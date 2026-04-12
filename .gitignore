@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model weights
+models/
+*.bin
+*.safetensors
+*.pt
+*.onnx
+
+# Benchmark outputs
+benchmarks/results/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Project notes
+CLAUDE.md
+questions.txt
