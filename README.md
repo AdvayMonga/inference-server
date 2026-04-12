@@ -1,6 +1,6 @@
 # Inference Server
 
-Production LLM inference server built from scratch in Python. Features async batching, KV cache management, continuous batching, and streaming — the same problems solved by vLLM, TGI, and SGLang.
+Production LLM inference server built from scratch in Python.
 
 ## Quick Start
 
@@ -8,7 +8,7 @@ Production LLM inference server built from scratch in Python. Features async bat
 python -m venv venv
 source venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env  # edit with your settings
+cp .env.example .env
 ```
 
 ## Configuration
