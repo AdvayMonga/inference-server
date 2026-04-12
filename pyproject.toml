@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68.0", "wheel"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "inference-server"
@@ -10,8 +10,9 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
-    "torch>=2.2",
-    "transformers>=4.40",
+    "torch>=2.4",
+    "transformers>=4.51",
+    "accelerate>=0.30",
 ]
 
 [project.optional-dependencies]
