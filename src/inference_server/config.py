@@ -18,7 +18,7 @@ class Settings:
     max_queue_size: int = 1000
 
     # Model
-    model_name: str = "google/gemma-4-E2B"
+    model_name: str = "google/gemma-4-E2B-it"
     backend: str = "mps"  # "mps", "cuda", or "cpu"
     max_tokens: int = 512
     context_window: int = 8192

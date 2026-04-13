@@ -20,7 +20,7 @@ class MPSBackend(InferenceBackend):
         """Load model and tokenizer onto MPS device."""
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=torch.float16
+            model_name, dtype=torch.bfloat16
         ).to(self.device)
         self.model.eval()
 

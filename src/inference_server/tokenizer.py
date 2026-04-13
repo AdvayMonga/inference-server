@@ -24,6 +24,24 @@ class Tokenizer:
 
         return token_ids
 
+    def encode_chat(self, text: str) -> list[int]:
+        """Wrap text in the chat template and encode. Used for instruction-tuned models."""
+        if not text:
+            raise ValueError("Input text is empty")
+
+        messages = [{"role": "user", "content": text}]
+        inputs = self._tokenizer.apply_chat_template(
+            messages, return_dict=True, return_tensors=None, add_generation_prompt=True
+        )
+        token_ids = inputs["input_ids"]
+
+        if len(token_ids) > self._context_window:
+            raise ValueError(
+                f"Input is {len(token_ids)} tokens, exceeds context window of {self._context_window}"
+            )
+
+        return token_ids
+
     def decode(self, token_ids: list[int]) -> str:
         """Convert token IDs back to text."""
         return self._tokenizer.decode(token_ids, skip_special_tokens=True)
