@@ -18,6 +18,13 @@ class InferenceBackend(ABC):
         ...
 
     @abstractmethod
+    def generate_batch(
+        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+    ) -> list[list[int]]:
+        """Run batched autoregressive generation for multiple requests at once."""
+        ...
+
+    @abstractmethod
     def generate_step(
         self, token_ids: list[int], kv_cache: object | None = None
     ) -> tuple[int, object]:

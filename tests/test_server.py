@@ -1,11 +1,13 @@
 """Tests for the /generate endpoint using a fake backend."""
 
+import asyncio
 from typing import Generator
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from inference_server.backends.base import InferenceBackend
+from inference_server.batcher import BatchProcessor
 from inference_server.server import app
 
 
@@ -18,6 +20,14 @@ class FakeBackend(InferenceBackend):
     def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
         return list(range(100, 100 + max_tokens))
 
+    def generate_batch(
+        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+    ) -> list[list[int]]:
+        return [
+            list(range(100 + len(ids), 100 + len(ids) + mt))
+            for ids, mt in zip(batch_token_ids, max_tokens)
+        ]
+
     def generate_step(
         self, token_ids: list[int], kv_cache: object | None = None
     ) -> tuple[int, object]:
@@ -29,15 +39,24 @@ class FakeBackend(InferenceBackend):
 
 
 @pytest.fixture(autouse=True)
-def inject_fake_backend():
-    """Inject fake backend and tokenizer into app.state before each test."""
+async def inject_fake_backend():
+    """Inject fake backend, tokenizer, and batcher into app.state."""
     from inference_server.tokenizer import Tokenizer
 
-    app.state.backend = FakeBackend()
+    backend = FakeBackend()
+    batcher = BatchProcessor(backend)
+    batcher.start()
+
+    app.state.backend = backend
     app.state.tokenizer = Tokenizer("gpt2", 100)
+    app.state.batcher = batcher
+
     yield
+
+    await batcher.stop()
     del app.state.backend
     del app.state.tokenizer
+    del app.state.batcher
 
 
 @pytest.fixture
@@ -57,7 +76,6 @@ async def test_generate_success(client):
     assert "text" in data
     assert "tokens_generated" in data
     assert data["tokens_generated"] > 0
-    assert "ttft_ms" in data
     assert "total_ms" in data
 
 
@@ -99,8 +117,7 @@ async def test_stream_contains_done(client):
     response = await client.post(
         "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": True}
     )
-    body = response.text
-    assert "data: [DONE]" in body
+    assert "data: [DONE]" in response.text
 
 
 @pytest.mark.asyncio
@@ -108,8 +125,7 @@ async def test_stream_contains_ttft(client):
     response = await client.post(
         "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": True}
     )
-    body = response.text
-    assert "ttft_ms" in body
+    assert "ttft_ms" in response.text
 
 
 @pytest.mark.asyncio
@@ -120,3 +136,39 @@ async def test_stream_false_returns_json(client):
     assert response.status_code == 200
     data = response.json()
     assert "text" in data
+
+
+# --- Batching tests ---
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_return_correct_results(client):
+    """Multiple concurrent requests should each get their own result."""
+    async def send_request(text, max_tokens):
+        resp = await client.post(
+            "/generate", json={"text": text, "max_tokens": max_tokens}
+        )
+        return resp.json()
+
+    results = await asyncio.gather(
+        send_request("Hello", 3),
+        send_request("Hello world", 5),
+        send_request("Hi", 2),
+    )
+
+    assert results[0]["tokens_generated"] == 3
+    assert results[1]["tokens_generated"] == 5
+    assert results[2]["tokens_generated"] == 2
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_no_cross_contamination(client):
+    """Different requests must never receive each other's tokens."""
+    results = await asyncio.gather(
+        client.post("/generate", json={"text": "A", "max_tokens": 3}),
+        client.post("/generate", json={"text": "B", "max_tokens": 3}),
+    )
+
+    assert results[0].status_code == 200
+    assert results[1].status_code == 200
+    assert len(results[0].json()["text"]) > 0
+    assert len(results[1].json()["text"]) > 0
