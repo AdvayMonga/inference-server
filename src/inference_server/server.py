@@ -1,9 +1,12 @@
 """FastAPI server — accepts text, generates LLM responses via the backend."""
 
 import asyncio
+import time
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from inference_server.backends import create_backend
@@ -12,18 +15,23 @@ from inference_server.tokenizer import Tokenizer
 
 
 class GenerateRequest(BaseModel):
+    """Request body for the /generate endpoint."""
     text: str
     max_tokens: int = settings.max_tokens
+    stream: bool = settings.stream_by_default
 
 
 class GenerateResponse(BaseModel):
+    """Response body for non-streaming /generate requests."""
     text: str
     tokens_generated: int
+    ttft_ms: float
+    total_ms: float
 
 
 @asynccontextmanager
 async def lifespan(app):
-    # Startup — load model and tokenizer once
+    """Load model and tokenizer at startup, clean up at shutdown."""
     backend = create_backend(settings.backend)
     tokenizer = Tokenizer(settings.model_name, settings.context_window)
 
@@ -35,27 +43,72 @@ async def lifespan(app):
 
     yield
 
-    # Shutdown — cleanup if needed
-
 
 app = FastAPI(lifespan=lifespan)
 
 
-@app.post("/generate", response_model=GenerateResponse)
+async def event_stream(
+    backend, tokenizer, token_ids: list[int], max_tokens: int
+) -> AsyncGenerator[str, None]:
+    """Yield SSE-formatted chunks — one per generated token."""
+    loop = asyncio.get_event_loop()
+    first_token = True
+    start_time = time.perf_counter()
+
+    # Run the blocking stream() in a thread and consume via a queue
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def _run_stream():
+        for token_id in backend.stream(token_ids, max_tokens):
+            text = tokenizer.decode_token(token_id)
+            queue.put_nowait(text)
+        queue.put_nowait(None)  # Signal end
+
+    loop.run_in_executor(None, _run_stream)
+
+    while True:
+        # Wait for next token from the background thread
+        text = await queue.get()
+        if text is None:
+            break
+
+        if first_token:
+            ttft = (time.perf_counter() - start_time) * 1000
+            yield f"data: {{\"ttft_ms\": {ttft:.1f}}}\n\n"
+            first_token = False
+
+        yield f"data: {text}\n\n"
+
+    yield "data: [DONE]\n\n"
+
+
+@app.post("/generate")
 async def generate(request: GenerateRequest):
+    """Generate text — returns full response or streams tokens based on request.stream."""
     backend = app.state.backend
     tokenizer = app.state.tokenizer
     loop = asyncio.get_event_loop()
 
-    # Tokenize in thread (CPU-bound, don't block event loop)
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text)
 
-    # Generate in thread (model inference, definitely don't block event loop)
+    if request.stream:
+        return StreamingResponse(
+            event_stream(backend, tokenizer, token_ids, request.max_tokens),
+            media_type="text/event-stream",
+        )
+
+    # Non-streaming — generate all at once
+    start_time = time.perf_counter()
     generated_ids = await loop.run_in_executor(
         None, backend.generate, token_ids, request.max_tokens
     )
+    total_time = time.perf_counter() - start_time
 
-    # Detokenize in thread
     output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
 
-    return GenerateResponse(text=output_text, tokens_generated=len(generated_ids))
+    return GenerateResponse(
+        text=output_text,
+        tokens_generated=len(generated_ids),
+        ttft_ms=0,  # Can't measure separately in non-streaming mode
+        total_ms=total_time * 1000,
+    )

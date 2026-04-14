@@ -25,9 +25,12 @@ class Tokenizer:
         return token_ids
 
     def encode_chat(self, text: str) -> list[int]:
-        """Wrap text in the chat template and encode. Used for instruction-tuned models."""
+        """Wrap text in chat template and encode. Falls back to plain encode if no template."""
         if not text:
             raise ValueError("Input text is empty")
+
+        if not getattr(self._tokenizer, "chat_template", None):
+            return self.encode(text)
 
         messages = [{"role": "user", "content": text}]
         inputs = self._tokenizer.apply_chat_template(

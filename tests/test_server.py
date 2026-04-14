@@ -36,7 +36,6 @@ def inject_fake_backend():
     app.state.backend = FakeBackend()
     app.state.tokenizer = Tokenizer("gpt2", 100)
     yield
-    # Cleanup
     del app.state.backend
     del app.state.tokenizer
 
@@ -48,6 +47,8 @@ async def client():
         yield c
 
 
+# --- Non-streaming tests ---
+
 @pytest.mark.asyncio
 async def test_generate_success(client):
     response = await client.post("/generate", json={"text": "Hello world"})
@@ -56,6 +57,8 @@ async def test_generate_success(client):
     assert "text" in data
     assert "tokens_generated" in data
     assert data["tokens_generated"] > 0
+    assert "ttft_ms" in data
+    assert "total_ms" in data
 
 
 @pytest.mark.asyncio
@@ -78,3 +81,42 @@ async def test_generate_empty_input(client):
 async def test_generate_missing_text(client):
     response = await client.post("/generate", json={})
     assert response.status_code == 422
+
+
+# --- Streaming tests ---
+
+@pytest.mark.asyncio
+async def test_stream_returns_sse(client):
+    response = await client.post(
+        "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": True}
+    )
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+
+
+@pytest.mark.asyncio
+async def test_stream_contains_done(client):
+    response = await client.post(
+        "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": True}
+    )
+    body = response.text
+    assert "data: [DONE]" in body
+
+
+@pytest.mark.asyncio
+async def test_stream_contains_ttft(client):
+    response = await client.post(
+        "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": True}
+    )
+    body = response.text
+    assert "ttft_ms" in body
+
+
+@pytest.mark.asyncio
+async def test_stream_false_returns_json(client):
+    response = await client.post(
+        "/generate", json={"text": "Hello world", "max_tokens": 3, "stream": False}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert "text" in data
