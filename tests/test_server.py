@@ -40,16 +40,21 @@ class FakeBackend(InferenceBackend):
 
 @pytest.fixture(autouse=True)
 async def inject_fake_backend():
-    """Inject fake backend, tokenizer, and batcher into app.state."""
+    """Inject fake backend, tokenizer, batcher, and cache manager into app.state."""
+    from inference_server.kv_cache.cache_manager import CacheManager
     from inference_server.tokenizer import Tokenizer
 
     backend = FakeBackend()
+    cache_manager = CacheManager(num_blocks=20, block_size=4, eviction_policy="lru")
+    backend.set_cache_manager(cache_manager)
+
     batcher = BatchProcessor(backend)
     batcher.start()
 
     app.state.backend = backend
     app.state.tokenizer = Tokenizer("gpt2", 100)
     app.state.batcher = batcher
+    app.state.cache_manager = cache_manager
 
     yield
 
@@ -57,6 +62,7 @@ async def inject_fake_backend():
     del app.state.backend
     del app.state.tokenizer
     del app.state.batcher
+    del app.state.cache_manager
 
 
 @pytest.fixture

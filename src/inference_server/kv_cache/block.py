@@ -16,6 +16,7 @@ class Block:
     token_ids: list[int] = field(default_factory=list)  # which tokens are stored here
     ref_count: int = 0  # number of active requests using this block
     last_accessed: float = 0.0  # timestamp for LRU eviction
+    is_first_block: bool = False  # protected from eviction by attention sink policy
 
     @property
     def is_free(self) -> bool:
@@ -40,3 +41,4 @@ class Block:
         self.token_ids = []
         self.ref_count = 0
         self.last_accessed = 0.0
+        self.is_first_block = False

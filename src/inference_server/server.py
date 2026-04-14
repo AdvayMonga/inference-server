@@ -11,7 +11,8 @@ from pydantic import BaseModel
 
 from inference_server.backends import create_backend
 from inference_server.batcher import BatchProcessor
-from inference_server.config import settings
+from inference_server.config import settings, print_hardware_summary
+from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.tokenizer import Tokenizer
 
 
@@ -32,12 +33,22 @@ class GenerateResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app):
-    """Load model, tokenizer, and batcher at startup."""
+    """Load model, tokenizer, cache, and batcher at startup."""
+    print_hardware_summary(settings)
+
     backend = create_backend(settings.backend)
     tokenizer = Tokenizer(settings.model_name, settings.context_window)
 
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, backend.load_model, settings.model_name)
+
+    # Initialize KV cache manager and attach to backend
+    cache_manager = CacheManager(
+        num_blocks=1024,
+        block_size=settings.kv_cache_block_size,
+        eviction_policy=settings.eviction_policy,
+    )
+    backend.set_cache_manager(cache_manager)
 
     batcher = BatchProcessor(backend)
     batcher.start()
@@ -45,6 +56,7 @@ async def lifespan(app):
     app.state.backend = backend
     app.state.tokenizer = tokenizer
     app.state.batcher = batcher
+    app.state.cache_manager = cache_manager
 
     yield
 
@@ -97,14 +109,12 @@ async def generate(request: GenerateRequest):
 
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text)
 
-    # Streaming bypasses the batcher (needs per-token delivery)
     if request.stream:
         return StreamingResponse(
             event_stream(backend, tokenizer, token_ids, request.max_tokens),
             media_type="text/event-stream",
         )
 
-    # Non-streaming goes through the batcher for throughput
     start_time = time.perf_counter()
     generated_ids = await batcher.submit(token_ids, request.max_tokens)
     total_time = time.perf_counter() - start_time
@@ -117,3 +127,9 @@ async def generate(request: GenerateRequest):
         ttft_ms=0,
         total_ms=total_time * 1000,
     )
+
+
+@app.get("/cache/stats")
+async def cache_stats():
+    """Return KV cache statistics — useful for monitoring and the web UI."""
+    return app.state.cache_manager.hit_rate_info

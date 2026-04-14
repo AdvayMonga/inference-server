@@ -52,7 +52,7 @@ def test_blocks_allocated_correctly(cache):
     assert cache.block_manager.used_blocks == 2
 
 
-def test_store_fails_gracefully_when_full(cache):
+def test_store_evicts_when_full(cache):
     # Fill up the cache (20 blocks * 4 tokens = 80 tokens)
     for i in range(20):
         base = i * 4 * 100  # ensure unique prefixes
@@ -63,9 +63,10 @@ def test_store_fails_gracefully_when_full(cache):
 
     assert cache.block_manager.free_blocks == 0
 
-    # Storing more should return empty (no crash)
+    # Storing more should evict and succeed
     result = cache.store([999, 888, 777, 666], kv_tensors=[], skip_tokens=0)
-    assert result == []
+    assert len(result) > 0
+    assert cache._eviction_count >= 1
 
 
 def test_release_decrements_ref_count(cache):
