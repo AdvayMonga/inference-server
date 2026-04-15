@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Inference Server</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: monospace; background: #000; color: #fff; display: flex; height: 100vh; }
+
+  .chat-panel { flex: 1; display: flex; flex-direction: column; padding: 16px; }
+  .chat-header { font-size: 1.2em; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #333; padding-bottom: 8px; }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 8px 0; }
+  .message { margin-bottom: 12px; padding: 10px; border: 1px solid #333; max-width: 85%; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .message.user { margin-left: auto; border-color: #666; }
+  .message.assistant { border-color: #444; }
+  .message.assistant .cursor { display: inline-block; width: 7px; height: 14px; background: #fff; animation: blink 0.8s infinite; vertical-align: text-bottom; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .input-area { display: flex; gap: 8px; margin-top: 8px; }
+  .input-area textarea { flex: 1; background: #111; border: 1px solid #444; color: #fff; padding: 10px; font-family: monospace; font-size: 14px; resize: none; height: 44px; }
+  .input-area textarea:focus { outline: none; border-color: #888; }
+  .input-area button { background: #fff; color: #000; border: none; padding: 10px 20px; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; }
+  .input-area button:hover { background: #ccc; }
+  .input-area button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  .sidebar { width: 280px; background: #0a0a0a; padding: 16px; overflow-y: auto; border-left: 1px solid #333; }
+  .sidebar h2 { font-size: 0.9em; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 6px; }
+  .metric { margin-bottom: 8px; }
+  .metric-label { font-size: 0.7em; color: #888; text-transform: uppercase; }
+  .metric-value { font-size: 1.4em; font-weight: bold; }
+  .metric-unit { font-size: 0.6em; color: #666; }
+  .divider { border-top: 1px solid #333; margin: 12px 0; }
+
+  .cache-bar { height: 6px; background: #222; margin-top: 4px; }
+  .cache-bar-fill { height: 100%; background: #fff; transition: width 0.3s; }
+
+  .settings-section { margin-top: 12px; }
+  .settings-section label { display: block; font-size: 0.7em; color: #888; margin-bottom: 2px; text-transform: uppercase; }
+  .settings-section input, .settings-section select { width: 100%; background: #111; border: 1px solid #333; color: #fff; padding: 6px; font-family: monospace; font-size: 13px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<div class="chat-panel">
+  <div class="chat-header">inference-server</div>
+  <div class="chat-messages" id="messages"></div>
+  <div class="input-area">
+    <textarea id="input" placeholder="Type a message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
+    <button id="sendBtn" onclick="send()">Send</button>
+  </div>
+</div>
+
+<div class="sidebar">
+  <h2>Last Request</h2>
+  <div class="metric"><div class="metric-label">TTFT</div><div class="metric-value" id="m-ttft">-<span class="metric-unit">ms</span></div></div>
+  <div class="metric"><div class="metric-label">TPOT</div><div class="metric-value" id="m-tpot">-<span class="metric-unit">ms</span></div></div>
+  <div class="metric"><div class="metric-label">Tokens</div><div class="metric-value" id="m-tokens">-</div></div>
+  <div class="metric"><div class="metric-label">Total</div><div class="metric-value" id="m-total">-<span class="metric-unit">ms</span></div></div>
+  <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
+
+  <div class="divider"></div>
+  <h2>KV Cache</h2>
+  <div class="metric"><div class="metric-label">Hit Rate</div><div class="metric-value" id="m-hitrate">-<span class="metric-unit">%</span></div></div>
+  <div class="metric"><div class="metric-label">Hits / Misses</div><div class="metric-value" id="m-hitmiss">- / -</div></div>
+  <div class="metric"><div class="metric-label">Evictions</div><div class="metric-value" id="m-evictions">-</div></div>
+  <div class="metric">
+    <div class="metric-label">Utilization</div>
+    <div class="cache-bar"><div class="cache-bar-fill" id="m-util-bar" style="width:0%"></div></div>
+  </div>
+
+  <div class="divider"></div>
+  <div class="settings-section">
+    <h2>Settings</h2>
+    <label>Max Tokens</label>
+    <input type="number" id="s-max-tokens" value="256" min="1" max="4096">
+    <label>Stream</label>
+    <select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select>
+  </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+let generating = false;
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || generating) return;
+  generating = true;
+  sendBtn.disabled = true;
+  inputEl.value = '';
+
+  addMessage(text, 'user');
+  const el = addMessage('', 'assistant');
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  el.appendChild(cursor);
+
+  const maxTokens = parseInt(document.getElementById('s-max-tokens').value) || 256;
+  const stream = document.getElementById('s-stream').value === 'true';
+  const t0 = performance.now();
+  let tokens = 0, ttft = null, t1 = null, rawText = '';
+
+  if (stream) {
+    try {
+      const r = await fetch('/generate', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: true})
+      });
+      const reader = r.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, {stream: true});
+        const lines = buf.split('\n');
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const d = line.slice(6);
+          if (d === '[DONE]') break;
+          if (d.startsWith('{') && d.includes('ttft_ms')) {
+            try { ttft = JSON.parse(d).ttft_ms; t1 = performance.now(); } catch(e) {}
+            continue;
+          }
+          if (!t1) t1 = performance.now();
+          tokens++;
+          rawText += d;
+          cursor.remove();
+          el.innerHTML = renderMd(rawText);
+          el.appendChild(cursor);
+          messagesEl.scrollTop = messagesEl.scrollHeight;
+        }
+      }
+    } catch(e) { el.textContent += '\n[Error: ' + e.message + ']'; }
+  } else {
+    try {
+      const r = await fetch('/generate', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: false})
+      });
+      const d = await r.json();
+      el.innerHTML = renderMd(d.text);
+      tokens = d.tokens_generated;
+      ttft = d.ttft_ms;
+    } catch(e) { el.textContent = '[Error: ' + e.message + ']'; }
+  }
+
+  cursor.remove();
+  const total = performance.now() - t0;
+  const tpot = tokens > 1 ? (total - (ttft || 0)) / (tokens - 1) : 0;
+  const tps = tokens > 0 ? tokens / (total / 1000) : 0;
+
+  document.getElementById('m-ttft').innerHTML = (ttft != null ? ttft.toFixed(0) : '-') + '<span class="metric-unit">ms</span>';
+  document.getElementById('m-tpot').innerHTML = tpot.toFixed(1) + '<span class="metric-unit">ms</span>';
+  document.getElementById('m-tokens').textContent = tokens;
+  document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit">ms</span>';
+  document.getElementById('m-tps').textContent = tps.toFixed(1);
+
+  try {
+    const c = await (await fetch('/cache/stats')).json();
+    document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit">%</span>';
+    document.getElementById('m-hitmiss').textContent = c.hit_count + ' / ' + c.miss_count;
+    document.getElementById('m-evictions').textContent = c.eviction_count;
+    document.getElementById('m-util-bar').style.width = (c.utilization * 100) + '%';
+  } catch(e) {}
+
+  generating = false;
+  sendBtn.disabled = false;
+  inputEl.focus();
+}
+
+function renderMd(text) {
+  return text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/^### (.+)$/gm, '<b style="font-size:1.1em">$1</b>')
+    .replace(/^## (.+)$/gm, '<b style="font-size:1.2em">$1</b>')
+    .replace(/^# (.+)$/gm, '<b style="font-size:1.3em">$1</b>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/\*(.+?)\*/g, '<i>$1</i>')
+    .replace(/`(.+?)`/g, '<code style="background:#222;padding:2px 4px">$1</code>')
+    .replace(/^- (.+)$/gm, '&bull; $1')
+    .replace(/^---$/gm, '<hr style="border-color:#333">')
+    .replace(/\n/g, '<br>');
+}
+
+function addMessage(text, role) {
+  const el = document.createElement('div');
+  el.className = 'message ' + role;
+  if (role === 'user') el.textContent = text;
+  else el.innerHTML = renderMd(text);
+  messagesEl.appendChild(el);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return el;
+}
+</script>
+</body>
+</html>

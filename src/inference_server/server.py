@@ -4,9 +4,11 @@ import asyncio
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from inference_server.backends import create_backend
@@ -65,6 +67,14 @@ async def lifespan(app):
 
 app = FastAPI(lifespan=lifespan)
 
+STATIC_DIR = Path(__file__).parent / "static"
+
+
+@app.get("/")
+async def root():
+    """Serve the web UI."""
+    return FileResponse(STATIC_DIR / "index.html")
+
 
 async def event_stream(
     backend, tokenizer, token_ids: list[int], max_tokens: int
@@ -115,8 +125,12 @@ async def generate(request: GenerateRequest):
             media_type="text/event-stream",
         )
 
+    # Single-user: call generate() directly for cache support
+    # Batcher is available for multi-user extension
     start_time = time.perf_counter()
-    generated_ids = await batcher.submit(token_ids, request.max_tokens)
+    generated_ids = await loop.run_in_executor(
+        None, backend.generate, token_ids, request.max_tokens
+    )
     total_time = time.perf_counter() - start_time
 
     output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)

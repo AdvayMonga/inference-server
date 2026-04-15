@@ -18,6 +18,7 @@ class MPSBackend(InferenceBackend):
         self.model = None
         self.tokenizer = None
         self.device = torch.device("mps")
+        self._eos_ids: set[int] = set()
 
     def load_model(self, model_name: str) -> None:
         """Load model and tokenizer onto MPS device."""
@@ -29,36 +30,24 @@ class MPSBackend(InferenceBackend):
         ).to(self.device)
         self.model.eval()
 
-    def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
-        """Full autoregressive generation with optional prefix cache reuse."""
-        skip_tokens = 0
-        kv_cache = None
-
-        # Try to reuse cached KV state for the prompt prefix
-        if self.cache_manager is not None:
-            skip_tokens, cached_blocks = self.cache_manager.lookup(token_ids)
-            if skip_tokens > 0:
-                kv_cache = self.cache_manager.build_kv_from_blocks(cached_blocks)
-                logger.debug(f"Reusing {skip_tokens} cached tokens, computing {len(token_ids) - skip_tokens} new")
-
-        # Prefill: process uncached prompt tokens
-        uncached_ids = token_ids[skip_tokens:]
-        if uncached_ids:
-            input_tensor = torch.tensor([uncached_ids], device=self.device)
-            with torch.no_grad():
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+        # Collect all EOS token IDs — some models have multiple (e.g. <eos> and <turn|>)
+        eos = self.model.config.eos_token_id
+        if isinstance(eos, list):
+            self._eos_ids = set(eos)
         else:
-            # Entire prompt was cached — run one step to get the first generated token
-            input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
-            with torch.no_grad():
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            self._eos_ids = {eos}
+
+    def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
+        """Full autoregressive generation. KV tensor caching disabled until DynamicCache adapter is built."""
+        # Prefill: process the full prompt
+        input_tensor = torch.tensor([token_ids], device=self.device)
+        with torch.no_grad():
+            outputs = self.model(input_tensor, use_cache=True)
+            kv_cache = outputs.past_key_values
+            next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
         generated = []
-        if next_token_id == self.tokenizer.eos_token_id:
+        if next_token_id in self._eos_ids:
             self._cache_and_release(token_ids, kv_cache, skip_tokens)
             return generated
 
@@ -72,13 +61,13 @@ class MPSBackend(InferenceBackend):
                 kv_cache = outputs.past_key_values
                 next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
-                if next_token_id == self.tokenizer.eos_token_id:
+                if next_token_id in self._eos_ids:
                     break
 
                 generated.append(next_token_id)
 
-        # Store the prompt's KV state in cache for future requests
-        self._cache_and_release(token_ids, kv_cache, skip_tokens)
+        # TODO: Store KV state once DynamicCache adapter is built
+        # self._cache_and_release(token_ids, kv_cache, 0)
 
         return generated
 
@@ -87,10 +76,9 @@ class MPSBackend(InferenceBackend):
         if self.cache_manager is None:
             return
 
-        # Extract KV tensors from HuggingFace format: tuple of (K, V) per layer
-        if kv_cache is not None:
-            kv_tensors = [(k.squeeze(0), v.squeeze(0)) for k, v in kv_cache]
-            self.cache_manager.store(token_ids, kv_tensors, skip_tokens=skip_tokens)
+        # Store without KV tensors for now — tracks prefix matches for hit rate
+        # Full tensor-level caching requires adapting to DynamicCache API (future optimization)
+        self.cache_manager.store(token_ids, kv_tensors=[], skip_tokens=skip_tokens)
 
         # Release the lookup ref we acquired
         if skip_tokens > 0:
@@ -103,7 +91,6 @@ class MPSBackend(InferenceBackend):
         batch_size = len(batch_token_ids)
         max_prompt_len = max(len(ids) for ids in batch_token_ids)
         pad_id = self.tokenizer.pad_token_id
-        eos_id = self.tokenizer.eos_token_id
         max_gen = max(max_tokens)
 
         padded = []
@@ -131,7 +118,7 @@ class MPSBackend(InferenceBackend):
                     if finished[i]:
                         continue
                     tok = next_tokens[i].item()
-                    if tok == eos_id or len(generated[i]) >= max_tokens[i]:
+                    if tok in self._eos_ids or len(generated[i]) >= max_tokens[i]:
                         finished[i] = True
                     else:
                         generated[i].append(tok)
@@ -189,7 +176,7 @@ class MPSBackend(InferenceBackend):
                     kv_cache = outputs.past_key_values
                     next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
-                    if next_token_id == self.tokenizer.eos_token_id:
+                    if next_token_id in self._eos_ids:
                         break
 
                     yield next_token_id

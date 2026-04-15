@@ -34,7 +34,8 @@ class Tokenizer:
 
         messages = [{"role": "user", "content": text}]
         inputs = self._tokenizer.apply_chat_template(
-            messages, return_dict=True, return_tensors=None, add_generation_prompt=True
+            messages, return_dict=True, return_tensors=None,
+            add_generation_prompt=True, enable_thinking=False,
         )
         token_ids = inputs["input_ids"]
 
