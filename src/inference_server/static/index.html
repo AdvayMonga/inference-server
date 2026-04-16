@@ -95,8 +95,9 @@
   <h2>SETTINGS</h2>
   <div class="settings-section">
     <div class="metric-grid">
-      <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="256" min="1" max="4096"></div>
+      <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="512" min="1" max="4096"></div>
       <div><label>Stream</label><select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+      <div><label>Thinking</label><select id="s-thinking"><option value="true" selected>On</option><option value="false">Off</option></select></div>
     </div>
   </div>
 
@@ -148,6 +149,7 @@ async function send() {
 
   const maxTokens = parseInt(document.getElementById('s-max-tokens').value) || 256;
   const stream = document.getElementById('s-stream').value === 'true';
+  const thinking = document.getElementById('s-thinking').value === 'true';
   const t0 = performance.now();
   let tokens = 0, ttft = null, t1 = null, rawText = '';
 
@@ -155,7 +157,7 @@ async function send() {
     try {
       const r = await fetch('/generate', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text, max_tokens: maxTokens, stream: true})
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: true, thinking})
       });
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -188,7 +190,7 @@ async function send() {
     try {
       const r = await fetch('/generate', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text, max_tokens: maxTokens, stream: false})
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: false, thinking})
       });
       const d = await r.json();
       el.innerHTML = renderMd(d.text);

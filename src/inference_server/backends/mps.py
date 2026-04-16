@@ -38,25 +38,14 @@ class MPSBackend(InferenceBackend):
             self._eos_ids = {eos}
 
     def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
-        """Full autoregressive generation. KV tensor caching disabled until DynamicCache adapter is built."""
-        # Prefill: process the full prompt
+        """Full autoregressive generation. Filters thinking tokens, only returns visible output."""
         input_tensor = torch.tensor([token_ids], device=self.device)
+        kv_cache = None
+        visible = []
+        in_thinking = False
+
         with torch.no_grad():
-            outputs = self.model(input_tensor, use_cache=True)
-            kv_cache = outputs.past_key_values
-            next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
-
-        generated = []
-        if next_token_id in self._eos_ids:
-            self._cache_and_release(token_ids, kv_cache, skip_tokens)
-            return generated
-
-        generated.append(next_token_id)
-
-        # Decode: generate remaining tokens one at a time
-        with torch.no_grad():
-            for _ in range(max_tokens - 1):
-                input_tensor = torch.tensor([[next_token_id]], device=self.device)
+            for _ in range(max_tokens * 4):
                 outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
                 kv_cache = outputs.past_key_values
                 next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
@@ -64,12 +53,21 @@ class MPSBackend(InferenceBackend):
                 if next_token_id in self._eos_ids:
                     break
 
-                generated.append(next_token_id)
+                if next_token_id == self.THINK_START:
+                    in_thinking = True
+                elif next_token_id == self.THINK_END:
+                    in_thinking = False
+                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                    continue
 
-        # TODO: Store KV state once DynamicCache adapter is built
-        # self._cache_and_release(token_ids, kv_cache, 0)
+                if not in_thinking:
+                    visible.append(next_token_id)
+                    if len(visible) >= max_tokens:
+                        break
 
-        return generated
+                input_tensor = torch.tensor([[next_token_id]], device=self.device)
+
+        return visible
 
     def _cache_and_release(self, token_ids: list[int], kv_cache: object, skip_tokens: int) -> None:
         """Store prompt KV state in cache and release blocks."""
@@ -146,39 +144,39 @@ class MPSBackend(InferenceBackend):
         next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
         return next_token_id, outputs.past_key_values
 
+    # Thinking channel token IDs (Gemma 4)
+    THINK_START = 100  # <|channel>
+    THINK_END = 101    # <channel|>
+
     def stream(self, token_ids: list[int], max_tokens: int) -> Generator[int, None, None]:
-        """Yield tokens one at a time with optional prefix cache reuse."""
-        skip_tokens = 0
+        """Yield token IDs one at a time. Thinking tokens don't count toward max_tokens."""
+        input_tensor = torch.tensor([token_ids], device=self.device)
         kv_cache = None
-
-        if self.cache_manager is not None:
-            skip_tokens, cached_blocks = self.cache_manager.lookup(token_ids)
-            if skip_tokens > 0:
-                kv_cache = self.cache_manager.build_kv_from_blocks(cached_blocks)
-
-        uncached_ids = token_ids[skip_tokens:]
-        if uncached_ids:
-            input_tensor = torch.tensor([uncached_ids], device=self.device)
-        else:
-            input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
+        visible_count = 0
+        in_thinking = False
 
         with torch.no_grad():
-            outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-            kv_cache = outputs.past_key_values
-            next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            for _ in range(max_tokens * 4):
+                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                kv_cache = outputs.past_key_values
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
-            if next_token_id != self.tokenizer.eos_token_id:
+                if next_token_id in self._eos_ids:
+                    break
+
+                if next_token_id == self.THINK_START:
+                    in_thinking = True
+                elif next_token_id == self.THINK_END:
+                    in_thinking = False
+                    yield next_token_id
+                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                    continue
+
                 yield next_token_id
 
-                for _ in range(max_tokens - 1):
-                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
-                    outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                    kv_cache = outputs.past_key_values
-                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
-
-                    if next_token_id in self._eos_ids:
+                if not in_thinking:
+                    visible_count += 1
+                    if visible_count >= max_tokens:
                         break
 
-                    yield next_token_id
-
-        self._cache_and_release(token_ids, kv_cache, skip_tokens)
+                input_tensor = torch.tensor([[next_token_id]], device=self.device)

@@ -36,6 +36,7 @@ class GenerateRequest(BaseModel):
     text: str
     max_tokens: int = settings.max_tokens
     stream: bool = settings.stream_by_default
+    thinking: bool = True
 
 
 class GenerateResponse(BaseModel):
@@ -82,7 +83,8 @@ async def lifespan(app):
         block_size=settings.kv_cache_block_size,
         eviction_policy=settings.eviction_policy,
     )
-    backend.set_cache_manager(cache_manager)
+    # Cache manager created but NOT attached to backend until DynamicCache adapter is built
+    # backend.set_cache_manager(cache_manager)
 
     batcher = BatchProcessor(backend)
     batcher.start()
@@ -109,6 +111,10 @@ async def root():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+THINK_START_TOKEN = 100  # <|channel> in Gemma 4
+THINK_END_TOKEN = 101    # <channel|> in Gemma 4
+
+
 async def event_stream(
     backend, tokenizer, token_ids: list[int], max_tokens: int
 ) -> AsyncGenerator[str, None]:
@@ -117,48 +123,41 @@ async def event_stream(
     first_visible_token = True
     in_thinking = False
     start_time = time.perf_counter()
-    accumulated = ""
 
     queue: asyncio.Queue = asyncio.Queue()
 
     def _run_stream():
         for token_id in backend.stream(token_ids, max_tokens):
-            text = tokenizer.decode_token(token_id)
-            queue.put_nowait(text)
+            queue.put_nowait(token_id)
         queue.put_nowait(None)
 
     loop.run_in_executor(None, _run_stream)
 
     while True:
-        text = await queue.get()
-        if text is None:
+        token_id = await queue.get()
+        if token_id is None:
             break
 
-        accumulated += text
-
-        # Detect thinking start/end
-        if "<think>" in accumulated and not in_thinking:
+        # Filter thinking at token ID level
+        if token_id == THINK_START_TOKEN:
             in_thinking = True
-        if "</think>" in accumulated and in_thinking:
+            continue
+        if token_id == THINK_END_TOKEN:
             in_thinking = False
-            # Strip everything up to and including </think>
-            idx = accumulated.index("</think>") + len("</think>")
-            accumulated = accumulated[idx:].lstrip()
-            if not accumulated:
-                continue
-
+            continue
         if in_thinking:
             continue
 
-        # Emit visible text
-        if accumulated:
-            if first_visible_token:
-                ttft = (time.perf_counter() - start_time) * 1000
-                yield f"data: {{\"ttft_ms\": {ttft:.1f}}}\n\n"
-                first_visible_token = False
+        text = tokenizer.decode_token(token_id)
+        if not text:
+            continue
 
-            yield f"data: {accumulated}\n\n"
-            accumulated = ""
+        if first_visible_token:
+            ttft = (time.perf_counter() - start_time) * 1000
+            yield f"data: {{\"ttft_ms\": {ttft:.1f}}}\n\n"
+            first_visible_token = False
+
+        yield f"data: {text}\n\n"
 
     yield "data: [DONE]\n\n"
 
@@ -170,7 +169,7 @@ async def generate(request: GenerateRequest):
     tokenizer = app.state.tokenizer
     loop = asyncio.get_event_loop()
 
-    token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text)
+    token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
 
     if request.stream:
         return StreamingResponse(
@@ -184,8 +183,7 @@ async def generate(request: GenerateRequest):
     )
     total_time = time.perf_counter() - start_time
 
-    raw_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
-    output_text = tokenizer.strip_thinking(raw_text)
+    output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
 
     return GenerateResponse(
         text=output_text,
