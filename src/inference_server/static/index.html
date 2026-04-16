@@ -8,36 +8,54 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: monospace; background: #000; color: #fff; display: flex; height: 100vh; }
 
-  .chat-panel { flex: 1; display: flex; flex-direction: column; padding: 16px; }
-  .chat-header { font-size: 1.2em; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #333; padding-bottom: 8px; }
+  .chat-panel { flex: 1; display: flex; flex-direction: column; padding: 20px; min-width: 0; }
+  .chat-header { font-size: 1.3em; font-weight: bold; margin-bottom: 16px; border-bottom: 1px solid #333; padding-bottom: 10px; }
   .chat-messages { flex: 1; overflow-y: auto; padding: 8px 0; }
-  .message { margin-bottom: 12px; padding: 10px; border: 1px solid #333; max-width: 85%; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+  .message { margin-bottom: 14px; padding: 12px; border: 1px solid #333; max-width: 85%; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
   .message.user { margin-left: auto; border-color: #666; }
   .message.assistant { border-color: #444; }
   .message.assistant .cursor { display: inline-block; width: 7px; height: 14px; background: #fff; animation: blink 0.8s infinite; vertical-align: text-bottom; }
   @keyframes blink { 50% { opacity: 0; } }
 
-  .input-area { display: flex; gap: 8px; margin-top: 8px; }
-  .input-area textarea { flex: 1; background: #111; border: 1px solid #444; color: #fff; padding: 10px; font-family: monospace; font-size: 14px; resize: none; height: 44px; }
+  .input-area { display: flex; gap: 8px; margin-top: 10px; }
+  .input-area textarea { flex: 1; background: #111; border: 1px solid #444; color: #fff; padding: 12px; font-family: monospace; font-size: 14px; resize: none; height: 48px; }
   .input-area textarea:focus { outline: none; border-color: #888; }
-  .input-area button { background: #fff; color: #000; border: none; padding: 10px 20px; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; }
+  .input-area button { background: #fff; color: #000; border: none; padding: 12px 24px; font-family: monospace; font-size: 14px; font-weight: bold; cursor: pointer; }
   .input-area button:hover { background: #ccc; }
   .input-area button:disabled { opacity: 0.3; cursor: not-allowed; }
 
-  .sidebar { width: 280px; background: #0a0a0a; padding: 16px; overflow-y: auto; border-left: 1px solid #333; }
-  .sidebar h2 { font-size: 0.9em; margin-bottom: 10px; border-bottom: 1px solid #333; padding-bottom: 6px; }
-  .metric { margin-bottom: 8px; }
-  .metric-label { font-size: 0.7em; color: #888; text-transform: uppercase; }
-  .metric-value { font-size: 1.4em; font-weight: bold; }
-  .metric-unit { font-size: 0.6em; color: #666; }
-  .divider { border-top: 1px solid #333; margin: 12px 0; }
+  /* Wider sidebar */
+  .sidebar { width: 400px; background: #0a0a0a; padding: 20px; overflow-y: auto; border-left: 1px solid #333; }
+  .sidebar h2 { font-size: 1em; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #333; padding-bottom: 8px; letter-spacing: 1px; }
 
-  .cache-bar { height: 6px; background: #222; margin-top: 4px; }
-  .cache-bar-fill { height: 100%; background: #fff; transition: width 0.3s; }
+  /* Larger metrics */
+  .metric { margin-bottom: 12px; }
+  .metric-label { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric-value { font-size: 1.8em; font-weight: bold; }
+  .metric-unit { font-size: 0.55em; color: #555; }
+  .divider { border-top: 1px solid #333; margin: 18px 0; }
 
-  .settings-section { margin-top: 12px; }
-  .settings-section label { display: block; font-size: 0.7em; color: #888; margin-bottom: 2px; text-transform: uppercase; }
-  .settings-section input, .settings-section select { width: 100%; background: #111; border: 1px solid #333; color: #fff; padding: 6px; font-family: monospace; font-size: 13px; margin-bottom: 8px; }
+  /* Two-column metric grid */
+  .metric-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  .cache-bar { height: 8px; background: #222; margin-top: 6px; border-radius: 2px; }
+  .cache-bar-fill { height: 100%; background: #fff; border-radius: 2px; transition: width 0.3s; }
+
+  .settings-section { margin-top: 8px; }
+  .settings-section label { display: block; font-size: 0.75em; color: #888; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .settings-section input, .settings-section select { width: 100%; background: #111; border: 1px solid #333; color: #fff; padding: 8px; font-family: monospace; font-size: 13px; margin-bottom: 10px; }
+
+  /* Simulator buttons */
+  .sim-btn { flex: 1; border: none; padding: 10px; font-family: monospace; font-size: 13px; font-weight: bold; cursor: pointer; letter-spacing: 0.5px; }
+  .sim-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .sim-btn.start { background: #fff; color: #000; }
+  .sim-btn.start:hover:not(:disabled) { background: #ccc; }
+  .sim-btn.stop { background: #333; color: #fff; }
+  .sim-btn.stop:hover:not(:disabled) { background: #555; }
+
+  .sim-status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .sim-status-indicator.running { background: #0f0; }
+  .sim-status-indicator.stopped { background: #555; }
 </style>
 </head>
 <body>
@@ -52,17 +70,21 @@
 </div>
 
 <div class="sidebar">
-  <h2>Last Request</h2>
-  <div class="metric"><div class="metric-label">TTFT</div><div class="metric-value" id="m-ttft">-<span class="metric-unit">ms</span></div></div>
-  <div class="metric"><div class="metric-label">TPOT</div><div class="metric-value" id="m-tpot">-<span class="metric-unit">ms</span></div></div>
-  <div class="metric"><div class="metric-label">Tokens</div><div class="metric-value" id="m-tokens">-</div></div>
-  <div class="metric"><div class="metric-label">Total</div><div class="metric-value" id="m-total">-<span class="metric-unit">ms</span></div></div>
-  <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
+  <h2>LAST REQUEST</h2>
+  <div class="metric-grid">
+    <div class="metric"><div class="metric-label">TTFT</div><div class="metric-value" id="m-ttft">-<span class="metric-unit"> ms</span></div></div>
+    <div class="metric"><div class="metric-label">TPOT</div><div class="metric-value" id="m-tpot">-<span class="metric-unit"> ms</span></div></div>
+    <div class="metric"><div class="metric-label">Tokens</div><div class="metric-value" id="m-tokens">-</div></div>
+    <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
+  </div>
+  <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
 
   <div class="divider"></div>
-  <h2>KV Cache</h2>
-  <div class="metric"><div class="metric-label">Hit Rate</div><div class="metric-value" id="m-hitrate">-<span class="metric-unit">%</span></div></div>
-  <div class="metric"><div class="metric-label">Hits / Misses</div><div class="metric-value" id="m-hitmiss">- / -</div></div>
+  <h2>KV CACHE</h2>
+  <div class="metric-grid">
+    <div class="metric"><div class="metric-label">Hit Rate</div><div class="metric-value" id="m-hitrate">-<span class="metric-unit"> %</span></div></div>
+    <div class="metric"><div class="metric-label">Hits / Misses</div><div class="metric-value" id="m-hitmiss" style="font-size:1.3em">- / -</div></div>
+  </div>
   <div class="metric"><div class="metric-label">Evictions</div><div class="metric-value" id="m-evictions">-</div></div>
   <div class="metric">
     <div class="metric-label">Utilization</div>
@@ -70,12 +92,38 @@
   </div>
 
   <div class="divider"></div>
+  <h2>SETTINGS</h2>
   <div class="settings-section">
-    <h2>Settings</h2>
-    <label>Max Tokens</label>
-    <input type="number" id="s-max-tokens" value="256" min="1" max="4096">
-    <label>Stream</label>
-    <select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select>
+    <div class="metric-grid">
+      <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="256" min="1" max="4096"></div>
+      <div><label>Stream</label><select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+    </div>
+  </div>
+
+  <div class="divider"></div>
+  <h2>LOAD SIMULATOR</h2>
+  <div class="settings-section">
+    <div class="metric-grid">
+      <div><label>Simulated Users</label><input type="number" id="sim-users" value="4" min="1" max="16"></div>
+      <div><label>Max Tokens</label><input type="number" id="sim-tokens" value="64" min="1" max="512"></div>
+    </div>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:14px">
+    <button class="sim-btn start" id="simStartBtn" onclick="simStart()">START</button>
+    <button class="sim-btn stop" id="simStopBtn" onclick="simStop()" disabled>STOP</button>
+  </div>
+  <div id="sim-status" style="display:none">
+    <div class="metric" style="margin-bottom:14px">
+      <div class="metric-label">Status</div>
+      <div class="metric-value" style="font-size:1.1em"><span class="sim-status-indicator stopped" id="sim-dot"></span><span id="sim-state">Stopped</span></div>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Requests Done</div><div class="metric-value" id="sim-reqs">0</div></div>
+      <div class="metric"><div class="metric-label">Elapsed</div><div class="metric-value" id="sim-elapsed">-<span class="metric-unit"> s</span></div></div>
+      <div class="metric"><div class="metric-label">Avg TTFT</div><div class="metric-value" id="sim-ttft">-<span class="metric-unit"> ms</span></div></div>
+      <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="sim-tpot">-<span class="metric-unit"> ms</span></div></div>
+    </div>
+    <div class="metric"><div class="metric-label">Background Throughput</div><div class="metric-value" id="sim-tps">-<span class="metric-unit"> tok/s</span></div></div>
   </div>
 </div>
 
@@ -154,15 +202,15 @@ async function send() {
   const tpot = tokens > 1 ? (total - (ttft || 0)) / (tokens - 1) : 0;
   const tps = tokens > 0 ? tokens / (total / 1000) : 0;
 
-  document.getElementById('m-ttft').innerHTML = (ttft != null ? ttft.toFixed(0) : '-') + '<span class="metric-unit">ms</span>';
-  document.getElementById('m-tpot').innerHTML = tpot.toFixed(1) + '<span class="metric-unit">ms</span>';
+  document.getElementById('m-ttft').innerHTML = (ttft != null ? ttft.toFixed(0) : '-') + '<span class="metric-unit"> ms</span>';
+  document.getElementById('m-tpot').innerHTML = tpot.toFixed(1) + '<span class="metric-unit"> ms</span>';
   document.getElementById('m-tokens').textContent = tokens;
-  document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit">ms</span>';
+  document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit"> ms</span>';
   document.getElementById('m-tps').textContent = tps.toFixed(1);
 
   try {
     const c = await (await fetch('/cache/stats')).json();
-    document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit">%</span>';
+    document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit"> %</span>';
     document.getElementById('m-hitmiss').textContent = c.hit_count + ' / ' + c.miss_count;
     document.getElementById('m-evictions').textContent = c.eviction_count;
     document.getElementById('m-util-bar').style.width = (c.utilization * 100) + '%';
@@ -195,6 +243,50 @@ function addMessage(text, role) {
   messagesEl.appendChild(el);
   messagesEl.scrollTop = messagesEl.scrollHeight;
   return el;
+}
+
+// --- Load Simulator ---
+let simPolling = null;
+
+async function simStart() {
+  const users = parseInt(document.getElementById('sim-users').value) || 4;
+  const tokens = parseInt(document.getElementById('sim-tokens').value) || 64;
+  try {
+    const r = await fetch('/simulate/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({num_users: users, max_tokens: tokens})
+    });
+    if (!r.ok) return;
+    document.getElementById('sim-status').style.display = 'block';
+    document.getElementById('simStartBtn').disabled = true;
+    document.getElementById('simStopBtn').disabled = false;
+    document.getElementById('sim-dot').className = 'sim-status-indicator running';
+    document.getElementById('sim-state').textContent = 'Running';
+    simPolling = setInterval(simPoll, 1000);
+  } catch(e) {}
+}
+
+async function simStop() {
+  try { await fetch('/simulate/stop', {method: 'POST'}); } catch(e) {}
+  if (simPolling) { clearInterval(simPolling); simPolling = null; }
+  document.getElementById('simStartBtn').disabled = false;
+  document.getElementById('simStopBtn').disabled = true;
+  document.getElementById('sim-dot').className = 'sim-status-indicator stopped';
+  document.getElementById('sim-state').textContent = 'Stopped';
+}
+
+async function simPoll() {
+  try {
+    const s = await (await fetch('/simulate/status')).json();
+    document.getElementById('sim-state').textContent = s.running ? 'Running' : 'Stopped';
+    document.getElementById('sim-dot').className = 'sim-status-indicator ' + (s.running ? 'running' : 'stopped');
+    document.getElementById('sim-reqs').textContent = s.requests_completed;
+    document.getElementById('sim-ttft').innerHTML = s.avg_ttft_ms.toFixed(0) + '<span class="metric-unit"> ms</span>';
+    document.getElementById('sim-tpot').innerHTML = s.avg_tpot_ms.toFixed(1) + '<span class="metric-unit"> ms</span>';
+    document.getElementById('sim-tps').innerHTML = s.tokens_per_sec.toFixed(1) + '<span class="metric-unit"> tok/s</span>';
+    document.getElementById('sim-elapsed').innerHTML = s.elapsed_s.toFixed(0) + '<span class="metric-unit"> s</span>';
+    if (!s.running) simStop();
+  } catch(e) {}
 }
 </script>
 </body>

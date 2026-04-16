@@ -1,5 +1,7 @@
 """Tokenization pipeline — text to token IDs and back, with validation."""
 
+import re
+
 from transformers import AutoTokenizer
 
 
@@ -35,7 +37,7 @@ class Tokenizer:
         messages = [{"role": "user", "content": text}]
         inputs = self._tokenizer.apply_chat_template(
             messages, return_dict=True, return_tensors=None,
-            add_generation_prompt=True, enable_thinking=False,
+            add_generation_prompt=True,
         )
         token_ids = inputs["input_ids"]
 
@@ -53,6 +55,12 @@ class Tokenizer:
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID — used for streaming one token at a time."""
         return self._tokenizer.decode([token_id], skip_special_tokens=True)
+
+    @staticmethod
+    def strip_thinking(text: str) -> str:
+        """Remove <think>...</think> blocks from model output."""
+        stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return stripped.strip()
 
     @property
     def eos_token_id(self) -> int:
