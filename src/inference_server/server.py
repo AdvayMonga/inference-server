@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from inference_server.backends import create_backend
 from inference_server.batcher import BatchProcessor
 from inference_server.config import settings, print_hardware_summary
-from inference_server.kv_cache.cache_manager import CacheManager
+from inference_server.kv_cache.dynamic_cache_adapter import DynamicCacheAdapter
 from inference_server.tokenizer import Tokenizer
 
 DEFAULT_PROMPTS = [
@@ -78,13 +78,8 @@ async def lifespan(app):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, backend.load_model, settings.model_name)
 
-    cache_manager = CacheManager(
-        num_blocks=1024,
-        block_size=settings.kv_cache_block_size,
-        eviction_policy=settings.eviction_policy,
-    )
-    # Cache manager created but NOT attached to backend until DynamicCache adapter is built
-    # backend.set_cache_manager(cache_manager)
+    cache_adapter = DynamicCacheAdapter(max_entries=64)
+    backend.set_cache_adapter(cache_adapter)
 
     batcher = BatchProcessor(backend)
     batcher.start()
@@ -92,7 +87,7 @@ async def lifespan(app):
     app.state.backend = backend
     app.state.tokenizer = tokenizer
     app.state.batcher = batcher
-    app.state.cache_manager = cache_manager
+    app.state.cache_adapter = cache_adapter
     app.state.simulation = SimulationState()
 
     yield
@@ -111,51 +106,37 @@ async def root():
     return FileResponse(STATIC_DIR / "index.html")
 
 
-THINK_START_TOKEN = 100  # <|channel> in Gemma 4
-THINK_END_TOKEN = 101    # <channel|> in Gemma 4
-
-
 async def event_stream(
-    backend, tokenizer, token_ids: list[int], max_tokens: int
+    backend, tokenizer, token_ids: list[int], max_tokens: int,
+    template_prefix_len: int = 0,
 ) -> AsyncGenerator[str, None]:
-    """Yield SSE-formatted chunks, skipping thinking tokens."""
+    """Yield SSE-formatted chunks. Backend already filters thinking tokens."""
     loop = asyncio.get_event_loop()
-    first_visible_token = True
-    in_thinking = False
+    first_token = True
     start_time = time.perf_counter()
 
     queue: asyncio.Queue = asyncio.Queue()
 
     def _run_stream():
-        for token_id in backend.stream(token_ids, max_tokens):
-            queue.put_nowait(token_id)
+        for token_id in backend.stream(token_ids, max_tokens, template_prefix_len):
+            text = tokenizer.decode_token(token_id)
+            queue.put_nowait(text)
         queue.put_nowait(None)
 
     loop.run_in_executor(None, _run_stream)
 
     while True:
-        token_id = await queue.get()
-        if token_id is None:
+        text = await queue.get()
+        if text is None:
             break
 
-        # Filter thinking at token ID level
-        if token_id == THINK_START_TOKEN:
-            in_thinking = True
-            continue
-        if token_id == THINK_END_TOKEN:
-            in_thinking = False
-            continue
-        if in_thinking:
-            continue
-
-        text = tokenizer.decode_token(token_id)
         if not text:
             continue
 
-        if first_visible_token:
+        if first_token:
             ttft = (time.perf_counter() - start_time) * 1000
             yield f"data: {{\"ttft_ms\": {ttft:.1f}}}\n\n"
-            first_visible_token = False
+            first_token = False
 
         yield f"data: {text}\n\n"
 
@@ -170,16 +151,17 @@ async def generate(request: GenerateRequest):
     loop = asyncio.get_event_loop()
 
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
+    tpl = tokenizer.template_prefix_len
 
     if request.stream:
         return StreamingResponse(
-            event_stream(backend, tokenizer, token_ids, request.max_tokens),
+            event_stream(backend, tokenizer, token_ids, request.max_tokens, tpl),
             media_type="text/event-stream",
         )
 
     start_time = time.perf_counter()
     generated_ids = await loop.run_in_executor(
-        None, backend.generate, token_ids, request.max_tokens
+        None, backend.generate, token_ids, request.max_tokens, tpl
     )
     total_time = time.perf_counter() - start_time
 
@@ -196,7 +178,7 @@ async def generate(request: GenerateRequest):
 @app.get("/cache/stats")
 async def cache_stats():
     """Return KV cache statistics."""
-    return app.state.cache_manager.hit_rate_info
+    return app.state.cache_adapter.hit_rate_info
 
 
 # --- Load Simulator ---
@@ -213,27 +195,27 @@ async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, p
                 t0 = time.perf_counter()
                 resp = await client.post(
                     f"http://127.0.0.1:{port}/generate",
-                    json={"text": prompt, "max_tokens": max_tokens, "stream": False},
+                    json={"text": prompt, "max_tokens": max_tokens, "stream": False, "thinking": False},
                 )
                 total = (time.perf_counter() - t0) * 1000
 
-                data = resp.json()
-                tokens = data.get("tokens_generated", 0)
-                ttft = data.get("total_ms", total)  # approximate TTFT as total for non-streaming
-                tpot = total / max(tokens, 1)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tokens = data.get("tokens_generated", 0)
+                    tpot = total / max(tokens, 1)
 
-                sim.requests_completed += 1
-                sim.total_tokens += tokens
-                sim.ttft_sum += ttft
-                sim.tpot_sum += tpot
-                sim.tpot_count += 1
+                    sim.requests_completed += 1
+                    sim.total_tokens += tokens
+                    sim.ttft_sum += total
+                    sim.tpot_sum += tpot
+                    sim.tpot_count += 1
 
             except asyncio.CancelledError:
                 return
             except Exception:
                 pass
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
 
 
 @app.post("/simulate/start")

@@ -11,8 +11,8 @@ class Block:
 
     block_id: int
     block_size: int  # number of token positions in this block
-    k_tensor: torch.Tensor | None = None  # [num_layers, num_heads, block_size, head_dim]
-    v_tensor: torch.Tensor | None = None
+    k_tensor: list | None = None  # per-layer K tensors [num_heads, block_tokens, head_dim]
+    v_tensor: list | None = None  # per-layer V tensors
     token_ids: list[int] = field(default_factory=list)  # which tokens are stored here
     ref_count: int = 0  # number of active requests using this block
     last_accessed: float = 0.0  # timestamp for LRU eviction

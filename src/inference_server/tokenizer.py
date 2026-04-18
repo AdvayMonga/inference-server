@@ -11,6 +11,35 @@ class Tokenizer:
     def __init__(self, model_name: str, context_window: int):
         self._tokenizer = AutoTokenizer.from_pretrained(model_name)
         self._context_window = context_window
+        self._template_prefix_len = self._calc_template_prefix_len()
+
+    def _calc_template_prefix_len(self) -> int:
+        """Count shared template tokens that are identical for all prompts."""
+        if not getattr(self._tokenizer, "chat_template", None):
+            return 0
+        try:
+            ids_a = self._tokenizer.apply_chat_template(
+                [{"role": "user", "content": "A"}],
+                return_dict=True, return_tensors=None, add_generation_prompt=True,
+            )["input_ids"]
+            ids_b = self._tokenizer.apply_chat_template(
+                [{"role": "user", "content": "B"}],
+                return_dict=True, return_tensors=None, add_generation_prompt=True,
+            )["input_ids"]
+            shared = 0
+            for a, b in zip(ids_a, ids_b):
+                if a == b:
+                    shared += 1
+                else:
+                    break
+            return shared
+        except Exception:
+            return 0
+
+    @property
+    def template_prefix_len(self) -> int:
+        """Number of template tokens shared by all prompts (not cacheable across prompts)."""
+        return self._template_prefix_len
 
     def encode(self, text: str) -> list[int]:
         """Convert text to token IDs. Raises if input exceeds context window."""

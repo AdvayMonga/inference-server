@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 class MPSBackend(InferenceBackend):
     """Inference backend for Apple Silicon GPUs via Metal Performance Shaders."""
 
+    # Thinking channel token IDs (Gemma 4)
+    THINK_START = 100  # <|channel>
+    THINK_END = 101    # <channel|>
+
     def __init__(self):
         self.model = None
         self.tokenizer = None
@@ -30,26 +34,52 @@ class MPSBackend(InferenceBackend):
         ).to(self.device)
         self.model.eval()
 
-        # Collect all EOS token IDs — some models have multiple (e.g. <eos> and <turn|>)
         eos = self.model.config.eos_token_id
         if isinstance(eos, list):
             self._eos_ids = set(eos)
         else:
             self._eos_ids = {eos}
 
-    def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
-        """Full autoregressive generation. Filters thinking tokens, only returns visible output."""
-        input_tensor = torch.tensor([token_ids], device=self.device)
+    def generate(self, token_ids: list[int], max_tokens: int,
+                  template_prefix_len: int = 0) -> list[int]:
+        """Two-phase generation: prefill (cacheable) then decode (unique per response)."""
         kv_cache = None
+        cache_hit = False
+
+        # --- Phase 1: Prefill ---
+        if self.cache_adapter is not None:
+            matched, cached_kv = self.cache_adapter.restore(token_ids)
+            if matched == len(token_ids) and cached_kv is not None:
+                kv_cache = cached_kv
+                cache_hit = True
+                logger.debug(f"Cache hit: reusing {matched} tokens")
+
+        with torch.no_grad():
+            if not cache_hit:
+                input_tensor = torch.tensor([token_ids], device=self.device)
+                outputs = self.model(input_tensor, use_cache=True)
+                kv_cache = outputs.past_key_values
+
+                if self.cache_adapter is not None:
+                    self.cache_adapter.store(token_ids, kv_cache)
+
+        # --- Phase 2: Decode (generate tokens one at a time) ---
+
         visible = []
         in_thinking = False
 
         with torch.no_grad():
-            for _ in range(max_tokens * 4):
+            # Get first generated token
+            if cache_hit:
+                # Entire prompt cached — run last token to prime generation
+                input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
                 outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
                 kv_cache = outputs.past_key_values
                 next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            else:
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
+            for _ in range(max_tokens * 4):
                 if next_token_id in self._eos_ids:
                     break
 
@@ -57,30 +87,17 @@ class MPSBackend(InferenceBackend):
                     in_thinking = True
                 elif next_token_id == self.THINK_END:
                     in_thinking = False
-                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
-                    continue
-
-                if not in_thinking:
+                elif not in_thinking:
                     visible.append(next_token_id)
                     if len(visible) >= max_tokens:
                         break
 
                 input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                kv_cache = outputs.past_key_values
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
         return visible
-
-    def _cache_and_release(self, token_ids: list[int], kv_cache: object, skip_tokens: int) -> None:
-        """Store prompt KV state in cache and release blocks."""
-        if self.cache_manager is None:
-            return
-
-        # Store without KV tensors for now — tracks prefix matches for hit rate
-        # Full tensor-level caching requires adapting to DynamicCache API (future optimization)
-        self.cache_manager.store(token_ids, kv_tensors=[], skip_tokens=skip_tokens)
-
-        # Release the lookup ref we acquired
-        if skip_tokens > 0:
-            self.cache_manager.release(token_ids)
 
     def generate_batch(
         self, batch_token_ids: list[list[int]], max_tokens: list[int]
@@ -144,23 +161,41 @@ class MPSBackend(InferenceBackend):
         next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
         return next_token_id, outputs.past_key_values
 
-    # Thinking channel token IDs (Gemma 4)
-    THINK_START = 100  # <|channel>
-    THINK_END = 101    # <channel|>
-
-    def stream(self, token_ids: list[int], max_tokens: int) -> Generator[int, None, None]:
-        """Yield token IDs one at a time. Thinking tokens don't count toward max_tokens."""
-        input_tensor = torch.tensor([token_ids], device=self.device)
+    def stream(self, token_ids: list[int], max_tokens: int,
+                template_prefix_len: int = 0) -> Generator[int, None, None]:
+        """Two-phase streaming: prefill (cacheable) then decode (yields tokens)."""
         kv_cache = None
+        cache_hit = False
+
+        # --- Phase 1: Prefill ---
+        if self.cache_adapter is not None:
+            matched, cached_kv = self.cache_adapter.restore(token_ids)
+            if matched == len(token_ids) and cached_kv is not None:
+                kv_cache = cached_kv
+                cache_hit = True
+
+        with torch.no_grad():
+            if not cache_hit:
+                input_tensor = torch.tensor([token_ids], device=self.device)
+                outputs = self.model(input_tensor, use_cache=True)
+                kv_cache = outputs.past_key_values
+
+                if self.cache_adapter is not None:
+                    self.cache_adapter.store(token_ids, kv_cache)
+
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            else:
+                input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
+                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                kv_cache = outputs.past_key_values
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+
+        # --- Phase 2: Decode ---
         visible_count = 0
         in_thinking = False
 
         with torch.no_grad():
             for _ in range(max_tokens * 4):
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
-
                 if next_token_id in self._eos_ids:
                     break
 
@@ -168,15 +203,14 @@ class MPSBackend(InferenceBackend):
                     in_thinking = True
                 elif next_token_id == self.THINK_END:
                     in_thinking = False
+                elif not in_thinking:
                     yield next_token_id
-                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
-                    continue
-
-                yield next_token_id
-
-                if not in_thinking:
                     visible_count += 1
                     if visible_count >= max_tokens:
                         break
 
                 input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                kv_cache = outputs.past_key_values
+                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+

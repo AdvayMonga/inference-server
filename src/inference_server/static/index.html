@@ -66,6 +66,7 @@
   <div class="input-area">
     <textarea id="input" placeholder="Type a message..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();send()}"></textarea>
     <button id="sendBtn" onclick="send()">Send</button>
+    <button id="stopBtn" onclick="stopGeneration()" style="display:none;background:#333;color:#fff;border:none;padding:12px 20px;font-family:monospace;font-size:14px;font-weight:bold;cursor:pointer">Stop</button>
   </div>
 </div>
 
@@ -132,13 +133,22 @@
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
+const stopBtn = document.getElementById('stopBtn');
 let generating = false;
+let abortController = null;
+
+function stopGeneration() {
+  if (abortController) abortController.abort();
+}
 
 async function send() {
   const text = inputEl.value.trim();
   if (!text || generating) return;
   generating = true;
   sendBtn.disabled = true;
+  sendBtn.style.display = 'none';
+  stopBtn.style.display = 'block';
+  abortController = new AbortController();
   inputEl.value = '';
 
   addMessage(text, 'user');
@@ -157,7 +167,8 @@ async function send() {
     try {
       const r = await fetch('/generate', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text, max_tokens: maxTokens, stream: true, thinking})
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: true, thinking}),
+        signal: abortController.signal
       });
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -190,7 +201,8 @@ async function send() {
     try {
       const r = await fetch('/generate', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text, max_tokens: maxTokens, stream: false, thinking})
+        body: JSON.stringify({text, max_tokens: maxTokens, stream: false, thinking}),
+        signal: abortController.signal
       });
       const d = await r.json();
       el.innerHTML = renderMd(d.text);
@@ -219,7 +231,10 @@ async function send() {
   } catch(e) {}
 
   generating = false;
+  abortController = null;
   sendBtn.disabled = false;
+  sendBtn.style.display = 'block';
+  stopBtn.style.display = 'none';
   inputEl.focus();
 }
 

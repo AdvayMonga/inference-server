@@ -17,7 +17,8 @@ class FakeBackend(InferenceBackend):
     def load_model(self, model_name: str) -> None:
         pass
 
-    def generate(self, token_ids: list[int], max_tokens: int) -> list[int]:
+    def generate(self, token_ids: list[int], max_tokens: int,
+                  template_prefix_len: int = 0) -> list[int]:
         return list(range(100, 100 + max_tokens))
 
     def generate_batch(
@@ -33,7 +34,8 @@ class FakeBackend(InferenceBackend):
     ) -> tuple[int, object]:
         return 100, None
 
-    def stream(self, token_ids: list[int], max_tokens: int) -> Generator[int, None, None]:
+    def stream(self, token_ids: list[int], max_tokens: int,
+                template_prefix_len: int = 0) -> Generator[int, None, None]:
         for i in range(max_tokens):
             yield 100 + i
 
@@ -41,12 +43,12 @@ class FakeBackend(InferenceBackend):
 @pytest.fixture(autouse=True)
 async def inject_fake_backend():
     """Inject fake backend, tokenizer, batcher, and cache manager into app.state."""
-    from inference_server.kv_cache.cache_manager import CacheManager
+    from inference_server.kv_cache.dynamic_cache_adapter import DynamicCacheAdapter
     from inference_server.tokenizer import Tokenizer
 
     backend = FakeBackend()
-    cache_manager = CacheManager(num_blocks=20, block_size=4, eviction_policy="lru")
-    backend.set_cache_manager(cache_manager)
+    cache_adapter = DynamicCacheAdapter(max_entries=20)
+    backend.set_cache_adapter(cache_adapter)
 
     batcher = BatchProcessor(backend)
     batcher.start()
@@ -54,7 +56,7 @@ async def inject_fake_backend():
     app.state.backend = backend
     app.state.tokenizer = Tokenizer("gpt2", 100)
     app.state.batcher = batcher
-    app.state.cache_manager = cache_manager
+    app.state.cache_adapter = cache_adapter
 
     yield
 
@@ -62,7 +64,7 @@ async def inject_fake_backend():
     del app.state.backend
     del app.state.tokenizer
     del app.state.batcher
-    del app.state.cache_manager
+    del app.state.cache_adapter
 
 
 @pytest.fixture

@@ -111,19 +111,19 @@ class CacheManager:
         return True
 
     def build_kv_from_blocks(self, blocks: list[Block]) -> object | None:
-        """Reconstruct a KV cache tuple from cached blocks."""
-        if not blocks or blocks[0].k_tensor is None:
+        """Reconstruct per-layer (K, V) tuples from cached blocks."""
+        valid_blocks = [b for b in blocks if b.k_tensor is not None]
+        if not valid_blocks:
             return None
 
-        num_layers = blocks[0].k_tensor.shape[0]
+        num_layers = len(valid_blocks[0].k_tensor)
         layer_kv = []
         for layer in range(num_layers):
-            k_parts = [b.k_tensor[layer] for b in blocks if b.k_tensor is not None]
-            v_parts = [b.v_tensor[layer] for b in blocks if b.v_tensor is not None]
-            if k_parts and v_parts:
-                k = torch.cat(k_parts, dim=1)
-                v = torch.cat(v_parts, dim=1)
-                layer_kv.append((k, v))
+            k_parts = [b.k_tensor[layer] for b in valid_blocks]
+            v_parts = [b.v_tensor[layer] for b in valid_blocks]
+            k = torch.cat(k_parts, dim=1)  # concat along seq_len dim
+            v = torch.cat(v_parts, dim=1)
+            layer_kv.append((k, v))
 
         return tuple(layer_kv) if layer_kv else None
 
@@ -132,7 +132,7 @@ class CacheManager:
         kv_tensors: list[tuple[torch.Tensor, torch.Tensor]],
         skip_tokens: int,
     ) -> None:
-        """Slice KV tensors and store them in blocks."""
+        """Slice KV tensors and store per-layer in blocks."""
         num_layers = len(kv_tensors)
         token_offset = skip_tokens
 
@@ -140,15 +140,9 @@ class CacheManager:
             num_tokens = block.num_tokens_stored
             end = token_offset + num_tokens
 
-            k_slices = []
-            v_slices = []
-            for layer_idx in range(num_layers):
-                k, v = kv_tensors[layer_idx]
-                k_slices.append(k[:, token_offset:end, :])
-                v_slices.append(v[:, token_offset:end, :])
-
-            block.k_tensor = torch.stack(k_slices)
-            block.v_tensor = torch.stack(v_slices)
+            # Store as list of per-layer slices (not stacked — layers may have different head counts)
+            block.k_tensor = [kv_tensors[l][0][:, token_offset:end, :] for l in range(num_layers)]
+            block.v_tensor = [kv_tensors[l][1][:, token_offset:end, :] for l in range(num_layers)]
             token_offset = end
 
     @property
