@@ -56,6 +56,11 @@
   .sim-status-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
   .sim-status-indicator.running { background: #0f0; }
   .sim-status-indicator.stopped { background: #555; }
+
+  .sidebar canvas { display: block; margin-bottom: 2px; }
+  .graph-label { font-size: 0.75em; color: #888; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; margin-bottom: 12px; }
+  .clear-btn { cursor: pointer; color: #555; font-size: 0.7em; float: right; letter-spacing: 0.5px; }
+  .clear-btn:hover { color: #aaa; }
 </style>
 </head>
 <body>
@@ -79,6 +84,15 @@
     <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
   </div>
   <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
+
+  <div class="divider"></div>
+  <h2>METRICS HISTORY <span class="clear-btn" onclick="clearGraphs('chat')">[CLEAR]</span></h2>
+  <canvas id="graph-chat-ttft"></canvas>
+  <div class="graph-label">TTFT (ms)</div>
+  <canvas id="graph-chat-tpot"></canvas>
+  <div class="graph-label">TPOT (ms)</div>
+  <canvas id="graph-chat-tps"></canvas>
+  <div class="graph-label">TOKENS/SEC</div>
 
   <div class="divider"></div>
   <h2>KV CACHE</h2>
@@ -126,6 +140,14 @@
       <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="sim-tpot">-<span class="metric-unit"> ms</span></div></div>
     </div>
     <div class="metric"><div class="metric-label">Background Throughput</div><div class="metric-value" id="sim-tps">-<span class="metric-unit"> tok/s</span></div></div>
+    <div class="divider" style="margin-top:14px"></div>
+    <div class="graph-label" style="margin-bottom:8px;font-weight:bold">SIMULATOR HISTORY</div>
+    <canvas id="graph-sim-ttft"></canvas>
+    <div class="graph-label">AVG TTFT (ms)</div>
+    <canvas id="graph-sim-tpot"></canvas>
+    <div class="graph-label">AVG TPOT (ms)</div>
+    <canvas id="graph-sim-tps"></canvas>
+    <div class="graph-label">THROUGHPUT (tok/s)</div>
   </div>
 </div>
 
@@ -136,6 +158,104 @@ const sendBtn = document.getElementById('sendBtn');
 const stopBtn = document.getElementById('stopBtn');
 let generating = false;
 let abortController = null;
+
+// --- Live Graphs ---
+const graphData = {
+  'chat-ttft': [], 'chat-tpot': [], 'chat-tps': [],
+  'sim-ttft': [],  'sim-tpot': [],  'sim-tps': [],
+};
+const MAX_POINTS = 60;
+const GRAPH_CSS_W = 360, GRAPH_CSS_H = 120;
+
+function initCanvas(id) {
+  const c = document.getElementById(id);
+  if (!c) return;
+  const dpr = window.devicePixelRatio || 1;
+  c.width = GRAPH_CSS_W * dpr;
+  c.height = GRAPH_CSS_H * dpr;
+  c.style.width = GRAPH_CSS_W + 'px';
+  c.style.height = GRAPH_CSS_H + 'px';
+  c.getContext('2d').scale(dpr, dpr);
+}
+
+function drawGraph(key) {
+  const canvas = document.getElementById('graph-' + key);
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const pts = graphData[key];
+  const W = GRAPH_CSS_W, H = GRAPH_CSS_H;
+  const pad = { top: 10, right: 10, bottom: 4, left: 44 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top - pad.bottom;
+
+  ctx.clearRect(0, 0, W, H);
+
+  if (pts.length === 0) {
+    ctx.fillStyle = '#333';
+    ctx.font = '11px monospace';
+    ctx.fillText('no data', W / 2 - 22, H / 2);
+    return;
+  }
+
+  const values = pts.map(p => p.v);
+  const yMin = 0;
+  const yMax = Math.max(...values) * 1.15 || 1;
+
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1;
+  ctx.fillStyle = '#555';
+  ctx.font = '10px monospace';
+  for (let i = 0; i <= 2; i++) {
+    const yVal = yMin + (yMax - yMin) * (i / 2);
+    const y = pad.top + plotH - (plotH * i / 2);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, y);
+    ctx.lineTo(W - pad.right, y);
+    ctx.stroke();
+    ctx.fillText(yVal.toFixed(0), 2, y + 3);
+  }
+
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const x = pad.left + (pts.length === 1 ? plotW / 2 : (i / (pts.length - 1)) * plotW);
+    const y = pad.top + plotH - ((pts[i].v - yMin) / (yMax - yMin)) * plotH;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  const last = pts[pts.length - 1];
+  const lx = pad.left + (pts.length === 1 ? plotW / 2 : plotW);
+  const ly = pad.top + plotH - ((last.v - yMin) / (yMax - yMin)) * plotH;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function pushPoint(key, value) {
+  if (value == null || isNaN(value)) return;
+  graphData[key].push({ v: value });
+  if (graphData[key].length > MAX_POINTS) graphData[key].shift();
+  drawGraph(key);
+}
+
+function clearGraphs(prefix) {
+  for (const key in graphData) {
+    if (key.startsWith(prefix)) {
+      graphData[key] = [];
+      drawGraph(key);
+    }
+  }
+}
+
+// Init all canvases
+['chat-ttft','chat-tpot','chat-tps','sim-ttft','sim-tpot','sim-tps'].forEach(k => {
+  initCanvas('graph-' + k);
+  drawGraph(k);
+});
 
 function stopGeneration() {
   if (abortController) abortController.abort();
@@ -222,6 +342,10 @@ async function send() {
   document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit"> ms</span>';
   document.getElementById('m-tps').textContent = tps.toFixed(1);
 
+  pushPoint('chat-ttft', ttft);
+  pushPoint('chat-tpot', tpot);
+  pushPoint('chat-tps', tps);
+
   try {
     const c = await (await fetch('/cache/stats')).json();
     document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit"> %</span>';
@@ -275,6 +399,7 @@ async function simStart() {
     });
     if (!r.ok) return;
     document.getElementById('sim-status').style.display = 'block';
+    clearGraphs('sim');
     document.getElementById('simStartBtn').disabled = true;
     document.getElementById('simStopBtn').disabled = false;
     document.getElementById('sim-dot').className = 'sim-status-indicator running';
@@ -302,6 +427,9 @@ async function simPoll() {
     document.getElementById('sim-tpot').innerHTML = s.avg_tpot_ms.toFixed(1) + '<span class="metric-unit"> ms</span>';
     document.getElementById('sim-tps').innerHTML = s.tokens_per_sec.toFixed(1) + '<span class="metric-unit"> tok/s</span>';
     document.getElementById('sim-elapsed').innerHTML = s.elapsed_s.toFixed(0) + '<span class="metric-unit"> s</span>';
+    pushPoint('sim-ttft', s.avg_ttft_ms);
+    pushPoint('sim-tpot', s.avg_tpot_ms);
+    pushPoint('sim-tps', s.tokens_per_sec);
     if (!s.running) simStop();
   } catch(e) {}
 }
