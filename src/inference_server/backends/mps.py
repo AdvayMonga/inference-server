@@ -1,6 +1,7 @@
 """MPS (Apple Silicon) inference backend."""
 
 import logging
+import threading
 from typing import Generator
 
 import torch
@@ -23,6 +24,7 @@ class MPSBackend(InferenceBackend):
         self.tokenizer = None
         self.device = torch.device("mps")
         self._eos_ids: set[int] = set()
+        self._lock = threading.Lock()
 
     def load_model(self, model_name: str) -> None:
         """Load model and tokenizer onto MPS device."""
@@ -34,6 +36,12 @@ class MPSBackend(InferenceBackend):
         ).to(self.device)
         self.model.eval()
 
+        # Optional: compile the model for fused GPU kernels
+        from inference_server.config import settings
+        if settings.compile_model:
+            logger.info("Compiling model with torch.compile (first run will be slow)...")
+            self.model = torch.compile(self.model)
+
         eos = self.model.config.eos_token_id
         if isinstance(eos, list):
             self._eos_ids = set(eos)
@@ -43,66 +51,74 @@ class MPSBackend(InferenceBackend):
     def generate(self, token_ids: list[int], max_tokens: int,
                   template_prefix_len: int = 0) -> list[int]:
         """Two-phase generation: prefill (cacheable) then decode (unique per response)."""
-        kv_cache = None
-        cache_hit = False
+        with self._lock:
+            kv_cache = None
+            cache_hit = False
 
-        # --- Phase 1: Prefill ---
-        if self.cache_adapter is not None:
-            matched, cached_kv = self.cache_adapter.restore(token_ids)
-            if matched == len(token_ids) and cached_kv is not None:
-                kv_cache = cached_kv
-                cache_hit = True
-                logger.debug(f"Cache hit: reusing {matched} tokens")
+            # --- Phase 1: Prefill ---
+            if self.cache_adapter is not None:
+                matched, cached_kv = self.cache_adapter.restore(token_ids)
+                if matched == len(token_ids) and cached_kv is not None:
+                    kv_cache = cached_kv
+                    cache_hit = True
+                    logger.debug(f"Cache hit: reusing {matched} tokens")
 
-        with torch.no_grad():
-            if not cache_hit:
-                input_tensor = torch.tensor([token_ids], device=self.device)
-                outputs = self.model(input_tensor, use_cache=True)
-                kv_cache = outputs.past_key_values
+            with torch.no_grad():
+                if not cache_hit:
+                    input_tensor = torch.tensor([token_ids], device=self.device)
+                    outputs = self.model(input_tensor, use_cache=True)
+                    kv_cache = outputs.past_key_values
 
-                if self.cache_adapter is not None:
-                    self.cache_adapter.store(token_ids, kv_cache)
+                    if self.cache_adapter is not None:
+                        self.cache_adapter.store(token_ids, kv_cache)
 
-        # --- Phase 2: Decode (generate tokens one at a time) ---
+            # --- Phase 2: Decode (generate tokens one at a time) ---
 
-        visible = []
-        in_thinking = False
+            visible = []
+            in_thinking = False
 
-        with torch.no_grad():
-            # Get first generated token
-            if cache_hit:
-                # Entire prompt cached — run last token to prime generation
-                input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
-            else:
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            with torch.no_grad():
+                # Get first generated token
+                if cache_hit:
+                    # Entire prompt cached — run last token to prime generation
+                    input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
+                    outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                    kv_cache = outputs.past_key_values
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                else:
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
-            for _ in range(max_tokens * 4):
-                if next_token_id in self._eos_ids:
-                    break
-
-                if next_token_id == self.THINK_START:
-                    in_thinking = True
-                elif next_token_id == self.THINK_END:
-                    in_thinking = False
-                elif not in_thinking:
-                    visible.append(next_token_id)
-                    if len(visible) >= max_tokens:
+                for _ in range(max_tokens * 4):
+                    if next_token_id in self._eos_ids:
                         break
 
-                input_tensor = torch.tensor([[next_token_id]], device=self.device)
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                    if next_token_id == self.THINK_START:
+                        in_thinking = True
+                    elif next_token_id == self.THINK_END:
+                        in_thinking = False
+                    elif not in_thinking:
+                        visible.append(next_token_id)
+                        if len(visible) >= max_tokens:
+                            break
 
-        return visible
+                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                    outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                    kv_cache = outputs.past_key_values
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+
+            return visible
 
     def generate_batch(
         self, batch_token_ids: list[list[int]], max_tokens: list[int]
     ) -> list[list[int]]:
         """Batched autoregressive generation with padding and per-request EOS tracking."""
+        with self._lock:
+            return self._generate_batch_impl(batch_token_ids, max_tokens)
+
+    def _generate_batch_impl(
+        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+    ) -> list[list[int]]:
+        """Inner batch generation (called under lock)."""
         batch_size = len(batch_token_ids)
         max_prompt_len = max(len(ids) for ids in batch_token_ids)
         pad_id = self.tokenizer.pad_token_id
@@ -164,53 +180,54 @@ class MPSBackend(InferenceBackend):
     def stream(self, token_ids: list[int], max_tokens: int,
                 template_prefix_len: int = 0) -> Generator[int, None, None]:
         """Two-phase streaming: prefill (cacheable) then decode (yields tokens)."""
-        kv_cache = None
-        cache_hit = False
+        with self._lock:
+            kv_cache = None
+            cache_hit = False
 
-        # --- Phase 1: Prefill ---
-        if self.cache_adapter is not None:
-            matched, cached_kv = self.cache_adapter.restore(token_ids)
-            if matched == len(token_ids) and cached_kv is not None:
-                kv_cache = cached_kv
-                cache_hit = True
+            # --- Phase 1: Prefill ---
+            if self.cache_adapter is not None:
+                matched, cached_kv = self.cache_adapter.restore(token_ids)
+                if matched == len(token_ids) and cached_kv is not None:
+                    kv_cache = cached_kv
+                    cache_hit = True
 
-        with torch.no_grad():
-            if not cache_hit:
-                input_tensor = torch.tensor([token_ids], device=self.device)
-                outputs = self.model(input_tensor, use_cache=True)
-                kv_cache = outputs.past_key_values
+            with torch.no_grad():
+                if not cache_hit:
+                    input_tensor = torch.tensor([token_ids], device=self.device)
+                    outputs = self.model(input_tensor, use_cache=True)
+                    kv_cache = outputs.past_key_values
 
-                if self.cache_adapter is not None:
-                    self.cache_adapter.store(token_ids, kv_cache)
+                    if self.cache_adapter is not None:
+                        self.cache_adapter.store(token_ids, kv_cache)
 
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
-            else:
-                input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                else:
+                    input_tensor = torch.tensor([[token_ids[-1]]], device=self.device)
+                    outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                    kv_cache = outputs.past_key_values
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 
-        # --- Phase 2: Decode ---
-        visible_count = 0
-        in_thinking = False
+            # --- Phase 2: Decode ---
+            visible_count = 0
+            in_thinking = False
 
-        with torch.no_grad():
-            for _ in range(max_tokens * 4):
-                if next_token_id in self._eos_ids:
-                    break
-
-                if next_token_id == self.THINK_START:
-                    in_thinking = True
-                elif next_token_id == self.THINK_END:
-                    in_thinking = False
-                elif not in_thinking:
-                    yield next_token_id
-                    visible_count += 1
-                    if visible_count >= max_tokens:
+            with torch.no_grad():
+                for _ in range(max_tokens * 4):
+                    if next_token_id in self._eos_ids:
                         break
 
-                input_tensor = torch.tensor([[next_token_id]], device=self.device)
-                outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
-                kv_cache = outputs.past_key_values
-                next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                    if next_token_id == self.THINK_START:
+                        in_thinking = True
+                    elif next_token_id == self.THINK_END:
+                        in_thinking = False
+                    elif not in_thinking:
+                        yield next_token_id
+                        visible_count += 1
+                        if visible_count >= max_tokens:
+                            break
+
+                    input_tensor = torch.tensor([[next_token_id]], device=self.device)
+                    outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
+                    kv_cache = outputs.past_key_values
+                    next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
 

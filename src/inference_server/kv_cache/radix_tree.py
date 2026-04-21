@@ -121,7 +121,7 @@ class RadixTree:
                 remaining = remaining[match_len:]
                 node = child
             else:
-                # Partial edge match — we can reuse blocks that are fully covered
+                # Partial edge match — reuse blocks that are fully covered
                 # but not a partially filled block
                 matched_tokens += match_len
                 # Only include blocks whose tokens are fully matched
