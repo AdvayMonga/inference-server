@@ -84,6 +84,10 @@
     <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
   </div>
   <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
+  <div class="metric-grid">
+    <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="m-avg-tpot">-<span class="metric-unit"> ms</span></div></div>
+    <div class="metric"><div class="metric-label">Avg Tokens/sec</div><div class="metric-value" id="m-avg-tps">-</div></div>
+  </div>
 
   <div class="divider"></div>
   <h2>METRICS HISTORY <span class="clear-btn" onclick="clearGraphs('chat')">[CLEAR]</span></h2>
@@ -112,7 +116,7 @@
     <div class="metric-grid">
       <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="512" min="1" max="4096"></div>
       <div><label>Stream</label><select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select></div>
-      <div><label>Thinking</label><select id="s-thinking"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+      <div><label>Thinking</label><select id="s-thinking"><option value="true">On</option><option value="false" selected>Off</option></select></div>
     </div>
   </div>
 
@@ -158,6 +162,7 @@ const sendBtn = document.getElementById('sendBtn');
 const stopBtn = document.getElementById('stopBtn');
 let generating = false;
 let abortController = null;
+let tpotSum = 0, tpsSum = 0, reqCount = 0;
 
 // --- Live Graphs ---
 const graphData = {
@@ -341,6 +346,14 @@ async function send() {
   document.getElementById('m-tokens').textContent = tokens;
   document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit"> ms</span>';
   document.getElementById('m-tps').textContent = tps.toFixed(1);
+
+  if (tpot > 0) {
+    reqCount++;
+    tpotSum += tpot;
+    tpsSum += tps;
+    document.getElementById('m-avg-tpot').innerHTML = (tpotSum / reqCount).toFixed(1) + '<span class="metric-unit"> ms</span>';
+    document.getElementById('m-avg-tps').textContent = (tpsSum / reqCount).toFixed(1);
+  }
 
   pushPoint('chat-ttft', ttft);
   pushPoint('chat-tpot', tpot);

@@ -8,5 +8,8 @@ def create_backend(backend_name: str) -> InferenceBackend:
     if backend_name == "mps":
         from inference_server.backends.mps import MPSBackend
         return MPSBackend()
+    elif backend_name == "mlx":
+        from inference_server.backends.mlx_backend import MLXBackend
+        return MLXBackend()
     else:
-        raise ValueError(f"Unknown backend: {backend_name}. Available: mps")
+        raise ValueError(f"Unknown backend: {backend_name}. Available: mps, mlx")
