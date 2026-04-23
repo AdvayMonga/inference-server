@@ -1,6 +1,6 @@
 # Inference Server
 
-Production LLM inference server built from scratch in Python.
+LLM inference server built from scratch
 
 ## Quick Start
 
