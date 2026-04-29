@@ -86,10 +86,11 @@ def test_shared_prefix_two_sequences():
 
 
 def test_three_sequences_branching():
+    # One token per block so every position is a valid split boundary.
     tree = RadixTree()
-    tree.insert([1, 2, 3], make_blocks([[1, 2, 3]]))
-    tree.insert([1, 2, 4], make_blocks([[1, 2, 4]]))
-    tree.insert([1, 5], make_blocks([[1, 5]]))
+    tree.insert([1, 2, 3], make_blocks([[1], [2], [3]]))
+    tree.insert([1, 2, 4], make_blocks([[1], [2], [4]]))
+    tree.insert([1, 5], make_blocks([[1], [5]]))
 
     matched, _ = tree.find_prefix([1, 2, 3])
     assert matched == 3
@@ -124,8 +125,8 @@ def test_remove_sequence():
 
 def test_remove_one_of_two_branches():
     tree = RadixTree()
-    tree.insert([1, 2, 3], make_blocks([[1, 2, 3]]))
-    tree.insert([1, 2, 4], make_blocks([[1, 2, 4]]))
+    tree.insert([1, 2, 3], make_blocks([[1], [2], [3]]))
+    tree.insert([1, 2, 4], make_blocks([[1], [2], [4]]))
 
     tree.remove([1, 2, 3])
 

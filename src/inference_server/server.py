@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from inference_server.backends import create_backend
 from inference_server.batcher import BatchProcessor
 from inference_server.config import settings, print_hardware_summary
-from inference_server.kv_cache.dynamic_cache_adapter import DynamicCacheAdapter
+from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.tokenizer import Tokenizer
 
 DEFAULT_PROMPTS = [
@@ -78,8 +78,12 @@ async def lifespan(app):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, backend.load_model, settings.model_name)
 
-    cache_adapter = DynamicCacheAdapter(max_entries=64)
-    backend.set_cache_adapter(cache_adapter)
+    cache_manager = CacheManager(
+        num_blocks=settings.kv_cache_num_blocks,
+        block_size=settings.kv_cache_block_size,
+        eviction_policy=settings.eviction_policy,
+    )
+    backend.set_cache_adapter(cache_manager)
 
     batcher = BatchProcessor(backend)
     batcher.start()
@@ -87,7 +91,7 @@ async def lifespan(app):
     app.state.backend = backend
     app.state.tokenizer = tokenizer
     app.state.batcher = batcher
-    app.state.cache_adapter = cache_adapter
+    app.state.cache_adapter = cache_manager
     app.state.simulation = SimulationState()
 
     yield

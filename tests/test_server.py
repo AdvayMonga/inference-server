@@ -43,11 +43,11 @@ class FakeBackend(InferenceBackend):
 @pytest.fixture(autouse=True)
 async def inject_fake_backend():
     """Inject fake backend, tokenizer, batcher, and cache manager into app.state."""
-    from inference_server.kv_cache.dynamic_cache_adapter import DynamicCacheAdapter
+    from inference_server.kv_cache.cache_manager import CacheManager
     from inference_server.tokenizer import Tokenizer
 
     backend = FakeBackend()
-    cache_adapter = DynamicCacheAdapter(max_entries=20)
+    cache_adapter = CacheManager(num_blocks=20, block_size=4)
     backend.set_cache_adapter(cache_adapter)
 
     batcher = BatchProcessor(backend)

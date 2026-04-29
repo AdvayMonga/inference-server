@@ -25,8 +25,24 @@ class CacheManager:
         self._miss_count = 0
 
     def lookup(self, token_ids: list[int], session_id: str = "default") -> tuple[int, list[Block]]:
-        """Find the longest cached prefix. Returns (tokens_matched, blocks)."""
+        """Find the longest cached prefix. Returns (tokens_matched, blocks).
+
+        Guarantees matched == sum of returned blocks' token counts (block-aligned).
+        """
         matched, blocks = self.radix_tree.find_prefix(token_ids)
+
+        aligned_blocks: list[Block] = []
+        running = 0
+        for b in blocks:
+            n = b.num_tokens_stored
+            if running + n > matched:
+                break
+            aligned_blocks.append(b)
+            running += n
+
+        matched = running
+        blocks = aligned_blocks
+
         if matched > 0:
             for block in blocks:
                 block.acquire()

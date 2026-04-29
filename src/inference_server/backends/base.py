@@ -4,16 +4,16 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Generator
 
 if TYPE_CHECKING:
-    from inference_server.kv_cache.dynamic_cache_adapter import DynamicCacheAdapter
+    from inference_server.kv_cache.cache_manager import CacheManager
 
 
 class InferenceBackend(ABC):
     """Interface for model backends. Server code only talks through this."""
 
-    cache_adapter: "DynamicCacheAdapter | None" = None
+    cache_adapter: "CacheManager | None" = None
 
-    def set_cache_adapter(self, adapter: "DynamicCacheAdapter") -> None:
-        """Attach a cache adapter for prefix caching. Optional."""
+    def set_cache_adapter(self, adapter: "CacheManager") -> None:
+        """Attach a CacheManager for prefix caching. Optional."""
         self.cache_adapter = adapter
 
     @abstractmethod

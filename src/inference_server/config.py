@@ -39,6 +39,7 @@ class Settings:
     # KV Cache
     kv_cache_memory_fraction: float = 0.9
     kv_cache_block_size: int = 16
+    kv_cache_num_blocks: int = 256
     eviction_policy: str = "lru"  # "lru", "attention_sink_lru", "h2o"
 
     # Streaming
@@ -84,6 +85,7 @@ def load_settings() -> Settings:
         context_window=int(os.environ.get("CONTEXT_WINDOW", Settings.context_window)),
         kv_cache_memory_fraction=float(os.environ.get("KV_CACHE_MEMORY_FRACTION", Settings.kv_cache_memory_fraction)),
         kv_cache_block_size=int(os.environ.get("KV_CACHE_BLOCK_SIZE", Settings.kv_cache_block_size)),
+        kv_cache_num_blocks=int(os.environ.get("KV_CACHE_NUM_BLOCKS", Settings.kv_cache_num_blocks)),
         eviction_policy=os.environ.get("EVICTION_POLICY", Settings.eviction_policy),
         stream_by_default=os.environ.get("STREAM_BY_DEFAULT", str(Settings.stream_by_default)).lower() == "true",
         keep_model_warm=os.environ.get("KEEP_MODEL_WARM", str(Settings.keep_model_warm)).lower() == "true",

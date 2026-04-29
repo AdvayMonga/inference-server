@@ -25,12 +25,14 @@ def test_store_and_lookup(cache):
     assert len(blocks) > 0
 
 
-def test_prefix_sharing(cache):
-    cache.store([10, 20, 30, 40], kv_tensors=[], skip_tokens=0)
-    cache.store([10, 20, 50, 60], kv_tensors=[], skip_tokens=0)
+def test_prefix_sharing():
+    # block_size=2 so the 2-token shared prefix lands on a block boundary
+    c = CacheManager(num_blocks=20, block_size=2)
+    c.store([10, 20, 30, 40], kv_tensors=[], skip_tokens=0)
+    c.store([10, 20, 50, 60], kv_tensors=[], skip_tokens=0)
 
     # Both share [10, 20] prefix
-    matched, _ = cache.lookup([10, 20, 99])
+    matched, _ = c.lookup([10, 20, 99])
     assert matched == 2
 
 

@@ -75,9 +75,13 @@ class RadixTree:
                 block_idx += len(child.blocks)
                 node = child
             else:
-                # Partial match — split the edge
-                self._split_node(node, child, first_token, match_len)
-                remaining = remaining[match_len:]
+                # Partial match — try to split the edge at a block boundary
+                actual_split = self._split_node(node, child, first_token, match_len)
+                if actual_split == 0:
+                    # Could not split (first block straddles boundary).
+                    # Bail: don't index the rest of this sequence. Safe but loses sharing.
+                    return
+                remaining = remaining[actual_split:]
                 block_idx += len(node.children[first_token].blocks)
                 node = node.children[first_token]
 
@@ -188,22 +192,36 @@ class RadixTree:
 
     def _split_node(
         self, parent: RadixNode, child: RadixNode, edge_key: int, split_at: int
-    ) -> None:
-        """Split a child edge at the given position, creating an intermediate node."""
-        # New intermediate node gets the matched prefix
+    ) -> int:
+        """Split a child edge at the largest block boundary <= split_at.
+
+        Returns the actual split position (block-aligned). Returns 0 if no clean split
+        is possible (first block straddles the split point) — caller must handle.
+        """
+        # Find largest block-aligned position <= split_at
+        aligned_split = 0
+        blocks_in_mid = 0
+        for block in child.blocks:
+            next_pos = aligned_split + block.num_tokens_stored
+            if next_pos <= split_at:
+                aligned_split = next_pos
+                blocks_in_mid += 1
+            else:
+                break
+
+        if aligned_split == 0:
+            return 0
+
         mid_node = RadixNode(
-            token_ids=child.token_ids[:split_at],
-            blocks=child.blocks[:self._blocks_for_tokens(child, split_at)],
+            token_ids=child.token_ids[:aligned_split],
+            blocks=child.blocks[:blocks_in_mid],
         )
+        child.token_ids = child.token_ids[aligned_split:]
+        child.blocks = child.blocks[blocks_in_mid:]
 
-        # Original child keeps the unmatched suffix
-        child.token_ids = child.token_ids[split_at:]
-        remaining_blocks = child.blocks[len(mid_node.blocks):]
-        child.blocks = remaining_blocks
-
-        # Wire up: parent → mid_node → child
         mid_node.children[child.token_ids[0]] = child
         parent.children[edge_key] = mid_node
+        return aligned_split
 
     def _blocks_for_tokens(self, node: RadixNode, num_tokens: int) -> int:
         """Count how many blocks cover the first num_tokens of a node."""
