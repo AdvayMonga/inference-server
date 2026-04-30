@@ -62,8 +62,8 @@ class CacheManager:
 
         num_blocks_needed = self.block_manager.blocks_needed(len(new_token_ids))
 
-        # Try to evict if not enough space
-        while not self.block_manager.can_allocate(num_blocks_needed):
+        # Try to evict if not enough space (can_allocate takes a token count)
+        while not self.block_manager.can_allocate(len(new_token_ids)):
             evicted = self._evict_one()
             if not evicted:
                 logger.debug(f"[{session_id}] Cannot evict — all blocks in use, skipping store")

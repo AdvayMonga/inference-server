@@ -16,6 +16,7 @@ class BatchRequest:
     token_ids: list[int]
     max_tokens: int
     future: asyncio.Future
+    session_id: str = "default"
 
 
 class BatchProcessor:
@@ -42,11 +43,15 @@ class BatchProcessor:
             except asyncio.CancelledError:
                 pass
 
-    async def submit(self, token_ids: list[int], max_tokens: int) -> list[int]:
+    async def submit(self, token_ids: list[int], max_tokens: int,
+                     session_id: str = "default") -> list[int]:
         """Submit a request and wait for the result."""
         loop = asyncio.get_running_loop()
         future = loop.create_future()
-        request = BatchRequest(token_ids=token_ids, max_tokens=max_tokens, future=future)
+        request = BatchRequest(
+            token_ids=token_ids, max_tokens=max_tokens,
+            future=future, session_id=session_id,
+        )
         await self.queue.put(request)
         return await future
 
@@ -83,11 +88,13 @@ class BatchProcessor:
 
                 batch_token_ids = [r.token_ids for r in batch]
                 batch_max_tokens = [r.max_tokens for r in batch]
+                batch_session_ids = [r.session_id for r in batch]
 
                 logger.info(f"Processing batch of {batch_size} requests")
 
                 results = await loop.run_in_executor(
-                    None, self.backend.generate_batch, batch_token_ids, batch_max_tokens
+                    None, self.backend.generate_batch,
+                    batch_token_ids, batch_max_tokens, batch_session_ids,
                 )
 
                 for request, result in zip(batch, results):

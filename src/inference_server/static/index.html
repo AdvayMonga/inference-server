@@ -84,6 +84,7 @@
     <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
   </div>
   <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
+  <div class="metric"><div class="metric-label">Cached Prompt Tokens</div><div class="metric-value" id="m-cached" style="font-size:1.3em">- / -</div></div>
   <div class="metric-grid">
     <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="m-avg-tpot">-<span class="metric-unit"> ms</span></div></div>
     <div class="metric"><div class="metric-label">Avg Tokens/sec</div><div class="metric-value" id="m-avg-tps">-</div></div>
@@ -262,6 +263,18 @@ function clearGraphs(prefix) {
   drawGraph(k);
 });
 
+async function refreshCacheStats() {
+  try {
+    const c = await (await fetch('/cache/stats')).json();
+    document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit"> %</span>';
+    document.getElementById('m-hitmiss').textContent = c.hit_count + ' / ' + c.miss_count;
+    document.getElementById('m-evictions').textContent = c.eviction_count;
+    document.getElementById('m-util-bar').style.width = (c.utilization * 100) + '%';
+  } catch(e) {}
+}
+refreshCacheStats();
+setInterval(refreshCacheStats, 2000);
+
 function stopGeneration() {
   if (abortController) abortController.abort();
 }
@@ -287,6 +300,7 @@ async function send() {
   const thinking = document.getElementById('s-thinking').value === 'true';
   const t0 = performance.now();
   let tokens = 0, ttft = null, t1 = null, rawText = '';
+  let cacheHit = null, promptTokens = null;
 
   if (stream) {
     try {
@@ -309,7 +323,13 @@ async function send() {
           const d = line.slice(6);
           if (d === '[DONE]') break;
           if (d.startsWith('{') && d.includes('ttft_ms')) {
-            try { ttft = JSON.parse(d).ttft_ms; t1 = performance.now(); } catch(e) {}
+            try {
+              const m = JSON.parse(d);
+              ttft = m.ttft_ms;
+              if (m.cache_hit_tokens != null) cacheHit = m.cache_hit_tokens;
+              if (m.prompt_tokens != null) promptTokens = m.prompt_tokens;
+              t1 = performance.now();
+            } catch(e) {}
             continue;
           }
           if (!t1) t1 = performance.now();
@@ -333,6 +353,8 @@ async function send() {
       el.innerHTML = renderMd(d.text);
       tokens = d.tokens_generated;
       ttft = d.ttft_ms;
+      cacheHit = d.cache_hit_tokens;
+      promptTokens = d.prompt_tokens;
     } catch(e) { el.textContent = '[Error: ' + e.message + ']'; }
   }
 
@@ -347,6 +369,11 @@ async function send() {
   document.getElementById('m-total').innerHTML = total.toFixed(0) + '<span class="metric-unit"> ms</span>';
   document.getElementById('m-tps').textContent = tps.toFixed(1);
 
+  if (promptTokens != null) {
+    const hit = cacheHit != null ? cacheHit : 0;
+    document.getElementById('m-cached').textContent = hit + ' / ' + promptTokens;
+  }
+
   if (tpot > 0) {
     reqCount++;
     tpotSum += tpot;
@@ -359,13 +386,7 @@ async function send() {
   pushPoint('chat-tpot', tpot);
   pushPoint('chat-tps', tps);
 
-  try {
-    const c = await (await fetch('/cache/stats')).json();
-    document.getElementById('m-hitrate').innerHTML = (c.hit_rate * 100).toFixed(1) + '<span class="metric-unit"> %</span>';
-    document.getElementById('m-hitmiss').textContent = c.hit_count + ' / ' + c.miss_count;
-    document.getElementById('m-evictions').textContent = c.eviction_count;
-    document.getElementById('m-util-bar').style.width = (c.utilization * 100) + '%';
-  } catch(e) {}
+  refreshCacheStats();
 
   generating = false;
   abortController = null;

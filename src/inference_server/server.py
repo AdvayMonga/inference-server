@@ -37,6 +37,7 @@ class GenerateRequest(BaseModel):
     max_tokens: int = settings.max_tokens
     stream: bool = settings.stream_by_default
     thinking: bool = True
+    session_id: str = "default"
 
 
 class GenerateResponse(BaseModel):
@@ -45,6 +46,8 @@ class GenerateResponse(BaseModel):
     tokens_generated: int
     ttft_ms: float
     total_ms: float
+    prompt_tokens: int
+    cache_hit_tokens: int
 
 
 class SimulateRequest(BaseModel):
@@ -112,7 +115,7 @@ async def root():
 
 async def event_stream(
     backend, tokenizer, token_ids: list[int], max_tokens: int,
-    template_prefix_len: int = 0,
+    template_prefix_len: int = 0, session_id: str = "default",
 ) -> AsyncGenerator[str, None]:
     """Yield SSE-formatted chunks. Backend already filters thinking tokens."""
     loop = asyncio.get_event_loop()
@@ -122,7 +125,7 @@ async def event_stream(
     queue: asyncio.Queue = asyncio.Queue()
 
     def _run_stream():
-        for token_id in backend.stream(token_ids, max_tokens, template_prefix_len):
+        for token_id in backend.stream(token_ids, max_tokens, template_prefix_len, session_id=session_id):
             text = tokenizer.decode_token(token_id)
             queue.put_nowait(text)
         queue.put_nowait(None)
@@ -139,7 +142,12 @@ async def event_stream(
 
         if first_token:
             ttft = (time.perf_counter() - start_time) * 1000
-            yield f"data: {{\"ttft_ms\": {ttft:.1f}}}\n\n"
+            meta = {
+                "ttft_ms": round(ttft, 1),
+                "prompt_tokens": len(token_ids),
+                "cache_hit_tokens": backend.last_cache_hit_tokens,
+            }
+            yield f"data: {json.dumps(meta)}\n\n"
             first_token = False
 
         yield f"data: {text}\n\n"
@@ -159,13 +167,14 @@ async def generate(request: GenerateRequest):
 
     if request.stream:
         return StreamingResponse(
-            event_stream(backend, tokenizer, token_ids, request.max_tokens, tpl),
+            event_stream(backend, tokenizer, token_ids, request.max_tokens, tpl,
+                         session_id=request.session_id),
             media_type="text/event-stream",
         )
 
     start_time = time.perf_counter()
     generated_ids = await loop.run_in_executor(
-        None, backend.generate, token_ids, request.max_tokens, tpl
+        None, backend.generate, token_ids, request.max_tokens, tpl, request.session_id
     )
     total_time = time.perf_counter() - start_time
 
@@ -176,6 +185,8 @@ async def generate(request: GenerateRequest):
         tokens_generated=len(generated_ids),
         ttft_ms=0,
         total_ms=total_time * 1000,
+        prompt_tokens=len(token_ids),
+        cache_hit_tokens=backend.last_cache_hit_tokens,
     )
 
 
@@ -199,7 +210,8 @@ async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, p
                 t0 = time.perf_counter()
                 resp = await client.post(
                     f"http://127.0.0.1:{port}/generate",
-                    json={"text": prompt, "max_tokens": max_tokens, "stream": False, "thinking": False},
+                    json={"text": prompt, "max_tokens": max_tokens, "stream": False,
+                          "thinking": False, "session_id": f"sim-{user_id}"},
                 )
                 total = (time.perf_counter() - t0) * 1000
 

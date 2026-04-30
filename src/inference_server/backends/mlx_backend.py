@@ -37,7 +37,8 @@ class MLXBackend(InferenceBackend):
             self._eos_ids = {1, 106}
 
     def generate(self, token_ids: list[int], max_tokens: int,
-                  template_prefix_len: int = 0) -> list[int]:
+                  template_prefix_len: int = 0,
+                  session_id: str = "default") -> list[int]:
         """Full generation with thinking filter."""
         prompt = self.tokenizer.decode(token_ids)
         visible = []
@@ -64,11 +65,14 @@ class MLXBackend(InferenceBackend):
         return visible
 
     def generate_batch(
-        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+        self, batch_token_ids: list[list[int]], max_tokens: list[int],
+        session_ids: list[str] | None = None,
     ) -> list[list[int]]:
         """Batch generation — runs sequentially for MLX (single-user optimized)."""
+        sids = session_ids if session_ids is not None else ["default"] * len(batch_token_ids)
         return [
-            self.generate(ids, mt) for ids, mt in zip(batch_token_ids, max_tokens)
+            self.generate(ids, mt, session_id=sid)
+            for ids, mt, sid in zip(batch_token_ids, max_tokens, sids)
         ]
 
     def generate_step(
@@ -81,7 +85,8 @@ class MLXBackend(InferenceBackend):
         return 0, None
 
     def stream(self, token_ids: list[int], max_tokens: int,
-                template_prefix_len: int = 0) -> Generator[int, None, None]:
+                template_prefix_len: int = 0,
+                session_id: str = "default") -> Generator[int, None, None]:
         """Yield token IDs one at a time with thinking filter."""
         prompt = self.tokenizer.decode(token_ids)
         visible_count = 0

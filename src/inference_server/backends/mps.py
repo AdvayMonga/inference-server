@@ -53,11 +53,12 @@ class MPSBackend(InferenceBackend):
             self._eos_ids = {eos}
 
     def generate(self, token_ids: list[int], max_tokens: int,
-                  template_prefix_len: int = 0) -> list[int]:
+                  template_prefix_len: int = 0,
+                  session_id: str = "default") -> list[int]:
         """Two-phase generation: prefill (cacheable) then decode (unique per response)."""
         with self._lock:
             try:
-                kv_cache, next_token_id = self._prefill_with_cache(token_ids)
+                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id)
 
                 # --- Phase 2: Decode ---
                 visible = []
@@ -85,19 +86,22 @@ class MPSBackend(InferenceBackend):
                 return visible
             finally:
                 if self.cache_adapter is not None:
-                    self.cache_adapter.release(token_ids)
+                    self.cache_adapter.release(token_ids, session_id=session_id)
 
-    def _prefill_with_cache(self, token_ids: list[int]) -> tuple[object, int]:
+    def _prefill_with_cache(self, token_ids: list[int],
+                             session_id: str = "default") -> tuple[object, int]:
         """Run prefill using CacheManager prefix lookup. Returns (kv_cache, first_token_id)."""
         cache = self.cache_adapter
         matched = 0
         kv_cache = None
 
         if cache is not None:
-            lookup_matched, prefix_blocks = cache.lookup(token_ids)
+            lookup_matched, prefix_blocks = cache.lookup(token_ids, session_id=session_id)
             if lookup_matched > 0:
                 kv_cache, matched = blocks_to_dynamic_cache(prefix_blocks)
                 logger.debug(f"Prefix cache hit: {matched}/{len(token_ids)} tokens")
+
+        self.last_cache_hit_tokens = matched
 
         with torch.no_grad():
             if matched == len(token_ids):
@@ -122,66 +126,120 @@ class MPSBackend(InferenceBackend):
         # Store the new portion into the cache
         if cache is not None and matched < len(token_ids):
             per_layer_3d = dynamic_cache_to_per_layer_3d(kv_cache)
-            cache.store(token_ids, per_layer_3d, skip_tokens=matched)
+            cache.store(token_ids, per_layer_3d, skip_tokens=matched, session_id=session_id)
 
         return kv_cache, next_token_id
 
     def generate_batch(
-        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+        self, batch_token_ids: list[list[int]], max_tokens: list[int],
+        session_ids: list[str] | None = None,
     ) -> list[list[int]]:
-        """Batched autoregressive generation with padding and per-request EOS tracking."""
+        """Batched autoregressive generation with per-row prefix caching."""
         with self._lock:
-            return self._generate_batch_impl(batch_token_ids, max_tokens)
+            return self._generate_batch_impl(batch_token_ids, max_tokens, session_ids)
 
     def _generate_batch_impl(
-        self, batch_token_ids: list[list[int]], max_tokens: list[int]
+        self, batch_token_ids: list[list[int]], max_tokens: list[int],
+        session_ids: list[str] | None = None,
     ) -> list[list[int]]:
-        """Inner batch generation (called under lock)."""
+        """Per-row prefill (with cache), batched decode."""
+        from transformers.cache_utils import DynamicCache
+
         batch_size = len(batch_token_ids)
-        max_prompt_len = max(len(ids) for ids in batch_token_ids)
-        pad_id = self.tokenizer.pad_token_id
+        if session_ids is None:
+            session_ids = ["default"] * batch_size
         max_gen = max(max_tokens)
 
-        padded = []
-        for ids in batch_token_ids:
-            padding = [pad_id] * (max_prompt_len - len(ids))
-            padded.append(padding + ids)
+        # Phase 1: per-row prefill (sequential — each row hits cache independently)
+        per_row_caches: list[DynamicCache] = []
+        first_tokens: list[int] = []
+        real_kv_lens: list[int] = []
 
-        input_ids = torch.tensor(padded, device=self.device)
-        attention_mask = (input_ids != pad_id).long()
+        try:
+            for ids, sid in zip(batch_token_ids, session_ids):
+                kv_i, tok_i = self._prefill_with_cache(ids, sid)
+                per_row_caches.append(kv_i)
+                first_tokens.append(tok_i)
+                real_kv_lens.append(kv_i.layers[0].keys.shape[2])
 
-        generated = [[] for _ in range(batch_size)]
-        finished = [False] * batch_size
-        kv_cache = None
+            max_kv_len = max(real_kv_lens)
 
-        with torch.no_grad():
-            for step in range(max_gen):
-                outputs = self.model(
-                    input_ids, attention_mask=attention_mask,
-                    past_key_values=kv_cache, use_cache=True,
-                )
-                kv_cache = outputs.past_key_values
-                next_tokens = outputs.logits[:, -1, :].argmax(dim=-1)
+            # Phase 2: stack per-row caches into a batched DynamicCache (left-pad along seq)
+            batched_cache = self._stack_caches_left_padded(per_row_caches, max_kv_len)
 
-                for i in range(batch_size):
-                    if finished[i]:
-                        continue
-                    tok = next_tokens[i].item()
-                    if tok in self._eos_ids or len(generated[i]) >= max_tokens[i]:
-                        finished[i] = True
-                    else:
-                        generated[i].append(tok)
+            # Initial attention mask: 0 over left-pad, 1 over real KV
+            attention_mask = torch.zeros(
+                batch_size, max_kv_len, device=self.device, dtype=torch.long
+            )
+            for i, L in enumerate(real_kv_lens):
+                attention_mask[i, max_kv_len - L:] = 1
 
-                if all(finished):
-                    break
+            generated: list[list[int]] = [[] for _ in range(batch_size)]
+            finished: list[bool] = [False] * batch_size
+            current_tokens = torch.tensor(first_tokens, device=self.device).unsqueeze(1)
 
-                input_ids = next_tokens.unsqueeze(1)
-                attention_mask = torch.cat([
-                    attention_mask,
-                    torch.ones(batch_size, 1, device=self.device, dtype=torch.long),
-                ], dim=1)
+            # Phase 3: batched decode with explicit per-row position_ids
+            with torch.no_grad():
+                for step in range(max_gen):
+                    for i in range(batch_size):
+                        if finished[i]:
+                            continue
+                        tok = current_tokens[i, 0].item()
+                        if tok in self._eos_ids or len(generated[i]) >= max_tokens[i]:
+                            finished[i] = True
+                        else:
+                            generated[i].append(tok)
 
-        return generated
+                    if all(finished):
+                        break
+
+                    attention_mask = torch.cat([
+                        attention_mask,
+                        torch.ones(batch_size, 1, device=self.device, dtype=torch.long),
+                    ], dim=1)
+                    position_ids = torch.tensor(
+                        [[real_kv_lens[i] + step] for i in range(batch_size)],
+                        device=self.device, dtype=torch.long,
+                    )
+
+                    outputs = self.model(
+                        current_tokens,
+                        attention_mask=attention_mask,
+                        position_ids=position_ids,
+                        past_key_values=batched_cache,
+                        use_cache=True,
+                    )
+                    batched_cache = outputs.past_key_values
+                    current_tokens = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+
+            return generated
+        finally:
+            if self.cache_adapter is not None:
+                for ids, sid in zip(batch_token_ids, session_ids):
+                    self.cache_adapter.release(ids, session_id=sid)
+
+    def _stack_caches_left_padded(self, per_row_caches: list, max_kv_len: int):
+        """Build a batched DynamicCache by left-padding each row's KV along seq dim."""
+        from transformers.cache_utils import DynamicCache
+
+        if not per_row_caches:
+            return None
+        num_layers = len(per_row_caches[0].layers)
+        batched = DynamicCache()
+        for layer in range(num_layers):
+            ks, vs = [], []
+            for cache in per_row_caches:
+                k = cache.layers[layer].keys     # [1, H, L, D]
+                v = cache.layers[layer].values
+                pad_len = max_kv_len - k.shape[2]
+                if pad_len > 0:
+                    pad_shape = (k.shape[0], k.shape[1], pad_len, k.shape[3])
+                    k = torch.cat([torch.zeros(pad_shape, device=k.device, dtype=k.dtype), k], dim=2)
+                    v = torch.cat([torch.zeros(pad_shape, device=v.device, dtype=v.dtype), v], dim=2)
+                ks.append(k)
+                vs.append(v)
+            batched.update(torch.cat(ks, dim=0), torch.cat(vs, dim=0), layer)
+        return batched
 
     def generate_step(
         self, token_ids: list[int], kv_cache: object | None = None
@@ -196,11 +254,12 @@ class MPSBackend(InferenceBackend):
         return next_token_id, outputs.past_key_values
 
     def stream(self, token_ids: list[int], max_tokens: int,
-                template_prefix_len: int = 0) -> Generator[int, None, None]:
+                template_prefix_len: int = 0,
+                session_id: str = "default") -> Generator[int, None, None]:
         """Two-phase streaming: prefill (cacheable) then decode (yields tokens)."""
         with self._lock:
             try:
-                kv_cache, next_token_id = self._prefill_with_cache(token_ids)
+                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id)
 
                 # --- Phase 2: Decode ---
                 visible_count = 0
@@ -227,5 +286,5 @@ class MPSBackend(InferenceBackend):
                         next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
             finally:
                 if self.cache_adapter is not None:
-                    self.cache_adapter.release(token_ids)
+                    self.cache_adapter.release(token_ids, session_id=session_id)
 
