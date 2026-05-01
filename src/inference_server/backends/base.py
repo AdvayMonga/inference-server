@@ -86,6 +86,18 @@ class InferenceBackend(ABC):
             f"{type(self).__name__} does not support remove_row_from_cache()"
         )
 
+    def splice_into_batched(
+        self, batched_kv: object | None, new_kv: object, new_kv_len: int,
+    ) -> object:
+        """Append a new row's KV to a batched cache, left-padding to align seq lengths.
+
+        Returns the updated batched cache. If `batched_kv` is None, returns a batched
+        cache containing just the new row.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support splice_into_batched()"
+        )
+
     def kv_length(self, kv: object) -> int:
         """Return the current sequence length of a KV cache."""
         raise NotImplementedError(f"{type(self).__name__} does not support kv_length()")

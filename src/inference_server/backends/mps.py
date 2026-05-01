@@ -282,6 +282,33 @@ class MPSBackend(InferenceBackend):
             new_cache.update(k, v, layer_idx)
         return new_cache
 
+    def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
+        """Append a new row's KV with left-padding so all rows align."""
+        from transformers.cache_utils import DynamicCache
+        if batched_kv is None:
+            return self._stack_caches_left_padded([new_kv], new_kv_len)
+
+        existing_len = self.kv_length(batched_kv)
+        max_len = max(existing_len, new_kv_len)
+        ex_pad = max_len - existing_len
+        new_pad = max_len - new_kv_len
+
+        out = DynamicCache()
+        for li, ex_layer in enumerate(batched_kv.layers):
+            ek, ev = ex_layer.keys, ex_layer.values
+            if ex_pad > 0:
+                shp = (ek.shape[0], ek.shape[1], ex_pad, ek.shape[3])
+                ek = torch.cat([torch.zeros(shp, device=ek.device, dtype=ek.dtype), ek], dim=2)
+                ev = torch.cat([torch.zeros(shp, device=ev.device, dtype=ev.dtype), ev], dim=2)
+            nk = new_kv.layers[li].keys
+            nv = new_kv.layers[li].values
+            if new_pad > 0:
+                shp = (nk.shape[0], nk.shape[1], new_pad, nk.shape[3])
+                nk = torch.cat([torch.zeros(shp, device=nk.device, dtype=nk.dtype), nk], dim=2)
+                nv = torch.cat([torch.zeros(shp, device=nv.device, dtype=nv.dtype), nv], dim=2)
+            out.update(torch.cat([ek, nk], dim=0), torch.cat([ev, nv], dim=0), li)
+        return out
+
     def kv_length(self, kv: object) -> int:
         return kv.layers[0].keys.shape[2]
 

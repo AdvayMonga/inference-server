@@ -14,9 +14,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from inference_server.backends import create_backend
-from inference_server.batcher import BatchProcessor
 from inference_server.config import settings, print_hardware_summary
 from inference_server.kv_cache.cache_manager import CacheManager
+from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
 from inference_server.tokenizer import Tokenizer
 
 DEFAULT_PROMPTS = [
@@ -88,18 +88,18 @@ async def lifespan(app):
     )
     backend.set_cache_adapter(cache_manager)
 
-    batcher = BatchProcessor(backend)
-    batcher.start()
+    scheduler = ContinuousBatchScheduler(backend, max_batch_size=settings.max_batch_size)
+    scheduler.start()
 
     app.state.backend = backend
     app.state.tokenizer = tokenizer
-    app.state.batcher = batcher
+    app.state.scheduler = scheduler
     app.state.cache_adapter = cache_manager
     app.state.simulation = SimulationState()
 
     yield
 
-    await batcher.stop()
+    await scheduler.stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -114,68 +114,67 @@ async def root():
 
 
 async def event_stream(
-    backend, tokenizer, token_ids: list[int], max_tokens: int,
-    template_prefix_len: int = 0, session_id: str = "default",
+    scheduler, tokenizer, token_ids: list[int], max_tokens: int,
+    session_id: str = "default",
 ) -> AsyncGenerator[str, None]:
-    """Yield SSE-formatted chunks. Backend already filters thinking tokens."""
-    loop = asyncio.get_event_loop()
-    first_token = True
+    """SSE stream sourced from a ScheduledRequest.token_queue."""
+    loop = asyncio.get_running_loop()
     start_time = time.perf_counter()
+    token_queue: asyncio.Queue = asyncio.Queue()
 
-    queue: asyncio.Queue = asyncio.Queue()
+    req = ScheduledRequest(
+        token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
+        future=loop.create_future(), token_queue=token_queue,
+    )
+    submit_task = asyncio.create_task(scheduler.submit(req))
 
-    def _run_stream():
-        for token_id in backend.stream(token_ids, max_tokens, template_prefix_len, session_id=session_id):
-            text = tokenizer.decode_token(token_id)
-            queue.put_nowait(text)
-        queue.put_nowait(None)
-
-    loop.run_in_executor(None, _run_stream)
-
-    while True:
-        text = await queue.get()
-        if text is None:
-            break
-
-        if not text:
-            continue
-
-        if first_token:
-            ttft = (time.perf_counter() - start_time) * 1000
-            meta = {
-                "ttft_ms": round(ttft, 1),
-                "prompt_tokens": len(token_ids),
-                "cache_hit_tokens": backend.last_cache_hit_tokens,
-            }
-            yield f"data: {json.dumps(meta)}\n\n"
-            first_token = False
-
-        yield f"data: {text}\n\n"
-
-    yield "data: [DONE]\n\n"
+    first = True
+    try:
+        while True:
+            tok_id = await token_queue.get()
+            if tok_id is None:
+                break
+            text = tokenizer.decode_token(tok_id)
+            if first:
+                ttft = (time.perf_counter() - start_time) * 1000
+                meta = {
+                    "ttft_ms": round(ttft, 1),
+                    "prompt_tokens": len(token_ids),
+                    "cache_hit_tokens": req.cache_hit_tokens,
+                }
+                yield f"data: {json.dumps(meta)}\n\n"
+                first = False
+            if text:
+                yield f"data: {text}\n\n"
+        await submit_task   # surface scheduler exceptions
+    finally:
+        if not submit_task.done():
+            submit_task.cancel()
+        yield "data: [DONE]\n\n"
 
 
 @app.post("/generate")
 async def generate(request: GenerateRequest):
-    """Generate text — direct call for non-streaming, SSE for streaming."""
-    backend = app.state.backend
+    """Generate text — routes through the continuous-batch scheduler."""
+    scheduler = app.state.scheduler
     tokenizer = app.state.tokenizer
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
-    tpl = tokenizer.template_prefix_len
 
     if request.stream:
         return StreamingResponse(
-            event_stream(backend, tokenizer, token_ids, request.max_tokens, tpl,
+            event_stream(scheduler, tokenizer, token_ids, request.max_tokens,
                          session_id=request.session_id),
             media_type="text/event-stream",
         )
 
-    start_time = time.perf_counter()
-    generated_ids = await loop.run_in_executor(
-        None, backend.generate, token_ids, request.max_tokens, tpl, request.session_id
+    req = ScheduledRequest(
+        token_ids=token_ids, max_tokens=request.max_tokens,
+        session_id=request.session_id, future=loop.create_future(),
     )
+    start_time = time.perf_counter()
+    generated_ids = await scheduler.submit(req)
     total_time = time.perf_counter() - start_time
 
     output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
@@ -186,7 +185,7 @@ async def generate(request: GenerateRequest):
         ttft_ms=0,
         total_ms=total_time * 1000,
         prompt_tokens=len(token_ids),
-        cache_hit_tokens=backend.last_cache_hit_tokens,
+        cache_hit_tokens=req.cache_hit_tokens,
     )
 
 
