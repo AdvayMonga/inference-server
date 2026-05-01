@@ -50,3 +50,51 @@ class InferenceBackend(ABC):
                 session_id: str = "default") -> Generator[int, None, None]:
         """Yield token IDs one at a time as they are generated."""
         ...
+
+    # --- Continuous-batching primitives (used by ContinuousBatchScheduler) ---
+    # Backends that cannot expose these (e.g. MLX via mlx_lm) raise NotImplementedError.
+
+    def prefill(
+        self, token_ids: list[int], session_id: str = "default"
+    ) -> tuple[object, int, int]:
+        """Prefill one request. Returns (per_row_kv_cache, first_token_id, kv_length)."""
+        raise NotImplementedError(f"{type(self).__name__} does not support prefill()")
+
+    def decode_step_batched(
+        self,
+        current_tokens: object,    # tensor [B, 1]
+        batched_kv: object,
+        attention_mask: object,    # tensor [B, S]
+        position_ids: object,      # tensor [B, 1]
+    ) -> tuple[object, object]:
+        """One decode step. Returns (next_tokens [B], updated batched_kv)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support decode_step_batched()"
+        )
+
+    def stack_caches_left_padded(
+        self, per_row_caches: list, max_kv_len: int
+    ) -> object:
+        """Left-pad and stack per-row KV caches into a batched cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support stack_caches_left_padded()"
+        )
+
+    def remove_row_from_cache(self, batched_kv: object, row_idx: int) -> object:
+        """Drop row `row_idx` from the batched cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support remove_row_from_cache()"
+        )
+
+    def kv_length(self, kv: object) -> int:
+        """Return the current sequence length of a KV cache."""
+        raise NotImplementedError(f"{type(self).__name__} does not support kv_length()")
+
+    def is_eos(self, token_id: int) -> bool:
+        """True if `token_id` is an end-of-sequence token."""
+        raise NotImplementedError(f"{type(self).__name__} does not support is_eos()")
+
+    @property
+    def device_str(self) -> str:
+        """Device identifier for tensor creation by the scheduler."""
+        raise NotImplementedError(f"{type(self).__name__} does not expose device_str")

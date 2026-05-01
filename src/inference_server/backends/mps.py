@@ -241,6 +241,57 @@ class MPSBackend(InferenceBackend):
             batched.update(torch.cat(ks, dim=0), torch.cat(vs, dim=0), layer)
         return batched
 
+    # --- Continuous-batching primitives ---
+
+    def prefill(
+        self, token_ids: list[int], session_id: str = "default"
+    ) -> tuple[object, int, int]:
+        """Prefill one request through the cache. Caller holds the model lock."""
+        kv, first_token = self._prefill_with_cache(token_ids, session_id)
+        return kv, first_token, kv.layers[0].keys.shape[2]
+
+    def decode_step_batched(
+        self,
+        current_tokens: torch.Tensor,
+        batched_kv: object,
+        attention_mask: torch.Tensor,
+        position_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, object]:
+        """One forward pass over the running batch."""
+        with torch.no_grad():
+            outputs = self.model(
+                current_tokens,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=batched_kv,
+                use_cache=True,
+            )
+        next_tokens = outputs.logits[:, -1, :].argmax(dim=-1)
+        return next_tokens, outputs.past_key_values
+
+    def stack_caches_left_padded(self, per_row_caches: list, max_kv_len: int) -> object:
+        return self._stack_caches_left_padded(per_row_caches, max_kv_len)
+
+    def remove_row_from_cache(self, batched_kv: object, row_idx: int) -> object:
+        """Drop one row from a batched DynamicCache along the batch dim."""
+        from transformers.cache_utils import DynamicCache
+        new_cache = DynamicCache()
+        for layer_idx, layer in enumerate(batched_kv.layers):
+            k = torch.cat([layer.keys[:row_idx], layer.keys[row_idx + 1:]], dim=0)
+            v = torch.cat([layer.values[:row_idx], layer.values[row_idx + 1:]], dim=0)
+            new_cache.update(k, v, layer_idx)
+        return new_cache
+
+    def kv_length(self, kv: object) -> int:
+        return kv.layers[0].keys.shape[2]
+
+    def is_eos(self, token_id: int) -> bool:
+        return token_id in self._eos_ids
+
+    @property
+    def device_str(self) -> str:
+        return str(self.device)
+
     def generate_step(
         self, token_ids: list[int], kv_cache: object | None = None
     ) -> tuple[int, object]:
