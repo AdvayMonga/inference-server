@@ -14,6 +14,10 @@ from inference_server.backends.base import InferenceBackend
 logger = logging.getLogger(__name__)
 
 
+class QueueFullError(Exception):
+    """Raised by submit() when the pending queue has no capacity."""
+
+
 @dataclass
 class ScheduledRequest:
     """A request handed to a scheduler. The scheduler resolves `future` on completion."""
@@ -46,16 +50,23 @@ class _ActiveRow:
 class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
-    def __init__(self, backend: InferenceBackend, max_batch_size: int = 16):
+    def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
+                 max_queue_size: int = 1000):
         self.backend = backend
         self.max_batch_size = max_batch_size
-        self._pending: stdqueue.Queue[ScheduledRequest] = stdqueue.Queue()
+        self.max_queue_size = max_queue_size
+        self._pending: stdqueue.Queue[ScheduledRequest] = stdqueue.Queue(maxsize=max_queue_size)
         self._active: list[_ActiveRow] = []
         self._batched_kv: object | None = None
         self._attention_mask: torch.Tensor | None = None
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Counters
+        self._total_admitted = 0
+        self._total_completed = 0
+        self._total_rejected = 0
+        self._pending_high_water = 0
 
     # --- Public interface ---
 
@@ -76,9 +87,34 @@ class ContinuousBatchScheduler(SchedulerInterface):
         await asyncio.get_running_loop().run_in_executor(None, self._worker.join)
         self._worker = None
 
+    def enqueue(self, request: ScheduledRequest) -> None:
+        """Synchronously enqueue. Raises QueueFullError if no capacity."""
+        try:
+            self._pending.put_nowait(request)
+        except stdqueue.Full:
+            self._total_rejected += 1
+            raise QueueFullError(
+                f"pending queue at capacity ({self.max_queue_size})"
+            )
+        depth = self._pending.qsize()
+        if depth > self._pending_high_water:
+            self._pending_high_water = depth
+
     async def submit(self, request: ScheduledRequest) -> list[int]:
-        self._pending.put(request)
+        self.enqueue(request)
         return await request.future
+
+    def stats(self) -> dict:
+        return {
+            "active_size": len(self._active),
+            "pending_depth": self._pending.qsize(),
+            "max_batch_size": self.max_batch_size,
+            "max_queue_size": self.max_queue_size,
+            "total_admitted": self._total_admitted,
+            "total_completed": self._total_completed,
+            "total_rejected": self._total_rejected,
+            "pending_high_water": self._pending_high_water,
+        }
 
     # --- Worker loop ---
 
@@ -162,6 +198,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 continue
             self._splice_in(kv, kv_len, device)
             self._active.append(_ActiveRow(request=req, current_token=first_token, real_kv_len=kv_len))
+            self._total_admitted += 1
 
     def _splice_in(self, new_kv: object, new_kv_len: int, device: str) -> None:
         """Add a new row's KV to the batched cache; backend handles cache surgery."""
@@ -222,6 +259,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._loop is None:
             return
         result = list(request.generated)
+        self._total_completed += 1
         if request.token_queue is not None:
             self._loop.call_soon_threadsafe(request.token_queue.put_nowait, None)
         # Release cached blocks tied to this prompt

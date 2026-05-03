@@ -9,14 +9,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from inference_server.backends import create_backend
 from inference_server.config import settings, print_hardware_summary
 from inference_server.kv_cache.cache_manager import CacheManager
-from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+from inference_server.scheduler import (
+    ContinuousBatchScheduler,
+    QueueFullError,
+    ScheduledRequest,
+)
 from inference_server.tokenizer import Tokenizer
 
 DEFAULT_PROMPTS = [
@@ -88,7 +92,11 @@ async def lifespan(app):
     )
     backend.set_cache_adapter(cache_manager)
 
-    scheduler = ContinuousBatchScheduler(backend, max_batch_size=settings.max_batch_size)
+    scheduler = ContinuousBatchScheduler(
+        backend,
+        max_batch_size=settings.max_batch_size,
+        max_queue_size=settings.max_queue_size,
+    )
     scheduler.start()
 
     app.state.backend = backend
@@ -114,24 +122,14 @@ async def root():
 
 
 async def event_stream(
-    scheduler, tokenizer, token_ids: list[int], max_tokens: int,
-    session_id: str = "default",
+    req: ScheduledRequest, tokenizer,
+    prompt_token_count: int, start_time: float,
 ) -> AsyncGenerator[str, None]:
-    """SSE stream sourced from a ScheduledRequest.token_queue."""
-    loop = asyncio.get_running_loop()
-    start_time = time.perf_counter()
-    token_queue: asyncio.Queue = asyncio.Queue()
-
-    req = ScheduledRequest(
-        token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
-        future=loop.create_future(), token_queue=token_queue,
-    )
-    submit_task = asyncio.create_task(scheduler.submit(req))
-
+    """SSE stream sourced from an already-enqueued request's token_queue."""
     first = True
     try:
         while True:
-            tok_id = await token_queue.get()
+            tok_id = await req.token_queue.get()
             if tok_id is None:
                 break
             text = tokenizer.decode_token(tok_id)
@@ -139,17 +137,16 @@ async def event_stream(
                 ttft = (time.perf_counter() - start_time) * 1000
                 meta = {
                     "ttft_ms": round(ttft, 1),
-                    "prompt_tokens": len(token_ids),
+                    "prompt_tokens": prompt_token_count,
                     "cache_hit_tokens": req.cache_hit_tokens,
                 }
                 yield f"data: {json.dumps(meta)}\n\n"
                 first = False
             if text:
                 yield f"data: {text}\n\n"
-        await submit_task   # surface scheduler exceptions
+        if req.future.done() and req.future.exception():
+            raise req.future.exception()  # type: ignore[misc]
     finally:
-        if not submit_task.done():
-            submit_task.cancel()
         yield "data: [DONE]\n\n"
 
 
@@ -163,9 +160,19 @@ async def generate(request: GenerateRequest):
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
 
     if request.stream:
+        token_queue: asyncio.Queue = asyncio.Queue()
+        req = ScheduledRequest(
+            token_ids=token_ids, max_tokens=request.max_tokens,
+            session_id=request.session_id, future=loop.create_future(),
+            token_queue=token_queue,
+        )
+        try:
+            scheduler.enqueue(req)
+        except QueueFullError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        start_time = time.perf_counter()
         return StreamingResponse(
-            event_stream(scheduler, tokenizer, token_ids, request.max_tokens,
-                         session_id=request.session_id),
+            event_stream(req, tokenizer, len(token_ids), start_time),
             media_type="text/event-stream",
         )
 
@@ -174,7 +181,10 @@ async def generate(request: GenerateRequest):
         session_id=request.session_id, future=loop.create_future(),
     )
     start_time = time.perf_counter()
-    generated_ids = await scheduler.submit(req)
+    try:
+        generated_ids = await scheduler.submit(req)
+    except QueueFullError as e:
+        raise HTTPException(status_code=429, detail=str(e))
     total_time = time.perf_counter() - start_time
 
     output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
@@ -193,6 +203,12 @@ async def generate(request: GenerateRequest):
 async def cache_stats():
     """Return KV cache statistics."""
     return app.state.cache_adapter.hit_rate_info
+
+
+@app.get("/scheduler/stats")
+async def scheduler_stats():
+    """Return scheduler depth, throughput counters, and rejection count."""
+    return app.state.scheduler.stats()
 
 
 # --- Load Simulator ---
