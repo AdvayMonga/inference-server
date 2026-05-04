@@ -43,6 +43,7 @@ class GenerateRequest(BaseModel):
     stream: bool = settings.stream_by_default
     thinking: bool = True
     session_id: str = "default"
+    priority: int = 0
 
 
 class GenerateResponse(BaseModel):
@@ -166,7 +167,7 @@ async def generate(request: GenerateRequest):
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=request.max_tokens,
             session_id=request.session_id, future=loop.create_future(),
-            token_queue=token_queue,
+            token_queue=token_queue, priority=request.priority,
         )
         try:
             scheduler.enqueue(req)
@@ -181,6 +182,7 @@ async def generate(request: GenerateRequest):
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=request.max_tokens,
         session_id=request.session_id, future=loop.create_future(),
+        priority=request.priority,
     )
     start_time = time.perf_counter()
     try:

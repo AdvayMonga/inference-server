@@ -1,7 +1,6 @@
 """Scheduling policies — decide which pending request to admit next."""
 
 from abc import ABC, abstractmethod
-from collections import deque
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -31,48 +30,58 @@ class SchedulingPolicy(ABC):
 
 
 class FCFSPolicy(SchedulingPolicy):
-    """First-come-first-served: admit in arrival order."""
+    """First-come-first-served, with priority as the dominant key.
+
+    Sort key: (-priority, arrival_seq). Higher priority drains first;
+    within a priority tier, oldest arrival wins.
+    """
 
     def __init__(self) -> None:
-        self._queue: deque["ScheduledRequest"] = deque()
+        self._pending: list["ScheduledRequest"] = []
 
     def pick_next(self) -> "ScheduledRequest | None":
-        if not self._queue:
+        if not self._pending:
             return None
-        return self._queue.popleft()
+        chosen = min(self._pending, key=lambda r: (-r.priority, r.arrival_seq))
+        self._pending.remove(chosen)
+        return chosen
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
-        self._queue.append(request)
+        self._pending.append(request)
 
 
 class FairPolicy(SchedulingPolicy):
-    """Virtual Token Counter fairness over session_id.
+    """Virtual Token Counter fairness over session_id, gated by priority.
 
-    Picks the session with the fewest tokens served so far. New sessions
-    inherit the current min counter so they don't get an unfair burst.
+    Sort key: (-priority, virtual_counter[session_id], arrival_seq).
+    Priority dominates fairness; within a priority tier, the session that
+    has been served least wins; arrival_seq breaks final ties.
+
+    New sessions inherit the current min counter across active sessions
+    so they don't starve behind old high-spenders, and can't catch-up-burst.
     """
 
     def __init__(self) -> None:
         self._counters: dict[str, float] = {}
-        self._pending: dict[str, deque["ScheduledRequest"]] = {}
+        self._pending: list["ScheduledRequest"] = []
 
     def pick_next(self) -> "ScheduledRequest | None":
-        sessions_with_pending = [s for s, q in self._pending.items() if q]
-        if not sessions_with_pending:
+        if not self._pending:
             return None
-        # Smallest counter wins; tiebreak on the head request's arrival_seq.
         chosen = min(
-            sessions_with_pending,
-            key=lambda s: (self._counters.get(s, 0.0), self._pending[s][0].arrival_seq),
+            self._pending,
+            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
         )
-        return self._pending[chosen].popleft()
+        self._pending.remove(chosen)
+        return chosen
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         sid = request.session_id
         if sid not in self._counters:
-            active = [c for s, c in self._counters.items() if self._pending.get(s)]
+            pending_sids = {r.session_id for r in self._pending}
+            active = [c for s, c in self._counters.items() if s in pending_sids]
             self._counters[sid] = min(active) if active else 0.0
-        self._pending.setdefault(sid, deque()).append(request)
+        self._pending.append(request)
 
     def on_tokens_processed(self, request: "ScheduledRequest", n_tokens: int) -> None:
         self._counters[request.session_id] = (

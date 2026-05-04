@@ -10,13 +10,14 @@ from inference_server.scheduling_policy import (
 )
 
 
-def _req(session_id: str, arrival_seq: int) -> ScheduledRequest:
+def _req(session_id: str, arrival_seq: int, priority: int = 0) -> ScheduledRequest:
     return ScheduledRequest(
         token_ids=[1, 2, 3],
         max_tokens=4,
         session_id=session_id,
         future=asyncio.Future(),
         arrival_seq=arrival_seq,
+        priority=priority,
     )
 
 
@@ -81,13 +82,40 @@ def test_fair_late_arrival_not_starved():
 def test_fair_preserves_intra_session_fifo():
     p = FairPolicy()
     a1, a2, a3 = _req("A", 1), _req("A", 2), _req("A", 3)
-    for r in (a3, a1, a2):  # arrived in this order
+    for r in (a1, a2, a3):
         p.on_request_arrived(r)
-    # Within session A, FIFO by arrival into the deque.
-    assert p.pick_next() is a3
+    # Within session A, FIFO by arrival_seq.
     assert p.pick_next() is a1
     assert p.pick_next() is a2
+    assert p.pick_next() is a3
 
 
 def test_fair_empty_pick():
     assert FairPolicy().pick_next() is None
+
+
+def test_fcfs_priority_dominates_arrival():
+    p = FCFSPolicy()
+    early_low = _req("A", 1, priority=0)
+    late_high = _req("A", 2, priority=5)
+    p.on_request_arrived(early_low)
+    p.on_request_arrived(late_high)
+    assert p.pick_next() is late_high
+    assert p.pick_next() is early_low
+
+
+def test_fair_priority_dominates_fairness():
+    p = FairPolicy()
+    # Drain a request from A so its counter climbs.
+    a_warm = _req("A", 1, priority=0)
+    p.on_request_arrived(a_warm)
+    drained = p.pick_next()
+    p.on_tokens_processed(drained, 1000)
+
+    # New low-priority A request and a high-priority B request both arrive.
+    a_low = _req("A", 2, priority=0)
+    b_high = _req("B", 3, priority=5)
+    p.on_request_arrived(a_low)
+    p.on_request_arrived(b_high)
+    # B wins despite A having served fewer pending tokens — priority dominates.
+    assert p.pick_next() is b_high
