@@ -18,6 +18,9 @@ class CacheManager:
     def __init__(self, num_blocks: int, block_size: int, eviction_policy: str = "lru"):
         self.block_manager = BlockManager(num_blocks, block_size)
         self.radix_tree = RadixTree()
+        # Exact-match index: full prompt tokens -> all blocks for that prompt.
+        # Catches the case where radix insert bails on mid-block divergence.
+        self._exact_index: dict[tuple[int, ...], list[Block]] = {}
         self.eviction_policy: EvictionPolicy = create_eviction_policy(eviction_policy)
         self.block_size = block_size
         self._eviction_count = 0
@@ -28,7 +31,19 @@ class CacheManager:
         """Find the longest cached prefix. Returns (tokens_matched, blocks).
 
         Guarantees matched == sum of returned blocks' token counts (block-aligned).
+        Tries the exact-match index first, then falls back to radix prefix matching.
         """
+        # Layer 1: exact full-prompt match. Always block-aligned (covers all stored tokens).
+        exact_blocks = self._exact_index.get(tuple(token_ids))
+        if exact_blocks is not None and all(b.k_tensor is not None for b in exact_blocks):
+            matched = sum(b.num_tokens_stored for b in exact_blocks)
+            for block in exact_blocks:
+                block.acquire()
+                self.eviction_policy.on_access(block)
+            self._hit_count += 1
+            logger.debug(f"[{session_id}] Exact cache hit: {matched} tokens from {len(exact_blocks)} blocks")
+            return matched, list(exact_blocks)
+
         matched, blocks = self.radix_tree.find_prefix(token_ids)
 
         aligned_blocks: list[Block] = []
@@ -90,6 +105,9 @@ class CacheManager:
         all_blocks = list(prefix_blocks) + blocks
         self.radix_tree.insert(token_ids, all_blocks)
 
+        # Layer 1 index: exact full-prompt entry (always succeeds, even when radix bails).
+        self._exact_index[tuple(token_ids)] = all_blocks
+
         # Release the allocation ref — blocks are now in cache, not in active use
         for block in blocks:
             block.release()
@@ -99,6 +117,11 @@ class CacheManager:
 
     def release(self, token_ids: list[int], session_id: str = "default") -> None:
         """Release blocks for a completed request (decrement ref counts)."""
+        exact_blocks = self._exact_index.get(tuple(token_ids))
+        if exact_blocks is not None:
+            for block in exact_blocks:
+                block.release()
+            return
         _, blocks = self.radix_tree.find_prefix(token_ids)
         for block in blocks:
             block.release()
@@ -118,6 +141,11 @@ class CacheManager:
         # Remove from radix tree
         if victim.token_ids:
             self.radix_tree.remove(victim.token_ids)
+
+        # Drop any exact-match entries that referenced this block
+        stale = [k for k, blocks in self._exact_index.items() if victim in blocks]
+        for k in stale:
+            del self._exact_index[k]
 
         # Free the block
         victim.clear()
