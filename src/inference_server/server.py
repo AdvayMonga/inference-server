@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -23,6 +24,8 @@ from inference_server.scheduler import (
 )
 from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.tokenizer import Tokenizer
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PROMPTS = [
     "Explain how a computer works in simple terms",
@@ -218,7 +221,7 @@ async def scheduler_stats():
 # --- Load Simulator ---
 
 async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, port: int):
-    """One simulated user — loops sending non-streaming requests until cancelled."""
+    """One simulated user — loops sending streaming requests until cancelled."""
     async with httpx.AsyncClient(timeout=120.0) as client:
         prompt_idx = user_id
         while True:
@@ -227,28 +230,51 @@ async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, p
 
             try:
                 t0 = time.perf_counter()
-                resp = await client.post(
+                ttft_ms: float | None = None
+                tokens = 0
+                async with client.stream(
+                    "POST",
                     f"http://127.0.0.1:{port}/generate",
-                    json={"text": prompt, "max_tokens": max_tokens, "stream": False,
+                    json={"text": prompt, "max_tokens": max_tokens, "stream": True,
                           "thinking": False, "session_id": f"sim-{user_id}"},
-                )
+                ) as resp:
+                    if resp.status_code != 200:
+                        body = await resp.aread()
+                        logger.warning("sim user %d got %d: %s", user_id, resp.status_code, body[:200])
+                        await asyncio.sleep(1.0)
+                        continue
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        payload = line[6:]
+                        if payload == "[DONE]":
+                            break
+                        if ttft_ms is None:
+                            try:
+                                meta = json.loads(payload)
+                                if isinstance(meta, dict) and "ttft_ms" in meta:
+                                    ttft_ms = float(meta["ttft_ms"])
+                                    continue
+                            except json.JSONDecodeError:
+                                pass
+                        tokens += 1
                 total = (time.perf_counter() - t0) * 1000
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    tokens = data.get("tokens_generated", 0)
-                    tpot = total / max(tokens, 1)
+                if ttft_ms is None or tokens == 0:
+                    continue
 
-                    sim.requests_completed += 1
-                    sim.total_tokens += tokens
-                    sim.ttft_sum += total
-                    sim.tpot_sum += tpot
+                sim.requests_completed += 1
+                sim.total_tokens += tokens
+                sim.ttft_sum += ttft_ms
+                if tokens > 1:
+                    sim.tpot_sum += (total - ttft_ms) / (tokens - 1)
                     sim.tpot_count += 1
 
             except asyncio.CancelledError:
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("sim user %d error: %s", user_id, e)
+                await asyncio.sleep(1.0)
 
             await asyncio.sleep(0.1)
 
@@ -258,7 +284,7 @@ async def simulate_start(request: SimulateRequest):
     """Start background traffic simulation."""
     sim = app.state.simulation
     if sim.running:
-        return {"error": "Simulation already running"}, 409
+        raise HTTPException(status_code=409, detail="Simulation already running")
 
     sim.running = True
     sim.num_users = request.num_users
