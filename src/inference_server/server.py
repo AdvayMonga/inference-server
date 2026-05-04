@@ -21,6 +21,7 @@ from inference_server.scheduler import (
     QueueFullError,
     ScheduledRequest,
 )
+from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.tokenizer import Tokenizer
 
 DEFAULT_PROMPTS = [
@@ -96,6 +97,7 @@ async def lifespan(app):
         backend,
         max_batch_size=settings.max_batch_size,
         max_queue_size=settings.max_queue_size,
+        policy=create_scheduling_policy(settings.scheduling_policy),
     )
     scheduler.start()
 

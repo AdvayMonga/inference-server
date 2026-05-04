@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-import queue as stdqueue
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from dataclasses import dataclass, field
 import torch
 
 from inference_server.backends.base import InferenceBackend
+from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ class ScheduledRequest:
     token_queue: asyncio.Queue | None = None
     generated: list[int] = field(default_factory=list)
     cache_hit_tokens: int = 0   # set by scheduler after prefill
+    arrival_seq: int = 0        # set by scheduler at enqueue (monotonic)
+    priority: int = 0           # higher = more important; tiebreak field for policies
 
 
 class SchedulerInterface(ABC):
@@ -51,11 +53,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
-                 max_queue_size: int = 1000):
+                 max_queue_size: int = 1000,
+                 policy: SchedulingPolicy | None = None):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
-        self._pending: stdqueue.Queue[ScheduledRequest] = stdqueue.Queue(maxsize=max_queue_size)
+        self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
+        self._pending_lock = threading.Lock()
+        self._pending_cv = threading.Condition(self._pending_lock)
+        self._pending_count = 0
+        self._arrival_counter = 0
         self._active: list[_ActiveRow] = []
         self._batched_kv: object | None = None
         self._attention_mask: torch.Tensor | None = None
@@ -82,34 +89,40 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._worker is None:
             return
         self._stop_event.set()
-        # nudge the queue so the worker unblocks
-        self._pending.put(None)  # type: ignore[arg-type]
+        with self._pending_cv:
+            self._pending_cv.notify_all()
         await asyncio.get_running_loop().run_in_executor(None, self._worker.join)
         self._worker = None
 
     def enqueue(self, request: ScheduledRequest) -> None:
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
-        try:
-            self._pending.put_nowait(request)
-        except stdqueue.Full:
-            self._total_rejected += 1
-            raise QueueFullError(
-                f"pending queue at capacity ({self.max_queue_size})"
-            )
-        depth = self._pending.qsize()
-        if depth > self._pending_high_water:
-            self._pending_high_water = depth
+        with self._pending_cv:
+            if self._pending_count >= self.max_queue_size:
+                self._total_rejected += 1
+                raise QueueFullError(
+                    f"pending queue at capacity ({self.max_queue_size})"
+                )
+            self._arrival_counter += 1
+            request.arrival_seq = self._arrival_counter
+            self.policy.on_request_arrived(request)
+            self._pending_count += 1
+            if self._pending_count > self._pending_high_water:
+                self._pending_high_water = self._pending_count
+            self._pending_cv.notify()
 
     async def submit(self, request: ScheduledRequest) -> list[int]:
         self.enqueue(request)
         return await request.future
 
     def stats(self) -> dict:
+        with self._pending_lock:
+            pending_depth = self._pending_count
         return {
             "active_size": len(self._active),
-            "pending_depth": self._pending.qsize(),
+            "pending_depth": pending_depth,
             "max_batch_size": self.max_batch_size,
             "max_queue_size": self.max_queue_size,
+            "policy": type(self.policy).__name__,
             "total_admitted": self._total_admitted,
             "total_completed": self._total_completed,
             "total_rejected": self._total_rejected,
@@ -123,15 +136,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
         device = self.backend.device_str
         try:
             while not self._stop_event.is_set():
-                # If batch empty and nothing pending, block briefly on the queue.
-                if not self._active and self._pending.empty():
-                    try:
-                        first = self._pending.get(timeout=0.1)
-                    except stdqueue.Empty:
-                        continue
-                    if first is None:
+                # If batch empty and nothing pending, wait on the cv.
+                if not self._active:
+                    with self._pending_cv:
+                        if self._pending_count == 0 and not self._stop_event.is_set():
+                            self._pending_cv.wait(timeout=0.1)
+                    if self._stop_event.is_set():
                         break
-                    self._pending.put(first)  # put back so admit phase picks it up
 
                 with self.backend._lock:  # serialize against legacy generate/stream
                     # Admit first so freshly admitted first_tokens get processed below
@@ -163,6 +174,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 to_evict.append(i)
 
         for i in reversed(to_evict):
+            row = self._active[i]
+            self.policy.on_request_finished(row.request)
             self._evict_row(i)
 
     def _evict_row(self, idx: int) -> None:
@@ -183,17 +196,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _admit_pending(self, device: str) -> None:
         while len(self._active) < self.max_batch_size:
-            try:
-                req = self._pending.get_nowait()
-            except stdqueue.Empty:
-                return
-            if req is None:
-                return
+            with self._pending_cv:
+                req = self.policy.pick_next()
+                if req is None:
+                    return
+                self._pending_count -= 1
             try:
                 kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
                 logger.exception("Prefill failed for session %s", req.session_id)
+                self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
             self._splice_in(kv, kv_len, device)
@@ -247,6 +260,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for i, row in enumerate(self._active):
             row.current_token = int(next_tokens[i].item())
             row.real_kv_len += 1
+            self.policy.on_tokens_processed(row.request, 1)
 
     # --- Cross-thread helpers ---
 
@@ -284,6 +298,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _fail_all(self, exc: BaseException) -> None:
         for row in self._active:
+            self.policy.on_request_finished(row.request)
             self._reject(row.request, exc)
         self._active.clear()
         self._batched_kv = None

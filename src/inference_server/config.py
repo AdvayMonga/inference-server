@@ -56,7 +56,7 @@ class Settings:
     # Reserved for multi-user extension (ignored for now)
     max_concurrent_sessions: int = 1
     per_session_memory_limit_mb: int = 0  # 0 = unlimited
-    scheduler_policy: str = "single_user"  # "single_user", "fair", "priority"
+    scheduling_policy: str = "fcfs"  # "fcfs"; future: "fair", "priority"
 
     @property
     def resolved_device(self) -> str:
@@ -94,7 +94,7 @@ def load_settings() -> Settings:
         metrics_port=int(os.environ.get("METRICS_PORT", Settings.metrics_port)),
         max_concurrent_sessions=int(os.environ.get("MAX_CONCURRENT_SESSIONS", Settings.max_concurrent_sessions)),
         per_session_memory_limit_mb=int(os.environ.get("PER_SESSION_MEMORY_LIMIT_MB", Settings.per_session_memory_limit_mb)),
-        scheduler_policy=os.environ.get("SCHEDULER_POLICY", Settings.scheduler_policy),
+        scheduling_policy=os.environ.get("SCHEDULING_POLICY", Settings.scheduling_policy),
     )
 
 
