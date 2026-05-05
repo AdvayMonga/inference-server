@@ -54,10 +54,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
                  max_queue_size: int = 1000,
-                 policy: SchedulingPolicy | None = None):
+                 policy: SchedulingPolicy | None = None,
+                 max_active_kv_tokens: int = 0):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
+        # 0 means "no explicit cap"; we use a huge sentinel so checks are uniform.
+        self.max_active_kv_tokens = max_active_kv_tokens if max_active_kv_tokens > 0 else 2**31
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -74,6 +77,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._total_completed = 0
         self._total_rejected = 0
         self._pending_high_water = 0
+        self._kv_admit_blocked = 0
+        self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over _active rows
 
     # --- Public interface ---
 
@@ -117,6 +122,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def stats(self) -> dict:
         with self._pending_lock:
             pending_depth = self._pending_count
+        cache = self.backend.cache_adapter
+        kv_pressure = cache.pressure if cache is not None else 0.0
+        kv_free_blocks = cache.free_blocks if cache is not None else 0
         return {
             "active_size": len(self._active),
             "pending_depth": pending_depth,
@@ -127,6 +135,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_completed": self._total_completed,
             "total_rejected": self._total_rejected,
             "pending_high_water": self._pending_high_water,
+            "kv_pressure": kv_pressure,
+            "kv_free_blocks": kv_free_blocks,
+            "kv_admit_blocked": self._kv_admit_blocked,
+            "active_kv_reserved": self._active_kv_reserved,
+            "active_kv_budget": self.max_active_kv_tokens,
         }
 
     # --- Worker loop ---
@@ -180,6 +193,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _evict_row(self, idx: int) -> None:
         row = self._active.pop(idx)
+        self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
         if self._batched_kv is not None:
             if len(self._active) == 0:
                 self._batched_kv = None
@@ -195,17 +209,58 @@ class ContinuousBatchScheduler(SchedulerInterface):
     # --- Phase 2: admit new requests ---
 
     def _admit_pending(self, device: str) -> None:
+        cache = self.backend.cache_adapter
         while len(self._active) < self.max_batch_size:
             with self._pending_cv:
-                req = self.policy.pick_next()
-                if req is None:
+                # HOL-wait: peek, KV-fit check, then consume only if it fits.
+                peeked = self.policy.peek_next()
+                if peeked is None:
                     return
+                reservation = len(peeked.token_ids) + peeked.max_tokens
+
+                # Active-KV gate: protects against decode-time OOM.
+                if reservation > self.max_active_kv_tokens:
+                    self.policy.pick_next()
+                    self._pending_count -= 1
+                    self._total_rejected += 1
+                    err = QueueFullError(
+                        f"request reserves {reservation} KV tokens, exceeds active budget "
+                        f"({self.max_active_kv_tokens})"
+                    )
+                    self.policy.on_request_finished(peeked)
+                    self._reject(peeked, err)
+                    continue
+                if self._active_kv_reserved + reservation > self.max_active_kv_tokens:
+                    self._kv_admit_blocked += 1
+                    return
+
+                # Cache-pool gate: avoids forced eviction churn.
+                if cache is not None:
+                    needed = cache.blocks_needed(reservation)
+                    if needed > cache.free_blocks:
+                        if needed > cache.total_blocks:
+                            self.policy.pick_next()
+                            self._pending_count -= 1
+                            self._total_rejected += 1
+                            err = QueueFullError(
+                                f"request needs {needed} KV blocks, exceeds cache capacity "
+                                f"({cache.total_blocks})"
+                            )
+                            self.policy.on_request_finished(peeked)
+                            self._reject(peeked, err)
+                            continue
+                        self._kv_admit_blocked += 1
+                        return
+
+                req = self.policy.pick_next()
                 self._pending_count -= 1
+                self._active_kv_reserved += reservation
             try:
                 kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
                 logger.exception("Prefill failed for session %s", req.session_id)
+                self._active_kv_reserved -= reservation
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
@@ -301,5 +356,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self.policy.on_request_finished(row.request)
             self._reject(row.request, exc)
         self._active.clear()
+        self._active_kv_reserved = 0
         self._batched_kv = None
         self._attention_mask = None

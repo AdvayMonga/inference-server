@@ -12,7 +12,12 @@ class SchedulingPolicy(ABC):
 
     @abstractmethod
     def pick_next(self) -> "ScheduledRequest | None":
-        """Return the next request to admit, or None if nothing is ready."""
+        """Return and remove the next request to admit, or None if nothing is ready."""
+        ...
+
+    @abstractmethod
+    def peek_next(self) -> "ScheduledRequest | None":
+        """Return the next request to admit without removing it, or None."""
         ...
 
     @abstractmethod
@@ -46,6 +51,11 @@ class FCFSPolicy(SchedulingPolicy):
         self._pending.remove(chosen)
         return chosen
 
+    def peek_next(self) -> "ScheduledRequest | None":
+        if not self._pending:
+            return None
+        return min(self._pending, key=lambda r: (-r.priority, r.arrival_seq))
+
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         self._pending.append(request)
 
@@ -74,6 +84,14 @@ class FairPolicy(SchedulingPolicy):
         )
         self._pending.remove(chosen)
         return chosen
+
+    def peek_next(self) -> "ScheduledRequest | None":
+        if not self._pending:
+            return None
+        return min(
+            self._pending,
+            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
+        )
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         sid = request.session_id

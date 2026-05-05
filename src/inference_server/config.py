@@ -29,6 +29,9 @@ class Settings:
     max_batch_size: int = 32
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
+    # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
+    # 0 = derive from max_batch_size * context_window (effectively unbounded).
+    max_active_kv_tokens: int = 0
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
@@ -79,6 +82,7 @@ def load_settings() -> Settings:
         max_batch_size=int(os.environ.get("MAX_BATCH_SIZE", Settings.max_batch_size)),
         batch_timeout_ms=float(os.environ.get("BATCH_TIMEOUT_MS", Settings.batch_timeout_ms)),
         max_queue_size=int(os.environ.get("MAX_QUEUE_SIZE", Settings.max_queue_size)),
+        max_active_kv_tokens=int(os.environ.get("MAX_ACTIVE_KV_TOKENS", Settings.max_active_kv_tokens)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
         max_tokens=int(os.environ.get("MAX_TOKENS", Settings.max_tokens)),

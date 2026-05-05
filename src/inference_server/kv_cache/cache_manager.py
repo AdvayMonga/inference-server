@@ -190,6 +190,21 @@ class CacheManager:
             token_offset = end
 
     @property
+    def free_blocks(self) -> int:
+        return self.block_manager.free_blocks
+
+    @property
+    def total_blocks(self) -> int:
+        return self.block_manager.total_blocks
+
+    @property
+    def pressure(self) -> float:
+        return self.block_manager.utilization
+
+    def blocks_needed(self, num_tokens: int) -> int:
+        return self.block_manager.blocks_needed(num_tokens)
+
+    @property
     def hit_rate_info(self) -> dict:
         """Return cache stats including hit rate and eviction count."""
         total_lookups = self._hit_count + self._miss_count
