@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import random
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -23,20 +24,26 @@ from inference_server.scheduler import (
     ScheduledRequest,
 )
 from inference_server.scheduling_policy import create_scheduling_policy
+from inference_server.simulator_prompts import MAX_TOKENS_RANGE, PROMPT_MIX
 from inference_server.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_PROMPTS = [
-    "Explain how a computer works in simple terms",
-    "What is the capital of France?",
-    "Write a short poem about the ocean",
-    "Summarize the theory of relativity in three sentences",
-    "What are the main differences between Python and JavaScript?",
-    "Describe the process of photosynthesis",
-    "What happened during the French Revolution?",
-    "Explain recursion to a five year old",
-]
+
+def _sample_prompt_and_max_tokens(rng: random.Random, max_tokens_cap: int) -> tuple[str, int, str]:
+    """Weighted pick from PROMPT_MIX, then random max_tokens within the bucket's range."""
+    r = rng.random()
+    cumulative = 0.0
+    for bucket_name, prompts, weight in PROMPT_MIX:
+        cumulative += weight
+        if r <= cumulative:
+            prompt = rng.choice(prompts)
+            lo, hi = MAX_TOKENS_RANGE[bucket_name]
+            mt = rng.randint(lo, min(hi, max_tokens_cap))
+            return prompt, mt, bucket_name
+    # Fallback (weights don't sum to 1)
+    prompt = rng.choice(PROMPT_MIX[0][1])
+    return prompt, max_tokens_cap, PROMPT_MIX[0][0]
 
 
 class GenerateRequest(BaseModel):
@@ -223,12 +230,16 @@ async def scheduler_stats():
 # --- Load Simulator ---
 
 async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, port: int):
-    """One simulated user — loops sending streaming requests until cancelled."""
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        prompt_idx = user_id
+    """One simulated user — loops sending streaming requests until cancelled.
+
+    Per request: picks weighted from PROMPT_MIX (short/medium/long), draws random
+    max_tokens from the bucket's range, and jitters think-time between requests.
+    Per-user RNG seeded by user_id so reruns are reproducible.
+    """
+    rng = random.Random(user_id)
+    async with httpx.AsyncClient(timeout=300.0) as client:
         while True:
-            prompt = DEFAULT_PROMPTS[prompt_idx % len(DEFAULT_PROMPTS)]
-            prompt_idx += 1
+            prompt, mt, _bucket = _sample_prompt_and_max_tokens(rng, max_tokens)
 
             try:
                 t0 = time.perf_counter()
@@ -237,7 +248,7 @@ async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, p
                 async with client.stream(
                     "POST",
                     f"http://127.0.0.1:{port}/generate",
-                    json={"text": prompt, "max_tokens": max_tokens, "stream": True,
+                    json={"text": prompt, "max_tokens": mt, "stream": True,
                           "thinking": False, "session_id": f"sim-{user_id}"},
                 ) as resp:
                     if resp.status_code != 200:
@@ -278,7 +289,8 @@ async def _simulated_user(user_id: int, sim: SimulationState, max_tokens: int, p
                 logger.warning("sim user %d error: %s", user_id, e)
                 await asyncio.sleep(1.0)
 
-            await asyncio.sleep(0.1)
+            # Jittered think-time so users don't synchronize.
+            await asyncio.sleep(rng.uniform(0.05, 0.4))
 
 
 @app.post("/simulate/start")
