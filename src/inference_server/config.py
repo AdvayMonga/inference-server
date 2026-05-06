@@ -3,6 +3,12 @@
 import os
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
+
+# Load .env if present (local-dev convenience). No-op in prod where the
+# orchestrator (Modal, Docker, k8s) injects env vars directly.
+load_dotenv()
+
 
 def _detect_device() -> str:
     """Auto-detect best available device: CUDA → MPS → CPU."""

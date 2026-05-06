@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.4",
     "transformers>=4.51",
     "accelerate>=0.30",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
