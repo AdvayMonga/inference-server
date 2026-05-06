@@ -60,6 +60,32 @@ class InferenceBackend(ABC):
         """Prefill one request. Returns (per_row_kv_cache, first_token_id, kv_length)."""
         raise NotImplementedError(f"{type(self).__name__} does not support prefill()")
 
+    def prefill_lookup(
+        self, token_ids: list[int], session_id: str = "default"
+    ) -> tuple[object | None, int]:
+        """Cache lookup only. Returns (partial_kv, matched_tokens). No forward pass."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support prefill_lookup()"
+        )
+
+    def prefill_chunk(
+        self, chunk_token_ids: list[int], partial_kv: object | None,
+    ) -> tuple[object, int, int]:
+        """Forward pass on chunk_token_ids against partial_kv.
+        Returns (extended_kv, last_argmax_token, new_kv_len)."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support prefill_chunk()"
+        )
+
+    def prefill_store(
+        self, token_ids: list[int], full_kv: object, matched: int,
+        session_id: str = "default",
+    ) -> None:
+        """Store the uncached portion of full_kv into the cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support prefill_store()"
+        )
+
     def decode_step_batched(
         self,
         current_tokens: object,    # tensor [B, 1]

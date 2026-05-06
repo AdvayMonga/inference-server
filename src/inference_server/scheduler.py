@@ -49,24 +49,37 @@ class _ActiveRow:
     real_kv_len: int         # actual KV cache length for this row
 
 
+@dataclass
+class _PrefillingRow:
+    """Request whose prefill is in progress (chunked-prefill mode)."""
+    request: ScheduledRequest
+    matched: int                 # cached prefix length from lookup
+    tokens_fed: int              # tokens currently in partial_kv (starts == matched)
+    partial_kv: object | None    # KV so far; None if no cache hit and no chunk fed yet
+
+
 class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
                  max_queue_size: int = 1000,
                  policy: SchedulingPolicy | None = None,
-                 max_active_kv_tokens: int = 0):
+                 max_active_kv_tokens: int = 0,
+                 prefill_chunk_size: int = 0):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
         # 0 means "no explicit cap"; we use a huge sentinel so checks are uniform.
         self.max_active_kv_tokens = max_active_kv_tokens if max_active_kv_tokens > 0 else 2**31
+        # 0 = chunked prefill disabled; otherwise tokens fed per chunk.
+        self.prefill_chunk_size = prefill_chunk_size
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
         self._pending_count = 0
         self._arrival_counter = 0
         self._active: list[_ActiveRow] = []
+        self._prefilling: list[_PrefillingRow] = []
         self._batched_kv: object | None = None
         self._attention_mask: torch.Tensor | None = None
         self._stop_event = threading.Event()
@@ -78,7 +91,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._total_rejected = 0
         self._pending_high_water = 0
         self._kv_admit_blocked = 0
-        self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over _active rows
+        self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
+        self._prefill_chunks_processed = 0
 
     # --- Public interface ---
 
@@ -127,6 +141,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         kv_free_blocks = cache.free_blocks if cache is not None else 0
         return {
             "active_size": len(self._active),
+            "prefilling_depth": len(self._prefilling),
             "pending_depth": pending_depth,
             "max_batch_size": self.max_batch_size,
             "max_queue_size": self.max_queue_size,
@@ -140,6 +155,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "kv_admit_blocked": self._kv_admit_blocked,
             "active_kv_reserved": self._active_kv_reserved,
             "active_kv_budget": self.max_active_kv_tokens,
+            "prefill_chunk_size": self.prefill_chunk_size,
+            "prefill_chunks_processed": self._prefill_chunks_processed,
         }
 
     # --- Worker loop ---
@@ -149,8 +166,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         device = self.backend.device_str
         try:
             while not self._stop_event.is_set():
-                # If batch empty and nothing pending, wait on the cv.
-                if not self._active:
+                # If nothing in-flight and nothing pending, wait on the cv.
+                if not self._active and not self._prefilling:
                     with self._pending_cv:
                         if self._pending_count == 0 and not self._stop_event.is_set():
                             self._pending_cv.wait(timeout=0.1)
@@ -158,8 +175,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
                         break
 
                 with self.backend._lock:  # serialize against legacy generate/stream
-                    # Admit first so freshly admitted first_tokens get processed below
+                    # Order matters: admit (lookup-only when chunked) → advance one prefill
+                    # chunk (may promote a row to _active with a fresh first_token) → evict
+                    # processes those first_tokens this same iter → decode advances active.
                     self._admit_pending(device)
+                    self._advance_prefill_chunk(device)
                     self._evict_finished()
                     if self._active:
                         self._decode_step(device)
@@ -210,7 +230,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
-        while len(self._active) < self.max_batch_size:
+        while len(self._active) + len(self._prefilling) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.
                 peeked = self.policy.peek_next()
@@ -256,6 +276,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
             try:
+                if self.prefill_chunk_size > 0:
+                    # Chunked-prefill mode: lookup only, defer forward pass to _advance_prefill_chunk
+                    partial_kv, matched = self.backend.prefill_lookup(req.token_ids, req.session_id)
+                    req.cache_hit_tokens = self.backend.last_cache_hit_tokens
+                    self._prefilling.append(_PrefillingRow(
+                        request=req, matched=matched,
+                        tokens_fed=matched, partial_kv=partial_kv,
+                    ))
+                    self._total_admitted += 1
+                    continue
+
                 kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
@@ -267,6 +298,50 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._splice_in(kv, kv_len, device)
             self._active.append(_ActiveRow(request=req, current_token=first_token, real_kv_len=kv_len))
             self._total_admitted += 1
+
+    # --- Chunked prefill: advance one in-flight prefill by one chunk per iter ---
+
+    def _advance_prefill_chunk(self, device: str) -> None:
+        """Advance the head _prefilling row by one chunk. Promote to _active if final."""
+        if not self._prefilling:
+            return
+        prow = self._prefilling[0]
+        ids = prow.request.token_ids
+
+        if prow.matched == len(ids):
+            # Full cache hit — feed last token as a one-token primer (mirrors monolithic).
+            chunk = [ids[-1]]
+            is_final = True
+        else:
+            end = min(prow.tokens_fed + self.prefill_chunk_size, len(ids))
+            chunk = ids[prow.tokens_fed:end]
+            is_final = (end == len(ids))
+
+        try:
+            kv, last_token, kv_len = self.backend.prefill_chunk(chunk, prow.partial_kv)
+        except Exception as e:
+            logger.exception("prefill_chunk failed for session %s", prow.request.session_id)
+            self._prefilling.pop(0)
+            self._active_kv_reserved -= len(prow.request.token_ids) + prow.request.max_tokens
+            self.policy.on_request_finished(prow.request)
+            self._reject(prow.request, e)
+            return
+
+        prow.partial_kv = kv
+        prow.tokens_fed += len(chunk)
+        self._prefill_chunks_processed += 1
+
+        if is_final:
+            # Store the new KV portion in the cache (skip already-cached prefix).
+            try:
+                self.backend.prefill_store(ids, kv, prow.matched, prow.request.session_id)
+            except Exception:
+                logger.exception("prefill_store failed for session %s", prow.request.session_id)
+            self._prefilling.pop(0)
+            self._splice_in(kv, kv_len, device)
+            self._active.append(_ActiveRow(
+                request=prow.request, current_token=last_token, real_kv_len=kv_len,
+            ))
 
     def _splice_in(self, new_kv: object, new_kv_len: int, device: str) -> None:
         """Add a new row's KV to the batched cache; backend handles cache surgery."""
@@ -355,7 +430,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row in self._active:
             self.policy.on_request_finished(row.request)
             self._reject(row.request, exc)
+        for prow in self._prefilling:
+            self.policy.on_request_finished(prow.request)
+            self._reject(prow.request, exc)
         self._active.clear()
+        self._prefilling.clear()
         self._active_kv_reserved = 0
         self._batched_kv = None
         self._attention_mask = None

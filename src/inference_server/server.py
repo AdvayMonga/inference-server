@@ -102,6 +102,7 @@ async def lifespan(app):
         max_batch_size=settings.max_batch_size,
         max_queue_size=settings.max_queue_size,
         max_active_kv_tokens=settings.max_active_kv_tokens,
+        prefill_chunk_size=settings.prefill_chunk_size,
         policy=create_scheduling_policy(settings.scheduling_policy),
     )
     scheduler.start()

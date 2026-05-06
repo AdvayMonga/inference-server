@@ -250,6 +250,42 @@ class MPSBackend(InferenceBackend):
         kv, first_token = self._prefill_with_cache(token_ids, session_id)
         return kv, first_token, kv.layers[0].keys.shape[2]
 
+    def prefill_lookup(
+        self, token_ids: list[int], session_id: str = "default"
+    ) -> tuple[object | None, int]:
+        """Cache lookup only — no forward pass. Returns (partial_kv, matched)."""
+        cache = self.cache_adapter
+        matched = 0
+        partial_kv = None
+        if cache is not None:
+            m, prefix_blocks = cache.lookup(token_ids, session_id=session_id)
+            if m > 0:
+                partial_kv, matched = blocks_to_dynamic_cache(prefix_blocks)
+        self.last_cache_hit_tokens = matched
+        return partial_kv, matched
+
+    def prefill_chunk(
+        self, chunk_token_ids: list[int], partial_kv: object | None
+    ) -> tuple[object, int, int]:
+        """Forward pass on chunk_token_ids against partial_kv. Returns (kv, last_argmax, kv_len)."""
+        with torch.no_grad():
+            input_tensor = torch.tensor([chunk_token_ids], device=self.device)
+            outputs = self.model(input_tensor, past_key_values=partial_kv, use_cache=True)
+            kv = outputs.past_key_values
+            last_token = int(outputs.logits[:, -1, :].argmax(dim=-1).item())
+        return kv, last_token, kv.layers[0].keys.shape[2]
+
+    def prefill_store(
+        self, token_ids: list[int], full_kv: object, matched: int,
+        session_id: str = "default",
+    ) -> None:
+        """Store the uncached portion of full_kv into the cache."""
+        cache = self.cache_adapter
+        if cache is None or matched >= len(token_ids):
+            return
+        per_layer_3d = dynamic_cache_to_per_layer_3d(full_kv)
+        cache.store(token_ids, per_layer_3d, skip_tokens=matched, session_id=session_id)
+
     def decode_step_batched(
         self,
         current_tokens: torch.Tensor,
