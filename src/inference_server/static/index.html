@@ -8,7 +8,7 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { font-family: monospace; background: #000; color: #fff; display: flex; height: 100vh; }
 
-  .chat-panel { flex: 1; display: flex; flex-direction: column; padding: 20px; min-width: 0; }
+  .chat-panel { flex: 0 0 38%; min-width: 360px; display: flex; flex-direction: column; padding: 20px; }
   .chat-header { font-size: 1.3em; font-weight: bold; margin-bottom: 16px; border-bottom: 1px solid #333; padding-bottom: 10px; }
   .chat-messages { flex: 1; overflow-y: auto; padding: 8px 0; }
   .message { margin-bottom: 14px; padding: 12px; border: 1px solid #333; max-width: 85%; line-height: 1.6; white-space: pre-wrap; word-wrap: break-word; font-size: 14px; }
@@ -24,9 +24,15 @@
   .input-area button:hover { background: #ccc; }
   .input-area button:disabled { opacity: 0.3; cursor: not-allowed; }
 
-  /* Wider sidebar */
-  .sidebar { width: 400px; background: #0a0a0a; padding: 20px; overflow-y: auto; border-left: 1px solid #333; }
-  .sidebar h2 { font-size: 1em; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #333; padding-bottom: 8px; letter-spacing: 1px; }
+  /* Wide multi-column dashboard sidebar */
+  .sidebar { flex: 1; background: #0a0a0a; padding: 20px; overflow-y: auto; border-left: 1px solid #333; min-width: 0; }
+  .sidebar h2 { font-size: 0.95em; font-weight: bold; margin-bottom: 12px; border-bottom: 1px solid #333; padding-bottom: 8px; letter-spacing: 1px; }
+  .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 18px 24px; }
+  .dash-card { min-width: 0; }
+  .pct-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; margin-top: 4px; margin-bottom: 10px; }
+  .pct-cell { background: #111; border: 1px solid #222; padding: 6px 8px; }
+  .pct-label { font-size: 0.65em; color: #777; text-transform: uppercase; letter-spacing: 0.5px; }
+  .pct-val { font-size: 1.05em; font-weight: bold; margin-top: 2px; }
 
   /* Larger metrics */
   .metric { margin-bottom: 12px; }
@@ -76,53 +82,108 @@
 </div>
 
 <div class="sidebar">
-  <h2>LAST REQUEST</h2>
-  <div class="metric-grid">
-    <div class="metric"><div class="metric-label">TTFT</div><div class="metric-value" id="m-ttft">-<span class="metric-unit"> ms</span></div></div>
-    <div class="metric"><div class="metric-label">TPOT</div><div class="metric-value" id="m-tpot">-<span class="metric-unit"> ms</span></div></div>
-    <div class="metric"><div class="metric-label">Tokens</div><div class="metric-value" id="m-tokens">-</div></div>
-    <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
-  </div>
-  <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
-  <div class="metric"><div class="metric-label">Cached Prompt Tokens</div><div class="metric-value" id="m-cached" style="font-size:1.3em">- / -</div></div>
-  <div class="metric-grid">
-    <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="m-avg-tpot">-<span class="metric-unit"> ms</span></div></div>
-    <div class="metric"><div class="metric-label">Avg Tokens/sec</div><div class="metric-value" id="m-avg-tps">-</div></div>
-  </div>
+<div class="dashboard-grid">
 
-  <div class="divider"></div>
-  <h2>METRICS HISTORY <span class="clear-btn" onclick="clearGraphs('chat')">[CLEAR]</span></h2>
-  <canvas id="graph-chat-ttft"></canvas>
-  <div class="graph-label">TTFT (ms)</div>
-  <canvas id="graph-chat-tpot"></canvas>
-  <div class="graph-label">TPOT (ms)</div>
-  <canvas id="graph-chat-tps"></canvas>
-  <div class="graph-label">TOKENS/SEC</div>
-
-  <div class="divider"></div>
-  <h2>KV CACHE</h2>
-  <div class="metric-grid">
-    <div class="metric"><div class="metric-label">Hit Rate</div><div class="metric-value" id="m-hitrate">-<span class="metric-unit"> %</span></div></div>
-    <div class="metric"><div class="metric-label">Hits / Misses</div><div class="metric-value" id="m-hitmiss" style="font-size:1.3em">- / -</div></div>
-  </div>
-  <div class="metric"><div class="metric-label">Evictions</div><div class="metric-value" id="m-evictions">-</div></div>
-  <div class="metric">
-    <div class="metric-label">Utilization</div>
-    <div class="cache-bar"><div class="cache-bar-fill" id="m-util-bar" style="width:0%"></div></div>
-  </div>
-
-  <div class="divider"></div>
-  <h2>SETTINGS</h2>
-  <div class="settings-section">
+  <div class="dash-card">
+    <h2>LAST REQUEST</h2>
     <div class="metric-grid">
-      <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="512" min="1" max="4096"></div>
-      <div><label>Stream</label><select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select></div>
-      <div><label>Thinking</label><select id="s-thinking"><option value="true">On</option><option value="false" selected>Off</option></select></div>
+      <div class="metric"><div class="metric-label">TTFT</div><div class="metric-value" id="m-ttft">-<span class="metric-unit"> ms</span></div></div>
+      <div class="metric"><div class="metric-label">TPOT</div><div class="metric-value" id="m-tpot">-<span class="metric-unit"> ms</span></div></div>
+      <div class="metric"><div class="metric-label">Tokens</div><div class="metric-value" id="m-tokens">-</div></div>
+      <div class="metric"><div class="metric-label">Tokens/sec</div><div class="metric-value" id="m-tps">-</div></div>
+    </div>
+    <div class="metric"><div class="metric-label">Total Time</div><div class="metric-value" id="m-total">-<span class="metric-unit"> ms</span></div></div>
+    <div class="metric"><div class="metric-label">Cached Prompt Tokens</div><div class="metric-value" id="m-cached" style="font-size:1.3em">- / -</div></div>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Avg TPOT</div><div class="metric-value" id="m-avg-tpot">-<span class="metric-unit"> ms</span></div></div>
+      <div class="metric"><div class="metric-label">Avg Tokens/sec</div><div class="metric-value" id="m-avg-tps">-</div></div>
     </div>
   </div>
 
-  <div class="divider"></div>
-  <h2>LOAD SIMULATOR</h2>
+  <div class="dash-card">
+    <h2>ENGINE LIVE <span style="font-size:0.7em;color:#555;font-weight:normal">(60s window)</span></h2>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Req/sec</div><div class="metric-value" id="e-rps">-</div></div>
+      <div class="metric"><div class="metric-label">Tok/sec</div><div class="metric-value" id="e-tps">-</div></div>
+    </div>
+    <div class="metric-label" style="margin-top:6px">TTFT (ms)</div>
+    <div class="pct-row">
+      <div class="pct-cell"><div class="pct-label">p50</div><div class="pct-val" id="e-ttft-p50">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p95</div><div class="pct-val" id="e-ttft-p95">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p99</div><div class="pct-val" id="e-ttft-p99">-</div></div>
+    </div>
+    <div class="metric-label">TPOT (ms)</div>
+    <div class="pct-row">
+      <div class="pct-cell"><div class="pct-label">p50</div><div class="pct-val" id="e-tpot-p50">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p95</div><div class="pct-val" id="e-tpot-p95">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p99</div><div class="pct-val" id="e-tpot-p99">-</div></div>
+    </div>
+    <div class="metric-label">TOTAL (ms)</div>
+    <div class="pct-row">
+      <div class="pct-cell"><div class="pct-label">p50</div><div class="pct-val" id="e-total-p50">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p95</div><div class="pct-val" id="e-total-p95">-</div></div>
+      <div class="pct-cell"><div class="pct-label">p99</div><div class="pct-val" id="e-total-p99">-</div></div>
+    </div>
+  </div>
+
+  <div class="dash-card">
+    <h2>SCHEDULER</h2>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Active</div><div class="metric-value" id="s-active">-</div></div>
+      <div class="metric"><div class="metric-label">Prefilling</div><div class="metric-value" id="s-prefilling">-</div></div>
+      <div class="metric"><div class="metric-label">Pending</div><div class="metric-value" id="s-pending">-</div></div>
+      <div class="metric"><div class="metric-label">Policy</div><div class="metric-value" id="s-policy" style="font-size:0.95em">-</div></div>
+    </div>
+    <div class="metric">
+      <div class="metric-label">Active KV (<span id="s-kv-budget">-</span> budget)</div>
+      <div class="cache-bar"><div class="cache-bar-fill" id="s-kv-bar" style="width:0%"></div></div>
+      <div style="font-size:0.75em;color:#888;margin-top:4px"><span id="s-kv-reserved">-</span> tokens reserved</div>
+    </div>
+    <div class="metric-grid" style="margin-top:8px">
+      <div class="metric"><div class="metric-label">Admitted</div><div class="metric-value" id="s-admitted" style="font-size:1.3em">-</div></div>
+      <div class="metric"><div class="metric-label">Completed</div><div class="metric-value" id="s-completed" style="font-size:1.3em">-</div></div>
+      <div class="metric"><div class="metric-label">Rejected</div><div class="metric-value" id="s-rejected" style="font-size:1.3em">-</div></div>
+      <div class="metric"><div class="metric-label">KV Blocked</div><div class="metric-value" id="s-kvblocked" style="font-size:1.3em">-</div></div>
+    </div>
+  </div>
+
+  <div class="dash-card">
+    <h2>KV CACHE</h2>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Hit Rate</div><div class="metric-value" id="m-hitrate">-<span class="metric-unit"> %</span></div></div>
+      <div class="metric"><div class="metric-label">Hits / Misses</div><div class="metric-value" id="m-hitmiss" style="font-size:1.3em">- / -</div></div>
+    </div>
+    <div class="metric"><div class="metric-label">Evictions</div><div class="metric-value" id="m-evictions">-</div></div>
+    <div class="metric">
+      <div class="metric-label">Pool Utilization</div>
+      <div class="cache-bar"><div class="cache-bar-fill" id="m-util-bar" style="width:0%"></div></div>
+      <div style="font-size:0.75em;color:#888;margin-top:4px"><span id="m-kv-free">-</span> free blocks</div>
+    </div>
+  </div>
+
+  <div class="dash-card">
+    <h2>METRICS HISTORY <span class="clear-btn" onclick="clearGraphs('chat')">[CLEAR]</span></h2>
+    <canvas id="graph-chat-ttft"></canvas>
+    <div class="graph-label">TTFT (ms)</div>
+    <canvas id="graph-chat-tpot"></canvas>
+    <div class="graph-label">TPOT (ms)</div>
+    <canvas id="graph-chat-tps"></canvas>
+    <div class="graph-label">TOKENS/SEC</div>
+  </div>
+
+  <div class="dash-card">
+    <h2>SETTINGS</h2>
+    <div class="settings-section">
+      <div class="metric-grid">
+        <div><label>Max Tokens</label><input type="number" id="s-max-tokens" value="512" min="1" max="4096"></div>
+        <div><label>Stream</label><select id="s-stream"><option value="true" selected>On</option><option value="false">Off</option></select></div>
+        <div><label>Thinking</label><select id="s-thinking"><option value="true">On</option><option value="false" selected>Off</option></select></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="dash-card">
+    <h2>LOAD SIMULATOR</h2>
   <div class="settings-section">
     <div class="metric-grid">
       <div><label>Simulated Users</label><input type="number" id="sim-users" value="4" min="1" max="16"></div>
@@ -154,6 +215,9 @@
     <canvas id="graph-sim-tps"></canvas>
     <div class="graph-label">THROUGHPUT (tok/s)</div>
   </div>
+  </div>
+
+</div>
 </div>
 
 <script>
@@ -270,10 +334,44 @@ async function refreshCacheStats() {
     document.getElementById('m-hitmiss').textContent = c.hit_count + ' / ' + c.miss_count;
     document.getElementById('m-evictions').textContent = c.eviction_count;
     document.getElementById('m-util-bar').style.width = (c.utilization * 100) + '%';
+    document.getElementById('m-kv-free').textContent = c.free_blocks;
   } catch(e) {}
 }
 refreshCacheStats();
 setInterval(refreshCacheStats, 2000);
+
+async function refreshSchedulerStats() {
+  try {
+    const s = await (await fetch('/scheduler/stats')).json();
+    const fmt = v => (v == null ? '-' : Math.round(v));
+    // Engine live (60s rolling)
+    document.getElementById('e-rps').textContent = (s.throughput?.req_per_s ?? 0).toFixed(2);
+    document.getElementById('e-tps').textContent = (s.throughput?.tok_per_s ?? 0).toFixed(1);
+    for (const k of ['ttft', 'tpot', 'total']) {
+      const m = s[k + '_ms'] || {};
+      document.getElementById(`e-${k}-p50`).textContent = fmt(m.p50);
+      document.getElementById(`e-${k}-p95`).textContent = fmt(m.p95);
+      document.getElementById(`e-${k}-p99`).textContent = fmt(m.p99);
+    }
+    // Scheduler state
+    document.getElementById('s-active').textContent = s.active_size;
+    document.getElementById('s-prefilling').textContent = s.prefilling_depth;
+    document.getElementById('s-pending').textContent = s.pending_depth;
+    document.getElementById('s-policy').textContent = (s.policy || '').replace('Policy', '');
+    document.getElementById('s-admitted').textContent = s.total_admitted;
+    document.getElementById('s-completed').textContent = s.total_completed;
+    document.getElementById('s-rejected').textContent = s.total_rejected;
+    document.getElementById('s-kvblocked').textContent = s.kv_admit_blocked;
+    document.getElementById('s-kv-reserved').textContent = s.active_kv_reserved;
+    const budget = s.active_kv_budget;
+    const showBudget = budget && budget < 1e9;
+    document.getElementById('s-kv-budget').textContent = showBudget ? budget : '∞';
+    const pct = showBudget ? Math.min(100, (s.active_kv_reserved / budget) * 100) : 0;
+    document.getElementById('s-kv-bar').style.width = pct + '%';
+  } catch(e) {}
+}
+refreshSchedulerStats();
+setInterval(refreshSchedulerStats, 1000);
 
 function stopGeneration() {
   if (abortController) abortController.abort();
