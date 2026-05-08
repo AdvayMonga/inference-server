@@ -39,9 +39,10 @@ def _sample_prompt_and_max_tokens(rng: random.Random, max_tokens_cap: int) -> tu
         if r <= cumulative:
             prompt = rng.choice(prompts)
             lo, hi = MAX_TOKENS_RANGE[bucket_name]
-            mt = rng.randint(lo, min(hi, max_tokens_cap))
+            hi = min(hi, max_tokens_cap)
+            lo = min(lo, hi)  # cap may sit below bucket's natural floor
+            mt = rng.randint(lo, hi)
             return prompt, mt, bucket_name
-    # Fallback (weights don't sum to 1)
     prompt = rng.choice(PROMPT_MIX[0][1])
     return prompt, max_tokens_cap, PROMPT_MIX[0][0]
 
@@ -67,9 +68,9 @@ class GenerateResponse(BaseModel):
 
 
 class SimulateRequest(BaseModel):
-    """Request body for /simulate/start."""
+    """Request body for /simulate/start. max_tokens caps all buckets."""
     num_users: int = 4
-    max_tokens: int = 64
+    max_tokens: int = 500
 
 
 @dataclass
