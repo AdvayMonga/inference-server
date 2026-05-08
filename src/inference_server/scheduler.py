@@ -3,12 +3,14 @@
 import asyncio
 import logging
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import torch
 
 from inference_server.backends.base import InferenceBackend
+from inference_server.metrics import MetricsTracker
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,8 @@ class ScheduledRequest:
     cache_hit_tokens: int = 0   # set by scheduler after prefill
     arrival_seq: int = 0        # set by scheduler at enqueue (monotonic)
     priority: int = 0           # higher = more important; tiebreak field for policies
+    enqueue_ts: float = 0.0     # set by scheduler at enqueue (perf_counter)
+    first_token_ts: float = 0.0 # set when first token is produced
 
 
 class SchedulerInterface(ABC):
@@ -93,6 +97,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._kv_admit_blocked = 0
         self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
         self._prefill_chunks_processed = 0
+        self._metrics = MetricsTracker()
 
     # --- Public interface ---
 
@@ -115,6 +120,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def enqueue(self, request: ScheduledRequest) -> None:
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
+        request.enqueue_ts = time.perf_counter()
         with self._pending_cv:
             if self._pending_count >= self.max_queue_size:
                 self._total_rejected += 1
@@ -157,6 +163,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "active_kv_budget": self.max_active_kv_tokens,
             "prefill_chunk_size": self.prefill_chunk_size,
             "prefill_chunks_processed": self._prefill_chunks_processed,
+            **self._metrics.snapshot(),
         }
 
     # --- Worker loop ---
@@ -295,6 +302,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
+            req.first_token_ts = time.perf_counter()
             self._splice_in(kv, kv_len, device)
             self._active.append(_ActiveRow(request=req, current_token=first_token, real_kv_len=kv_len))
             self._total_admitted += 1
@@ -338,6 +346,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             except Exception:
                 logger.exception("prefill_store failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
+            prow.request.first_token_ts = time.perf_counter()
             self._splice_in(kv, kv_len, device)
             self._active.append(_ActiveRow(
                 request=prow.request, current_token=last_token, real_kv_len=kv_len,
@@ -404,6 +413,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
             return
         result = list(request.generated)
         self._total_completed += 1
+        if request.first_token_ts > 0 and request.enqueue_ts > 0:
+            now = time.perf_counter()
+            ttft = request.first_token_ts - request.enqueue_ts
+            total = now - request.enqueue_ts
+            n = len(result)
+            tpot = (total - ttft) / (n - 1) if n > 1 else 0.0
+            self._metrics.record(ttft, tpot, total, n)
         if request.token_queue is not None:
             self._loop.call_soon_threadsafe(request.token_queue.put_nowait, None)
         # Release cached blocks tied to this prompt
