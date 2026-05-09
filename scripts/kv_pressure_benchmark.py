@@ -13,7 +13,7 @@ Three scenarios:
 import asyncio
 import time
 
-from inference_server.backends.mps import MPSBackend
+from inference_server.backends.torch_backend import TorchBackend
 from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.scheduler import (
     ContinuousBatchScheduler,
@@ -120,7 +120,7 @@ async def scenario_cache_hard_reject(backend, tok):
 
 
 async def main():
-    backend = MPSBackend()
+    backend = TorchBackend(device="mps")
     print(f"Loading {MODEL}...")
     backend.load_model(MODEL)
     cache = CacheManager(num_blocks=TIGHT_BLOCKS, block_size=BLOCK_SIZE, eviction_policy="lru")

@@ -3,7 +3,7 @@
 import asyncio
 import time
 
-from inference_server.backends.mps import MPSBackend
+from inference_server.backends.torch_backend import TorchBackend
 from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
 from inference_server.tokenizer import Tokenizer
@@ -12,7 +12,7 @@ MODEL = "google/gemma-4-E2B-it"
 
 
 async def main():
-    backend = MPSBackend()
+    backend = TorchBackend(device="mps")
     print("Loading model...")
     backend.load_model(MODEL)
     cache = CacheManager(num_blocks=256, block_size=16, eviction_policy="lru")

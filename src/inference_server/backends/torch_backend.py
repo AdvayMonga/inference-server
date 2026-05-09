@@ -1,4 +1,4 @@
-"""MPS (Apple Silicon) inference backend."""
+"""PyTorch-based inference backend. Device-agnostic: cuda, mps, or cpu."""
 
 import logging
 import threading
@@ -16,22 +16,22 @@ from inference_server.kv_cache.hf_format import (
 logger = logging.getLogger(__name__)
 
 
-class MPSBackend(InferenceBackend):
-    """Inference backend for Apple Silicon GPUs via Metal Performance Shaders."""
+class TorchBackend(InferenceBackend):
+    """HuggingFace + PyTorch backend. Works on cuda, mps, or cpu."""
 
     # Thinking channel token IDs (Gemma 4)
     THINK_START = 100  # <|channel>
     THINK_END = 101    # <channel|>
 
-    def __init__(self):
+    def __init__(self, device: str = "cuda"):
         self.model = None
         self.tokenizer = None
-        self.device = torch.device("mps")
+        self.device = torch.device(device)
         self._eos_ids: set[int] = set()
         self._lock = threading.Lock()
 
     def load_model(self, model_name: str) -> None:
-        """Load model and tokenizer onto MPS device."""
+        """Load model and tokenizer onto the configured device."""
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
