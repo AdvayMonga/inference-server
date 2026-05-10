@@ -15,8 +15,19 @@ logger = logging.getLogger(__name__)
 class CacheManager:
     """Unified interface for KV cache prefix lookup, storage, eviction, and release."""
 
-    def __init__(self, num_blocks: int, block_size: int, eviction_policy: str = "lru"):
-        self.block_manager = BlockManager(num_blocks, block_size)
+    def __init__(
+        self, num_blocks: int, block_size: int, eviction_policy: str = "lru",
+        layer_shapes: list[tuple[int, int]] | None = None,
+        device: str = "cpu",
+        dtype=None,
+    ):
+        import torch
+        if dtype is None:
+            dtype = torch.bfloat16
+        self.block_manager = BlockManager(
+            num_blocks, block_size,
+            layer_shapes=layer_shapes, device=device, dtype=dtype,
+        )
         self.radix_tree = RadixTree()
         # Exact-match index: full prompt tokens -> all blocks for that prompt.
         # Catches the case where radix insert bails on mid-block divergence.
@@ -176,17 +187,30 @@ class CacheManager:
         kv_tensors: list[tuple[torch.Tensor, torch.Tensor]],
         skip_tokens: int,
     ) -> None:
-        """Slice KV tensors and store per-layer in blocks."""
+        """Copy KV tensors into the pre-allocated per-layer pools."""
         num_layers = len(kv_tensors)
+        bm = self.block_manager
         token_offset = skip_tokens
+
+        if bm.pool_view is None:
+            # Pool-less mode kept for tests that don't run a model
+            for block in blocks:
+                num_tokens = block.num_tokens_stored
+                end = token_offset + num_tokens
+                block.token_ids  # noop; legacy path retained only to satisfy code paths
+                token_offset = end
+            return
 
         for block in blocks:
             num_tokens = block.num_tokens_stored
             end = token_offset + num_tokens
-
-            # Store as list of per-layer slices (not stacked — layers may have different head counts)
-            block.k_tensor = [kv_tensors[l][0][:, token_offset:end, :] for l in range(num_layers)]
-            block.v_tensor = [kv_tensors[l][1][:, token_offset:end, :] for l in range(num_layers)]
+            for l in range(num_layers):
+                # Source: per-layer 3D (n_heads, seq, head_dim) — already batch-stripped upstream
+                src_k = kv_tensors[l][0][:, token_offset:end, :]
+                src_v = kv_tensors[l][1][:, token_offset:end, :]
+                # Dest: pool[l][block_id, :, :num_tokens, :] — shape (n_heads, num_tokens, head_dim)
+                bm.k_pools[l][block.block_id, :, :num_tokens, :].copy_(src_k)
+                bm.v_pools[l][block.block_id, :, :num_tokens, :].copy_(src_v)
             token_offset = end
 
     @property

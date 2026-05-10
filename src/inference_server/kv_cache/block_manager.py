@@ -3,18 +3,59 @@
 import logging
 import time
 
-from inference_server.kv_cache.block import Block
+import torch
+
+from inference_server.kv_cache.block import Block, BlockPoolView
 
 logger = logging.getLogger(__name__)
 
 
 class BlockManager:
-    """Manages a pre-allocated pool of KV cache blocks."""
+    """Manages a pre-allocated pool of KV cache blocks.
 
-    def __init__(self, num_blocks: int, block_size: int):
+    Each layer gets its own (num_blocks, n_kv_heads, block_size, head_dim) tensor.
+    Per-layer pools (rather than one stacked tensor) let us support hybrid
+    architectures where different layers have different KV shapes
+    (e.g. Gemma 4: most layers head_dim=256, every 5th layer head_dim=512).
+    """
+
+    def __init__(
+        self, num_blocks: int, block_size: int,
+        layer_shapes: list[tuple[int, int]] | None = None,
+        device: str | torch.device = "cpu",
+        dtype: torch.dtype = torch.bfloat16,
+    ):
         self.block_size = block_size
+        self.layer_shapes = layer_shapes  # list of (n_kv_heads, head_dim) per layer
+        self.device = torch.device(device) if isinstance(device, str) else device
+        self.dtype = dtype
+
+        if layer_shapes is not None:
+            self.k_pools: list[torch.Tensor] = [
+                torch.zeros(num_blocks, n_heads, block_size, head_dim,
+                            device=self.device, dtype=self.dtype)
+                for (n_heads, head_dim) in layer_shapes
+            ]
+            self.v_pools: list[torch.Tensor] = [
+                torch.zeros(num_blocks, n_heads, block_size, head_dim,
+                            device=self.device, dtype=self.dtype)
+                for (n_heads, head_dim) in layer_shapes
+            ]
+            self.pool_view = BlockPoolView(self.k_pools, self.v_pools)
+            total_bytes = sum(p.numel() * p.element_size() for p in self.k_pools + self.v_pools)
+            logger.info(
+                f"Pre-allocated KV pool: {num_blocks} blocks × {len(layer_shapes)} layers, "
+                f"{total_bytes / 1e9:.2f} GB on {self.device}"
+            )
+        else:
+            # Pool-less mode (legacy / tests that don't run a model)
+            self.k_pools = []
+            self.v_pools = []
+            self.pool_view = None
+
         self.blocks: dict[int, Block] = {
-            i: Block(block_id=i, block_size=block_size) for i in range(num_blocks)
+            i: Block(block_id=i, block_size=block_size, pool_view=self.pool_view)
+            for i in range(num_blocks)
         }
         self._free_ids: set[int] = set(range(num_blocks))
 

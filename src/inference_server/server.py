@@ -98,10 +98,15 @@ async def lifespan(app):
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, backend.load_model, settings.model_name)
 
+    layer_shapes = backend.kv_shape_per_layer() if hasattr(backend, "kv_shape_per_layer") else None
+    kv_dtype = backend.kv_dtype if hasattr(backend, "kv_dtype") else None
     cache_manager = CacheManager(
         num_blocks=settings.kv_cache_num_blocks,
         block_size=settings.kv_cache_block_size,
         eviction_policy=settings.eviction_policy,
+        layer_shapes=layer_shapes,
+        device=str(getattr(backend, "device", "cpu")),
+        dtype=kv_dtype,
     )
     backend.set_cache_adapter(cache_manager)
 

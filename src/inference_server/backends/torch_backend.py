@@ -52,6 +52,22 @@ class TorchBackend(InferenceBackend):
         else:
             self._eos_ids = {eos}
 
+    def kv_shape_per_layer(self) -> list[tuple[int, int]]:
+        """Probe the model's per-layer (n_kv_heads, head_dim). Works for any HF causal LM."""
+        if self.model is None:
+            raise RuntimeError("kv_shape_per_layer requires load_model first")
+        dummy = torch.tensor([[0]], device=self.device)
+        with torch.no_grad():
+            out = self.model(dummy, use_cache=True)
+        cache = out.past_key_values
+        # HF DynamicCache: cache.layers[i].keys is (batch, n_kv_heads, seq, head_dim)
+        return [(layer.keys.shape[1], layer.keys.shape[3]) for layer in cache.layers]
+
+    @property
+    def kv_dtype(self) -> torch.dtype:
+        """KV tensor dtype — matches the model's load dtype."""
+        return next(self.model.parameters()).dtype
+
     def generate(self, token_ids: list[int], max_tokens: int,
                   template_prefix_len: int = 0,
                   session_id: str = "default") -> list[int]:
