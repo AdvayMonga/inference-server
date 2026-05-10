@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Backend — Inference Server</title>
+<link rel="stylesheet" href="arch.css" />
+</head>
+<body>
+
+<div class="crumbs"><a href="architecture.html">← Architecture map</a> · Backend</div>
+<h1>Inference Backend</h1>
+<p class="lead">Owns the model. The only place in the system that knows what a tensor is. Everything above it talks in token IDs.</p>
+
+<div class="nav">
+  <a href="#interface">The interface</a>·
+  <a href="#prefill">Prefill primitives</a>·
+  <a href="#decode">Decode (batched)</a>·
+  <a href="#batch-ops">Batch ops</a>·
+  <a href="#hardware">Hardware detection</a>·
+  <a href="#torch">Torch backend</a>·
+  <a href="#mlx">MLX backend</a>·
+  <a href="arch-cache.html">→ KV Cache</a>
+</div>
+
+<h2 id="interface">The InferenceBackend interface</h2>
+<p class="lead">Defined in <code>backends/base.py</code>. Anything the scheduler does to "the model" goes through these methods.</p>
+
+<svg viewBox="0 0 1140 420" role="img" aria-label="Backend interface">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+  </defs>
+
+  <g>
+    <rect class="box backend" x="20" y="30" width="540" height="380" rx="6"/>
+    <text class="title" x="40" y="58">Continuous-batch primitives (the new path)</text>
+
+    <text x="40" y="92">prefill_lookup(tokens, sid)</text>
+    <text class="small" x="40" y="110">cache check only — no forward pass</text>
+    <text class="small" x="40" y="128">→ (matched_tokens, partial_kv | None)</text>
+
+    <text x="40" y="158">prefill_chunk(chunk_tokens, partial_kv)</text>
+    <text class="small" x="40" y="176">push N more prompt tokens through the model</text>
+    <text class="small" x="40" y="194">→ (extended_kv, last_argmax_token, kv_len)</text>
+
+    <text x="40" y="224">prefill_store(tokens, full_kv, matched, sid)</text>
+    <text class="small" x="40" y="242">register the new KV in the cache for the suffix</text>
+
+    <text x="40" y="272">decode_step_batched(curr_tokens, kv, mask, pos)</text>
+    <text class="small" x="40" y="290">one batched forward pass for every active row</text>
+    <text class="small" x="40" y="308">→ (next_tokens [B], updated_kv)</text>
+
+    <text x="40" y="338">splice_into_batched(...) · remove_row_from_cache(...)</text>
+    <text class="small" x="40" y="356">add or remove a row from the batched KV in-place</text>
+
+    <text x="40" y="386">kv_length(kv) · is_eos(token_id) · device_str</text>
+  </g>
+
+  <g>
+    <rect class="box" x="600" y="30" width="520" height="380" rx="6"/>
+    <text class="title" x="620" y="58">Legacy single-request methods (kept for tests, simulator non-batched mode)</text>
+
+    <text x="620" y="92">load_model(model_name)</text>
+    <text class="small" x="620" y="110">called once at startup</text>
+
+    <text x="620" y="140">generate(token_ids, max_tokens, sid)</text>
+    <text class="small" x="620" y="158">whole response in one call</text>
+
+    <text x="620" y="188">generate_batch(batch_tokens, max_tokens, sids)</text>
+    <text class="small" x="620" y="206">old fixed-window batched path — still used by some scripts</text>
+
+    <text x="620" y="236">stream(token_ids, max_tokens, sid)</text>
+    <text class="small" x="620" y="254">async generator yielding tokens one at a time</text>
+
+    <text x="620" y="284">set_cache_adapter(cache_manager)</text>
+    <text class="small" x="620" y="302">handed the cache reference at startup</text>
+
+    <text class="title" x="620" y="350">→ The scheduler only uses the primitives on the left.</text>
+    <text class="small" x="620" y="372">The methods on the right exist so older tests / scripts</text>
+    <text class="small" x="620" y="388">don't break. They route through the same backend.</text>
+  </g>
+</svg>
+
+<h2 id="prefill">Prefill primitives — what each one means</h2>
+
+<svg viewBox="0 0 1140 460" role="img" aria-label="Prefill steps">
+  <g>
+    <rect class="box" x="20" y="20" width="240" height="60" rx="6"/>
+    <text class="title" x="40" y="48">prompt tokens arrive</text>
+    <text class="small" x="40" y="68">say [t1, t2, t3, t4, t5, t6, t7]</text>
+  </g>
+  <g>
+    <rect class="box cache" x="300" y="20" width="280" height="60" rx="6"/>
+    <text class="title" x="320" y="48">prefill_lookup</text>
+    <text class="small" x="320" y="68">"how many of these are already cached?"</text>
+  </g>
+  <g>
+    <rect class="box backend" x="620" y="20" width="240" height="60" rx="6"/>
+    <text class="title" x="640" y="48">say first 3 are cached</text>
+    <text class="small" x="640" y="68">partial_kv covers [t1, t2, t3]</text>
+  </g>
+  <g>
+    <rect class="box backend" x="900" y="20" width="220" height="60" rx="6"/>
+    <text class="title" x="920" y="48">need to add [t4..t7]</text>
+    <text class="small" x="920" y="68">that's the work to do</text>
+  </g>
+
+  <g>
+    <rect class="box backend" x="20" y="110" width="540" height="240" rx="6"/>
+    <text class="title" x="40" y="138">prefill_chunk(chunk, partial_kv)</text>
+    <text x="40" y="164">runs one forward pass on the chunk</text>
+    <text class="small" x="40" y="190">starts with partial_kv as past_key_values</text>
+    <text class="small" x="40" y="208">extends it with the chunk's K/V state</text>
+    <text class="small" x="40" y="236">if PREFILL_CHUNK_SIZE = 2:</text>
+    <text class="small" x="40" y="254">  tick N: chunk = [t4, t5] → kv covers t1..t5</text>
+    <text class="small" x="40" y="272">  tick N+1: chunk = [t6, t7] → kv covers t1..t7</text>
+    <text class="small" x="40" y="306">also returns the argmax of the last token</text>
+    <text class="small" x="40" y="324">→ that's the first generated token, ready for decode</text>
+  </g>
+
+  <g>
+    <rect class="box cache" x="600" y="110" width="520" height="240" rx="6"/>
+    <text class="title" x="620" y="138">prefill_store(tokens, full_kv, matched=3, sid)</text>
+    <text x="620" y="164">writes the suffix's KV into the cache</text>
+    <text class="small" x="620" y="190">skip the first <code>matched</code> tokens (already cached)</text>
+    <text class="small" x="620" y="208">slice K and V tensors from the model's pool format</text>
+    <text class="small" x="620" y="226">into block-sized chunks</text>
+    <text class="small" x="620" y="254">copy each chunk into the BlockManager's pre-allocated</text>
+    <text class="small" x="620" y="272">layer pools at the allocated block IDs</text>
+    <text class="small" x="620" y="306">register in radix tree + exact-match index</text>
+    <text class="small" x="620" y="324">next time anyone asks for [t1..t7], full hit</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="380" width="1100" height="60" rx="6"/>
+    <text class="title" x="40" y="408">last_cache_hit_tokens</text>
+    <text class="small" x="40" y="428">backend stamps this on the response so the user (and metrics) can see how much was a cache hit.</text>
+  </g>
+</svg>
+
+<h2 id="decode">decode_step_batched — the hot path</h2>
+<p class="lead">This is what runs every tick. Make it fast and the whole engine gets fast.</p>
+
+<svg viewBox="0 0 1140 420" role="img" aria-label="Batched decode">
+  <g>
+    <rect class="box queue" x="20" y="30" width="240" height="80" rx="6"/>
+    <text class="title" x="40" y="58">_active rows</text>
+    <text class="small" x="40" y="78">B requests, each with its own KV state</text>
+    <text class="small" x="40" y="96">at different sequence lengths</text>
+  </g>
+  <g>
+    <rect class="box backend" x="300" y="30" width="280" height="80" rx="6"/>
+    <text class="title" x="320" y="58">stack_caches_left_padded</text>
+    <text class="small" x="320" y="78">aligns KV from rows of different lengths</text>
+    <text class="small" x="320" y="96">into one rectangular tensor</text>
+  </g>
+  <g>
+    <rect class="box backend" x="620" y="30" width="240" height="80" rx="6"/>
+    <text class="title" x="640" y="58">build attention mask</text>
+    <text class="small" x="640" y="78">shape [B, S]</text>
+    <text class="small" x="640" y="96">zeros at the padding, ones elsewhere</text>
+  </g>
+  <g>
+    <rect class="box backend" x="900" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="920" y="58">build position_ids</text>
+    <text class="small" x="920" y="78">shape [B, 1]</text>
+    <text class="small" x="920" y="96">each row's real next position</text>
+  </g>
+
+  <g>
+    <rect class="box backend" x="20" y="140" width="1100" height="100" rx="6"/>
+    <text class="title" x="40" y="168">model.forward(input_ids=[B,1], past_key_values=batched_kv, attention_mask, position_ids)</text>
+    <text x="40" y="194">one big forward pass — every active request gets one new token at the same time</text>
+    <text class="small" x="40" y="216">argmax the logits → next_tokens [B]</text>
+    <text class="small" x="40" y="232">each row gets its token streamed back to its client; metrics record TPOT</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="270" width="1100" height="140" rx="6"/>
+    <text class="title" x="40" y="298">why left-padding</text>
+    <text class="small" x="40" y="320">if row A's KV has length 50 and row B's has length 200, we need them in one tensor of shape [B, 200].</text>
+    <text class="small" x="40" y="338">pad row A on the left with 150 zeros (and mask them out). this makes new positions line up on the right edge,</text>
+    <text class="small" x="40" y="356">which is what causal attention assumes. right-padding would put padding in the middle of useful tokens.</text>
+    <text class="small" x="40" y="386">remove_row_from_cache then just slices the row out of the batched KV when its request finishes.</text>
+  </g>
+
+  <path class="flow" d="M260,70 L300,70"/>
+  <path class="flow" d="M580,70 L620,70"/>
+  <path class="flow" d="M860,70 L900,70"/>
+</svg>
+
+<h2 id="batch-ops">Batch operations (in-place row management)</h2>
+<table>
+  <tr><th>Method</th><th>What it does</th></tr>
+  <tr><td><code>splice_into_batched(batched_kv, new_kv, kv_len)</code></td><td>Adds a row to the batched KV (after prefill finishes). Left-pads to fit.</td></tr>
+  <tr><td><code>remove_row_from_cache(batched_kv, row_idx)</code></td><td>Drops a row in-place when a request finishes. The remaining rows stay aligned.</td></tr>
+  <tr><td><code>stack_caches_left_padded(rows)</code></td><td>Builds the batched KV from a list of per-row KVs at the start of decode_step.</td></tr>
+  <tr><td><code>kv_length(kv)</code></td><td>How many real (non-padded) tokens this KV represents.</td></tr>
+</table>
+
+<h2 id="hardware">Hardware detection</h2>
+<p class="lead">Auto-pick the best available accelerator at startup. Manual override via <code>DEVICE</code> env var.</p>
+
+<svg viewBox="0 0 1140 220" role="img" aria-label="Hardware detection">
+  <g>
+    <rect class="box backend" x="20" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="40" y="58">CUDA available?</text>
+    <text class="small" x="40" y="78">torch.cuda.is_available()</text>
+    <text class="small" x="40" y="94">→ best, NVIDIA GPUs</text>
+  </g>
+  <g>
+    <rect class="box backend" x="280" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="300" y="58">MPS available?</text>
+    <text class="small" x="300" y="78">Apple Silicon GPU</text>
+    <text class="small" x="300" y="94">→ dev default on M-series</text>
+  </g>
+  <g>
+    <rect class="box backend" x="540" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="560" y="58">CPU fallback</text>
+    <text class="small" x="560" y="78">always works, slow</text>
+    <text class="small" x="560" y="94">→ tests and CI</text>
+  </g>
+  <g>
+    <rect class="box" x="800" y="30" width="320" height="80" rx="6"/>
+    <text class="title" x="820" y="58">override: DEVICE=...</text>
+    <text class="small" x="820" y="78">force a specific device for benchmarks</text>
+    <text class="small" x="820" y="94">or to compare backends head-to-head</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="140" width="1100" height="60" rx="6"/>
+    <text class="title" x="40" y="168">at startup the backend prints what it picked plus available memory</text>
+    <text class="small" x="40" y="188">Phase 7 will extend this to auto-size KV cache to fit the detected memory budget</text>
+  </g>
+</svg>
+
+<h2 id="torch">Torch backend (the primary one)</h2>
+<p class="lead"><code>backends/torch_backend.py</code>. Wraps a HuggingFace causal LM.</p>
+
+<ul>
+  <li>Loads the HF model + tokenizer at startup. Optional <code>torch.compile</code> via <code>COMPILE_MODEL</code> env var.</li>
+  <li>Implements every continuous-batch primitive listed above.</li>
+  <li>Holds a reference to the <code>CacheManager</code> so prefill can do lookup/store directly.</li>
+  <li>Uses HF's <code>DynamicCache</code> as the in-flight KV format. <code>kv_cache/hf_format.py</code> handles the conversion between our paged blocks and HF's flat tensor layout.</li>
+  <li>Owns a single <code>backend._lock</code> that the scheduler holds for the entire tick — serializes legacy generate/stream calls against the batched path.</li>
+</ul>
+
+<h2 id="mlx">MLX backend (Apple-native, limited)</h2>
+<p class="lead"><code>backends/mlx_backend.py</code>. Built on <code>mlx_lm.stream_generate</code>.</p>
+
+<div class="callout warn">
+  <strong>Known limitation:</strong> <code>mlx_lm.stream_generate</code> owns its own internal KV cache and exposes no hook to plug ours in. The MLX backend accepts a <code>session_id</code> but ignores cache lookup. Continuous-batch primitives are not implemented here. MPS via the torch backend is the primary path on Apple Silicon. A real MLX continuous-batch backend would have to be written directly against <code>mlx.core</code> — listed as a future extension in CLAUDE.md.
+</div>
+
+<p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> for who calls these methods · <a href="arch-cache.html">KV Cache</a> for how blocks become DynamicCache and back.</p>
+
+</body>
+</html>

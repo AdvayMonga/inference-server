@@ -1,0 +1,342 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>KV Cache — Inference Server</title>
+<link rel="stylesheet" href="arch.css" />
+</head>
+<body>
+
+<div class="crumbs"><a href="architecture.html">← Architecture map</a> · KV Cache</div>
+<h1>KV Cache</h1>
+<p class="lead">Paged, session-aware key/value cache with cross-session prefix sharing. Lets repeated and shared prompts skip the prefill cost entirely.</p>
+
+<div class="nav">
+  <a href="#why">Why we need it</a>·
+  <a href="#layers">Two-layer lookup</a>·
+  <a href="#blocks">Blocks &amp; the pool</a>·
+  <a href="#radix">Radix tree</a>·
+  <a href="#lookup">Lookup flow</a>·
+  <a href="#store">Store flow</a>·
+  <a href="#eviction">Eviction policies</a>·
+  <a href="arch-scheduler.html">→ Scheduler</a>
+</div>
+
+<h2 id="why">Why a KV cache exists</h2>
+<div class="callout">
+  <strong>The problem:</strong> attention re-reads every previous token's K and V matrices on every new token. Recomputing them from scratch each time is wasted work — they're deterministic from the prompt.<br><br>
+  <strong>The fix:</strong> store the K/V tensors for every prompt position once, look them up by prefix, and only run the model on the new tail tokens. For repeated or shared prompts (chat templates, system prompts, multi-turn sessions) the savings are huge.
+</div>
+
+<h2 id="layers">Two-layer lookup</h2>
+<p class="lead">A fast exact match for whole prompts, a flexible radix tree for prefix sharing.</p>
+
+<svg viewBox="0 0 1140 420" role="img" aria-label="Two layer lookup">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#79c0ff"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
+  </defs>
+
+  <g>
+    <rect class="box" x="20" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="40" y="58">incoming prompt tokens</text>
+    <text class="small" x="40" y="78">a list of integers</text>
+    <text class="small" x="40" y="94">e.g. [2, 106, 1645, ..., 107]</text>
+  </g>
+
+  <g>
+    <rect class="box cache" x="280" y="30" width="380" height="160" rx="6"/>
+    <text class="title" x="300" y="58">Layer 1 — Exact-match index</text>
+    <text x="300" y="84">a plain dict from "the whole prompt" to its blocks</text>
+    <text class="small" x="300" y="108">key: tuple(token_ids)</text>
+    <text class="small" x="300" y="126">value: list of cache blocks</text>
+    <text class="small" x="300" y="150">always block-aligned</text>
+    <text class="small" x="300" y="170">→ if the exact same prompt has been seen before, full hit</text>
+  </g>
+
+  <g>
+    <rect class="box cache" x="700" y="30" width="420" height="160" rx="6"/>
+    <text class="title" x="720" y="58">Layer 2 — Radix tree</text>
+    <text x="720" y="84">prefix matching across all sessions</text>
+    <text class="small" x="720" y="108">walks the tree along the prompt's tokens</text>
+    <text class="small" x="720" y="126">returns the longest cached prefix</text>
+    <text class="small" x="720" y="150">enables sharing — many prompts that start the same</text>
+    <text class="small" x="720" y="170">(e.g. shared chat template) reuse the same blocks</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="240" width="1100" height="160" rx="6"/>
+    <text class="title" x="40" y="268">Why both layers exist (this is the gotcha)</text>
+    <text class="small" x="40" y="294">The radix tree only stores nodes at block-aligned boundaries. When two prompts share, say, 47 tokens but the</text>
+    <text class="small" x="40" y="312">block size is 64, the radix tree has nothing to insert and silently bails. This happens constantly because the</text>
+    <text class="small" x="40" y="330">chat-template prefix is a fixed N tokens that almost never lines up with a block boundary.</text>
+    <text class="small" x="40" y="358">Without the exact-match layer, "ask the same question twice" would miss the cache. The dict catches it.</text>
+    <text class="small" x="40" y="378">This two-layer pattern matches what SGLang and vLLM ship — same problem, same shape of fix.</text>
+  </g>
+
+  <path class="flow-strong" d="M240,70 L280,70"/>
+  <path class="flow-strong" d="M660,70 L700,70"/>
+</svg>
+
+<h2 id="blocks">Blocks and the block pool</h2>
+<p class="lead">The cache is a fixed pool of equally-sized blocks. Allocations are handles into per-layer tensor pools — no python-level tensors flying around.</p>
+
+<svg viewBox="0 0 1140 360" role="img" aria-label="Block pool">
+  <g>
+    <rect class="box cache" x="20" y="30" width="540" height="220" rx="6"/>
+    <text class="title" x="40" y="58">BlockManager</text>
+    <text x="40" y="84">owns one big tensor per layer, per K and per V</text>
+    <text class="small" x="40" y="110">shape: (num_blocks, n_kv_heads, block_size, head_dim)</text>
+    <text class="small" x="40" y="138">allocated once at startup, never grows</text>
+    <text class="small" x="40" y="166">allocate(n) → pops n from the free list, ref_count++</text>
+    <text class="small" x="40" y="194">free(blocks) → ref_count--, return to free list when 0</text>
+    <text class="small" x="40" y="220">tracks: total_blocks, free_blocks, used_blocks, utilization</text>
+  </g>
+
+  <g>
+    <rect class="box" x="600" y="30" width="520" height="220" rx="6"/>
+    <text class="title" x="620" y="58">Block (the handle)</text>
+    <text x="620" y="84">a thin object pointing into the pool</text>
+    <text class="small" x="620" y="110">block_id, block_size</text>
+    <text class="small" x="620" y="128">token_ids — what's actually stored here</text>
+    <text class="small" x="620" y="146">ref_count — how many references hold this block</text>
+    <text class="small" x="620" y="164">last_accessed — timestamp for LRU</text>
+    <text class="small" x="620" y="182">is_first_block — attention-sink flag, protected from eviction</text>
+    <text class="small" x="620" y="206">acquire / release / clear methods</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="280" width="1100" height="60" rx="6"/>
+    <text class="title" x="40" y="306">Why pre-allocated tensor pools</text>
+    <text class="small" x="40" y="328">no malloc on the hot path · contiguous memory means good cache behavior · capacity is bounded and predictable</text>
+  </g>
+</svg>
+
+<h2 id="radix">Radix tree (compressed prefix trie)</h2>
+<p class="lead">Lets many prompts share the same blocks for the part of the prompt they have in common.</p>
+
+<svg viewBox="0 0 1140 360" role="img" aria-label="Radix tree">
+  <g>
+    <circle cx="200" cy="60" r="22" fill="#1c2a25" stroke="#3fb950" stroke-width="1.5"/>
+    <text class="title" x="183" y="65">root</text>
+  </g>
+
+  <line x1="200" y1="82" x2="120" y2="140" stroke="#3fb950" stroke-width="1.4"/>
+  <line x1="200" y1="82" x2="280" y2="140" stroke="#3fb950" stroke-width="1.4"/>
+  <text class="lbl" x="120" y="115">[chat template prefix]</text>
+  <text class="lbl" x="280" y="115">[other prompt start]</text>
+
+  <g>
+    <rect class="box cache" x="60" y="150" width="180" height="60" rx="4"/>
+    <text class="title" x="80" y="174">node A</text>
+    <text class="small" x="80" y="194">2 blocks · ref=3</text>
+  </g>
+  <g>
+    <rect class="box cache" x="220" y="150" width="180" height="60" rx="4"/>
+    <text class="title" x="240" y="174">node B</text>
+    <text class="small" x="240" y="194">1 block · ref=1</text>
+  </g>
+
+  <line x1="150" y1="210" x2="80" y2="260" stroke="#3fb950" stroke-width="1.4"/>
+  <line x1="150" y1="210" x2="220" y2="260" stroke="#3fb950" stroke-width="1.4"/>
+  <text class="lbl" x="60" y="240">[user A's tokens]</text>
+  <text class="lbl" x="220" y="240">[user B's tokens]</text>
+
+  <g>
+    <rect class="box cache" x="20" y="270" width="180" height="60" rx="4"/>
+    <text class="title" x="40" y="294">node A1</text>
+    <text class="small" x="40" y="314">3 blocks · ref=1</text>
+  </g>
+  <g>
+    <rect class="box cache" x="200" y="270" width="180" height="60" rx="4"/>
+    <text class="title" x="220" y="294">node A2</text>
+    <text class="small" x="220" y="314">2 blocks · ref=1</text>
+  </g>
+
+  <g>
+    <rect class="box" x="450" y="40" width="670" height="290" rx="6"/>
+    <text class="title" x="470" y="68">Operations</text>
+    <text x="470" y="94">find_prefix(tokens)</text>
+    <text class="small" x="470" y="114">walks edges as long as tokens match. returns longest matched</text>
+    <text class="small" x="470" y="132">prefix and the blocks along the way (block-aligned only).</text>
+    <text x="470" y="160">insert(tokens, blocks)</text>
+    <text class="small" x="470" y="180">walks existing edges. on a partial match it splits the edge at</text>
+    <text class="small" x="470" y="198">the largest block-aligned boundary. <strong>bails silently</strong> if the</text>
+    <text class="small" x="470" y="216">first block of the new entry would straddle the split point —</text>
+    <text class="small" x="470" y="234">that's exactly when the exact-match index covers for it.</text>
+    <text x="470" y="262">remove(tokens)</text>
+    <text class="small" x="470" y="282">walks to leaf, frees blocks, cleans up empty parent edges.</text>
+    <text class="small" x="470" y="306">edges hold variable-length token sequences (compressed trie)</text>
+  </g>
+</svg>
+
+<h2 id="lookup">Lookup flow (full path)</h2>
+
+<svg viewBox="0 0 1140 380" role="img" aria-label="Lookup flow">
+  <g>
+    <rect class="box http" x="20" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="40" y="58">backend.prefill_lookup(tokens, sid)</text>
+    <text class="small" x="40" y="78">called by scheduler.admit_pending</text>
+  </g>
+  <g>
+    <rect class="box cache" x="300" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="320" y="58">cache.lookup(tokens, sid)</text>
+    <text class="small" x="320" y="78">begin two-layer search</text>
+  </g>
+  <g>
+    <rect class="box cache" x="580" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="600" y="58">try exact_index first</text>
+    <text class="small" x="600" y="78">whole-prompt dict hit?</text>
+  </g>
+  <g>
+    <rect class="box cache" x="860" y="30" width="260" height="60" rx="6"/>
+    <text class="title" x="880" y="58">fallback to radix.find_prefix</text>
+    <text class="small" x="880" y="78">longest matching prefix</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="120" width="540" height="80" rx="6"/>
+    <text class="title" x="40" y="148">for each matched block: eviction.on_access(block)</text>
+    <text class="small" x="40" y="170">marks the block as recently used (or bumps its score, depending on policy)</text>
+    <text class="small" x="40" y="186">so it won't be evicted out from under us</text>
+  </g>
+
+  <g>
+    <rect class="box backend" x="600" y="120" width="520" height="80" rx="6"/>
+    <text class="title" x="620" y="148">turn matched blocks into a HF DynamicCache</text>
+    <text class="small" x="620" y="170">slice the per-layer pools by block_id and stack them</text>
+    <text class="small" x="620" y="186">into the format the model.forward() expects as past_key_values</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="230" width="1100" height="120" rx="6"/>
+    <text class="title" x="40" y="258">return value</text>
+    <text class="small" x="40" y="280">(matched_tokens_count, partial_kv | None)</text>
+    <text class="small" x="40" y="306">the scheduler now knows how many prompt tokens it can skip and what KV state to start from.</text>
+    <text class="small" x="40" y="324">remaining tokens go through prefill (chunked or whole), then store the suffix back into the cache.</text>
+  </g>
+
+  <path class="flow-cache" d="M260,60 L300,60"/>
+  <path class="flow-cache" d="M540,60 L580,60"/>
+  <path class="flow-cache" d="M820,60 L860,60"/>
+</svg>
+
+<h2 id="store">Store flow</h2>
+<p class="lead">After prefill produces new K/V state for the uncached portion of the prompt, store it for next time.</p>
+
+<svg viewBox="0 0 1140 360" role="img" aria-label="Store flow">
+  <g>
+    <rect class="box backend" x="20" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="40" y="58">prefill produced new KV</text>
+    <text class="small" x="40" y="78">for the suffix the cache didn't have</text>
+  </g>
+  <g>
+    <rect class="box cache" x="300" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="320" y="58">cache.store(...)</text>
+    <text class="small" x="320" y="78">called by the backend or scheduler</text>
+  </g>
+  <g>
+    <rect class="box queue" x="580" y="30" width="240" height="60" rx="6"/>
+    <text class="title" x="600" y="58">need new blocks?</text>
+    <text class="small" x="600" y="78">if pool is full → evict</text>
+  </g>
+  <g>
+    <rect class="box cache" x="860" y="30" width="260" height="60" rx="6"/>
+    <text class="title" x="880" y="58">allocate + write into pool</text>
+    <text class="small" x="880" y="78">copy K and V slices, layer by layer</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="130" width="1100" height="80" rx="6"/>
+    <text class="title" x="40" y="158">eviction loop (if needed)</text>
+    <text class="small" x="40" y="180">while not enough free blocks: pick a victim with ref_count == 0 using the eviction policy,</text>
+    <text class="small" x="40" y="196">remove it from the radix tree and the exact-match index, clear the block, return it to the free list</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="240" width="540" height="100" rx="6"/>
+    <text class="title" x="40" y="268">attention-sink flag</text>
+    <text class="small" x="40" y="290">if this is the first block of the prompt</text>
+    <text class="small" x="40" y="306">(skip_tokens == 0), set is_first_block = True</text>
+    <text class="small" x="40" y="322">SinkLRU and H2O refuse to evict it</text>
+  </g>
+
+  <g>
+    <rect class="box" x="600" y="240" width="520" height="100" rx="6"/>
+    <text class="title" x="620" y="268">register in both layers</text>
+    <text class="small" x="620" y="290">radix.insert(tokens, blocks) — for prefix sharing</text>
+    <text class="small" x="620" y="306">exact_index[tuple(tokens)] = blocks — for whole-prompt fast path</text>
+    <text class="small" x="620" y="322">caller releases its temporary reference; ref_count drops to 0 only after the row finishes</text>
+  </g>
+
+  <path class="flow-cache" d="M260,60 L300,60"/>
+  <path class="flow-cache" d="M540,60 L580,60"/>
+  <path class="flow-cache" d="M820,60 L860,60"/>
+</svg>
+
+<h2 id="eviction">Eviction policies</h2>
+<p class="lead">Same interface, three implementations. Selected via the <code>EVICTION_POLICY</code> env var.</p>
+
+<svg viewBox="0 0 1140 320" role="img" aria-label="Eviction policies">
+  <g>
+    <rect class="box" x="20" y="30" width="350" height="270" rx="6"/>
+    <text class="title" x="40" y="58">LRU</text>
+    <text x="40" y="84">"least recently used"</text>
+    <text class="small" x="40" y="110">on every access, stamp the block with now()</text>
+    <text class="small" x="40" y="138">to evict, pick the block with the oldest stamp</text>
+    <text class="small" x="40" y="170">cheap and predictable</text>
+    <text class="small" x="40" y="200">downside: oblivious to which tokens</text>
+    <text class="small" x="40" y="218">actually carry useful information</text>
+    <text class="small" x="40" y="262">good default · the baseline to beat</text>
+  </g>
+
+  <g>
+    <rect class="box" x="395" y="30" width="350" height="270" rx="6"/>
+    <text class="title" x="415" y="58">SinkLRU</text>
+    <text x="415" y="84">LRU but never evict the first block</text>
+    <text class="small" x="415" y="110">protects blocks marked is_first_block</text>
+    <text class="small" x="415" y="138">picks LRU among everything else</text>
+    <text class="small" x="415" y="170">why: the very first tokens of a sequence</text>
+    <text class="small" x="415" y="188">are an "attention sink" — most layers</text>
+    <text class="small" x="415" y="206">attend back to them no matter how long</text>
+    <text class="small" x="415" y="224">the sequence gets (StreamingLLM finding)</text>
+    <text class="small" x="415" y="262">good for: long-context streaming</text>
+  </g>
+
+  <g>
+    <rect class="box" x="770" y="30" width="350" height="270" rx="6"/>
+    <text class="title" x="790" y="58">H2O</text>
+    <text x="790" y="84">attention-mass-weighted eviction</text>
+    <text class="small" x="790" y="110">on every step, sum the attention weight</text>
+    <text class="small" x="790" y="128">paid to each block by every head</text>
+    <text class="small" x="790" y="158">to evict, pick the lowest-scoring block</text>
+    <text class="small" x="790" y="180">(also protects is_first_block)</text>
+    <text class="small" x="790" y="216">⚠ wired but inactive: backend doesn't</text>
+    <text class="small" x="790" y="234">extract attention weights yet, so all scores</text>
+    <text class="small" x="790" y="252">stay at 0 — currently behaves as LRU</text>
+    <text class="small" x="790" y="282">future: needs output_attentions=True path</text>
+  </g>
+</svg>
+
+<table>
+  <tr><th>Method</th><th>What it must do</th></tr>
+  <tr><td>on_access(block)</td><td>called when a block is read from. update timestamps or accumulators.</td></tr>
+  <tr><td>select_victim(candidates)</td><td>given the set of blocks with ref_count == 0, pick one to evict.</td></tr>
+  <tr><td>record_attention(block, score)</td><td>H2O-only hook. backend would call this with attention mass per block.</td></tr>
+</table>
+
+<h2 id="counters">Stats &amp; observability</h2>
+<table>
+  <tr><th>Counter</th><th>Where</th></tr>
+  <tr><td>hit_count, miss_count, hit_rate</td><td><code>/cache/stats</code></td></tr>
+  <tr><td>eviction_count</td><td><code>/cache/stats</code></td></tr>
+  <tr><td>total / used / free / utilization</td><td><code>/cache/stats</code></td></tr>
+  <tr><td>cache_hit_tokens (per request)</td><td>response body of <code>/generate</code></td></tr>
+</table>
+
+<p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> for how lookup feeds the admit step · <a href="arch-backend.html">Backend</a> for how blocks become DynamicCache.</p>
+
+</body>
+</html>

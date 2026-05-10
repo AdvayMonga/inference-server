@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Inference Server — Architecture Map</title>
+<link rel="stylesheet" href="arch.css" />
+</head>
+<body>
+
+<h1>Inference Server — Architecture Map</h1>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-05-09.</p>
+
+<div class="nav">
+  <strong>Detail pages:</strong>
+  <a href="arch-server.html">HTTP &amp; Server</a>·
+  <a href="arch-scheduler.html">Scheduler</a>·
+  <a href="arch-backend.html">Backend</a>·
+  <a href="arch-cache.html">KV Cache</a>·
+  <a href="#status">Phase status</a>
+</div>
+
+<h2>The big picture</h2>
+<p class="lead">A request walks left to right. The HTTP layer turns text into a job, the scheduler decides who runs when, the backend does the math, and the KV cache makes sure we don't redo work we've already done.</p>
+<p class="click-hint">↓ Each colored block is a link — click to open its detail page.</p>
+
+<svg viewBox="0 0 1160 640" role="img" aria-label="Top-level architecture overview">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#79c0ff"/></marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#3fb950"/></marker>
+    <marker id="arrow-yellow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#d29922"/></marker>
+  </defs>
+
+  <!-- Client -->
+  <g>
+    <rect class="box" x="20" y="40" width="160" height="80" rx="6"/>
+    <text class="title" x="40" y="68">Client</text>
+    <text class="small" x="40" y="88">browser, curl,</text>
+    <text class="small" x="40" y="103">load simulator</text>
+  </g>
+
+  <!-- HTTP / Server -->
+  <a href="arch-server.html">
+    <rect class="box http" x="220" y="20" width="240" height="160" rx="8"/>
+    <text class="title" x="240" y="48">HTTP layer (FastAPI)</text>
+    <text class="lbl" x="240" y="66">server.py</text>
+    <text x="240" y="92">accepts requests</text>
+    <text x="240" y="110">tokenizes prompts</text>
+    <text x="240" y="128">streams tokens back (SSE)</text>
+    <text x="240" y="146">serves the dashboard</text>
+    <text class="small" x="240" y="170">click to open →</text>
+  </a>
+
+  <!-- Scheduler -->
+  <a href="arch-scheduler.html">
+    <rect class="box sched" x="500" y="20" width="260" height="280" rx="8"/>
+    <text class="title" x="520" y="48">Scheduler</text>
+    <text class="lbl" x="520" y="66">scheduler.py</text>
+    <text x="520" y="92">decides who runs each tick</text>
+    <text x="520" y="110">batches many users together</text>
+    <text x="520" y="128">enforces fairness across</text>
+    <text x="520" y="143">sessions (FCFS or VTC)</text>
+    <text x="520" y="166">protects the system from</text>
+    <text x="520" y="181">overload (backpressure)</text>
+    <text x="520" y="204">streams long prompts in</text>
+    <text x="520" y="219">small chunks</text>
+    <rect x="520" y="234" width="220" height="22" rx="3" fill="#1c1c2a" stroke="#555"/>
+    <text class="small" x="528" y="249">queues: pending · prefilling · active</text>
+    <text class="small" x="520" y="278">click to open →</text>
+  </a>
+
+  <!-- Backend -->
+  <a href="arch-backend.html">
+    <rect class="box backend" x="800" y="20" width="240" height="160" rx="8"/>
+    <text class="title" x="820" y="48">Inference Backend</text>
+    <text class="lbl" x="820" y="66">backends/torch_backend.py</text>
+    <text x="820" y="92">runs the model</text>
+    <text x="820" y="110">handles prefill + decode</text>
+    <text x="820" y="128">picks the best hardware</text>
+    <text x="820" y="146">(CUDA → MPS → CPU)</text>
+    <text class="small" x="820" y="170">click to open →</text>
+  </a>
+
+  <!-- Model -->
+  <g>
+    <rect class="box" x="1060" y="60" width="80" height="80" rx="6"/>
+    <text class="title" x="1075" y="92">Model</text>
+    <text class="small" x="1075" y="110">Gemma 3</text>
+    <text class="small" x="1075" y="124">E2B / E4B</text>
+  </g>
+
+  <!-- KV cache -->
+  <a href="arch-cache.html">
+    <rect class="box cache" x="500" y="340" width="540" height="220" rx="8"/>
+    <text class="title" x="520" y="368">KV Cache (paged, session-aware)</text>
+    <text class="lbl" x="520" y="386">kv_cache/cache_manager.py</text>
+    <text x="520" y="412">remembers attention state for the prompt prefix</text>
+    <text x="520" y="430">so repeated or shared prompts skip the prefill cost</text>
+
+    <rect class="box" x="520" y="448" width="155" height="50" rx="4"/>
+    <text class="title" x="532" y="467">Exact-match index</text>
+    <text class="small" x="532" y="485">whole-prompt fast path</text>
+
+    <rect class="box" x="690" y="448" width="155" height="50" rx="4"/>
+    <text class="title" x="702" y="467">Radix tree</text>
+    <text class="small" x="702" y="485">prefix sharing across sessions</text>
+
+    <rect class="box" x="860" y="448" width="160" height="50" rx="4"/>
+    <text class="title" x="872" y="467">Block pool + eviction</text>
+    <text class="small" x="872" y="485">LRU · SinkLRU · H2O</text>
+
+    <text class="small" x="520" y="535">click to open →</text>
+  </a>
+
+  <!-- Tokenizer (used by server + backend, sit below HTTP) -->
+  <g>
+    <rect class="box" x="220" y="220" width="240" height="80" rx="6"/>
+    <text class="title" x="240" y="246">Tokenizer</text>
+    <text class="lbl" x="240" y="262">tokenizer.py</text>
+    <text class="small" x="240" y="280">turns text ↔ token IDs,</text>
+    <text class="small" x="240" y="294">applies chat template</text>
+  </g>
+
+  <!-- Metrics -->
+  <g>
+    <rect class="box" x="220" y="340" width="240" height="100" rx="6"/>
+    <text class="title" x="240" y="368">Metrics tracker</text>
+    <text class="lbl" x="240" y="384">metrics.py</text>
+    <text class="small" x="240" y="402">records TTFT, TPOT,</text>
+    <text class="small" x="240" y="416">throughput in a 60s window</text>
+    <text class="small" x="240" y="432">surfaces p50/p95/p99</text>
+  </g>
+
+  <!-- Simulator -->
+  <g>
+    <rect class="box" x="20" y="160" width="160" height="120" rx="6"/>
+    <text class="title" x="40" y="188">Load simulator</text>
+    <text class="lbl" x="40" y="204">simulator_prompts.py</text>
+    <text class="small" x="40" y="224">multi-user traffic,</text>
+    <text class="small" x="40" y="240">weighted prompts,</text>
+    <text class="small" x="40" y="256">jittered think-time</text>
+  </g>
+
+  <!-- Dashboard -->
+  <g>
+    <rect class="box" x="20" y="320" width="160" height="120" rx="6"/>
+    <text class="title" x="40" y="348">Dashboard</text>
+    <text class="lbl" x="40" y="364">static/index.html</text>
+    <text class="small" x="40" y="384">live metrics,</text>
+    <text class="small" x="40" y="400">cache stats,</text>
+    <text class="small" x="40" y="416">scheduler stats</text>
+  </g>
+
+  <!-- Config -->
+  <g>
+    <rect class="box" x="20" y="480" width="440" height="80" rx="6"/>
+    <text class="title" x="40" y="508">Config (env vars)</text>
+    <text class="lbl" x="40" y="524">config.py — DEVICE, MODEL_NAME, MAX_BATCH_SIZE,</text>
+    <text class="lbl" x="40" y="540">MAX_ACTIVE_KV_TOKENS, PREFILL_CHUNK_SIZE,</text>
+    <text class="lbl" x="40" y="556">EVICTION_POLICY, SCHEDULING_POLICY, KV_CACHE_*</text>
+  </g>
+
+  <!-- Arrows -->
+  <path class="flow-strong" d="M180,80 L220,80"/>
+  <path class="flow-strong" d="M460,100 L500,100"/>
+  <path class="flow-strong" d="M760,100 L800,100"/>
+  <path class="flow" d="M1040,100 L1060,100"/>
+  <path class="flow-cache" d="M870,180 L770,340"/>
+  <path class="flow" d="M340,180 L340,220"/>
+  <path class="flow" d="M460,260 L500,200"/>
+  <path class="flow" d="M460,380 L500,380"/>
+  <path class="flow" d="M180,220 L220,100"/>
+  <path class="flow-loop" d="M620,300 C 620,330 620,335 620,340"/>
+</svg>
+
+<div class="legend">
+  <span><span class="sw" style="background:var(--accent)"></span>HTTP / request path</span>
+  <span><span class="sw" style="background:var(--purple)"></span>scheduler</span>
+  <span><span class="sw" style="background:var(--orange)"></span>backend</span>
+  <span><span class="sw" style="background:var(--green)"></span>KV cache</span>
+  <span><span class="sw" style="background:var(--pink)"></span>queues</span>
+  <span><span class="sw" style="background:var(--yellow)"></span>scheduler loop</span>
+</div>
+
+<h2>What each subsystem is responsible for</h2>
+<table>
+  <tr><th>Subsystem</th><th>One-line job</th><th>Detail page</th></tr>
+  <tr><td>HTTP &amp; Server</td><td>Accept requests, tokenize, stream tokens back, serve dashboard.</td><td><a href="arch-server.html">arch-server.html</a></td></tr>
+  <tr><td>Scheduler</td><td>Decide which requests run together, when, and at what speed — fairly.</td><td><a href="arch-scheduler.html">arch-scheduler.html</a></td></tr>
+  <tr><td>Backend</td><td>Own the model. Run prefill and decode forward passes.</td><td><a href="arch-backend.html">arch-backend.html</a></td></tr>
+  <tr><td>KV Cache</td><td>Remember attention state so we don't recompute prompt prefixes.</td><td><a href="arch-cache.html">arch-cache.html</a></td></tr>
+  <tr><td>Tokenizer</td><td>Stateless text ↔ tokens with the Gemma chat template.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Load simulator</td><td>Built-in multi-user load generator for stress testing.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Dashboard</td><td>Browser UI for live cache and scheduler stats.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Config</td><td>Env-var-driven settings, no hardcoded paths.</td><td>covered on every page</td></tr>
+</table>
+
+<h2>How a single request flows through the system</h2>
+<p class="lead">Read this once and the rest of the diagrams will make sense.</p>
+
+<ol>
+  <li><strong>Client sends a POST to <code>/generate</code></strong> with the prompt text, max tokens, optional <code>session_id</code>, and optional <code>priority</code>.</li>
+  <li><strong>Server tokenizes</strong> the text using the Gemma chat template and wraps it in a <code>ScheduledRequest</code> object that carries the session ID and arrival time.</li>
+  <li><strong>Scheduler queues the request</strong>. The fairness policy (FCFS or VTC) decides where it lands relative to other waiting requests.</li>
+  <li><strong>Each tick the scheduler tries to admit pending requests</strong>. It only admits if there's room in both the active-KV budget and the cache block pool. If not, the request waits.</li>
+  <li><strong>If the prompt is long, prefill is split into chunks</strong>, one chunk per tick — long prompts no longer freeze every other user's stream.</li>
+  <li><strong>The cache is checked for any matching prefix</strong>. If found, those tokens skip the forward pass entirely.</li>
+  <li><strong>The backend runs a single batched decode forward pass</strong> across every active request, producing one new token per request per tick.</li>
+  <li><strong>Each new token is streamed to its client</strong> via SSE. Metrics track TTFT and TPOT.</li>
+  <li><strong>When a request hits EOS or max tokens, it leaves the active batch</strong>, releases its blocks, and frees its KV reservation.</li>
+</ol>
+
+<h2 id="status">Phase status</h2>
+<p class="lead">What's done, what's in progress, what's deferred.</p>
+
+<table>
+  <tr><th>Phase</th><th>What it built</th><th>Status</th></tr>
+  <tr><td>0 — Foundation</td><td>Project structure, env-driven config, backend interface</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>1 — Tokenization</td><td>Chat template + edge-case handling</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>2 — Generation loop</td><td>Token-by-token decode, EOS / max-tokens handling, runs in executor</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>3 — Streaming</td><td>SSE endpoint, TTFT measurement</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>4 — Fixed-window batching</td><td>Replaced by Phase 6 continuous batching</td><td><span class="badge b-done">superseded</span></td></tr>
+  <tr><td>5 — KV cache</td><td>Block pool, radix tree, exact-match index, three eviction policies</td><td><span class="badge b-done">done</span> <span class="badge b-defer">H2O wiring deferred</span></td></tr>
+  <tr><td>6 — Continuous batching</td><td>Iteration-level scheduling, immediate slot fill</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Fair scheduling</td><td>FCFS + Fair (VTC) + priority hooks</td><td><span class="badge b-done">done</span> <span class="badge b-defer">preemption deferred</span></td></tr>
+  <tr><td>6 — Backpressure</td><td>Queue gate + active-KV gate + cache-pool gate, soft-hold and hard-reject</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Chunked prefill (alternating)</td><td>Long prompts split across ticks so they don't block decode</td><td><span class="badge b-prog">in progress</span></td></tr>
+  <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Needs custom attention path</td><td><span class="badge b-defer">deferred — CUDA only</span></td></tr>
+  <tr><td>6 — Load simulator</td><td>Built-in weighted multi-user simulator with per-user RNG</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Locust load testing</td><td>External load generator, throughput-vs-latency curves</td><td><span class="badge b-todo">next</span></td></tr>
+  <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>
+  <tr><td>7 — Hardware auto-detect</td><td>CUDA → MPS → CPU fallback, partial</td><td><span class="badge b-prog">partial</span></td></tr>
+  <tr><td>8 — Observability</td><td>Sliding-window metrics done, Prometheus not wired</td><td><span class="badge b-prog">partial</span></td></tr>
+</table>
+
+<p class="footnote">Diagram color key — blue = HTTP, purple = scheduler, orange = backend, green = KV cache, pink = queues, yellow dashed = scheduler loop, red dashed = eviction. <strong>Maintenance:</strong> any new feature or component change must update this file and the relevant detail page (see CLAUDE.md → Documentation Maintenance).</p>
+
+</body>
+</html>

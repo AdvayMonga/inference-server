@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Scheduler — Inference Server</title>
+<link rel="stylesheet" href="arch.css" />
+</head>
+<body>
+
+<div class="crumbs"><a href="architecture.html">← Architecture map</a> · Scheduler</div>
+<h1>Scheduler</h1>
+<p class="lead">The engine's heart. Decides which requests are batched together each tick, how to be fair across users, and how to refuse work cleanly when the system would otherwise melt.</p>
+
+<div class="nav">
+  <a href="#queues">Queues</a>·
+  <a href="#tick">Per-tick loop</a>·
+  <a href="#policies">Policies</a>·
+  <a href="#backpressure">Backpressure</a>·
+  <a href="#chunked">Chunked prefill</a>·
+  <a href="#reservation">Reservation accounting</a>·
+  <a href="arch-backend.html">→ Backend</a>·
+  <a href="arch-cache.html">→ KV Cache</a>
+</div>
+
+<h2 id="queues">The three queues</h2>
+<p class="lead">Every request sits in exactly one of these at any time.</p>
+
+<svg viewBox="0 0 1140 280" role="img" aria-label="Scheduler queues">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#79c0ff"/></marker>
+  </defs>
+
+  <g>
+    <rect class="box queue" x="20" y="40" width="320" height="180" rx="6"/>
+    <text class="title" x="40" y="68">_pending</text>
+    <text x="40" y="92">requests waiting their turn</text>
+    <text class="small" x="40" y="115">ordered by the active scheduling policy</text>
+    <text class="small" x="40" y="133">(FCFS or Fair / VTC)</text>
+    <text class="small" x="40" y="158">capacity: MAX_QUEUE_SIZE</text>
+    <text class="small" x="40" y="176">over capacity → HTTP 429</text>
+    <text class="small" x="40" y="200">drained by _admit_pending</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="380" y="40" width="320" height="180" rx="6"/>
+    <text class="title" x="400" y="68">_prefilling</text>
+    <text x="400" y="92">prompts being processed in chunks</text>
+    <text class="small" x="400" y="115">long prompts split into PREFILL_CHUNK_SIZE</text>
+    <text class="small" x="400" y="133">tokens; one chunk per tick</text>
+    <text class="small" x="400" y="158">prevents one giant prompt from</text>
+    <text class="small" x="400" y="176">freezing every other user's stream</text>
+    <text class="small" x="400" y="200">drained by advance_prefill_chunk</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="740" y="40" width="380" height="180" rx="6"/>
+    <text class="title" x="760" y="68">_active</text>
+    <text x="760" y="92">requests in the decoding batch</text>
+    <text class="small" x="760" y="115">capacity: MAX_BATCH_SIZE</text>
+    <text class="small" x="760" y="133">all rows decode together in one forward pass</text>
+    <text class="small" x="760" y="158">when a row hits EOS or max_tokens it leaves</text>
+    <text class="small" x="760" y="176">and a pending request can take its slot</text>
+    <text class="small" x="760" y="200">drained when finished, fed by _prefilling</text>
+  </g>
+
+  <path class="flow-strong" d="M340,130 L380,130"/>
+  <path class="flow-strong" d="M700,130 L740,130"/>
+</svg>
+
+<div class="callout">
+  <strong>Why a separate prefilling queue?</strong> Prefill is expensive but parallel-friendly across the prompt's tokens. Decode is cheap per token but happens many times. Mixing them in the same logical queue makes the scheduler harder to reason about. Keeping them separate means the chunked-prefill state machine can evolve without disturbing the decode batch.
+</div>
+
+<h2 id="tick">What happens on a single tick</h2>
+<p class="lead">One iteration of the scheduler's worker thread, in order. The order matters — getting it wrong drops first tokens.</p>
+
+<svg viewBox="0 0 1140 540" role="img" aria-label="Scheduler tick">
+  <g>
+    <rect class="box sched" x="20" y="20" width="1100" height="48" rx="6"/>
+    <text class="title" x="40" y="50">while running:    (the worker thread holds the backend lock for the whole tick)</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="20" y="100" width="260" height="200" rx="6"/>
+    <text class="title" x="40" y="128">① admit_pending</text>
+    <text x="40" y="154">try to start new requests</text>
+    <text class="small" x="40" y="178">peek at the next pending request</text>
+    <text class="small" x="40" y="196">ask the cache: how much of this prompt</text>
+    <text class="small" x="40" y="212">is already cached?</text>
+    <text class="small" x="40" y="234">check both backpressure gates</text>
+    <text class="small" x="40" y="252">→ if both pass, admit</text>
+    <text class="small" x="40" y="270">→ if not, wait or reject</text>
+  </g>
+
+  <g>
+    <rect class="box backend" x="300" y="100" width="260" height="200" rx="6"/>
+    <text class="title" x="320" y="128">② advance_prefill_chunk</text>
+    <text x="320" y="154">feed long prompts a chunk at a time</text>
+    <text class="small" x="320" y="178">for each row in _prefilling:</text>
+    <text class="small" x="320" y="196">  push the next N prompt tokens</text>
+    <text class="small" x="320" y="212">  through the model</text>
+    <text class="small" x="320" y="240">on the final chunk:</text>
+    <text class="small" x="320" y="258">  store the new KV in the cache</text>
+    <text class="small" x="320" y="276">  promote the row → _active</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="580" y="100" width="260" height="200" rx="6"/>
+    <text class="title" x="600" y="128">③ evict_finished</text>
+    <text x="600" y="154">retire any rows that just ended</text>
+    <text class="small" x="600" y="178">for each row in _active:</text>
+    <text class="small" x="600" y="196">  if EOS or hit max_tokens:</text>
+    <text class="small" x="600" y="214">    remove row from batched KV</text>
+    <text class="small" x="600" y="232">    release its cache blocks</text>
+    <text class="small" x="600" y="250">    free its KV reservation</text>
+    <text class="small" x="600" y="268">    finish the user's response</text>
+  </g>
+
+  <g>
+    <rect class="box backend" x="860" y="100" width="260" height="200" rx="6"/>
+    <text class="title" x="880" y="128">④ decode_step</text>
+    <text x="880" y="154">one batched forward pass for everyone</text>
+    <text class="small" x="880" y="178">stack KV from every active row</text>
+    <text class="small" x="880" y="196">with left-padding to align lengths</text>
+    <text class="small" x="880" y="214">build attention mask + position IDs</text>
+    <text class="small" x="880" y="232">run the model once</text>
+    <text class="small" x="880" y="252">  → one new token per row</text>
+    <text class="small" x="880" y="270">stream each token to its client</text>
+  </g>
+
+  <path class="flow-strong" d="M280,200 L300,200"/>
+  <path class="flow-strong" d="M560,200 L580,200"/>
+  <path class="flow-strong" d="M840,200 L860,200"/>
+  <path class="flow-loop" d="M990,300 C 990,360 130,360 130,300"/>
+  <text class="lbl" x="540" y="380">next tick (immediately, no delay)</text>
+
+  <g>
+    <rect class="box" x="20" y="410" width="1100" height="110" rx="6"/>
+    <text class="title" x="40" y="438">Order matters: admit must come before evict</text>
+    <text class="small" x="40" y="460">if a freshly-admitted row's first token were generated in step ④ but step ③ ran first, it would never get</text>
+    <text class="small" x="40" y="478">streamed (the row wasn't yet "finished" but also wasn't tracked properly). Saved as a project memory; do not</text>
+    <text class="small" x="40" y="496">reorder these phases without re-deriving correctness.</text>
+  </g>
+</svg>
+
+<h2 id="policies">Scheduling policies</h2>
+<p class="lead">Both implement the same interface. The policy decides who runs next.</p>
+
+<svg viewBox="0 0 1140 320" role="img" aria-label="Policies">
+  <g>
+    <rect class="box sched" x="20" y="30" width="540" height="260" rx="6"/>
+    <text class="title" x="40" y="58">FCFS (first-come, first-served)</text>
+    <text x="40" y="84">straight FIFO with priority on top</text>
+    <text class="small" x="40" y="108">sort key: (-priority, arrival_seq)</text>
+    <text class="small" x="40" y="126">higher-priority requests drain first</text>
+    <text class="small" x="40" y="144">within a priority tier, oldest goes first</text>
+    <text class="small" x="40" y="172">cheap, predictable, the right default</text>
+    <text class="small" x="40" y="190">a heavy user can hog the queue if priorities tie</text>
+    <text class="small" x="40" y="226">good for: low-concurrency, single-tenant, tests</text>
+  </g>
+
+  <g>
+    <rect class="box sched" x="580" y="30" width="540" height="260" rx="6"/>
+    <text class="title" x="600" y="58">Fair (Virtual-Token-Counter, VTC)</text>
+    <text x="600" y="84">per-session fairness using a virtual clock</text>
+    <text class="small" x="600" y="108">each session has a counter of tokens it has spent</text>
+    <text class="small" x="600" y="126">sort key: (-priority, counter[sid], arrival_seq)</text>
+    <text class="small" x="600" y="144">lowest-spend session gets the next slot</text>
+    <text class="small" x="600" y="172">new sessions inherit the current minimum counter</text>
+    <text class="small" x="600" y="190">→ they neither starve nor get a catch-up burst</text>
+    <text class="small" x="600" y="226">good for: real multi-user load, the production target</text>
+  </g>
+</svg>
+
+<table>
+  <tr><th>Hook</th><th>When it fires</th><th>What both policies do</th></tr>
+  <tr><td>on_request_arrived</td><td>request enters _pending</td><td>insert into the policy's ordered structure</td></tr>
+  <tr><td>peek_next</td><td>admit step inspects head</td><td>return next candidate without removing it</td></tr>
+  <tr><td>pick_next</td><td>admit step commits</td><td>remove and return the head</td></tr>
+  <tr><td>on_tokens_processed</td><td>after each decode step</td><td>VTC bumps the counter; FCFS no-op</td></tr>
+  <tr><td>on_request_finished</td><td>row leaves _active</td><td>cleanup hook; both no-op for now</td></tr>
+</table>
+
+<div class="callout warn">
+  <strong>Preemption is deliberately deferred.</strong> Today's "soft hold" (a fitting request waits for room to open up) is behaviorally equivalent to preemption for the common case. Preemption only becomes load-bearing once strict priority classes or per-tenant SLAs land — see CLAUDE.md.
+</div>
+
+<h2 id="backpressure">Backpressure (three gates)</h2>
+<p class="lead">Three independent checks decide whether a pending request can start. All three must pass.</p>
+
+<svg viewBox="0 0 1140 320" role="img" aria-label="Backpressure gates">
+  <g>
+    <rect class="box queue" x="20" y="30" width="350" height="240" rx="6"/>
+    <text class="title" x="40" y="58">Gate 1 — Queue capacity</text>
+    <text x="40" y="84">checked at HTTP entry</text>
+    <text class="small" x="40" y="110">_pending size vs MAX_QUEUE_SIZE</text>
+    <text class="small" x="40" y="138">over capacity → reject immediately</text>
+    <text class="small" x="40" y="166">client gets HTTP 429 with reason</text>
+    <text class="small" x="40" y="200">protects the server from a flood</text>
+    <text class="small" x="40" y="218">that would otherwise pile up forever</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="395" y="30" width="350" height="240" rx="6"/>
+    <text class="title" x="415" y="58">Gate 2 — Active-KV budget</text>
+    <text x="415" y="84">checked in admit_pending</text>
+    <text class="small" x="415" y="110">running sum of (prompt_len + max_tokens)</text>
+    <text class="small" x="415" y="128">across every active row</text>
+    <text class="small" x="415" y="154">if adding this request would blow the budget:</text>
+    <text class="small" x="415" y="172">  soft-hold (wait for someone to finish)</text>
+    <text class="small" x="415" y="200">if the request alone is bigger than the budget:</text>
+    <text class="small" x="415" y="218">  hard-reject (it can never fit)</text>
+    <text class="small" x="415" y="244">prevents decode-time OOM</text>
+  </g>
+
+  <g>
+    <rect class="box queue" x="770" y="30" width="350" height="240" rx="6"/>
+    <text class="title" x="790" y="58">Gate 3 — Cache block pool</text>
+    <text x="790" y="84">checked in admit_pending</text>
+    <text class="small" x="790" y="110">blocks_needed for prompt vs free blocks</text>
+    <text class="small" x="790" y="138">not enough free blocks → soft-hold</text>
+    <text class="small" x="790" y="166">prompt bigger than the whole pool → hard-reject</text>
+    <text class="small" x="790" y="200">prevents "evict to admit, then immediately</text>
+    <text class="small" x="790" y="218">re-evict" thrash that wastes work</text>
+  </g>
+</svg>
+
+<table>
+  <tr><th>Behavior</th><th>What it means</th></tr>
+  <tr><td>soft-hold</td><td>request stays at the head of _pending; we re-check next tick. Order is preserved so fairness still applies.</td></tr>
+  <tr><td>hard-reject</td><td>request can never fit; respond with HTTP 429 + a structured reason instead of letting it hang.</td></tr>
+  <tr><td>kv_pressure</td><td>used / total cache blocks. Surfaced in <code>/scheduler/stats</code>.</td></tr>
+  <tr><td>active_kv_reserved</td><td>current sum of admitted (prompt_len + max_tokens). Also surfaced.</td></tr>
+  <tr><td>kv_admit_blocked</td><td>counter — how many times the gates blocked an admission this run.</td></tr>
+</table>
+
+<h2 id="chunked">Chunked prefill</h2>
+<p class="lead">Long prompts no longer freeze every other user.</p>
+
+<svg viewBox="0 0 1140 280" role="img" aria-label="Chunked prefill">
+  <g>
+    <rect class="box backend" x="20" y="30" width="220" height="80" rx="6"/>
+    <text class="title" x="40" y="58">long prompt arrives</text>
+    <text class="small" x="40" y="78">e.g. 4000 tokens</text>
+  </g>
+  <g>
+    <rect class="box queue" x="280" y="30" width="240" height="80" rx="6"/>
+    <text class="title" x="300" y="58">split into chunks</text>
+    <text class="small" x="300" y="78">PREFILL_CHUNK_SIZE per chunk</text>
+  </g>
+  <g>
+    <rect class="box backend" x="560" y="30" width="240" height="80" rx="6"/>
+    <text class="title" x="580" y="58">tick N: feed chunk 1</text>
+    <text class="small" x="580" y="78">decode batch still runs in parallel</text>
+  </g>
+  <g>
+    <rect class="box backend" x="840" y="30" width="280" height="80" rx="6"/>
+    <text class="title" x="860" y="58">tick N+k: feed last chunk</text>
+    <text class="small" x="860" y="78">store full KV in cache, promote → active</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="140" width="1100" height="120" rx="6"/>
+    <text class="title" x="40" y="168">Two versions, only one runs today</text>
+    <text class="small" x="40" y="190"><strong>Version A (alternating, in progress):</strong> chunked prefill happens as a separate forward pass alongside the</text>
+    <text class="small" x="40" y="206">decode batch. Two passes per tick. Works on MPS today. Captures the latency win.</text>
+    <text class="small" x="40" y="228"><strong>Version B (mixed-batch, vLLM-style, deferred):</strong> a single forward pass packs decode rows and one prefill chunk</text>
+    <text class="small" x="40" y="244">together. Needs a custom attention path (FlashAttention varlen). CUDA-only. Pairs with the vLLM benchmark phase.</text>
+  </g>
+</svg>
+
+<h2 id="reservation">Reservation accounting (the load-bearing invariant)</h2>
+<div class="callout warn">
+  <strong>The rule:</strong> <code>_active_kv_reserved</code> is the sum of <code>(prompt_len + max_tokens)</code> across every row in <code>_active</code>. Admit adds. Finish, evict, and any future preemption all subtract. If anything forgets to subtract, the engine starts hard-rejecting requests it could actually serve.
+</div>
+
+<p class="footnote">See also: <a href="arch-backend.html">Backend</a> for what <code>decode_step_batched</code> and <code>prefill_chunk</code> actually do · <a href="arch-cache.html">KV Cache</a> for how the cache-pool gate is computed.</p>
+
+</body>
+</html>
