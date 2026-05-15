@@ -39,5 +39,7 @@ benchmarks/results/
 CLAUDE.md
 notes.txt
 
-COMPARE.md
 Model_Continuity.md
+DECISIONS.md
+
+.claude/
