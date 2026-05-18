@@ -90,6 +90,7 @@ class SimulationState:
 @asynccontextmanager
 async def lifespan(app):
     """Load model, tokenizer, cache, and batcher at startup."""
+    app.state.ready = False
     print_hardware_summary(settings)
 
     backend = create_backend(settings.backend)
@@ -125,9 +126,11 @@ async def lifespan(app):
     app.state.scheduler = scheduler
     app.state.cache_adapter = cache_manager
     app.state.simulation = SimulationState()
+    app.state.ready = True
 
     yield
 
+    app.state.ready = False
     await scheduler.stop()
 
 
@@ -140,6 +143,20 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def root():
     """Serve the web UI."""
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/health")
+async def health():
+    """Liveness — process is up. Cheap; touches no state."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness — 200 once model + scheduler are up, 503 otherwise."""
+    if not getattr(app.state, "ready", False):
+        raise HTTPException(status_code=503, detail="not ready")
+    return {"status": "ready"}
 
 
 async def event_stream(
