@@ -7,7 +7,10 @@ Usage:
     python scripts/eviction_benchmark.py
 """
 
+import datetime
+import html as html_lib
 import os
+import pathlib
 import signal
 import subprocess
 import sys
@@ -160,6 +163,116 @@ def print_markdown_table(results: list[PolicyResult]) -> None:
     print()
 
 
+def _bar_chart_svg(title: str, label_value_pairs: list[tuple[str, float]],
+                   unit: str, lower_is_better: bool) -> str:
+    """One small SVG bar chart. label_value_pairs is in policy order."""
+    if not label_value_pairs:
+        return ""
+    width = 360
+    bar_h = 28
+    gap = 14
+    left_pad = 140
+    right_pad = 80
+    top_pad = 36
+    height = top_pad + len(label_value_pairs) * (bar_h + gap)
+    max_v = max(v for _, v in label_value_pairs) or 1.0
+    best_v = min(v for _, v in label_value_pairs) if lower_is_better \
+        else max(v for _, v in label_value_pairs)
+    bars = []
+    bars.append(f'<text class="title" x="14" y="22">{html_lib.escape(title)}</text>')
+    for i, (label, value) in enumerate(label_value_pairs):
+        y = top_pad + i * (bar_h + gap)
+        bar_w = max(2.0, (value / max_v) * (width - left_pad - right_pad))
+        is_best = value == best_v
+        fill = "#3fb950" if is_best else "#79c0ff"
+        bars.append(
+            f'<text x="14" y="{y + bar_h * 0.65:.0f}" class="lbl">{html_lib.escape(label)}</text>'
+            f'<rect x="{left_pad}" y="{y}" width="{bar_w:.1f}" height="{bar_h}" rx="3" fill="{fill}" opacity="0.85"/>'
+            f'<text x="{left_pad + bar_w + 6:.0f}" y="{y + bar_h * 0.65:.0f}" class="mono">{value:.2f}{unit}</text>'
+        )
+    arrow = "↓ lower better" if lower_is_better else "↑ higher better"
+    bars.append(f'<text x="{width - right_pad}" y="22" class="small" text-anchor="end">{arrow}</text>')
+    inner = "\n      ".join(bars)
+    return (
+        f'<svg viewBox="0 0 {width} {height}" role="img" aria-label="{html_lib.escape(title)}">\n'
+        f'      {inner}\n    </svg>'
+    )
+
+
+def write_html_report(results: list[PolicyResult], out_path: pathlib.Path) -> None:
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    workload_line = (
+        f"{results[0].total_requests} requests "
+        f"({len(SYSTEM_PROMPTS)} system prompts × {len(SUFFIXES)} suffixes + 8 revisits)"
+    )
+    budget_line = f"{NUM_BLOCKS} blocks × {BLOCK_SIZE} tokens = {NUM_BLOCKS * BLOCK_SIZE} cacheable tokens"
+    model_line = f"MODEL_NAME={os.environ.get('MODEL_NAME', '(default)')}"
+
+    charts = [
+        _bar_chart_svg("Cold avg latency", [(r.policy, r.cold_ttft_ms) for r in results], " ms", True),
+        _bar_chart_svg("Warm (revisit) avg latency", [(r.policy, r.warm_ttft_ms) for r in results], " ms", True),
+        _bar_chart_svg("Avg cache-hit tokens on revisits", [(r.policy, r.revisit_hit_tokens_avg) for r in results], "", False),
+        _bar_chart_svg("Final cache hit rate", [(r.policy, r.final_hit_rate * 100) for r in results], "%", False),
+    ]
+
+    rows = "\n".join(
+        f"  <tr><td>{html_lib.escape(r.policy)}</td>"
+        f"<td>{r.cold_ttft_ms:.0f}</td>"
+        f"<td>{r.warm_ttft_ms:.0f}</td>"
+        f"<td>{r.revisit_hit_tokens_avg:.1f}</td>"
+        f"<td>{r.final_hit_rate * 100:.1f}%</td>"
+        f"<td>{r.final_evictions}</td>"
+        f"<td>{r.final_utilization * 100:.0f}%</td></tr>"
+        for r in results
+    )
+
+    chart_blocks = "\n".join(f'    <div>{c}</div>' for c in charts)
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Eviction policy benchmark — {timestamp}</title>
+<link rel="stylesheet" href="arch.css" />
+<style>
+  .charts {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }}
+  .charts > div {{ background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }}
+</style>
+</head>
+<body>
+<div class="crumbs"><a href="architecture.html">← Architecture map</a> · Benchmark</div>
+<h1>Eviction policy benchmark</h1>
+<p class="lead">Generated {timestamp}. Compares <code>lru</code> · <code>attention_sink_lru</code> · <code>h2o</code> on the same workload.</p>
+
+<div class="panel">
+  <h3>Run config</h3>
+  <ul class="compact" style="margin:0;padding-left:20px;">
+    <li>Workload: {workload_line}</li>
+    <li>KV budget: {budget_line}</li>
+    <li>Model: {model_line}</li>
+  </ul>
+</div>
+
+<h2>Results</h2>
+<table>
+  <tr><th>Policy</th><th>Cold avg ms</th><th>Warm avg ms</th><th>Avg revisit hit tokens</th><th>Hit rate</th><th>Evictions</th><th>Util</th></tr>
+{rows}
+</table>
+
+<h2>Charts</h2>
+<div class="charts">
+{chart_blocks}
+</div>
+
+<p class="footnote">Green bar = best for that metric. H2O currently behaves like LRU because the backend doesn't extract attention weights yet — see <a href="arch-cache.html#eviction">cache page</a>.</p>
+</body>
+</html>
+"""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+
+
 def main() -> int:
     results = []
     for policy in POLICIES:
@@ -168,6 +281,12 @@ def main() -> int:
         print(f"  done: hit_rate={results[-1].final_hit_rate:.2%}, "
               f"evictions={results[-1].final_evictions}", file=sys.stderr)
     print_markdown_table(results)
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = repo_root / "docs" / f"bench-eviction-{stamp}.html"
+    write_html_report(results, out)
+    print(f"HTML report written to {out.relative_to(repo_root)}", file=sys.stderr)
     return 0
 
 
