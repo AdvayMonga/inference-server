@@ -26,7 +26,7 @@
 <h2 id="endpoints">HTTP endpoints</h2>
 <p class="lead">All the URLs the server exposes and what each one does.</p>
 
-<svg viewBox="0 0 1140 460" role="img" aria-label="HTTP endpoints">
+<svg viewBox="0 0 1140 540" role="img" aria-label="HTTP endpoints">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
     <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#79c0ff"/></marker>
@@ -78,10 +78,26 @@
   </g>
 
   <g>
-    <rect class="box" x="20" y="320" width="1100" height="100" rx="6"/>
-    <text class="title" x="40" y="348">All endpoints share one ScheduledRequest path</text>
-    <text x="40" y="372">/generate is the only endpoint that creates work. Stats endpoints are read-only snapshots.</text>
-    <text class="small" x="40" y="394">The simulator endpoints internally fire /generate calls — they are not a separate code path.</text>
+    <rect class="box http" x="20" y="320" width="540" height="100" rx="6"/>
+    <text class="title" x="40" y="348">GET /health</text>
+    <text x="40" y="372">liveness probe — process is up</text>
+    <text class="small" x="40" y="392">always 200, no state touched — cheap for Modal/k8s polls</text>
+    <text class="small" x="40" y="408">if this fails, the container is dead and traffic should be cut</text>
+  </g>
+
+  <g>
+    <rect class="box http" x="600" y="320" width="520" height="100" rx="6"/>
+    <text class="title" x="620" y="348">GET /ready</text>
+    <text x="620" y="372">readiness probe — model + scheduler are up</text>
+    <text class="small" x="620" y="392">503 until lifespan finishes loading, 200 after</text>
+    <text class="small" x="620" y="408">Modal won't route /generate traffic until this is 200</text>
+  </g>
+
+  <g>
+    <rect class="box" x="20" y="440" width="1100" height="80" rx="6"/>
+    <text class="title" x="40" y="468">All endpoints share one ScheduledRequest path</text>
+    <text x="40" y="490">/generate is the only endpoint that creates work. Stats endpoints are read-only snapshots.</text>
+    <text class="small" x="40" y="510">The simulator endpoints internally fire /generate calls — they are not a separate code path.</text>
   </g>
 </svg>
 
