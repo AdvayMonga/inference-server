@@ -14,6 +14,10 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
+    .pip_install(
+        "https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    )
+    .env({"COMPILE_MODEL": "true"})
     .add_local_python_source("inference_server")
 )
 
