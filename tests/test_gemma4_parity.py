@@ -76,15 +76,48 @@ def test_fixture_present():
     )
 
 
-@pytest.mark.skip(reason="Enable once src/inference_server/models/gemma4.py exists (M1)")
-def test_custom_matches_hf():
-    """Byte-for-byte parity check of the custom forward against the HF fixture."""
-    from inference_server.models.gemma4 import GemmaForCausalLM  # noqa: F401  # not yet built
+def _load_hf_state_dict_cached():
+    """Load Gemma 4 state_dict from HF (uses local cache once warmed)."""
+    from transformers import AutoModelForCausalLM
+    return AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16).state_dict()
 
-    fixture = torch.load(FIXTURE_PATH, map_location="cpu")
-    # custom = GemmaForCausalLM.from_safetensors(MODEL_NAME).eval()
-    # out = custom(fixture["input_ids"], output_hidden_states=True)
-    # for i, (h_hf, h_custom) in enumerate(zip(fixture["hidden_states"], out.hidden_states)):
-    #     assert torch.allclose(h_hf, h_custom.cpu(), atol=ATOL), f"layer {i} hidden state mismatch"
-    # assert torch.allclose(fixture["logits"], out.logits.cpu(), atol=ATOL)
-    pytest.fail("Custom forward not implemented yet")
+
+def test_rmsnorm_matches_hf():
+    """GemmaRMSNorm output must equal HF's Gemma4RMSNorm on the same input + weight."""
+    from inference_server.models.gemma4 import GemmaRMSNorm
+    from transformers.models.gemma4.modeling_gemma4 import Gemma4RMSNorm
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    hf_sd = _load_hf_state_dict_cached()
+    w = hf_sd["model.language_model.layers.0.input_layernorm.weight"]
+
+    ours = GemmaRMSNorm(dim=w.shape[0], eps=1e-6).eval()
+    ours.weight.data.copy_(w)
+    theirs = Gemma4RMSNorm(dim=w.shape[0], eps=1e-6).eval()
+    theirs.weight.data.copy_(w.float())  # HF stores it as float-promoted at init
+
+    x = fixture["hidden_states"][0]
+    with torch.no_grad():
+        a = ours(x)
+        b = theirs(x)
+    assert a.shape == b.shape and a.dtype == b.dtype
+    assert torch.equal(a, b), "RMSNorm output diverges from HF"
+
+
+def test_embedding_matches_hf():
+    """GemmaEmbedding output must equal HF's hidden_states[0] (post-scaling embed output)."""
+    from inference_server.models.gemma4 import GemmaEmbedding
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    hf_sd = _load_hf_state_dict_cached()
+
+    embed = GemmaEmbedding(vocab_size=262144, hidden_size=1536).eval()
+    embed.load_hf_weights(hf_sd)
+
+    with torch.no_grad():
+        out = embed(fixture["input_ids"])
+
+    expected = fixture["hidden_states"][0]
+    assert out.shape == expected.shape, f"shape {out.shape} vs expected {expected.shape}"
+    assert out.dtype == expected.dtype, f"dtype {out.dtype} vs expected {expected.dtype}"
+    assert torch.equal(out, expected), "embedding output not byte-identical to HF"

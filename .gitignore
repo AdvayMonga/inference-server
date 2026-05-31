@@ -22,8 +22,8 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Model weights
-models/
+# Model weights (top-level only — don't shadow src/inference_server/models/)
+/models/
 *.bin
 *.safetensors
 *.pt
