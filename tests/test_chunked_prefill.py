@@ -60,7 +60,7 @@ class FakeChunkBackend(InferenceBackend):
         self.last_cache_hit_tokens = 0
         return None, 0
 
-    def prefill_chunk(self, chunk_token_ids, partial_kv):
+    def prefill_chunk(self, chunk_token_ids, partial_kv, sampling=None):
         prev_len = partial_kv.seq_len if partial_kv is not None else 0
         new_len = prev_len + len(chunk_token_ids)
         self.chunk_input_tokens_total += len(chunk_token_ids)
@@ -70,7 +70,7 @@ class FakeChunkBackend(InferenceBackend):
         self.store_calls.append((len(token_ids), matched))
 
     # --- Batched decode ---
-    def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids):
+    def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row=None):
         next_tokens = current_tokens.squeeze(-1) + 1
         batched_kv.seq_len += 1
         return next_tokens, batched_kv

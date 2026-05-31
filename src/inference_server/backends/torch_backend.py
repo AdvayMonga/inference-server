@@ -12,6 +12,7 @@ from inference_server.kv_cache.hf_format import (
     blocks_to_dynamic_cache,
     dynamic_cache_to_per_layer_3d,
 )
+from inference_server.sampling import GREEDY, SamplingParams, sample
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,12 @@ class TorchBackend(InferenceBackend):
 
     def generate(self, token_ids: list[int], max_tokens: int,
                   template_prefix_len: int = 0,
-                  session_id: str = "default") -> list[int]:
+                  session_id: str = "default",
+                  sampling: SamplingParams = GREEDY) -> list[int]:
         """Two-phase generation: prefill (cacheable) then decode (unique per response)."""
         with self._lock:
             try:
-                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id)
+                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id, sampling)
 
                 # --- Phase 2: Decode ---
                 visible = []
@@ -97,7 +99,7 @@ class TorchBackend(InferenceBackend):
                         input_tensor = torch.tensor([[next_token_id]], device=self.device)
                         outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
                         kv_cache = outputs.past_key_values
-                        next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                        next_token_id = int(sample(outputs.logits[:, -1, :], sampling).item())
 
                 return visible
             finally:
@@ -105,7 +107,8 @@ class TorchBackend(InferenceBackend):
                     self.cache_adapter.release(token_ids, session_id=session_id)
 
     def _prefill_with_cache(self, token_ids: list[int],
-                             session_id: str = "default") -> tuple[object, int]:
+                             session_id: str = "default",
+                             sampling: SamplingParams = GREEDY) -> tuple[object, int]:
         """Run prefill using CacheManager prefix lookup. Returns (kv_cache, first_token_id)."""
         cache = self.cache_adapter
         matched = 0
@@ -137,7 +140,7 @@ class TorchBackend(InferenceBackend):
                 outputs = self.model(input_tensor, use_cache=True)
                 kv_cache = outputs.past_key_values
 
-            next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+            next_token_id = int(sample(outputs.logits[:, -1, :], sampling).item())
 
         # Store the new portion into the cache
         if cache is not None and matched < len(token_ids):
@@ -226,7 +229,7 @@ class TorchBackend(InferenceBackend):
                         use_cache=True,
                     )
                     batched_cache = outputs.past_key_values
-                    current_tokens = outputs.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+                    current_tokens = sample(outputs.logits[:, -1, :], GREEDY).unsqueeze(-1)
 
             return generated
         finally:
@@ -281,14 +284,15 @@ class TorchBackend(InferenceBackend):
         return partial_kv, matched
 
     def prefill_chunk(
-        self, chunk_token_ids: list[int], partial_kv: object | None
+        self, chunk_token_ids: list[int], partial_kv: object | None,
+        sampling: SamplingParams = GREEDY,
     ) -> tuple[object, int, int]:
-        """Forward pass on chunk_token_ids against partial_kv. Returns (kv, last_argmax, kv_len)."""
+        """Forward pass on chunk_token_ids against partial_kv. Returns (kv, last_sampled, kv_len)."""
         with torch.no_grad():
             input_tensor = torch.tensor([chunk_token_ids], device=self.device)
             outputs = self.model(input_tensor, past_key_values=partial_kv, use_cache=True)
             kv = outputs.past_key_values
-            last_token = int(outputs.logits[:, -1, :].argmax(dim=-1).item())
+            last_token = int(sample(outputs.logits[:, -1, :], sampling).item())
         return kv, last_token, kv.layers[0].keys.shape[2]
 
     def prefill_store(
@@ -308,8 +312,9 @@ class TorchBackend(InferenceBackend):
         batched_kv: object,
         attention_mask: torch.Tensor,
         position_ids: torch.Tensor,
+        sampling_per_row: list[SamplingParams] | None = None,
     ) -> tuple[torch.Tensor, object]:
-        """One forward pass over the running batch."""
+        """One forward pass over the running batch. Per-row sampling if provided."""
         with torch.no_grad():
             outputs = self.model(
                 current_tokens,
@@ -318,7 +323,13 @@ class TorchBackend(InferenceBackend):
                 past_key_values=batched_kv,
                 use_cache=True,
             )
-        next_tokens = outputs.logits[:, -1, :].argmax(dim=-1)
+        last_logits = outputs.logits[:, -1, :]  # [B, V]
+        if sampling_per_row is None:
+            next_tokens = sample(last_logits, GREEDY)
+        else:
+            next_tokens = torch.stack([
+                sample(last_logits[i], sampling_per_row[i]) for i in range(last_logits.shape[0])
+            ])
         return next_tokens, outputs.past_key_values
 
     def stack_caches_left_padded(self, per_row_caches: list, max_kv_len: int) -> object:
@@ -372,7 +383,8 @@ class TorchBackend(InferenceBackend):
         return str(self.device)
 
     def generate_step(
-        self, token_ids: list[int], kv_cache: object | None = None
+        self, token_ids: list[int], kv_cache: object | None = None,
+        sampling: SamplingParams = GREEDY,
     ) -> tuple[int, object]:
         """Single generation step on MPS."""
         input_tensor = torch.tensor([token_ids], device=self.device)
@@ -380,16 +392,17 @@ class TorchBackend(InferenceBackend):
         with torch.no_grad():
             outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
 
-        next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+        next_token_id = int(sample(outputs.logits[:, -1, :], sampling).item())
         return next_token_id, outputs.past_key_values
 
     def stream(self, token_ids: list[int], max_tokens: int,
                 template_prefix_len: int = 0,
-                session_id: str = "default") -> Generator[int, None, None]:
+                session_id: str = "default",
+                sampling: SamplingParams = GREEDY) -> Generator[int, None, None]:
         """Two-phase streaming: prefill (cacheable) then decode (yields tokens)."""
         with self._lock:
             try:
-                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id)
+                kv_cache, next_token_id = self._prefill_with_cache(token_ids, session_id, sampling)
 
                 # --- Phase 2: Decode ---
                 visible_count = 0
@@ -413,7 +426,7 @@ class TorchBackend(InferenceBackend):
                         input_tensor = torch.tensor([[next_token_id]], device=self.device)
                         outputs = self.model(input_tensor, past_key_values=kv_cache, use_cache=True)
                         kv_cache = outputs.past_key_values
-                        next_token_id = outputs.logits[:, -1, :].argmax(dim=-1).item()
+                        next_token_id = int(sample(outputs.logits[:, -1, :], sampling).item())
             finally:
                 if self.cache_adapter is not None:
                     self.cache_adapter.release(token_ids, session_id=session_id)

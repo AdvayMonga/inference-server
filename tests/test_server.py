@@ -52,7 +52,7 @@ class FakeBackend(InferenceBackend):
         kv = _FakeKV(batch_size=1, seq_len=len(token_ids))
         return kv, 100, len(token_ids)
 
-    def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids):
+    def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row=None):
         # Each row produces (current + 1) as next token, deterministic
         next_tokens = current_tokens.squeeze(-1) + 1
         batched_kv.seq_len += 1

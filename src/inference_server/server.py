@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from inference_server.backends import create_backend
 from inference_server.config import settings, print_hardware_summary
 from inference_server.kv_cache.cache_manager import CacheManager
+from inference_server.sampling import SamplingParams
 from inference_server.scheduler import (
     ContinuousBatchScheduler,
     QueueFullError,
@@ -35,6 +36,9 @@ class GenerateRequest(BaseModel):
     thinking: bool = True
     session_id: str = "default"
     priority: int = 0
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 0
 
 
 class GenerateResponse(BaseModel):
@@ -158,12 +162,17 @@ async def generate(request: GenerateRequest):
 
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
 
+    sampling = SamplingParams(
+        temperature=request.temperature, top_p=request.top_p, top_k=request.top_k,
+    )
+
     if request.stream:
         token_queue: asyncio.Queue = asyncio.Queue()
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=request.max_tokens,
             session_id=request.session_id, future=loop.create_future(),
             token_queue=token_queue, priority=request.priority,
+            sampling=sampling,
         )
         try:
             scheduler.enqueue(req)
@@ -178,7 +187,7 @@ async def generate(request: GenerateRequest):
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=request.max_tokens,
         session_id=request.session_id, future=loop.create_future(),
-        priority=request.priority,
+        priority=request.priority, sampling=sampling,
     )
     start_time = time.perf_counter()
     try:

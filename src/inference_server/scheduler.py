@@ -11,6 +11,7 @@ import torch
 
 from inference_server.backends.base import InferenceBackend
 from inference_server.metrics import MetricsTracker
+from inference_server.sampling import SamplingParams, sample
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 
 logger = logging.getLogger(__name__)
@@ -34,6 +35,7 @@ class ScheduledRequest:
     priority: int = 0           # higher = more important; tiebreak field for policies
     enqueue_ts: float = 0.0     # set by scheduler at enqueue (perf_counter)
     first_token_ts: float = 0.0 # set when first token is produced
+    sampling: SamplingParams = field(default_factory=SamplingParams)
 
 
 class SchedulerInterface(ABC):
@@ -326,7 +328,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             is_final = (end == len(ids))
 
         try:
-            kv, last_token, kv_len = self.backend.prefill_chunk(chunk, prow.partial_kv)
+            kv, last_token, kv_len = self.backend.prefill_chunk(chunk, prow.partial_kv, sampling=prow.request.sampling)
         except Exception as e:
             logger.exception("prefill_chunk failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
@@ -392,8 +394,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
             device=device, dtype=torch.long,
         )
 
+        sampling_per_row = [r.request.sampling for r in self._active]
         next_tokens, self._batched_kv = self.backend.decode_step_batched(
             current_tokens, self._batched_kv, self._attention_mask, position_ids,
+            sampling_per_row=sampling_per_row,
         )
 
         for i, row in enumerate(self._active):

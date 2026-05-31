@@ -41,7 +41,7 @@
 
     <text x="40" y="158">prefill_chunk(chunk_tokens, partial_kv)</text>
     <text class="small" x="40" y="176">push N more prompt tokens through the model</text>
-    <text class="small" x="40" y="194">→ (extended_kv, last_argmax_token, kv_len)</text>
+    <text class="small" x="40" y="194">→ (extended_kv, last_sampled_token, kv_len)</text>
 
     <text x="40" y="224">prefill_store(tokens, full_kv, matched, sid)</text>
     <text class="small" x="40" y="242">register the new KV in the cache for the suffix</text>
@@ -114,7 +114,7 @@
     <text class="small" x="40" y="236">if PREFILL_CHUNK_SIZE = 2:</text>
     <text class="small" x="40" y="254">  tick N: chunk = [t4, t5] → kv covers t1..t5</text>
     <text class="small" x="40" y="272">  tick N+1: chunk = [t6, t7] → kv covers t1..t7</text>
-    <text class="small" x="40" y="306">also returns the argmax of the last token</text>
+    <text class="small" x="40" y="306">also returns the sampled last token</text>
     <text class="small" x="40" y="324">→ that's the first generated token, ready for decode</text>
   </g>
 
@@ -171,7 +171,7 @@
     <rect class="box backend" x="20" y="140" width="1100" height="100" rx="6"/>
     <text class="title" x="40" y="168">model.forward(input_ids=[B,1], past_key_values=batched_kv, attention_mask, position_ids)</text>
     <text x="40" y="194">one big forward pass — every active request gets one new token at the same time</text>
-    <text class="small" x="40" y="216">argmax the logits → next_tokens [B]</text>
+    <text class="small" x="40" y="216">sample per-row (temp/top-k/top-p) → next_tokens [B]</text>
     <text class="small" x="40" y="232">each row gets its token streamed back to its client; metrics record TPOT</text>
   </g>
 

@@ -25,7 +25,8 @@ class InferenceBackend(ABC):
     @abstractmethod
     def generate(self, token_ids: list[int], max_tokens: int,
                   template_prefix_len: int = 0,
-                  session_id: str = "default") -> list[int]:
+                  session_id: str = "default",
+                  sampling: object = None) -> list[int]:
         """Run full autoregressive generation, return all generated token IDs."""
         ...
 
@@ -39,7 +40,8 @@ class InferenceBackend(ABC):
 
     @abstractmethod
     def generate_step(
-        self, token_ids: list[int], kv_cache: object | None = None
+        self, token_ids: list[int], kv_cache: object | None = None,
+        sampling: object = None,
     ) -> tuple[int, object]:
         """Run a single generation step. Return (next_token_id, updated_kv_cache)."""
         ...
@@ -47,7 +49,8 @@ class InferenceBackend(ABC):
     @abstractmethod
     def stream(self, token_ids: list[int], max_tokens: int,
                 template_prefix_len: int = 0,
-                session_id: str = "default") -> Generator[int, None, None]:
+                session_id: str = "default",
+                sampling: object = None) -> Generator[int, None, None]:
         """Yield token IDs one at a time as they are generated."""
         ...
 
@@ -70,6 +73,7 @@ class InferenceBackend(ABC):
 
     def prefill_chunk(
         self, chunk_token_ids: list[int], partial_kv: object | None,
+        sampling: object = None,
     ) -> tuple[object, int, int]:
         """Forward pass on chunk_token_ids against partial_kv.
         Returns (extended_kv, last_argmax_token, new_kv_len)."""
@@ -92,6 +96,7 @@ class InferenceBackend(ABC):
         batched_kv: object,
         attention_mask: object,    # tensor [B, S]
         position_ids: object,      # tensor [B, 1]
+        sampling_per_row: list | None = None,
     ) -> tuple[object, object]:
         """One decode step. Returns (next_tokens [B], updated batched_kv)."""
         raise NotImplementedError(
