@@ -238,7 +238,7 @@
 <p class="lead"><code>backends/torch_backend.py</code>. Wraps a HuggingFace causal LM.</p>
 
 <ul>
-  <li>Loads the HF model + tokenizer at startup. On CUDA, requests <code>attn_implementation="flash_attention_2"</code> (guarded — MPS/CPU stay on eager). Optional <code>torch.compile</code> via <code>COMPILE_MODEL</code> env var; defaulted on in the Modal image.</li>
+  <li>Loads the HF model + tokenizer at startup. Uses HF's default <code>sdpa</code> attention (FA2 was ruled out — Gemma 4 head_dim exceeds FA2's 256 ceiling on A10G; H100+FA3 would lift this). Optional <code>torch.compile</code> via <code>COMPILE_MODEL</code> env var; currently off in the Modal image (Gemma 4 + dynamo collide in HF's lm_head slice path).</li>
   <li>Implements every continuous-batch primitive listed above.</li>
   <li>Holds a reference to the <code>CacheManager</code> so prefill can do lookup/store directly.</li>
   <li>Uses HF's <code>DynamicCache</code> as the in-flight KV format. <code>kv_cache/hf_format.py</code> handles the conversion between our paged blocks and HF's flat tensor layout.</li>

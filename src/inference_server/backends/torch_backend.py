@@ -35,9 +35,8 @@ class TorchBackend(InferenceBackend):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        attn_kwargs = {"attn_implementation": "flash_attention_2"} if self.device.type == "cuda" else {}
         self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, dtype=torch.bfloat16, **attn_kwargs
+            model_name, dtype=torch.bfloat16
         ).to(self.device)
         self.model.eval()
 
