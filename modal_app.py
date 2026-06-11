@@ -14,6 +14,7 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
+    .env({"BACKEND": "custom-cuda"})  # use our hand-written Gemma 4 forward + paged KV
     .add_local_python_source("inference_server")
 )
 

@@ -45,6 +45,7 @@ class Settings:
     # Model
     model_name: str = "google/gemma-4-E2B-it"
     device: str = "auto"  # "auto", "cuda", "mps", or "cpu"
+    backend_name: str = ""  # explicit backend override (e.g. "custom-cuda"); empty = derive from device
     max_tokens: int = 512
     context_window: int = 8192
 
@@ -79,8 +80,8 @@ class Settings:
 
     @property
     def backend(self) -> str:
-        """Map device to backend name for create_backend()."""
-        return self.resolved_device
+        """Backend name for create_backend(). Explicit BACKEND override wins; else device."""
+        return self.backend_name or self.resolved_device
 
 
 def load_settings() -> Settings:
@@ -95,6 +96,7 @@ def load_settings() -> Settings:
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
+        backend_name=os.environ.get("BACKEND", Settings.backend_name),
         max_tokens=int(os.environ.get("MAX_TOKENS", Settings.max_tokens)),
         context_window=int(os.environ.get("CONTEXT_WINDOW", Settings.context_window)),
         kv_cache_memory_fraction=float(os.environ.get("KV_CACHE_MEMORY_FRACTION", Settings.kv_cache_memory_fraction)),
