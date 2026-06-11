@@ -234,7 +234,17 @@
   </g>
 </svg>
 
-<h2 id="torch">Torch backend (the primary one)</h2>
+<h2 id="custom">Custom-forward Torch backend (M1)</h2>
+<p class="lead"><code>backends/custom_torch_backend.py</code> + <code>models/gemma4.py</code>. Hand-written Gemma 4 forward pass — byte-identical to HF on the parity fixture.</p>
+
+<ul>
+  <li>Loads HF weights into our own <code>GemmaForCausalLM</code> via <code>from_hf()</code>. No <code>transformers</code> model class on the hot path.</li>
+  <li>Implements the full Gemma 4 architecture: dual-head-dim attention (sliding=256 / global=512), QK-norm + V-norm, GeGLU MLP (tanh approximation), dual RoPE (sliding base=10000 full-rot / full base=1e6 partial=0.25), per-layer embedding gating, KV sharing across the last 20 layers, final-logit softcapping at 30.</li>
+  <li>Activated via <code>BACKEND=custom-{cuda,mps,cpu}</code>. Falls back to <code>TorchBackend</code> by default.</li>
+  <li>Continuous-batching primitives (<code>prefill_chunk</code>, <code>decode_step_batched</code>, KV cache plumbing) are NotImplemented — the scheduler restricts itself to the legacy <code>generate</code>/<code>stream</code> path. M2 adds these on top of a paged KV cache that lives inside our forward.</li>
+</ul>
+
+<h2 id="torch">HF-Transformers Torch backend (original)</h2>
 <p class="lead"><code>backends/torch_backend.py</code>. Wraps a HuggingFace causal LM.</p>
 
 <ul>

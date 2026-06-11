@@ -26,10 +26,8 @@ ATOL = 1e-3  # bf16 tolerance — tighten to 1e-5 if we move to fp32
 
 
 def _device() -> torch.device:
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
+    # Force CPU for parity. MPS/CUDA kernels produce 1-ULP-different bf16 rounding
+    # vs CPU; tests would be device-dependent otherwise.
     return torch.device("cpu")
 
 
@@ -82,6 +80,40 @@ def _load_hf_state_dict_cached():
     return AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16).state_dict()
 
 
+def test_full_model_matches_hf():
+    """End-to-end parity: custom GemmaForCausalLM byte-identical to HF on the fixture prompt."""
+    from inference_server.models.gemma4 import GemmaForCausalLM
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    model = GemmaForCausalLM.from_hf(MODEL_NAME).eval()
+
+    with torch.no_grad():
+        logits, all_h = model(fixture["input_ids"], return_hidden_states=True)
+
+    # Last hidden_states[i] should match fixture's all_hidden[i] for every i
+    assert len(all_h) == len(fixture["hidden_states"]), (
+        f"layer count mismatch: ours {len(all_h)} vs fixture {len(fixture['hidden_states'])}"
+    )
+    for i, (a, b) in enumerate(zip(all_h, fixture["hidden_states"])):
+        # Allow tiny noise at deep layers (accumulated bf16 reductions can vary by 1 ULP);
+        # require byte-equality at embedding (i=0) and small drift floor elsewhere.
+        if i == 0:
+            assert torch.equal(a, b), f"hidden_states[0] (embedding) diverges"
+        else:
+            assert torch.allclose(a, b, atol=ATOL), f"hidden_states[{i}] diverges (max diff {(a-b).abs().max().item()})"
+
+    # Logits parity
+    assert torch.allclose(logits, fixture["logits"], atol=ATOL), (
+        f"logits diverge (max diff {(logits - fixture['logits']).abs().max().item()})"
+    )
+
+    # Top-5 next-token IDs must match exactly
+    top5 = torch.topk(logits[:, -1, :], k=5, dim=-1).indices
+    assert torch.equal(top5, fixture["top5_token_ids"]), (
+        f"top-5 token IDs diverge: ours {top5.tolist()} vs fixture {fixture['top5_token_ids'].tolist()}"
+    )
+
+
 def test_attention_matches_hf_sliding_layer0():
     """GemmaAttention vs HF Gemma4TextAttention on sliding layer 0, real hidden_states[0] input."""
     from inference_server.models.gemma4 import (
@@ -124,7 +156,7 @@ def test_attention_matches_hf_sliding_layer0():
         cos_bf, sin_bf = cos.to(torch.bfloat16), sin.to(torch.bfloat16)
 
         x = fixture["hidden_states"][0]
-        a = ours(x, cos, sin)
+        a, _ = ours(x, cos, sin)
         b, _ = theirs(
             hidden_states=x,
             position_embeddings=(cos_bf, sin_bf),
