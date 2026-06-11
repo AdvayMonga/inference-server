@@ -80,6 +80,108 @@ def _load_hf_state_dict_cached():
     return AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16).state_dict()
 
 
+def test_prefix_cache_hit_logits_match():
+    """Second session with shared prefix produces the same logits as no-cache reference."""
+    from inference_server.models.gemma4 import GemmaForCausalLM
+    from inference_server.models.paged_kv_cache import (
+        PagedKVCache, PrefixCache, make_pools_for_gemma,
+    )
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    model = GemmaForCausalLM.from_hf(MODEL_NAME).eval()
+    ids_all = fixture["input_ids"][0].tolist()  # 5 tokens
+    ids_prefix = ids_all[:4]                    # 4 tokens = 2 full blocks at bs=2
+    bs = 2
+
+    with torch.no_grad():
+        pools = make_pools_for_gemma(model, num_blocks_per_pool=64, block_size=bs)
+        prefix_cache = PrefixCache(pools=pools)
+
+        # Reference: full 5 tokens, no prefix sharing
+        ref_cache = PagedKVCache(pools=pools)
+        ref_logits = model(torch.tensor([ids_all]), kv_cache=ref_cache)
+        ref_cache.free_all()
+
+        # Session A: prefill the 4-token prefix, then store in prefix cache
+        a = PagedKVCache(pools=pools)
+        model(torch.tensor([ids_prefix]), kv_cache=a)
+        prefix_cache.store(ids_prefix, a.block_tables)
+        a.free_all()
+
+        # Session B: full 5 tokens, but skips computation on the cached prefix
+        matched, shared = prefix_cache.lookup(ids_all)
+        assert matched == 4, f"expected 4-token hit, got {matched}"
+        b = PagedKVCache(pools=pools, shared_prefix=shared, shared_prefix_tokens=matched)
+        b_logits = model(torch.tensor([ids_all[matched:]]), kv_cache=b)
+        b.free_all()
+
+    # Last-position logits should match reference (B saw all 5 tokens via cache + new)
+    assert torch.equal(b_logits[:, -1, :], ref_logits[:, -1, :]), (
+        f"prefix-shared logits diverge from reference "
+        f"(max diff {(b_logits[:, -1, :] - ref_logits[:, -1, :]).abs().max().item()})"
+    )
+    assert prefix_cache.hits == 1
+
+
+def test_paged_two_sessions_share_pool():
+    """Two PagedKVCache sessions on the same pool produce independent, correct outputs."""
+    from inference_server.models.gemma4 import GemmaForCausalLM
+    from inference_server.models.paged_kv_cache import PagedKVCache, make_pools_for_gemma
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    model = GemmaForCausalLM.from_hf(MODEL_NAME).eval()
+    ids = fixture["input_ids"]
+
+    with torch.no_grad():
+        pools = make_pools_for_gemma(model, num_blocks_per_pool=64, block_size=16)
+        # Reference: single session
+        ref = PagedKVCache(pools=pools)
+        ref_logits = model(ids, kv_cache=ref)
+        ref.free_all()
+
+        # Two sessions: each runs the same prompt; outputs must equal the reference
+        a = PagedKVCache(pools=pools)
+        b = PagedKVCache(pools=pools)
+        a_logits = model(ids, kv_cache=a)
+        b_logits = model(ids, kv_cache=b)
+        assert torch.equal(a_logits, ref_logits)
+        assert torch.equal(b_logits, ref_logits)
+        # Pools have free blocks again after release
+        a.free_all()
+        b.free_all()
+        # Every non-shared pool should be fully free
+        free_counts = [p.free_count if p is not None else None for p in pools]
+        for fc, pool in zip(free_counts, pools):
+            if pool is not None:
+                assert fc == pool.num_blocks, f"pool leaked blocks (free {fc}/{pool.num_blocks})"
+
+
+def test_paged_kv_matches_contiguous():
+    """PagedKVCache must yield byte-identical logits to the contiguous KVCache."""
+    from inference_server.models.gemma4 import GemmaForCausalLM, KVCache
+    from inference_server.models.paged_kv_cache import PagedKVCache, make_pools_for_gemma
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    model = GemmaForCausalLM.from_hf(MODEL_NAME).eval()
+    ids = fixture["input_ids"]  # [1, 5]
+
+    with torch.no_grad():
+        cont = KVCache(num_layers=model.model.num_layers)
+        l_cont_prefill = model(ids[:, :3], kv_cache=cont)
+        l_cont_d1 = model(ids[:, 3:4], kv_cache=cont)
+        l_cont_d2 = model(ids[:, 4:5], kv_cache=cont)
+
+        pools = make_pools_for_gemma(model, num_blocks_per_pool=64, block_size=16)
+        paged = PagedKVCache(pools=pools)
+        l_pg_prefill = model(ids[:, :3], kv_cache=paged)
+        l_pg_d1 = model(ids[:, 3:4], kv_cache=paged)
+        l_pg_d2 = model(ids[:, 4:5], kv_cache=paged)
+
+    assert torch.equal(l_cont_prefill, l_pg_prefill), "prefill logits diverge"
+    assert torch.equal(l_cont_d1, l_pg_d1), "decode step 1 logits diverge"
+    assert torch.equal(l_cont_d2, l_pg_d2), "decode step 2 logits diverge"
+
+
 def test_kv_cache_matches_no_cache():
     """Incremental decode through KVCache must yield identical logits to a single full forward."""
     from inference_server.models.gemma4 import GemmaForCausalLM, KVCache

@@ -22,7 +22,7 @@ import torch.nn.functional as F
 
 
 class KVCache:
-    """Per-layer (K, V) tensors. Shared layers have no entry (they reuse a source layer)."""
+    """Per-layer (K, V) tensors stored as contiguous [B, H, S, D]. Append concatenates along S."""
 
     def __init__(self, num_layers: int):
         self.k: list[torch.Tensor | None] = [None] * num_layers
@@ -33,9 +33,13 @@ class KVCache:
             return None
         return self.k[layer_idx], self.v[layer_idx]
 
-    def put(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
-        self.k[layer_idx] = k
-        self.v[layer_idx] = v
+    def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
+        if self.k[layer_idx] is None:
+            self.k[layer_idx] = k_new
+            self.v[layer_idx] = v_new
+        else:
+            self.k[layer_idx] = torch.cat([self.k[layer_idx], k_new], dim=2)
+            self.v[layer_idx] = torch.cat([self.v[layer_idx], v_new], dim=2)
 
     @property
     def seq_len(self) -> int:
@@ -183,8 +187,16 @@ class GemmaAttention(nn.Module):
         attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=is_causal, scale=1.0)
         attn = attn.transpose(1, 2).reshape(B, S, -1).contiguous()
         out = self.o_proj(attn)
-        # Non-shared layers always return their (cached + new) K/V so the model can re-cache.
-        kv_out = None if self.is_kv_shared else (k, v)
+        # Return ONLY the newly-computed K/V for this layer. The model owns the cache and
+        # decides whether to append to a contiguous tensor or paged blocks.
+        # Shared layers produced nothing → None.
+        if self.is_kv_shared:
+            kv_out = None
+        elif past_kv is None:
+            kv_out = (k, v)        # no past — "new" is all of it
+        else:
+            # Slice off the new portion. k/v are [B, H, S_total, D]; new is the last S tokens.
+            kv_out = (k[:, :, -S:, :], v[:, :, -S:, :])
         return out, kv_out
 
     def load_hf_weights(self, sd: dict, layer_idx: int) -> None:
@@ -466,12 +478,21 @@ class GemmaModel(nn.Module):
             cos, sin = cos_sin[self.layer_types[i]]
             sk = shared_kv.get(self.share_source[i]) if i in self.share_source else None
             past = kv_cache.get(i) if kv_cache is not None else None
-            h, kv_out = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk, past_kv=past)
-            if kv_out is not None:
+            h, kv_new = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk, past_kv=past)
+            if kv_new is not None:
                 if kv_cache is not None:
-                    kv_cache.put(i, kv_out[0], kv_out[1])
+                    kv_cache.append(i, kv_new[0], kv_new[1])
                 if i in self.store_kv_per_idx:
-                    shared_kv[i] = kv_out
+                    # Downstream sharers need the FULL (cached + new) K/V at this layer.
+                    if kv_cache is not None:
+                        shared_kv[i] = kv_cache.get(i)
+                    elif past is None:
+                        shared_kv[i] = kv_new
+                    else:
+                        shared_kv[i] = (
+                            torch.cat([past[0], kv_new[0]], dim=2),
+                            torch.cat([past[1], kv_new[1]], dim=2),
+                        )
 
         h = self.norm(h)
         if return_hidden_states:

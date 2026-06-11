@@ -42,8 +42,10 @@ class CustomTorchBackend(InferenceBackend):
         self.last_cache_hit_tokens = 0
 
     def load_model(self, model_name: str) -> None:
+        import os
         from transformers import AutoTokenizer
         from inference_server.models.gemma4 import GemmaForCausalLM
+        from inference_server.models.paged_kv_cache import make_pools_for_gemma
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
@@ -52,6 +54,14 @@ class CustomTorchBackend(InferenceBackend):
         self.model = GemmaForCausalLM.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
         eos = self.tokenizer.eos_token_id
         self._eos_ids = {eos} if isinstance(eos, int) else set(eos)
+
+        # Pre-allocate paged block pools shared across sessions.
+        n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
+        bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
+        self.pools = make_pools_for_gemma(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
+
+        from inference_server.models.paged_kv_cache import PrefixCache
+        self.prefix_cache = PrefixCache(pools=self.pools)
 
     def set_cache_adapter(self, adapter) -> None:
         self.cache_adapter = adapter  # not used yet — M2
@@ -65,36 +75,48 @@ class CustomTorchBackend(InferenceBackend):
         session_id: str = "default",
         sampling: SamplingParams = GREEDY,
     ) -> list[int]:
-        """One prefill pass, then incremental decode against the KVCache."""
-        from inference_server.models.gemma4 import KVCache
+        """Prefix-cache lookup → prefill only the suffix → incremental decode."""
+        from inference_server.models.paged_kv_cache import PagedKVCache
 
         with self._lock:
-            cache = KVCache(num_layers=self.model.model.num_layers)
-            # Prefill on the prompt
-            prompt = torch.tensor([token_ids], device=self.device)
-            logits = self.model(prompt, kv_cache=cache)
-            tok = int(sample(logits[:, -1, :], sampling).item())
-
-            visible: list[int] = []
-            in_thinking = False
-
-            for _ in range(max_tokens * 4):
-                if tok in self._eos_ids:
-                    break
-                if tok == self.THINK_START:
-                    in_thinking = True
-                elif tok == self.THINK_END:
-                    in_thinking = False
-                elif not in_thinking:
-                    visible.append(tok)
-                    if len(visible) >= max_tokens:
-                        break
-
-                # Decode one step on the new token
-                step = torch.tensor([[tok]], device=self.device)
-                logits = self.model(step, kv_cache=cache)
+            matched, shared = self.prefix_cache.lookup(token_ids)
+            self.last_cache_hit_tokens = matched
+            cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
+            try:
+                # Prefill only the un-cached suffix; if matched == len(token_ids) we still need
+                # at least one forward to produce next-token logits, so leave the last token unmatched.
+                if matched >= len(token_ids):
+                    matched = len(token_ids) - 1
+                    # Trim shared blocks so we don't double-count the last token's position
+                    # (this is rare — only when the entire prompt is in cache)
+                prompt_suffix = token_ids[matched:]
+                prompt = torch.tensor([prompt_suffix], device=self.device)
+                logits = self.model(prompt, kv_cache=cache)
                 tok = int(sample(logits[:, -1, :], sampling).item())
-            return visible
+
+                visible: list[int] = []
+                in_thinking = False
+
+                for _ in range(max_tokens * 4):
+                    if tok in self._eos_ids:
+                        break
+                    if tok == self.THINK_START:
+                        in_thinking = True
+                    elif tok == self.THINK_END:
+                        in_thinking = False
+                    elif not in_thinking:
+                        visible.append(tok)
+                        if len(visible) >= max_tokens:
+                            break
+
+                    step = torch.tensor([[tok]], device=self.device)
+                    logits = self.model(step, kv_cache=cache)
+                    tok = int(sample(logits[:, -1, :], sampling).item())
+                # Store the prompt's full blocks for future sharing (before releasing our refs).
+                self.prefix_cache.store(token_ids, cache.block_tables)
+                return visible
+            finally:
+                cache.free_all()
 
     @torch.no_grad()
     def stream(
@@ -103,33 +125,42 @@ class CustomTorchBackend(InferenceBackend):
         session_id: str = "default",
         sampling: SamplingParams = GREEDY,
     ) -> Generator[int, None, None]:
-        from inference_server.models.gemma4 import KVCache
+        from inference_server.models.paged_kv_cache import PagedKVCache
 
         with self._lock:
-            cache = KVCache(num_layers=self.model.model.num_layers)
-            prompt = torch.tensor([token_ids], device=self.device)
-            logits = self.model(prompt, kv_cache=cache)
-            tok = int(sample(logits[:, -1, :], sampling).item())
-
-            visible_count = 0
-            in_thinking = False
-
-            for _ in range(max_tokens * 4):
-                if tok in self._eos_ids:
-                    break
-                if tok == self.THINK_START:
-                    in_thinking = True
-                elif tok == self.THINK_END:
-                    in_thinking = False
-                elif not in_thinking:
-                    yield tok
-                    visible_count += 1
-                    if visible_count >= max_tokens:
-                        break
-
-                step = torch.tensor([[tok]], device=self.device)
-                logits = self.model(step, kv_cache=cache)
+            matched, shared = self.prefix_cache.lookup(token_ids)
+            self.last_cache_hit_tokens = matched
+            cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
+            try:
+                if matched >= len(token_ids):
+                    matched = len(token_ids) - 1
+                prompt_suffix = token_ids[matched:]
+                prompt = torch.tensor([prompt_suffix], device=self.device)
+                logits = self.model(prompt, kv_cache=cache)
                 tok = int(sample(logits[:, -1, :], sampling).item())
+
+                visible_count = 0
+                in_thinking = False
+
+                for _ in range(max_tokens * 4):
+                    if tok in self._eos_ids:
+                        break
+                    if tok == self.THINK_START:
+                        in_thinking = True
+                    elif tok == self.THINK_END:
+                        in_thinking = False
+                    elif not in_thinking:
+                        yield tok
+                        visible_count += 1
+                        if visible_count >= max_tokens:
+                            break
+
+                    step = torch.tensor([[tok]], device=self.device)
+                    logits = self.model(step, kv_cache=cache)
+                    tok = int(sample(logits[:, -1, :], sampling).item())
+                self.prefix_cache.store(token_ids, cache.block_tables)
+            finally:
+                cache.free_all()
 
     @torch.no_grad()
     def generate_step(
