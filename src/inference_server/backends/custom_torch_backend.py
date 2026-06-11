@@ -65,20 +65,20 @@ class CustomTorchBackend(InferenceBackend):
         session_id: str = "default",
         sampling: SamplingParams = GREEDY,
     ) -> list[int]:
-        """Autoregressive generation without KV cache — re-runs full forward each step.
-        Slow but correct; M2 wires up paged KV.
-        """
+        """One prefill pass, then incremental decode against the KVCache."""
+        from inference_server.models.gemma4 import KVCache
+
         with self._lock:
-            ids = list(token_ids)
+            cache = KVCache(num_layers=self.model.model.num_layers)
+            # Prefill on the prompt
+            prompt = torch.tensor([token_ids], device=self.device)
+            logits = self.model(prompt, kv_cache=cache)
+            tok = int(sample(logits[:, -1, :], sampling).item())
+
             visible: list[int] = []
             in_thinking = False
 
             for _ in range(max_tokens * 4):
-                input_tensor = torch.tensor([ids], device=self.device)
-                logits = self.model(input_tensor)
-                tok = int(sample(logits[:, -1, :], sampling).item())
-                ids.append(tok)
-
                 if tok in self._eos_ids:
                     break
                 if tok == self.THINK_START:
@@ -89,6 +89,11 @@ class CustomTorchBackend(InferenceBackend):
                     visible.append(tok)
                     if len(visible) >= max_tokens:
                         break
+
+                # Decode one step on the new token
+                step = torch.tensor([[tok]], device=self.device)
+                logits = self.model(step, kv_cache=cache)
+                tok = int(sample(logits[:, -1, :], sampling).item())
             return visible
 
     @torch.no_grad()
@@ -98,17 +103,18 @@ class CustomTorchBackend(InferenceBackend):
         session_id: str = "default",
         sampling: SamplingParams = GREEDY,
     ) -> Generator[int, None, None]:
+        from inference_server.models.gemma4 import KVCache
+
         with self._lock:
-            ids = list(token_ids)
+            cache = KVCache(num_layers=self.model.model.num_layers)
+            prompt = torch.tensor([token_ids], device=self.device)
+            logits = self.model(prompt, kv_cache=cache)
+            tok = int(sample(logits[:, -1, :], sampling).item())
+
             visible_count = 0
             in_thinking = False
 
             for _ in range(max_tokens * 4):
-                input_tensor = torch.tensor([ids], device=self.device)
-                logits = self.model(input_tensor)
-                tok = int(sample(logits[:, -1, :], sampling).item())
-                ids.append(tok)
-
                 if tok in self._eos_ids:
                     break
                 if tok == self.THINK_START:
@@ -121,16 +127,23 @@ class CustomTorchBackend(InferenceBackend):
                     if visible_count >= max_tokens:
                         break
 
+                step = torch.tensor([[tok]], device=self.device)
+                logits = self.model(step, kv_cache=cache)
+                tok = int(sample(logits[:, -1, :], sampling).item())
+
     @torch.no_grad()
     def generate_step(
         self, token_ids: list[int], kv_cache=None,
         sampling: SamplingParams = GREEDY,
     ) -> tuple[int, object]:
-        # No KV cache yet — ignore the kv_cache argument (M2)
+        """One forward pass. Pass our KVCache to incremental-decode; pass None to do full prefill."""
+        from inference_server.models.gemma4 import KVCache
+        if kv_cache is None:
+            kv_cache = KVCache(num_layers=self.model.model.num_layers)
         input_tensor = torch.tensor([token_ids], device=self.device)
-        logits = self.model(input_tensor)
+        logits = self.model(input_tensor, kv_cache=kv_cache)
         tok = int(sample(logits[:, -1, :], sampling).item())
-        return tok, None
+        return tok, kv_cache
 
     def generate_batch(self, batch_token_ids, max_tokens, session_ids=None):
         # Naive — loop generate() per row; concurrent batching belongs in M2.

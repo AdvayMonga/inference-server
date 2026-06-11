@@ -21,6 +21,31 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class KVCache:
+    """Per-layer (K, V) tensors. Shared layers have no entry (they reuse a source layer)."""
+
+    def __init__(self, num_layers: int):
+        self.k: list[torch.Tensor | None] = [None] * num_layers
+        self.v: list[torch.Tensor | None] = [None] * num_layers
+
+    def get(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor] | None:
+        if self.k[layer_idx] is None:
+            return None
+        return self.k[layer_idx], self.v[layer_idx]
+
+    def put(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor) -> None:
+        self.k[layer_idx] = k
+        self.v[layer_idx] = v
+
+    @property
+    def seq_len(self) -> int:
+        """Length of cached sequence. Any populated layer suffices."""
+        for k in self.k:
+            if k is not None:
+                return k.shape[2]
+        return 0
+
+
 class GemmaRMSNorm(nn.Module):
     """RMSNorm: x / sqrt(mean(x²) + eps) * weight. Compute in fp32, cast back."""
 
@@ -119,6 +144,7 @@ class GemmaAttention(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         shared_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, S, _ = x.shape
         cos = cos.to(x.dtype)
@@ -132,11 +158,16 @@ class GemmaAttention(nn.Module):
             assert shared_kv is not None, "KV-shared layer needs shared_kv"
             k, v = shared_kv
         else:
-            k = self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
-            k = self.k_norm(k)
-            k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)  # [B, Hkv, S, D]
-            v = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
-            v = self.v_norm(v).transpose(1, 2)
+            k_new = self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
+            k_new = self.k_norm(k_new)
+            k_new = apply_rotary(k_new, cos, sin, unsqueeze_dim=2).transpose(1, 2)
+            v_new = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
+            v_new = self.v_norm(v_new).transpose(1, 2)
+            if past_kv is not None:
+                k = torch.cat([past_kv[0], k_new], dim=2)
+                v = torch.cat([past_kv[1], v_new], dim=2)
+            else:
+                k, v = k_new, v_new
 
         # GQA expansion
         if self.num_q_heads != self.num_kv_heads:
@@ -146,12 +177,14 @@ class GemmaAttention(nn.Module):
         else:
             k_exp, v_exp = k, v
 
-        # scale=1.0 — magnitude absorbed by Q/K RMSNorm. is_causal=True; sliding-window mask
-        # for S > self.sliding_window is a follow-up; our parity fixture has S=5 < 512.
-        attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=True, scale=1.0)
+        # is_causal works for square (prefill); for decode (Q shorter than K) it would mask wrong,
+        # so pass no mask — single new token Q correctly attends to all cached + new K.
+        is_causal = q.shape[2] == k_exp.shape[2]
+        attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=is_causal, scale=1.0)
         attn = attn.transpose(1, 2).reshape(B, S, -1).contiguous()
         out = self.o_proj(attn)
-        kv_out = (k, v) if self.store_kv else None
+        # Non-shared layers always return their (cached + new) K/V so the model can re-cache.
+        kv_out = None if self.is_kv_shared else (k, v)
         return out, kv_out
 
     def load_hf_weights(self, sd: dict, layer_idx: int) -> None:
@@ -234,11 +267,12 @@ class GemmaDecoderLayer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         shared_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Attention block
         residual = h
         a = self.input_layernorm(h)
-        a, kv_out = self.self_attn(a, cos, sin, shared_kv=shared_kv)
+        a, kv_out = self.self_attn(a, cos, sin, shared_kv=shared_kv, past_kv=past_kv)
         a = self.post_attention_layernorm(a)
         h = residual + a
 
@@ -404,15 +438,20 @@ class GemmaModel(nn.Module):
         proj = self.per_layer_projection_norm(proj)
         return (proj + src1) * self.per_layer_input_combine_scale
 
-    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
-                return_hidden_states: bool = False):
+    def forward(
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
+        return_hidden_states: bool = False,
+        kv_cache: KVCache | None = None,
+    ):
         h = self.embed_tokens(input_ids)
+        cached_len = kv_cache.seq_len if kv_cache is not None else 0
         if position_ids is None:
-            position_ids = torch.arange(input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+            position_ids = torch.arange(
+                cached_len, cached_len + input_ids.shape[1], device=input_ids.device,
+            ).unsqueeze(0)
 
         per_layer = self._per_layer_inputs(input_ids, h)  # [B, S, L, D_per]
 
-        # Precompute cos/sin per type once
         cos_sin = {
             "sliding_attention": self.rope_sliding(position_ids),
             "full_attention": self.rope_full(position_ids),
@@ -426,9 +465,13 @@ class GemmaModel(nn.Module):
                 all_hidden.append(h)  # HF records input-to-layer-i, then post-norm at the end
             cos, sin = cos_sin[self.layer_types[i]]
             sk = shared_kv.get(self.share_source[i]) if i in self.share_source else None
-            h, kv_out = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk)
+            past = kv_cache.get(i) if kv_cache is not None else None
+            h, kv_out = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk, past_kv=past)
             if kv_out is not None:
-                shared_kv[i] = kv_out
+                if kv_cache is not None:
+                    kv_cache.put(i, kv_out[0], kv_out[1])
+                if i in self.store_kv_per_idx:
+                    shared_kv[i] = kv_out
 
         h = self.norm(h)
         if return_hidden_states:
@@ -458,12 +501,15 @@ class GemmaForCausalLM(nn.Module):
         # Wire the tie.
         self.lm_head.weight = self.model.embed_tokens.embed_tokens.weight
 
-    def forward(self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
-                return_hidden_states: bool = False):
+    def forward(
+        self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
+        return_hidden_states: bool = False,
+        kv_cache: KVCache | None = None,
+    ):
         if return_hidden_states:
-            h, all_h = self.model(input_ids, position_ids, return_hidden_states=True)
+            h, all_h = self.model(input_ids, position_ids, return_hidden_states=True, kv_cache=kv_cache)
         else:
-            h = self.model(input_ids, position_ids)
+            h = self.model(input_ids, position_ids, kv_cache=kv_cache)
         logits = self.lm_head(h)
         # softcap: tanh(x / s) * s — bounds logits to ±s, helps long-tail tokens
         if self.final_logit_softcapping:

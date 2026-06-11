@@ -80,6 +80,31 @@ def _load_hf_state_dict_cached():
     return AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16).state_dict()
 
 
+def test_kv_cache_matches_no_cache():
+    """Incremental decode through KVCache must yield identical logits to a single full forward."""
+    from inference_server.models.gemma4 import GemmaForCausalLM, KVCache
+
+    fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
+    model = GemmaForCausalLM.from_hf(MODEL_NAME).eval()
+    ids = fixture["input_ids"]  # [1, 5]
+
+    with torch.no_grad():
+        # No-cache reference: feed all 5 tokens at once.
+        ref_logits = model(ids)
+
+        # Incremental: prefill first 3 tokens, decode the remaining 2 one at a time.
+        cache = KVCache(num_layers=model.model.num_layers)
+        _ = model(ids[:, :3], kv_cache=cache)
+        _ = model(ids[:, 3:4], kv_cache=cache)
+        last_logits = model(ids[:, 4:5], kv_cache=cache)
+
+    # Only the last-step logits are comparable (positions 4 in both).
+    assert torch.allclose(last_logits[:, -1, :], ref_logits[:, -1, :], atol=ATOL), (
+        f"cached vs uncached last-position logits diverge "
+        f"(max diff {(last_logits[:, -1, :] - ref_logits[:, -1, :]).abs().max().item()})"
+    )
+
+
 def test_full_model_matches_hf():
     """End-to-end parity: custom GemmaForCausalLM byte-identical to HF on the fixture prompt."""
     from inference_server.models.gemma4 import GemmaForCausalLM
