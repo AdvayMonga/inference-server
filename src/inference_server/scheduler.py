@@ -224,11 +224,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
         row = self._active.pop(idx)
         self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
         if self._batched_kv is not None:
+            # Always route through the backend so paged caches can free blocks (no-op GC
+            # for DynamicCache). Null afterward when the batch empties.
+            self._batched_kv = self.backend.remove_row_from_cache(self._batched_kv, idx)
             if len(self._active) == 0:
                 self._batched_kv = None
                 self._attention_mask = None
             else:
-                self._batched_kv = self.backend.remove_row_from_cache(self._batched_kv, idx)
                 self._attention_mask = torch.cat([
                     self._attention_mask[:idx],
                     self._attention_mask[idx + 1:],

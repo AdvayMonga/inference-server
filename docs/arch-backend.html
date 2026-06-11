@@ -234,14 +234,16 @@
   </g>
 </svg>
 
-<h2 id="custom">Custom-forward Torch backend (M1)</h2>
-<p class="lead"><code>backends/custom_torch_backend.py</code> + <code>models/gemma4.py</code>. Hand-written Gemma 4 forward pass — byte-identical to HF on the parity fixture.</p>
+<h2 id="custom">Custom-forward Torch backend (M1–M2.4)</h2>
+<p class="lead"><code>backends/custom_torch_backend.py</code> + <code>models/gemma4.py</code>. Hand-written Gemma 4 forward pass — byte-identical to HF on the parity fixture. Scheduler-driven with paged KV + cross-session prefix sharing.</p>
 
 <ul>
   <li>Loads HF weights into our own <code>GemmaForCausalLM</code> via <code>from_hf()</code>. No <code>transformers</code> model class on the hot path.</li>
   <li>Implements the full Gemma 4 architecture: dual-head-dim attention (sliding=256 / global=512), QK-norm + V-norm, GeGLU MLP (tanh approximation), dual RoPE (sliding base=10000 full-rot / full base=1e6 partial=0.25), per-layer embedding gating, KV sharing across the last 20 layers, final-logit softcapping at 30.</li>
   <li>Activated via <code>BACKEND=custom-{cuda,mps,cpu}</code>. Falls back to <code>TorchBackend</code> by default.</li>
-  <li>Continuous-batching primitives (<code>prefill_chunk</code>, <code>decode_step_batched</code>, KV cache plumbing) are NotImplemented — the scheduler restricts itself to the legacy <code>generate</code>/<code>stream</code> path. M2 adds these on top of a paged KV cache that lives inside our forward.</li>
+  <li><strong>M2.4 — scheduler primitives.</strong> Implements <code>prefill</code>, <code>prefill_lookup/chunk/store</code>, <code>decode_step_batched</code>, <code>splice_into_batched</code>, <code>remove_row_from_cache</code>, <code>kv_length</code>, so <code>ContinuousBatchScheduler</code> drives it end-to-end (admit → prefill → batched decode → evict) with paged KV and prefix sharing.</li>
+  <li><strong>In-flight KV format = <code>list[PagedKVCache]</code></strong>, one paged cache per active row (not HF <code>DynamicCache</code>). Decode is <em>row-by-row</em> — one forward per row, not GPU-batched. Because each row's paged cache holds only its real tokens, there is no left-padding and the scheduler's <code>attention_mask</code> is ignored. Real single-forward batched decode is a later step.</li>
+  <li>Caches internally via its own <code>PrefixCache</code> + paged pools, <em>not</em> the HF-format <code>CacheManager</code>: <code>set_cache_adapter</code> is a no-op, so the scheduler's KV-pressure gate + release are skipped for this backend (pool exhaustion surfaces as request rejection). Block release happens on row eviction via <code>remove_row_from_cache → PagedKVCache.free_all()</code>.</li>
 </ul>
 
 <h2 id="torch">HF-Transformers Torch backend (original)</h2>

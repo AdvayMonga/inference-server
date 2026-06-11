@@ -12,8 +12,8 @@ def create_backend(backend_name: str) -> InferenceBackend:
         from inference_server.backends.mlx_backend import MLXBackend
         return MLXBackend()
     elif backend_name.startswith("custom-"):
-        # custom-cuda / custom-mps / custom-cpu — uses our hand-written Gemma 4 forward.
-        # No KV cache, no batched decode yet (M2 adds those).
+        # custom-cuda / custom-mps / custom-cpu — uses our hand-written Gemma 4 forward
+        # with paged KV + prefix sharing, scheduler-driven (row-by-row decode).
         from inference_server.backends.custom_torch_backend import CustomTorchBackend
         device = backend_name.split("-", 1)[1]
         return CustomTorchBackend(device=device)
