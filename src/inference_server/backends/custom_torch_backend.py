@@ -57,10 +57,15 @@ class CustomTorchBackend(InferenceBackend):
         eos = self.tokenizer.eos_token_id
         self._eos_ids = {eos} if isinstance(eos, int) else set(eos)
 
-        # Pre-allocate paged block pools shared across sessions.
+        # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
+        # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
         n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
+        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
-        self.pools = make_pools_for_gemma(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
+        self.pools = make_pools_for_gemma(
+            self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
+        )
+        self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
         from inference_server.models.paged_kv_cache import PrefixCache
         self.prefix_cache = PrefixCache(pools=self.pools)
@@ -290,6 +295,40 @@ class CustomTorchBackend(InferenceBackend):
     def kv_length(self, kv):
         """Longest row's seq_len (used only for the scheduler's mask bookkeeping)."""
         return max((c.seq_len for c in kv), default=0)
+
+    # --- Window-aware per-pool KV admission ---
+
+    def _kv_footprints(self, prompt_len: int, max_tokens: int) -> list[int]:
+        """Worst-case blocks this request occupies in each pool. Sliding pools are capped at
+        the window (they evict out-of-window blocks); full pools grow with the sequence."""
+        tokens = prompt_len + max_tokens
+        fps = []
+        for pool in self.pools:
+            if pool is None:
+                fps.append(0)
+                continue
+            blocks = (tokens + pool.block_size - 1) // pool.block_size
+            if pool.window is not None:
+                window_blocks = pool.window // pool.block_size + 1  # +1 for window/block straddle
+                blocks = min(blocks, window_blocks)
+            fps.append(blocks)
+        return fps
+
+    def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
+        """Admit only if this request's per-pool footprint fits in EVERY pool's free blocks.
+        Commits the reservation on success. Single-threaded (scheduler worker) → no lock."""
+        fps = self._kv_footprints(prompt_len, max_tokens)
+        for i, pool in enumerate(self.pools):
+            if pool is not None and self._reserved[i] + fps[i] > pool.num_blocks:
+                return False
+        for i in range(len(self.pools)):
+            self._reserved[i] += fps[i]
+        return True
+
+    def kv_release(self, prompt_len: int, max_tokens: int) -> None:
+        fps = self._kv_footprints(prompt_len, max_tokens)
+        for i in range(len(self.pools)):
+            self._reserved[i] -= fps[i]
 
     def is_eos(self, token_id: int) -> bool:
         return token_id in self._eos_ids

@@ -223,6 +223,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _evict_row(self, idx: int) -> None:
         row = self._active.pop(idx)
         self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
+        self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
         if self._batched_kv is not None:
             # Always route through the backend so paged caches can free blocks (no-op GC
             # for DynamicCache). Null afterward when the batch empties.
@@ -283,6 +284,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
                         self._kv_admit_blocked += 1
                         return
 
+                # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
+                # this request's per-pool footprint doesn't fit every pool's free blocks.
+                if not self.backend.kv_reserve(len(peeked.token_ids), peeked.max_tokens):
+                    self._kv_admit_blocked += 1
+                    return
+
                 req = self.policy.pick_next()
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
@@ -303,6 +310,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             except Exception as e:
                 logger.exception("Prefill failed for session %s", req.session_id)
                 self._active_kv_reserved -= reservation
+                self.backend.kv_release(len(req.token_ids), req.max_tokens)
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
@@ -335,6 +343,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             logger.exception("prefill_chunk failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
             self._active_kv_reserved -= len(prow.request.token_ids) + prow.request.max_tokens
+            self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
             self.policy.on_request_finished(prow.request)
             self._reject(prow.request, e)
             return
@@ -451,9 +460,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _fail_all(self, exc: BaseException) -> None:
         for row in self._active:
+            self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
             self.policy.on_request_finished(row.request)
             self._reject(row.request, exc)
         for prow in self._prefilling:
+            self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
             self.policy.on_request_finished(prow.request)
             self._reject(prow.request, exc)
         self._active.clear()

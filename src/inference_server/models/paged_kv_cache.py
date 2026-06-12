@@ -303,22 +303,30 @@ class BatchedPagedKVCache:
         return bt, sl
 
 
-def make_pools_for_gemma(model, num_blocks_per_pool: int = 1024, block_size: int = 16) -> list[BlockPool | None]:
+def make_pools_for_gemma(
+    model, num_blocks_per_pool: int = 1024, block_size: int = 16,
+    sliding_blocks: int | None = None,
+) -> list[BlockPool | None]:
     """Build the BlockPool list matching a GemmaForCausalLM's heterogeneous layers.
 
-    Shared layers get None (they don't own K/V). Sliding/full layers get pools sized to
-    their respective head_dim. All sessions share these pools.
+    Shared layers get None (they don't own K/V). Full-attention pools are sized to
+    `num_blocks_per_pool` (they grow with sequence length). Sliding pools are capped at the
+    window, so they can be sized smaller via `sliding_blocks` — freeing GPU memory to enlarge
+    the full pools (the binding constraint for long-context concurrency). Default: same size.
     """
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
+    if sliding_blocks is None:
+        sliding_blocks = num_blocks_per_pool
     pools: list[BlockPool | None] = []
     for layer in model.model.layers:
         attn = layer.self_attn
         if attn.is_kv_shared:
             pools.append(None)
         else:
+            is_sliding = attn.sliding_window is not None
             pools.append(BlockPool(
-                num_blocks=num_blocks_per_pool,
+                num_blocks=sliding_blocks if is_sliding else num_blocks_per_pool,
                 block_size=block_size,
                 num_kv_heads=attn.num_kv_heads,
                 head_dim=attn.head_dim,

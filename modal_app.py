@@ -15,9 +15,12 @@ image = (
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
     .env({
-        "BACKEND": "custom-cuda",          # our hand-written Gemma 4 forward + paged KV + kernel
-        "CUSTOM_BACKEND_BLOCKS": "1536",    # ~24.5k KV token-slots/layer (~450MB on A10G)
-        "MAX_ACTIVE_KV_TOKENS": "22000",    # admission cap < pool capacity → queue, don't OOM mid-decode
+        "BACKEND": "custom-cuda",                 # hand-written Gemma 4 forward + paged KV + kernel
+        # Windowed KV storage lets sliding pools be smaller (capped at the 512 window) so the
+        # binding full pools can be larger at ~equal memory → more concurrent long-context reqs.
+        "CUSTOM_BACKEND_BLOCKS": "2048",          # full-attention pools (grow with sequence)
+        "CUSTOM_BACKEND_SLIDING_BLOCKS": "1200",  # sliding pools (capped at window → sized smaller)
+        "MAX_ACTIVE_KV_TOKENS": "48000",          # coarse token cap; per-pool window-aware gate is the real limit
     })
     .add_local_python_source("inference_server")
 )

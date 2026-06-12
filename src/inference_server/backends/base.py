@@ -137,6 +137,18 @@ class InferenceBackend(ABC):
         """True if `token_id` is an end-of-sequence token."""
         raise NotImplementedError(f"{type(self).__name__} does not support is_eos()")
 
+    # --- Per-pool KV admission (backends that bound admission by their own block pools) ---
+    # Default no-op: backends relying on the scheduler's token gate / cache-pool gate pass.
+
+    def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
+        """Reserve KV-block budget for a request about to be admitted. Returns True (and
+        commits the reservation) if it fits in every pool, else False (caller soft-holds)."""
+        return True
+
+    def kv_release(self, prompt_len: int, max_tokens: int) -> None:
+        """Release a reservation taken by kv_reserve (request finished / rejected / failed)."""
+        ...
+
     @property
     def device_str(self) -> str:
         """Device identifier for tensor creation by the scheduler."""
