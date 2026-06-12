@@ -276,6 +276,10 @@
   <strong>The rule:</strong> <code>_active_kv_reserved</code> is the sum of <code>(prompt_len + max_tokens)</code> across every row in <code>_active</code>. Admit adds. Finish, evict, and any future preemption all subtract. If anything forgets to subtract, the engine starts hard-rejecting requests it could actually serve.
 </div>
 
+<div class="callout warn">
+  <strong>Mask bookkeeping rule:</strong> <code>_splice_in</code> sizes the attention-mask <code>cat</code> off the mask's own width (<code>_attention_mask.shape[1]</code>), <em>not</em> <code>backend.kv_length()</code>. For the paged custom backend <code>kv_length = max(per-row len)</code> drops when the longest row is evicted while the mask width doesn't — deriving the mask size from it cat'd mismatched widths and killed the worker (the 2026-06-12 mixed-workload crash). Scheduler-owned tensor state must be self-consistent, not derived from a backend metric whose invariants differ per backend.
+</div>
+
 <p class="footnote">See also: <a href="arch-backend.html">Backend</a> for what <code>decode_step_batched</code> and <code>prefill_chunk</code> actually do · <a href="arch-cache.html">KV Cache</a> for how the cache-pool gate is computed.</p>
 
 </body>
