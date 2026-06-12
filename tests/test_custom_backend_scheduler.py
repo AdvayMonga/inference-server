@@ -98,6 +98,47 @@ async def test_eviction_frees_blocks_no_leak(backend):
     )
 
 
+def test_batched_decode_matches_row_by_row(backend):
+    """One batched forward over rows of different KV lengths must give byte-identical
+    next-tokens to decoding each row alone (the old row-by-row path)."""
+    from inference_server.models.paged_kv_cache import PagedKVCache
+
+    p1 = [2, 651, 6037, 576, 6081, 603, 8]   # 7 tokens
+    p2 = [2, 1841, 603, 573]                  # 4 tokens — different length on purpose
+
+    def setup(prompt):
+        c = PagedKVCache(pools=backend.pools)
+        logits = backend.model(torch.tensor([prompt], device=backend.device), kv_cache=c)
+        return c, int(logits[:, -1, :].argmax(-1).item())
+
+    with torch.no_grad():
+        # Reference: decode each row alone (mirrors the pre-M-batched row-by-row logic).
+        cB1, tB1 = setup(p1)
+        nb1 = int(backend.model(torch.tensor([[tB1]], device=backend.device),
+                                position_ids=torch.tensor([[cB1.seq_len]], device=backend.device),
+                                kv_cache=cB1)[:, -1, :].argmax(-1).item())
+        cB2, tB2 = setup(p2)
+        nb2 = int(backend.model(torch.tensor([[tB2]], device=backend.device),
+                                position_ids=torch.tensor([[cB2.seq_len]], device=backend.device),
+                                kv_cache=cB2)[:, -1, :].argmax(-1).item())
+        cB1.free_all(); cB2.free_all()
+
+        # Batched: both rows in one forward.
+        cA1, tA1 = setup(p1)
+        cA2, tA2 = setup(p2)
+        next_tokens, _ = backend.decode_step_batched(
+            current_tokens=torch.tensor([[tA1], [tA2]], device=backend.device),
+            batched_kv=[cA1, cA2],
+            attention_mask=None,
+            position_ids=torch.tensor([[cA1.seq_len], [cA2.seq_len]], device=backend.device),
+        )
+        cA1.free_all(); cA2.free_all()
+
+    assert (tA1, tA2) == (tB1, tB2)
+    assert int(next_tokens[0].item()) == nb1, "batched row 0 diverged from row-by-row"
+    assert int(next_tokens[1].item()) == nb2, "batched row 1 diverged from row-by-row"
+
+
 @pytest.mark.asyncio
 async def test_concurrent_shared_prefix_hits_and_frees(backend):
     """Two sessions sharing a prefix both complete; prefix cache records hits; no leak."""

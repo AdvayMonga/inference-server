@@ -233,14 +233,37 @@ class CustomTorchBackend(InferenceBackend):
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
                             position_ids, sampling_per_row=None):
-        """Row-by-row decode (one forward per row). attention_mask is ignored — each row's
-        paged cache holds only its real tokens, so no padding alignment is needed."""
-        next_tokens = []
-        for i, cache in enumerate(batched_kv):
-            logits = self.model(current_tokens[i:i + 1], position_ids=position_ids[i:i + 1], kv_cache=cache)
-            params = sampling_per_row[i] if sampling_per_row is not None else GREEDY
-            next_tokens.append(sample(logits[:, -1, :], params))  # [1]
-        return torch.cat(next_tokens, dim=0), batched_kv
+        """One batched forward over all rows. The scheduler's `attention_mask` is ignored —
+        we build our own bool mask from per-row KV lengths (rows have different lengths).
+
+        Each row's paged cache is LEFT-padded to Lmax on gather, so real tokens are
+        right-aligned; after the new token is concatenated the real span is
+        [Lmax - seq_len_i : ] in a length-(Lmax+1) key axis — identical for every layer."""
+        from inference_server.models.paged_kv_cache import BatchedPagedKVCache
+
+        rows = batched_kv
+        n = len(rows)
+        ctx = BatchedPagedKVCache(rows)
+
+        if self.device.type == "cuda":
+            # Triton paged-attention kernel: reads K/V via block tables, no gather/pad.
+            logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=ctx)
+        else:
+            # Portable fallback (CPU/MPS): left-pad gather + masked SDPA. Real tokens
+            # (+ the new one) are the last (seq_len_i + 1) key positions; rest is masked.
+            seq_lens = [r.seq_len for r in rows]
+            lmax = max(seq_lens)
+            mask = torch.zeros(n, 1, 1, lmax + 1, dtype=torch.bool, device=self.device)
+            for i, L in enumerate(seq_lens):
+                mask[i, 0, 0, lmax - L:] = True
+            logits = self.model(current_tokens, position_ids=position_ids, kv_cache=ctx, attn_mask=mask)
+
+        last = logits[:, -1, :]  # [N, V]
+        if sampling_per_row is None:
+            next_tokens = sample(last, GREEDY)
+        else:
+            next_tokens = torch.stack([sample(last[i], sampling_per_row[i]) for i in range(n)])
+        return next_tokens, rows
 
     def stack_caches_left_padded(self, per_row_caches, max_kv_len):
         """Row-by-row batched form is just the list of per-row caches (no padding)."""

@@ -149,6 +149,9 @@ class GemmaAttention(nn.Module):
         sin: torch.Tensor,
         shared_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attn_mask: torch.Tensor | None = None,
+        paged_ctx: object | None = None,
+        kv_layer_idx: int | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         B, S, _ = x.shape
         cos = cos.to(x.dtype)
@@ -157,6 +160,23 @@ class GemmaAttention(nn.Module):
         q = self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim)
         q = self.q_norm(q)
         q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)  # [B, Hq, S, D]
+
+        # CUDA kernel decode path: write new K/V into blocks, attend via block tables.
+        # No gather, no padding. Non-shared layers append; shared layers read the source
+        # layer's pool (already populated earlier this step). Returns (out, None).
+        if paged_ctx is not None:
+            from inference_server.models.paged_attention_kernel import paged_decode_attention
+            if not self.is_kv_shared:
+                k_new = self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
+                k_new = self.k_norm(k_new)
+                k_new = apply_rotary(k_new, cos, sin, unsqueeze_dim=2).transpose(1, 2)
+                v_new = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
+                v_new = self.v_norm(v_new).transpose(1, 2)
+                paged_ctx.append(kv_layer_idx, k_new, v_new)
+            pool = paged_ctx.rows[0].pools[kv_layer_idx]
+            bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
+            out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=1.0)  # [B, Hq, D]
+            return self.o_proj(out.reshape(B, S, -1)), None
 
         if self.is_kv_shared:
             assert shared_kv is not None, "KV-shared layer needs shared_kv"
@@ -181,10 +201,14 @@ class GemmaAttention(nn.Module):
         else:
             k_exp, v_exp = k, v
 
-        # is_causal works for square (prefill); for decode (Q shorter than K) it would mask wrong,
-        # so pass no mask — single new token Q correctly attends to all cached + new K.
-        is_causal = q.shape[2] == k_exp.shape[2]
-        attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=is_causal, scale=1.0)
+        # Batched decode (variable per-row KV lengths) passes an explicit attn_mask so each
+        # row attends only to its own real tokens. Otherwise: is_causal for square prefill;
+        # for single-row decode (Q shorter than K) no mask — the one new token attends to all.
+        if attn_mask is not None:
+            attn = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=attn_mask, scale=1.0)
+        else:
+            is_causal = q.shape[2] == k_exp.shape[2]
+            attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=is_causal, scale=1.0)
         attn = attn.transpose(1, 2).reshape(B, S, -1).contiguous()
         out = self.o_proj(attn)
         # Return ONLY the newly-computed K/V for this layer. The model owns the cache and
@@ -280,11 +304,15 @@ class GemmaDecoderLayer(nn.Module):
         sin: torch.Tensor,
         shared_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
         past_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        attn_mask: torch.Tensor | None = None,
+        paged_ctx: object | None = None,
+        kv_layer_idx: int | None = None,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Attention block
         residual = h
         a = self.input_layernorm(h)
-        a, kv_out = self.self_attn(a, cos, sin, shared_kv=shared_kv, past_kv=past_kv)
+        a, kv_out = self.self_attn(a, cos, sin, shared_kv=shared_kv, past_kv=past_kv,
+                                   attn_mask=attn_mask, paged_ctx=paged_ctx, kv_layer_idx=kv_layer_idx)
         a = self.post_attention_layernorm(a)
         h = residual + a
 
@@ -454,6 +482,8 @@ class GemmaModel(nn.Module):
         self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
         return_hidden_states: bool = False,
         kv_cache: KVCache | None = None,
+        attn_mask: torch.Tensor | None = None,
+        paged_ctx: object | None = None,
     ):
         h = self.embed_tokens(input_ids)
         cached_len = kv_cache.seq_len if kv_cache is not None else 0
@@ -476,9 +506,17 @@ class GemmaModel(nn.Module):
             if return_hidden_states:
                 all_hidden.append(h)  # HF records input-to-layer-i, then post-norm at the end
             cos, sin = cos_sin[self.layer_types[i]]
+
+            if paged_ctx is not None:
+                # Kernel decode path: shared layers read the source layer's pool directly.
+                kv_idx = self.share_source[i] if i in self.share_source else i
+                h, _ = layer(h, per_layer[:, :, i, :], cos, sin,
+                             paged_ctx=paged_ctx, kv_layer_idx=kv_idx)
+                continue
+
             sk = shared_kv.get(self.share_source[i]) if i in self.share_source else None
             past = kv_cache.get(i) if kv_cache is not None else None
-            h, kv_new = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk, past_kv=past)
+            h, kv_new = layer(h, per_layer[:, :, i, :], cos, sin, shared_kv=sk, past_kv=past, attn_mask=attn_mask)
             if kv_new is not None:
                 if kv_cache is not None:
                     kv_cache.append(i, kv_new[0], kv_new[1])
@@ -526,11 +564,13 @@ class GemmaForCausalLM(nn.Module):
         self, input_ids: torch.Tensor, position_ids: torch.Tensor | None = None,
         return_hidden_states: bool = False,
         kv_cache: KVCache | None = None,
+        attn_mask: torch.Tensor | None = None,
+        paged_ctx: object | None = None,
     ):
         if return_hidden_states:
             h, all_h = self.model(input_ids, position_ids, return_hidden_states=True, kv_cache=kv_cache)
         else:
-            h = self.model(input_ids, position_ids, kv_cache=kv_cache)
+            h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
         logits = self.lm_head(h)
         # softcap: tanh(x / s) * s — bounds logits to ±s, helps long-tail tokens
         if self.final_logit_softcapping:
