@@ -118,7 +118,10 @@ class CustomTorchBackend(InferenceBackend):
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
                 # Store the prompt's full blocks for future sharing (before releasing our refs).
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                # Skip if a sliding layer evicted (prompt > window) — we only cache prefixes
+                # that fit fully in the window (no partial/offset blocks to share).
+                if not cache.any_evicted:
+                    self.prefix_cache.store(token_ids, cache.block_tables)
                 return visible
             finally:
                 cache.free_all()
@@ -163,7 +166,8 @@ class CustomTorchBackend(InferenceBackend):
                     step = torch.tensor([[tok]], device=self.device)
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                if not cache.any_evicted:   # only cache prefixes that fit fully in the window
+                    self.prefix_cache.store(token_ids, cache.block_tables)
             finally:
                 cache.free_all()
 
@@ -204,7 +208,8 @@ class CustomTorchBackend(InferenceBackend):
         suffix = token_ids[matched:]
         logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache)
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
-        self.prefix_cache.store(token_ids, cache.block_tables)
+        if not cache.any_evicted:   # only cache prefixes that fit fully in the window
+            self.prefix_cache.store(token_ids, cache.block_tables)
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
@@ -228,7 +233,8 @@ class CustomTorchBackend(InferenceBackend):
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
-        self.prefix_cache.store(token_ids, full_kv.block_tables)
+        if not full_kv.any_evicted:   # only cache prefixes that fit fully in the window
+            self.prefix_cache.store(token_ids, full_kv.block_tables)
 
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,

@@ -29,12 +29,13 @@ class BlockPool:
 
     def __init__(
         self, num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int,
-        dtype: torch.dtype, device: torch.device,
+        dtype: torch.dtype, device: torch.device, window: int | None = None,
     ):
         self.num_blocks = num_blocks
         self.block_size = block_size
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
+        self.window = window  # sliding-window size for this layer; None = full attention (never evicts)
         self.k = torch.zeros(num_blocks, num_kv_heads, block_size, head_dim, dtype=dtype, device=device)
         self.v = torch.zeros_like(self.k)
         self._refcounts: list[int] = [0] * num_blocks
@@ -133,10 +134,34 @@ class PagedKVCache:
         self.num_layers = len(pools)
         self.block_tables: list[list[int]] = [[] for _ in range(self.num_layers)]
         self.seq_lens: list[int] = [0] * self.num_layers
+        # Per-layer count of evicted (freed, out-of-window) leading blocks. Those slots in
+        # block_tables hold -1; the decode kernel's start_b skips them so they're never read.
+        self.evicted: list[int] = [0] * self.num_layers
         if shared_prefix:
             for layer_idx, bids in shared_prefix.items():
                 self.block_tables[layer_idx] = list(bids)
                 self.seq_lens[layer_idx] = shared_prefix_tokens
+
+    @property
+    def any_evicted(self) -> bool:
+        """True if any sliding layer has freed an out-of-window block (prompt/context > window).
+        Used to skip prefix-cache storage — we only cache prefixes that fit fully in the window."""
+        return any(e > 0 for e in self.evicted)
+
+    def _evict(self, layer_idx: int) -> None:
+        """Free blocks that have fully fallen out of this layer's sliding window."""
+        pool = self.pools[layer_idx]
+        if pool is None or pool.window is None:
+            return
+        bs = pool.block_size
+        keep_from = max(0, self.seq_lens[layer_idx] - pool.window) // bs  # first in-window logical block
+        bt = self.block_tables[layer_idx]
+        for i in range(self.evicted[layer_idx], keep_from):
+            if bt[i] >= 0:
+                pool.release(bt[i])
+                bt[i] = -1
+        if keep_from > self.evicted[layer_idx]:
+            self.evicted[layer_idx] = keep_from
 
     @property
     def seq_len(self) -> int:
@@ -153,8 +178,9 @@ class PagedKVCache:
             return None
         pool = self.pools[layer_idx]
         bt = self.block_tables[layer_idx]
-        # Gather all blocks → [N_blocks, H, block_size, D]
-        idx = torch.tensor(bt, device=pool.k.device, dtype=torch.long)
+        # Gather all blocks → [N_blocks, H, block_size, D]. Evicted slots (-1) map to block 0;
+        # their positions are out-of-window and get masked out by the caller's window mask.
+        idx = torch.tensor([b if b >= 0 else 0 for b in bt], device=pool.k.device, dtype=torch.long)
         k_gathered = pool.k.index_select(0, idx)
         v_gathered = pool.v.index_select(0, idx)
         # Flatten block dim into S → [H, N_blocks * block_size, D]
@@ -189,6 +215,7 @@ class PagedKVCache:
             pool.v[bid, :, slot, :] = v_per_tok[t]
 
         self.seq_lens[layer_idx] = seq_len + S_new
+        self._evict(layer_idx)  # free blocks now fully out of the sliding window
 
     def free_all(self) -> None:
         """Release this session's references; blocks return to pool when refcount hits 0."""
@@ -197,9 +224,11 @@ class PagedKVCache:
             if pool is None:
                 continue
             for bid in self.block_tables[layer_idx]:
-                pool.release(bid)
+                if bid >= 0:  # evicted slots (-1) were already released
+                    pool.release(bid)
             self.block_tables[layer_idx] = []
             self.seq_lens[layer_idx] = 0
+            self.evicted[layer_idx] = 0
 
 
 class BatchedPagedKVCache:
@@ -254,6 +283,8 @@ class BatchedPagedKVCache:
         sidx = torch.tensor(slots, dtype=torch.long, device=dev)
         pool.k[bidx, :, sidx, :] = k_new[:, :, 0, :]   # [N,H,D] — rows own distinct (block,slot)
         pool.v[bidx, :, sidx, :] = v_new[:, :, 0, :]
+        for row in self.rows:                          # free blocks now out of the sliding window
+            row._evict(layer_idx)
 
     def pools_for(self, layer_idx: int):
         return self.rows[0].pools[layer_idx]
@@ -265,7 +296,8 @@ class BatchedPagedKVCache:
         bts = [r.block_tables[layer_idx] for r in self.rows]
         seq_lens = [r.seq_lens[layer_idx] for r in self.rows]
         max_blocks = max((len(b) for b in bts), default=1) or 1
-        padded = [b + [0] * (max_blocks - len(b)) for b in bts]
+        # Evicted slots (-1) map to 0 — the kernel's start_b skips them, so they're never read.
+        padded = [[(x if x >= 0 else 0) for x in b] + [0] * (max_blocks - len(b)) for b in bts]
         bt = torch.tensor(padded, dtype=torch.int32, device=device)
         sl = torch.tensor(seq_lens, dtype=torch.int32, device=device)
         return bt, sl
@@ -292,5 +324,6 @@ def make_pools_for_gemma(model, num_blocks_per_pool: int = 1024, block_size: int
                 head_dim=attn.head_dim,
                 dtype=dtype,
                 device=device,
+                window=attn.sliding_window,  # sliding layers evict out-of-window blocks; full layers don't
             ))
     return pools
