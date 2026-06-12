@@ -27,6 +27,32 @@ from inference_server.sampling import GREEDY, SamplingParams, sample
 logger = logging.getLogger(__name__)
 
 
+class _GraphCtx:
+    """paged_ctx backed by FIXED static buffers, for CUDA-graph capture. Always processes
+    `maxN` rows (inactive rows are dummies pointing at a scratch block). Same append /
+    block_table_tensor interface the model uses, but reading the static buffers — so the
+    captured graph reads/writes fixed addresses and a replay just needs fresh values copied in.
+    """
+
+    def __init__(self, pools, seq_lens, block_tables, bs):
+        self.pools = pools
+        self.seq_lens = seq_lens          # static [maxN] long
+        self.block_tables = block_tables  # static per-layer [maxN, MAX_COLS] long
+        self.bs = bs
+
+    def append(self, layer_idx, k_new, v_new):
+        pool = self.pools[layer_idx]
+        rows = torch.arange(self.seq_lens.shape[0], device=self.seq_lens.device)
+        lb = self.seq_lens // self.bs
+        slot = self.seq_lens % self.bs
+        bid = self.block_tables[layer_idx][rows, lb]
+        pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
+        pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+
+    def block_table_tensor(self, layer_idx):
+        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), (self.seq_lens + 1).to(torch.int32)
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom GemmaForCausalLM forward."""
 
@@ -69,6 +95,15 @@ class CustomTorchBackend(InferenceBackend):
 
         from inference_server.models.paged_kv_cache import PrefixCache
         self.prefix_cache = PrefixCache(pools=self.pools)
+
+        # CUDA-graph decode: capture one graph at max_batch and replay (pad smaller batches).
+        # We're dispatch-bound (~1000 tiny launches/step), so one graph beats per-bucket capture.
+        from inference_server.config import settings
+        self._block_size = bsz
+        self._graph_max_rows = settings.max_batch_size
+        self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
+        self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
+        self._graph = None  # captured lazily on first decode
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
@@ -254,7 +289,12 @@ class CustomTorchBackend(InferenceBackend):
             state = batched_kv
             n = state.n_rows
             state.prepare_step()  # alloc any boundary-crossing block (once per step)
-            logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
+            if self._graph_on:
+                if self._graph is None:
+                    self._capture_graph()
+                logits = self._replay_decode(current_tokens, position_ids, state)
+            else:
+                logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
             state.advance()       # bump seq_lens + evict out-of-window blocks
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
@@ -274,6 +314,60 @@ class CustomTorchBackend(InferenceBackend):
         else:
             next_tokens = torch.stack([sample(last[i], sampling_per_row[i]) for i in range(n)])
         return next_tokens, batched_kv
+
+    # --- CUDA-graph decode capture/replay (single max-batch graph; see DECISIONS) ---
+
+    def _capture_graph(self) -> None:
+        """Capture the decode forward once over fixed static buffers (maxN rows). Warmup runs
+        eagerly (stabilizes allocator + JITs the Triton kernel) before capture. On any failure
+        we fall back to eager decode."""
+        maxN, cols, dev = self._graph_max_rows, self._graph_max_cols, self.device
+        self._g_tokens = torch.zeros(maxN, 1, dtype=torch.long, device=dev)
+        self._g_pos = torch.zeros(maxN, 1, dtype=torch.long, device=dev)
+        self._g_seqlens = torch.ones(maxN, dtype=torch.long, device=dev)
+        self._g_bt = [None] * len(self.pools)
+        self._scratch = [None] * len(self.pools)
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
+            self._g_bt[L] = torch.full((maxN, cols), self._scratch[L], dtype=torch.long, device=dev)
+        ctx = _GraphCtx(self.pools, self._g_seqlens, self._g_bt, self._block_size)
+        try:
+            s = torch.cuda.Stream()
+            s.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(s):
+                for _ in range(3):  # warmup (compile kernels, stabilize allocator)
+                    self.model(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+            torch.cuda.current_stream().wait_stream(s)
+            self._graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(self._graph):
+                self._g_out = self.model(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+            logger.info("Captured CUDA decode graph (max_rows=%d, max_cols=%d)", maxN, cols)
+        except Exception:
+            logger.exception("CUDA graph capture failed — falling back to eager decode")
+            self._graph_on = False
+            self._graph = None
+
+    def _replay_decode(self, current_tokens, position_ids, state):
+        """Copy this step's inputs into the static buffers (real rows + scratch dummies), replay
+        the captured graph, return logits[:n_rows]. The graph reads the static buffers, so its
+        scatter/kernel run on the fresh values — no per-op dispatch."""
+        n = state.n_rows
+        self._g_tokens[:n].copy_(current_tokens)
+        self._g_pos[:n].copy_(position_ids)
+        self._g_seqlens[:n].copy_(state.seq_lens)
+        self._g_seqlens[n:] = 1
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            self._g_bt[L].fill_(self._scratch[L])           # reset dummies + stale columns to scratch
+            bt = state.block_tables[L]
+            self._g_bt[L][:n, :bt.shape[1]].copy_(bt.clamp_min(0))
+        if self._graph is None:  # capture fell back to eager
+            return self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
+        self._graph.replay()
+        return self._g_out[:n]
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
         """Add a newly-prefilled row. CUDA: ingest into the persistent BatchedDecodeState.

@@ -323,8 +323,11 @@ class BatchedDecodeState:
         self.seq_lens = torch.zeros(0, dtype=torch.long, device=device)   # [R] logical len (pre-step)
         self.n_alloc = torch.zeros(0, dtype=torch.long, device=device)    # [R] logical blocks alloc'd
         self.block_tables: list[torch.Tensor | None] = [None] * len(pools)  # per layer [R, cols] (-1 = evicted)
-        # per non-shared layer: per-row count of evicted leading blocks (cold path).
-        self._evicted: list[list[int]] = [[] for _ in pools]
+        # Sliding layers all share one window + seq_lens, so they evict in lockstep → one
+        # shared evicted-count tensor [R] (not per-layer), enabling a sync-free fast path.
+        self._sliding = [L for L, p in enumerate(pools) if p is not None and p.window is not None]
+        self._window = next((p.window for p in pools if p is not None and p.window is not None), None)
+        self.evicted = torch.zeros(0, dtype=torch.long, device=device)    # [R] evicted leading blocks
 
     @property
     def n_rows(self) -> int:
@@ -354,7 +357,8 @@ class BatchedDecodeState:
                 cur = self._grow_cols(cur, cols)
                 row = torch.cat([row, torch.zeros(cols - row.shape[0], dtype=torch.long, device=self.device)])
                 self.block_tables[L] = torch.cat([cur, row.unsqueeze(0)], dim=0)
-            self._evicted[L].append(pkv.evicted[L])
+        ev0 = pkv.evicted[self._sliding[0]] if self._sliding else 0  # sliding layers share the count
+        self.evicted = torch.cat([self.evicted, torch.tensor([ev0], device=self.device)])
 
     def remove_row(self, idx: int) -> None:
         """Free row `idx`'s blocks and drop it from the batch."""
@@ -369,9 +373,9 @@ class BatchedDecodeState:
                 if bid >= 0:  # -1 = already-evicted (freed); padding never reaches here (< n_alloc)
                     pool.release(bid)
             self.block_tables[L] = self.block_tables[L][keep_t] if keep else None
-            del self._evicted[L][idx]
         self.seq_lens = self.seq_lens[keep_t]
         self.n_alloc = self.n_alloc[keep_t]
+        self.evicted = self.evicted[keep_t]
 
     def prepare_step(self) -> None:
         """Alloc a block for every boundary-crossing row in every layer (once per step)."""
@@ -409,21 +413,24 @@ class BatchedDecodeState:
         return bt, (self.seq_lens + 1).to(torch.int32)
 
     def advance(self) -> None:
-        """Bump seq_lens by the new token, then evict out-of-window blocks (sliding layers)."""
+        """Bump seq_lens by the new token, then evict out-of-window blocks. Sync-free fast path:
+        one `.any()` to check if any row crossed the window; the per-row Python (with its
+        GPU→CPU `.item()` syncs) runs only when a block is actually evicted (~1 per 16 steps)."""
         self.seq_lens = self.seq_lens + 1
-        for L, pool in enumerate(self.pools):
-            if pool is None or pool.window is None:
-                continue
-            keep_from = ((self.seq_lens - pool.window).clamp_min(0)) // self.bs   # [R]
-            for r in range(self.n_rows):
-                kf = int(keep_from[r].item())
-                for i in range(self._evicted[L][r], kf):
+        if self._window is None or self.n_rows == 0:
+            return
+        keep_from = ((self.seq_lens - self._window).clamp_min(0)) // self.bs   # [R], same for all sliding layers
+        need = keep_from > self.evicted
+        if not bool(need.any()):   # one sync; usually nothing to evict
+            return
+        for r in need.nonzero().flatten().tolist():
+            for i in range(int(self.evicted[r].item()), int(keep_from[r].item())):
+                for L in self._sliding:
                     bid = int(self.block_tables[L][r, i].item())
                     if bid >= 0:
-                        pool.release(bid)
+                        self.pools[L].release(bid)
                         self.block_tables[L][r, i] = -1
-                if kf > self._evicted[L][r]:
-                    self._evicted[L][r] = kf
+            self.evicted[r] = keep_from[r]
 
 
 def make_pools_for_gemma(

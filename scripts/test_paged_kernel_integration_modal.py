@@ -39,24 +39,12 @@ def run():
     backend.load_model(MODEL)
     model, dev = backend.model, backend.device
 
-    def reference():
-        """Per-row decode through the single-cache model path (validated)."""
-        gen = []
-        for p in PROMPTS:
-            c = PagedKVCache(pools=backend.pools)
-            tok = int(model(torch.tensor([p], device=dev), kv_cache=c)[:, -1, :].argmax(-1))
-            seq = [tok]
-            for _ in range(STEPS - 1):
-                logits = model(torch.tensor([[tok]], device=dev),
-                               position_ids=torch.tensor([[c.seq_len]], device=dev), kv_cache=c)
-                tok = int(logits[:, -1, :].argmax(-1))
-                seq.append(tok)
-            c.free_all()
-            gen.append(seq)
-        return gen
-
-    def batched_via_state():
-        """Real backend path: prefill → splice into BatchedDecodeState → decode_step_batched."""
+    def decode_via_state(use_graph):
+        """Batched state + kernel decode. use_graph toggles CUDA-graph replay vs eager — same
+        kernels either way, so outputs must match exactly (isolates the graph from the
+        kernel-vs-SDPA near-tie noise that confounds a per-row SDPA reference)."""
+        backend._graph_on = use_graph
+        backend._graph = None
         state, cur = None, []
         for p in PROMPTS:
             c = PagedKVCache(pools=backend.pools)
@@ -75,13 +63,13 @@ def run():
             backend.remove_row_from_cache(state, i)
         return gen
 
-    ref = reference()
-    got = batched_via_state()
+    ref = decode_via_state(use_graph=False)  # eager kernel
+    got = decode_via_state(use_graph=True)   # CUDA-graph replay
     ok = ref == got
     for i, (r, g) in enumerate(zip(ref, got)):
-        print(f"row {i}: ref={r}")
-        print(f"row {i}: got={g}  {'OK' if r == g else 'DIFF'}")
-    print("STATE INTEGRATION", "OK" if ok else "FAIL")
+        print(f"row {i}: eager ={r}")
+        print(f"row {i}: graph ={g}  {'OK' if r == g else 'DIFF'}")
+    print("GRAPH vs EAGER", "OK" if ok else "FAIL")
     return ok
 
 
