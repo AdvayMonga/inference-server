@@ -18,8 +18,9 @@ image = (
 app = modal.App("paged-kernel-test", image=image)
 
 
-def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale):
-    """Pure-torch paged attention: gather each seq's real K/V, full softmax."""
+def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale, window=1 << 30):
+    """Pure-torch paged attention: gather each seq's real K/V, softmax over the last
+    `window` keys (window >= L → full attention)."""
     import torch
 
     N, Hq, D = q.shape
@@ -29,18 +30,19 @@ def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale):
     out = torch.empty(N, Hq, D, dtype=torch.float32, device=q.device)
     for i in range(N):
         L = int(seq_lens[i].item())
+        lo = max(0, L - window)                      # window lower bound (key pos >= lo)
         nb = (L + bs - 1) // bs
         ks, vs = [], []
         for b in range(nb):
             blk = int(block_tables[i, b].item())
             ks.append(k_pool[blk])  # [num_kv_heads, bs, D]
             vs.append(v_pool[blk])
-        K = torch.cat(ks, dim=1)[:, :L, :].float()  # [num_kv_heads, L, D]
-        V = torch.cat(vs, dim=1)[:, :L, :].float()
-        K = K.repeat_interleave(group, dim=0)        # [Hq, L, D]
+        K = torch.cat(ks, dim=1)[:, lo:L, :].float()  # [num_kv_heads, win, D]
+        V = torch.cat(vs, dim=1)[:, lo:L, :].float()
+        K = K.repeat_interleave(group, dim=0)        # [Hq, win, D]
         V = V.repeat_interleave(group, dim=0)
         qi = q[i].float()                            # [Hq, D]
-        scores = (qi[:, None, :] * K).sum(-1) * scale  # [Hq, L]
+        scores = (qi[:, None, :] * K).sum(-1) * scale  # [Hq, win]
         attn = torch.softmax(scores, dim=-1)
         out[i] = (attn[:, :, None] * V).sum(dim=1)   # [Hq, D]
     return out
@@ -74,6 +76,25 @@ def run():
 
     ok = all(diff < 5e-2 for *_, diff in results)
     print("PARITY", "OK" if ok else "FAIL", results)
+
+    # Sliding-window probe: window < seq_len must match a windowed reference (last W keys).
+    win_results = []
+    for D in [256, 512]:
+        N, num_blocks, bs, W = 4, 256, 16, 50
+        seq_lens = torch.tensor([10, 50, 80, 200], dtype=torch.int32, device="cuda")  # mix < and > W
+        max_blocks = (int(seq_lens.max()) + bs - 1) // bs
+        k_pool = torch.randn(num_blocks, 1, bs, D, dtype=torch.bfloat16, device="cuda")
+        v_pool = torch.randn_like(k_pool)
+        bt = torch.arange(N * max_blocks, dtype=torch.int32, device="cuda").reshape(N, max_blocks) % num_blocks
+        q = torch.randn(N, 8, D, dtype=torch.bfloat16, device="cuda")
+        got = paged_decode_attention(q, k_pool, v_pool, bt, seq_lens, scale=1.0, window=W)
+        ref = _reference(q, k_pool, v_pool, bt, seq_lens, scale=1.0, window=W).to(got.dtype)
+        diff = (got.float() - ref.float()).abs().max().item()
+        win_results.append((D, W, diff))
+        print(f"window D={D} W={W}  max|diff|={diff:.4e}")
+    window_ok = all(diff < 5e-2 for *_, diff in win_results)
+    print("WINDOW", "OK" if window_ok else "FAIL", win_results)
+    ok = ok and window_ok
 
     # Recompilation probe: vary block-count widely. With the runtime loop bound, only the
     # first call per head_dim compiles; the rest must be fast (a constexpr bound would

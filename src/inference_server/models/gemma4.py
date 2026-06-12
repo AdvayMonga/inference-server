@@ -175,7 +175,8 @@ class GemmaAttention(nn.Module):
                 paged_ctx.append(kv_layer_idx, k_new, v_new)
             pool = paged_ctx.rows[0].pools[kv_layer_idx]
             bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
-            out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=1.0)  # [B, Hq, D]
+            window = self.sliding_window if self.sliding_window is not None else (1 << 30)
+            out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=1.0, window=window)
             return self.o_proj(out.reshape(B, S, -1)), None
 
         if self.is_kv_shared:
@@ -201,13 +202,32 @@ class GemmaAttention(nn.Module):
         else:
             k_exp, v_exp = k, v
 
-        # Batched decode (variable per-row KV lengths) passes an explicit attn_mask so each
-        # row attends only to its own real tokens. Otherwise: is_causal for square prefill;
-        # for single-row decode (Q shorter than K) no mask — the one new token attends to all.
+        # Causal + sliding-window masking. Sliding layers attend only to the last
+        # `sliding_window` keys; full layers attend to all causal keys. RoPE is baked into the
+        # stored K, so masking purely by position is correct.
+        S_q, S_k = q.shape[2], k_exp.shape[2]
+        W = self.sliding_window
         if attn_mask is not None:
+            # Batched decode: external mask encodes per-row validity (real tokens right-aligned).
+            # Sliding window = keep only the rightmost W columns (the W most-recent keys), same
+            # cutoff for every row.
+            if W is not None and S_k > W:
+                keep = torch.arange(S_k, device=q.device) >= (S_k - W)
+                attn_mask = attn_mask & keep[None, None, None, :]
             attn = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=attn_mask, scale=1.0)
+        elif (W is not None and S_k > W) or (S_k > S_q and S_q > 1):
+            # Window active, OR a cached multi-token suffix (is_causal can't express the cache
+            # offset). Build an explicit [S_q, S_k] mask by absolute position.
+            qpos = torch.arange(S_q, device=q.device) + (S_k - S_q)
+            kpos = torch.arange(S_k, device=q.device)
+            allowed = kpos[None, :] <= qpos[:, None]                 # causal
+            if W is not None:
+                allowed = allowed & ((qpos[:, None] - kpos[None, :]) < W)
+            attn = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=allowed, scale=1.0)
         else:
-            is_causal = q.shape[2] == k_exp.shape[2]
+            # Short/cold square prefill or single-row decode within the window — exact prior
+            # path (byte-identical to the parity fixture).
+            is_causal = S_q == S_k
             attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=is_causal, scale=1.0)
         attn = attn.transpose(1, 2).reshape(B, S, -1).contiguous()
         out = self.o_proj(attn)

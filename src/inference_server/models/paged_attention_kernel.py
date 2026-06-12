@@ -26,7 +26,7 @@ def _paged_decode_kernel(
     sk_b, sk_h, sk_s,      # pool strides: [num_blocks, num_kv_heads, block_size, D]
     so_n, so_h,            # Out strides
     bt_n,                  # block_tables row stride: [N, max_blocks]
-    scale,
+    scale, window,         # sliding window (W most-recent keys); huge sentinel = full attention
     GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr,
 ):
     seq = tl.program_id(0)
@@ -39,17 +39,19 @@ def _paged_decode_kernel(
     q = tl.load(Q + seq * sq_n + qh * sq_h + d).to(tl.float32)  # [D]
     L = tl.load(SL + seq)
     n_blocks = (L + BLOCK_SIZE - 1) // BLOCK_SIZE
+    lo = L - window                                             # keys at pos < lo are outside the window
+    start_b = tl.maximum(lo, 0) // BLOCK_SIZE                   # skip fully-out blocks (perf)
 
     m = -float("inf")
     l = 0.0
     acc = tl.zeros([D], dtype=tl.float32)
 
-    # Runtime (per-sequence) loop bound — NOT a constexpr. A constexpr here would recompile
+    # Runtime (per-sequence) loop bounds — NOT constexpr. A constexpr here would recompile
     # the kernel for every distinct block-count, thrashing under varied/growing seq lengths.
-    for b in range(0, n_blocks):
+    for b in range(start_b, n_blocks):
         blk = tl.load(BT + seq * bt_n + b)
         offs = b * BLOCK_SIZE + slots
-        valid = offs < L                                        # [BLOCK_SIZE]
+        valid = (offs < L) & (offs >= lo)                       # causal upper + window lower
 
         kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
         k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)  # [BLOCK_SIZE, D]
@@ -77,6 +79,7 @@ def paged_decode_attention(
     block_tables: torch.Tensor,  # [N, MAX_BLOCKS] int32 — physical block id per logical block
     seq_lens: torch.Tensor,      # [N] int32 — real KV length per sequence
     scale: float = 1.0,
+    window: int = 1 << 30,       # sliding window (W most-recent keys); default = full attention
 ) -> torch.Tensor:
     """Decode attention reading K/V via block tables. Returns [N, Hq, D] (q's dtype)."""
     N, Hq, D = q.shape
@@ -89,7 +92,7 @@ def paged_decode_attention(
         k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
         out.stride(0), out.stride(1),
         block_tables.stride(0),
-        scale,
+        scale, window,
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
