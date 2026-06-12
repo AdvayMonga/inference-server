@@ -1,12 +1,12 @@
 # Inference Server
 
-A production-grade, multi-user **LLM inference engine built from scratch in Python**, competing with [vLLM](https://github.com/vllm-project/vllm) at the engine layer — continuous batching, paged KV cache with cross-session prefix sharing, fair scheduling, and backpressure under memory pressure.
+A production-grade, multi-user **LLM inference engine built from scratch in Python**
 
-Built on Gemma 4 (E2B → E4B) with a custom forward pass that is byte-identical to HuggingFace Transformers.
+Built on Gemma 4 (E2B, E4B) with a custom forward pass byte-identical HF transformers.
 
 ## Live architecture map
 
-The full interactive architecture — click any block to drill into the scheduler, backend, KV cache, or HTTP layer:
+The full interactive architecture — click any block to see into the scheduler, backend, KV cache, or HTTP layer:
 
 [![Architecture overview](docs/architecture.svg)](https://advaymonga.github.io/inference-server/architecture.html)
 
@@ -42,7 +42,7 @@ Download and configure the model via HuggingFace, then set `MODEL_NAME` in `.env
 All settings are env vars in `.env` — see `.env.example` for the full list. Key knobs:
 
 - `DEVICE` — `cuda` / `mps` / `cpu` (auto-detected if unset)
-- `BACKEND` — `torch-*` (HF) or `custom-*` (custom Gemma forward)
+- `BACKEND` — `torch-*` (HF) or `custom-*` (custom model forward pass)
 - `MAX_BATCH_SIZE`, `MAX_ACTIVE_KV_TOKENS` — concurrency + KV budget
 - `SCHEDULING_POLICY` — `fcfs` / `vtc`
 - `EVICTION_POLICY` — `lru` / `sink` / `h2o`
@@ -54,10 +54,3 @@ uvicorn inference_server.server:app --host 0.0.0.0 --port 8000
 ```
 
 Open `http://localhost:8000` for the dashboard, live metrics, and built-in load simulator.
-
-## Documentation
-
-- **[Live architecture map](https://advaymonga.github.io/inference-server/architecture.html)** — interactive, click-to-drill-down
-- [`docs/architecture.html`](docs/architecture.html) — same map, runs locally
-- [`HANDOFF.md`](HANDOFF.md) — current state for a fresh session
-- [`DECISIONS.md`](DECISIONS.md) — mid-flight tradeoffs and deferrals
