@@ -235,20 +235,38 @@ class BatchedPagedKVCache:
         return torch.cat(ks, dim=0), torch.cat(vs, dim=0)  # [N, H, Lmax, D]
 
     def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
-        # k_new, v_new: [N, H, 1, D] — scatter row r's new token into its own blocks.
-        for r, row in enumerate(self.rows):
-            row.append(layer_idx, k_new[r:r + 1], v_new[r:r + 1])
+        """Decode scatter: write each row's single new token (k_new,v_new [N,H,1,D]) into its
+        own block. ONE vectorized indexed write for the whole batch (vs a per-row loop +
+        per-row launches). Block-boundary allocation stays in Python — rare, no tensor writes."""
+        pool = self.pools_for(layer_idx)
+        bs = pool.block_size
+        block_ids, slots = [], []
+        for row in self.rows:
+            L = row.seq_lens[layer_idx]
+            bt = row.block_tables[layer_idx]
+            if L // bs >= len(bt):          # crossed into a new block this step
+                bt.append(pool.alloc())
+            block_ids.append(bt[L // bs])
+            slots.append(L % bs)
+            row.seq_lens[layer_idx] = L + 1
+        dev = pool.k.device
+        bidx = torch.tensor(block_ids, dtype=torch.long, device=dev)
+        sidx = torch.tensor(slots, dtype=torch.long, device=dev)
+        pool.k[bidx, :, sidx, :] = k_new[:, :, 0, :]   # [N,H,D] — rows own distinct (block,slot)
+        pool.v[bidx, :, sidx, :] = v_new[:, :, 0, :]
+
+    def pools_for(self, layer_idx: int):
+        return self.rows[0].pools[layer_idx]
 
     def block_table_tensor(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Per-row block table [N, max_blocks] (int32, 0-padded) + seq_lens [N] for the kernel."""
-        device = self.rows[0].pools[layer_idx].k.device
+        """Per-row block table [N, max_blocks] (int32, 0-padded) + seq_lens [N] for the kernel.
+        Built with one host→device copy each (one padded list) instead of per-row tensors."""
+        device = self.pools_for(layer_idx).k.device
         bts = [r.block_tables[layer_idx] for r in self.rows]
         seq_lens = [r.seq_lens[layer_idx] for r in self.rows]
         max_blocks = max((len(b) for b in bts), default=1) or 1
-        bt = torch.zeros(len(self.rows), max_blocks, dtype=torch.int32, device=device)
-        for i, b in enumerate(bts):
-            if b:
-                bt[i, :len(b)] = torch.tensor(b, dtype=torch.int32, device=device)
+        padded = [b + [0] * (max_blocks - len(b)) for b in bts]
+        bt = torch.tensor(padded, dtype=torch.int32, device=device)
         sl = torch.tensor(seq_lens, dtype=torch.int32, device=device)
         return bt, sl
 

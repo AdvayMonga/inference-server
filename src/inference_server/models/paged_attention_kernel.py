@@ -25,9 +25,9 @@ def _paged_decode_kernel(
     sq_n, sq_h,            # Q strides: [N, Hq, D] (last dim contiguous)
     sk_b, sk_h, sk_s,      # pool strides: [num_blocks, num_kv_heads, block_size, D]
     so_n, so_h,            # Out strides
-    bt_n,                  # block_tables row stride: [N, MAX_BLOCKS]
+    bt_n,                  # block_tables row stride: [N, max_blocks]
     scale,
-    GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr, MAX_BLOCKS: tl.constexpr,
+    GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr,
 ):
     seq = tl.program_id(0)
     qh = tl.program_id(1)
@@ -44,9 +44,10 @@ def _paged_decode_kernel(
     l = 0.0
     acc = tl.zeros([D], dtype=tl.float32)
 
-    for b in range(0, MAX_BLOCKS):
-        in_range = b < n_blocks
-        blk = tl.load(BT + seq * bt_n + b, mask=in_range, other=0)
+    # Runtime (per-sequence) loop bound — NOT a constexpr. A constexpr here would recompile
+    # the kernel for every distinct block-count, thrashing under varied/growing seq lengths.
+    for b in range(0, n_blocks):
+        blk = tl.load(BT + seq * bt_n + b)
         offs = b * BLOCK_SIZE + slots
         valid = offs < L                                        # [BLOCK_SIZE]
 
@@ -92,6 +93,5 @@ def paged_decode_attention(
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
-        MAX_BLOCKS=block_tables.shape[1],
     )
     return out.to(q.dtype)

@@ -363,14 +363,15 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._attention_mask = torch.ones(1, new_kv_len, device=device, dtype=torch.long)
             return
 
-        existing_len = self.backend.kv_length(self._batched_kv)
-        max_len = max(existing_len, new_kv_len)
-        existing_pad = max_len - existing_len
-        new_pad = max_len - new_kv_len
-
         self._batched_kv = self.backend.splice_into_batched(self._batched_kv, new_kv, new_kv_len)
 
         # Attention mask is torch-typed scheduler state; pad existing rows then append new row.
+        # Drive sizing off the mask's OWN width, not kv_length: for paged backends
+        # kv_length = max(per-row len) drops when the longest row is evicted, while the mask
+        # width doesn't — so using kv_length here would cat mismatched widths and crash.
+        existing_len = self._attention_mask.shape[1]
+        max_len = max(existing_len, new_kv_len)
+        existing_pad = max_len - existing_len
         if existing_pad > 0:
             zeros = torch.zeros(self._attention_mask.shape[0], existing_pad, device=device, dtype=torch.long)
             self._attention_mask = torch.cat([zeros, self._attention_mask], dim=1)

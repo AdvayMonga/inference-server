@@ -74,7 +74,33 @@ def run():
 
     ok = all(diff < 5e-2 for *_, diff in results)
     print("PARITY", "OK" if ok else "FAIL", results)
-    return ok
+
+    # Recompilation probe: vary block-count widely. With the runtime loop bound, only the
+    # first call per head_dim compiles; the rest must be fast (a constexpr bound would
+    # recompile per distinct block-count → ~1s spikes → the mixed-sweep stall).
+    import time as _time
+    D, num_kv_heads, Hq, bs = 256, 1, 8, 16
+    num_blocks = 4096
+    k_pool = torch.randn(num_blocks, num_kv_heads, bs, D, dtype=torch.bfloat16, device="cuda")
+    v_pool = torch.randn_like(k_pool)
+    slow = []
+    for nb in [2, 8, 20, 40, 64, 96, 128]:  # distinct block-counts (would each recompile if constexpr)
+        max_blocks = nb
+        seq_lens = torch.tensor([nb * bs], dtype=torch.int32, device="cuda")
+        bt = torch.arange(max_blocks, dtype=torch.int32, device="cuda").reshape(1, max_blocks) % num_blocks
+        q = torch.randn(1, Hq, D, dtype=torch.bfloat16, device="cuda")
+        paged_decode_attention(q, k_pool, v_pool, bt, seq_lens, scale=1.0)
+        torch.cuda.synchronize()
+        t0 = _time.perf_counter()
+        paged_decode_attention(q, k_pool, v_pool, bt, seq_lens, scale=1.0)
+        torch.cuda.synchronize()
+        dt = (_time.perf_counter() - t0) * 1e3
+        print(f"  block_count={nb:4d}  call={dt:.1f} ms")
+        if dt > 100:
+            slow.append((nb, dt))
+    no_recompile = not slow
+    print("NO_RECOMPILE", "OK" if no_recompile else f"FAIL {slow}")
+    return ok and no_recompile
 
 
 @app.local_entrypoint()

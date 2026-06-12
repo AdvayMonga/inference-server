@@ -14,7 +14,11 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
-    .env({"BACKEND": "custom-cuda"})  # use our hand-written Gemma 4 forward + paged KV
+    .env({
+        "BACKEND": "custom-cuda",          # our hand-written Gemma 4 forward + paged KV + kernel
+        "CUSTOM_BACKEND_BLOCKS": "1536",    # ~24.5k KV token-slots/layer (~450MB on A10G)
+        "MAX_ACTIVE_KV_TOKENS": "22000",    # admission cap < pool capacity → queue, don't OOM mid-decode
+    })
     .add_local_python_source("inference_server")
 )
 
@@ -34,5 +38,7 @@ app = modal.App("inference-server", image=image)
 @modal.concurrent(max_inputs=256)
 @modal.asgi_app()
 def fastapi_app():
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", force=True)
     from inference_server.server import app as web_app
     return web_app
