@@ -244,24 +244,23 @@ class CustomTorchBackend(InferenceBackend):
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
                             position_ids, sampling_per_row=None):
-        """One batched forward over all rows. The scheduler's `attention_mask` is ignored —
-        we build our own bool mask from per-row KV lengths (rows have different lengths).
+        """One batched forward over all rows. `attention_mask` (scheduler-built) is ignored;
+        the window/causality come from per-row seq_lens inside the model.
 
-        Each row's paged cache is LEFT-padded to Lmax on gather, so real tokens are
-        right-aligned; after the new token is concatenated the real span is
-        [Lmax - seq_len_i : ] in a length-(Lmax+1) key axis — identical for every layer."""
-        from inference_server.models.paged_kv_cache import BatchedPagedKVCache
-
-        rows = batched_kv
-        n = len(rows)
-        ctx = BatchedPagedKVCache(rows)
-
+        CUDA: `batched_kv` is a persistent `BatchedDecodeState` — block tables live as GPU
+        tensors, so the per-step hot path is pure GPU (no Python rebuild). CPU/MPS: a
+        `list[PagedKVCache]` gathered into a left-padded masked SDPA (portable reference)."""
         if self.device.type == "cuda":
-            # Triton paged-attention kernel: reads K/V via block tables, no gather/pad.
-            logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=ctx)
+            state = batched_kv
+            n = state.n_rows
+            state.prepare_step()  # alloc any boundary-crossing block (once per step)
+            logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
+            state.advance()       # bump seq_lens + evict out-of-window blocks
         else:
-            # Portable fallback (CPU/MPS): left-pad gather + masked SDPA. Real tokens
-            # (+ the new one) are the last (seq_len_i + 1) key positions; rest is masked.
+            from inference_server.models.paged_kv_cache import BatchedPagedKVCache
+            rows = batched_kv
+            n = len(rows)
+            ctx = BatchedPagedKVCache(rows)
             seq_lens = [r.seq_len for r in rows]
             lmax = max(seq_lens)
             mask = torch.zeros(n, 1, 1, lmax + 1, dtype=torch.bool, device=self.device)
@@ -274,14 +273,16 @@ class CustomTorchBackend(InferenceBackend):
             next_tokens = sample(last, GREEDY)
         else:
             next_tokens = torch.stack([sample(last[i], sampling_per_row[i]) for i in range(n)])
-        return next_tokens, rows
-
-    def stack_caches_left_padded(self, per_row_caches, max_kv_len):
-        """Row-by-row batched form is just the list of per-row caches (no padding)."""
-        return list(per_row_caches)
+        return next_tokens, batched_kv
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
-        """Append a new row's paged cache to the batch."""
+        """Add a newly-prefilled row. CUDA: ingest into the persistent BatchedDecodeState.
+        CPU: append to the list of per-row caches."""
+        if self.device.type == "cuda":
+            from inference_server.models.paged_kv_cache import BatchedDecodeState
+            state = batched_kv if batched_kv is not None else BatchedDecodeState(self.pools, self.device)
+            state.add_row(new_kv)
+            return state
         if batched_kv is None:
             return [new_kv]
         batched_kv.append(new_kv)
@@ -289,11 +290,16 @@ class CustomTorchBackend(InferenceBackend):
 
     def remove_row_from_cache(self, batched_kv, row_idx):
         """Drop one row and release its blocks back to the pool."""
-        batched_kv.pop(row_idx).free_all()
+        if self.device.type == "cuda":
+            batched_kv.remove_row(row_idx)
+        else:
+            batched_kv.pop(row_idx).free_all()
         return batched_kv
 
     def kv_length(self, kv):
         """Longest row's seq_len (used only for the scheduler's mask bookkeeping)."""
+        if self.device.type == "cuda":
+            return int(kv.seq_lens.max().item()) if kv.n_rows else 0
         return max((c.seq_len for c in kv), default=0)
 
     # --- Window-aware per-pool KV admission ---

@@ -303,6 +303,129 @@ class BatchedPagedKVCache:
         return bt, sl
 
 
+class BatchedDecodeState:
+    """Persistent batched-decode state — the de-Pythoned replacement for rebuilding
+    `BatchedPagedKVCache` every step. Block tables and seq_lens live as GPU tensors, updated
+    incrementally on admit (`add_row`) / decode / evict, so the per-step hot path is pure GPU
+    ops (no Python list→tensor conversion, which profiling showed is ~95% of decode latency).
+
+    Owns its blocks directly (ingests a prefilled `PagedKVCache` via `add_row`, then frees on
+    `remove_row`). Drop-in for the model's paged_ctx interface: `append()` writes the new token
+    (scatter, no advance), `block_table_tensor()` returns (block table, effective seq_lens) for
+    the kernel. `prepare_step()` allocs boundary-crossing blocks once per step (before the
+    forward); `advance()` bumps seq_lens + evicts (after the forward).
+    """
+
+    def __init__(self, pools: list[BlockPool | None], device: torch.device):
+        self.pools = pools
+        self.device = device
+        self.bs = next(p.block_size for p in pools if p is not None)
+        self.seq_lens = torch.zeros(0, dtype=torch.long, device=device)   # [R] logical len (pre-step)
+        self.n_alloc = torch.zeros(0, dtype=torch.long, device=device)    # [R] logical blocks alloc'd
+        self.block_tables: list[torch.Tensor | None] = [None] * len(pools)  # per layer [R, cols] (-1 = evicted)
+        # per non-shared layer: per-row count of evicted leading blocks (cold path).
+        self._evicted: list[list[int]] = [[] for _ in pools]
+
+    @property
+    def n_rows(self) -> int:
+        return self.seq_lens.shape[0]
+
+    @staticmethod
+    def _grow_cols(t: torch.Tensor, cols: int) -> torch.Tensor:
+        if t.shape[1] >= cols:
+            return t
+        pad = torch.zeros(t.shape[0], cols - t.shape[1], dtype=t.dtype, device=t.device)
+        return torch.cat([t, pad], dim=1)
+
+    def add_row(self, pkv: "PagedKVCache") -> None:
+        """Adopt a prefilled PagedKVCache's blocks as a new batch row (no per-step cost)."""
+        self.seq_lens = torch.cat([self.seq_lens, torch.tensor([pkv.seq_len], device=self.device)])
+        n0 = max((len(pkv.block_tables[L]) for L, p in enumerate(self.pools) if p is not None), default=0)
+        self.n_alloc = torch.cat([self.n_alloc, torch.tensor([n0], device=self.device)])
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            row = torch.tensor(pkv.block_tables[L], dtype=torch.long, device=self.device)
+            cur = self.block_tables[L]
+            if cur is None:
+                self.block_tables[L] = row.unsqueeze(0)
+            else:
+                cols = max(cur.shape[1], row.shape[0])
+                cur = self._grow_cols(cur, cols)
+                row = torch.cat([row, torch.zeros(cols - row.shape[0], dtype=torch.long, device=self.device)])
+                self.block_tables[L] = torch.cat([cur, row.unsqueeze(0)], dim=0)
+            self._evicted[L].append(pkv.evicted[L])
+
+    def remove_row(self, idx: int) -> None:
+        """Free row `idx`'s blocks and drop it from the batch."""
+        keep = [i for i in range(self.n_rows) if i != idx]
+        keep_t = torch.tensor(keep, dtype=torch.long, device=self.device)
+        n_alloc_idx = int(self.n_alloc[idx].item())
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            row_blocks = self.block_tables[L][idx, :n_alloc_idx].tolist()
+            for bid in row_blocks:
+                if bid >= 0:  # -1 = already-evicted (freed); padding never reaches here (< n_alloc)
+                    pool.release(bid)
+            self.block_tables[L] = self.block_tables[L][keep_t] if keep else None
+            del self._evicted[L][idx]
+        self.seq_lens = self.seq_lens[keep_t]
+        self.n_alloc = self.n_alloc[keep_t]
+
+    def prepare_step(self) -> None:
+        """Alloc a block for every boundary-crossing row in every layer (once per step)."""
+        if self.n_rows == 0:
+            return
+        lb = self.seq_lens // self.bs                  # logical block of the new token, per row
+        crossing = (lb >= self.n_alloc).nonzero().flatten().tolist()
+        if not crossing:
+            return
+        need_cols = int(lb.max().item()) + 1
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            self.block_tables[L] = self._grow_cols(self.block_tables[L], need_cols)
+            for r in crossing:
+                self.block_tables[L][r, int(lb[r].item())] = pool.alloc()
+        for r in crossing:
+            self.n_alloc[r] += 1
+
+    def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
+        """Scatter the new token (k_new,v_new [R,H,1,D]) into each row's block. Pure GPU —
+        block id + slot computed from seq_lens (prepare_step already alloc'd any new block)."""
+        pool = self.pools[layer_idx]
+        rows = torch.arange(self.n_rows, device=self.device)
+        lb = self.seq_lens // self.bs
+        slot = self.seq_lens % self.bs
+        bid = self.block_tables[layer_idx][rows, lb]   # [R]
+        pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
+        pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+
+    def block_table_tensor(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Kernel inputs: persistent block table (int32, -1→0) + effective seq_lens (incl. the
+        new token just written). No rebuild — just dtype/sign cleanup + the +1."""
+        bt = self.block_tables[layer_idx].to(torch.int32).clamp_min(0)
+        return bt, (self.seq_lens + 1).to(torch.int32)
+
+    def advance(self) -> None:
+        """Bump seq_lens by the new token, then evict out-of-window blocks (sliding layers)."""
+        self.seq_lens = self.seq_lens + 1
+        for L, pool in enumerate(self.pools):
+            if pool is None or pool.window is None:
+                continue
+            keep_from = ((self.seq_lens - pool.window).clamp_min(0)) // self.bs   # [R]
+            for r in range(self.n_rows):
+                kf = int(keep_from[r].item())
+                for i in range(self._evicted[L][r], kf):
+                    bid = int(self.block_tables[L][r, i].item())
+                    if bid >= 0:
+                        pool.release(bid)
+                        self.block_tables[L][r, i] = -1
+                if kf > self._evicted[L][r]:
+                    self._evicted[L][r] = kf
+
+
 def make_pools_for_gemma(
     model, num_blocks_per_pool: int = 1024, block_size: int = 16,
     sliding_blocks: int | None = None,
