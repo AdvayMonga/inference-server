@@ -96,9 +96,9 @@ class FakeChunkBackend(InferenceBackend):
     def device_str(self): return "cpu"
 
 
-async def _run_one(backend, chunk_size, prompt_len, max_tokens):
+async def _run_one(backend, chunk_size, prompt_len, max_tokens, mode=None):
     sched = ContinuousBatchScheduler(
-        backend, max_batch_size=8, prefill_chunk_size=chunk_size,
+        backend, max_batch_size=8, prefill_chunk_size=chunk_size, prefill_mode=mode,
     )
     sched.start()
     try:
@@ -163,3 +163,34 @@ async def test_prefill_store_called_once_on_completion():
     await _run_one(backend, chunk_size=8, prompt_len=25, max_tokens=3)
     assert len(backend.store_calls) == 1
     assert backend.store_calls[0] == (25, 0)
+
+
+# --- PREFILL_MODE seam (forward-compat for disaggregation) ---
+
+@pytest.mark.asyncio
+async def test_mode_defaults_derive_from_chunk_size():
+    """No explicit mode: chunk_size>0 → chunked, chunk_size=0 → monolithic (back-compat)."""
+    backend = FakeChunkBackend()
+    _, chunked = await _run_one(backend, chunk_size=8, prompt_len=20, max_tokens=2)
+    _, mono = await _run_one(FakeChunkBackend(), chunk_size=0, prompt_len=20, max_tokens=2)
+    assert chunked["prefill_mode"] == "chunked"
+    assert mono["prefill_mode"] == "monolithic"
+
+
+@pytest.mark.asyncio
+async def test_explicit_monolithic_overrides_chunk_size():
+    """mode='monolithic' wins even with chunk_size>0 → no chunking happens."""
+    backend = FakeChunkBackend()
+    _, stats = await _run_one(backend, chunk_size=8, prompt_len=25, max_tokens=3, mode="monolithic")
+    assert stats["prefill_mode"] == "monolithic"
+    assert stats["prefill_chunks_processed"] == 0
+    assert backend.chunk_input_tokens_total == 0  # prefill_chunk never called
+
+
+def test_invalid_mode_and_chunked_without_size_raise():
+    """Misconfig fails loud at construction, not in the worker thread."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        ContinuousBatchScheduler(FakeChunkBackend(), prefill_mode="disaggregated")  # not implemented yet
+    with _pytest.raises(ValueError):
+        ContinuousBatchScheduler(FakeChunkBackend(), prefill_mode="chunked", prefill_chunk_size=0)

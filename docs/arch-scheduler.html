@@ -264,12 +264,19 @@
   <g>
     <rect class="box" x="20" y="140" width="1100" height="120" rx="6"/>
     <text class="title" x="40" y="168">Two versions, only one runs today</text>
-    <text class="small" x="40" y="190"><strong>Version A (alternating, in progress):</strong> chunked prefill happens as a separate forward pass alongside the</text>
-    <text class="small" x="40" y="206">decode batch. Two passes per tick. Works on MPS today. Captures the latency win.</text>
+    <text class="small" x="40" y="190"><strong>Version A (alternating, shipped):</strong> chunked prefill happens as a separate forward pass alongside the</text>
+    <text class="small" x="40" y="206">decode batch. Two passes per tick. Works on MPS today. Captures the latency win. Tested.</text>
     <text class="small" x="40" y="228"><strong>Version B (mixed-batch, vLLM-style, deferred):</strong> a single forward pass packs decode rows and one prefill chunk</text>
     <text class="small" x="40" y="244">together. Needs a custom attention path (FlashAttention varlen). CUDA-only. Pairs with the vLLM benchmark phase.</text>
   </g>
 </svg>
+
+<div class="callout">
+  <strong>Prefill strategy is a config seam (<code>PREFILL_MODE</code>).</strong> <code>monolithic</code> (one forward on admit) or <code>chunked</code> (V-A) today; the enum is the forward-compat extension point for <code>mixed_batch</code> (V-B) and <code>disaggregated</code> (P/D) — all reuse the same <code>_prefilling</code> phase + <code>prefill_chunk</code> primitive. Empty config derives the mode from <code>PREFILL_CHUNK_SIZE</code> (back-compat: &gt;0 → chunked); an unimplemented mode fails loud at construction.
+</div>
+<div class="callout">
+  <strong>The disaggregation seam: <code>_promote_to_decode</code>.</strong> Both monolithic admit and the chunked final-chunk path funnel a completed prefill's KV into the decode batch through this one method. Today it's a local splice on the same worker; under <strong>P/D disaggregation</strong> the KV is produced on a prefill worker and <em>transferred</em> here before the row decodes — so disagg adds a transfer at this single point plus a remote prefill loop, not a scheduler rewrite. The loop is already prefill/decode-decoupled, which is what makes that cheap.
+</div>
 
 <h2 id="reservation">Reservation accounting (the load-bearing invariant)</h2>
 <div class="callout warn">

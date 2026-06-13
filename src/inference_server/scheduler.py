@@ -67,18 +67,31 @@ class _PrefillingRow:
 class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
+    # Prefill strategies. `monolithic` = one forward on admit; `chunked` = V-A (one prefill
+    # chunk + one decode step per iter, kills HOL blocking). The enum is the forward-compat
+    # extension point: `mixed_batch` (V-B) and `disaggregated` (P/D) are future strategies that
+    # reuse the same `_prefilling` phase + `prefill_chunk` primitive + `_promote_to_decode` seam.
+    PREFILL_MODES = ("monolithic", "chunked")
+
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
                  max_queue_size: int = 1000,
                  policy: SchedulingPolicy | None = None,
                  max_active_kv_tokens: int = 0,
-                 prefill_chunk_size: int = 0):
+                 prefill_chunk_size: int = 0,
+                 prefill_mode: str | None = None):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
         # 0 means "no explicit cap"; we use a huge sentinel so checks are uniform.
         self.max_active_kv_tokens = max_active_kv_tokens if max_active_kv_tokens > 0 else 2**31
-        # 0 = chunked prefill disabled; otherwise tokens fed per chunk.
+        # Tokens fed per prefill chunk (chunked mode only).
         self.prefill_chunk_size = prefill_chunk_size
+        # Default mode from chunk_size (back-compat: chunk_size>0 → chunked), explicit override wins.
+        self.prefill_mode = prefill_mode or ("chunked" if prefill_chunk_size > 0 else "monolithic")
+        if self.prefill_mode not in self.PREFILL_MODES:
+            raise ValueError(f"unknown prefill_mode {self.prefill_mode!r}; expected one of {self.PREFILL_MODES}")
+        if self.prefill_mode == "chunked" and prefill_chunk_size <= 0:
+            raise ValueError("prefill_mode='chunked' requires prefill_chunk_size > 0")
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -163,6 +176,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "kv_admit_blocked": self._kv_admit_blocked,
             "active_kv_reserved": self._active_kv_reserved,
             "active_kv_budget": self.max_active_kv_tokens,
+            "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             **self._metrics.snapshot(),
@@ -294,7 +308,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
             try:
-                if self.prefill_chunk_size > 0:
+                if self.prefill_mode == "chunked":
                     # Chunked-prefill mode: lookup only, defer forward pass to _advance_prefill_chunk
                     partial_kv, matched = self.backend.prefill_lookup(req.token_ids, req.session_id)
                     req.cache_hit_tokens = self.backend.last_cache_hit_tokens
@@ -314,10 +328,22 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
-            req.first_token_ts = time.perf_counter()
-            self._splice_in(kv, kv_len, device)
-            self._active.append(_ActiveRow(request=req, current_token=first_token, real_kv_len=kv_len))
+            self._promote_to_decode(req, kv, kv_len, first_token, device)
             self._total_admitted += 1
+
+    def _promote_to_decode(self, request: ScheduledRequest, kv: object, kv_len: int,
+                           first_token: int, device: str) -> None:
+        """Join a completed prefill's KV to the running decode batch (its first decode token).
+
+        DISAGGREGATION SEAM: today this is a local splice on the same worker. Under P/D
+        disaggregation the KV is produced on a prefill worker and TRANSFERRED here before the row
+        decodes — this is the single point that handoff plugs into. The rest of the loop is already
+        prefill/decode-decoupled (`_prefilling` phase + `prefill_chunk` primitive), so disagg adds a
+        transfer here + a remote prefill loop, not a rewrite. Used by both monolithic admit and the
+        chunked final-chunk path."""
+        request.first_token_ts = time.perf_counter()
+        self._splice_in(kv, kv_len, device)
+        self._active.append(_ActiveRow(request=request, current_token=first_token, real_kv_len=kv_len))
 
     # --- Chunked prefill: advance one in-flight prefill by one chunk per iter ---
 
@@ -359,11 +385,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             except Exception:
                 logger.exception("prefill_store failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
-            prow.request.first_token_ts = time.perf_counter()
-            self._splice_in(kv, kv_len, device)
-            self._active.append(_ActiveRow(
-                request=prow.request, current_token=last_token, real_kv_len=kv_len,
-            ))
+            self._promote_to_decode(prow.request, kv, kv_len, last_token, device)
 
     def _splice_in(self, new_kv: object, new_kv_len: int, device: str) -> None:
         """Add a new row's KV to the batched cache; backend handles cache surgery."""

@@ -81,6 +81,7 @@ async def lifespan(app):
         max_queue_size=settings.max_queue_size,
         max_active_kv_tokens=settings.max_active_kv_tokens,
         prefill_chunk_size=settings.prefill_chunk_size,
+        prefill_mode=settings.prefill_mode or None,
         policy=create_scheduling_policy(settings.scheduling_policy),
     )
     scheduler.start()

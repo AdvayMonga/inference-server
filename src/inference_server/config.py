@@ -38,6 +38,10 @@ class Settings:
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
     # 0 = derive from max_batch_size * context_window (effectively unbounded).
     max_active_kv_tokens: int = 0
+    # Prefill strategy: "monolithic" (one forward on admit) or "chunked" (V-A: interleave one
+    # prefill chunk + one decode step per iter, kills HOL blocking). "" = derive from chunk_size
+    # (back-compat: chunk_size>0 → chunked). Future strategies: mixed_batch, disaggregated.
+    prefill_mode: str = ""
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
@@ -93,6 +97,7 @@ def load_settings() -> Settings:
         batch_timeout_ms=float(os.environ.get("BATCH_TIMEOUT_MS", Settings.batch_timeout_ms)),
         max_queue_size=int(os.environ.get("MAX_QUEUE_SIZE", Settings.max_queue_size)),
         max_active_kv_tokens=int(os.environ.get("MAX_ACTIVE_KV_TOKENS", Settings.max_active_kv_tokens)),
+        prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
