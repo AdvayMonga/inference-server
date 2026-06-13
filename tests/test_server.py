@@ -89,7 +89,10 @@ async def inject_fake_backend():
     from inference_server.tokenizer import Tokenizer
 
     backend = FakeBackend()
-    cache_adapter = CacheManager(num_blocks=20, block_size=4)
+    # 256 blocks × 4 = 1024 tokens — must fit a default-max_tokens (512) request, else the
+    # admission gate hard-rejects it (429) before it ever runs. test_generate_success omits
+    # max_tokens on purpose to exercise that default path; don't shrink this below ~130 blocks.
+    cache_adapter = CacheManager(num_blocks=256, block_size=4)
     backend.set_cache_adapter(cache_adapter)
 
     scheduler = ContinuousBatchScheduler(backend, max_batch_size=8)
