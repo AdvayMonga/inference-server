@@ -1,0 +1,3 @@
+prefill_mode,short_ttft_p95_ms,short_tpot_mean_ms,short_max_gap_ms,long_ttft_ms
+monolithic,2607,74,2412,2456
+chunked,392,56,201,1801

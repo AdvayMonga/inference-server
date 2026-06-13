@@ -377,6 +377,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         prow.partial_kv = kv
         prow.tokens_fed += len(chunk)
         self._prefill_chunks_processed += 1
+        self._metrics.record_chunk()
 
         if is_final:
             # Store the new KV portion in the cache (skip already-cached prefix).
@@ -470,6 +471,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._loop.call_soon_threadsafe(_set)
 
     def _reject(self, request: ScheduledRequest, exc: BaseException) -> None:
+        # QueueFullError = admission/queue reject; anything else = a failure (prefill error, crash).
+        self._metrics.record_rejection(failed=not isinstance(exc, QueueFullError))
         if self._loop is None:
             return
         if request.token_queue is not None:

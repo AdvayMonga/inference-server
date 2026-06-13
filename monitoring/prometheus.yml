@@ -1,0 +1,13 @@
+# Prometheus scrape config for the inference server's /metrics endpoint.
+# Used by the Phase-10 docker-compose stack (Prometheus + Grafana). Standalone usage:
+#   prometheus --config.file=monitoring/prometheus.yml
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: inference-server
+    metrics_path: /metrics
+    static_configs:
+      # Adjust to the server's host:port (8000 local; the Modal URL when deployed).
+      - targets: ["localhost:8000"]

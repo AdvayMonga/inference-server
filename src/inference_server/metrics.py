@@ -8,6 +8,8 @@ import threading
 import time
 from collections import deque
 
+from inference_server import prometheus_metrics
+
 
 def _percentile(sorted_vals: list[float], p: float) -> float:
     if not sorted_vals:
@@ -36,6 +38,15 @@ class MetricsTracker:
                 self._tpot.append((now, tpot))
             self._total.append((now, total))
             self._completions.append((now, n_tokens))
+        prometheus_metrics.record_completion(ttft, tpot, total, n_tokens)
+
+    def record_rejection(self, failed: bool = False) -> None:
+        """A request ended without completing — admission/queue reject (failed=False) or error."""
+        prometheus_metrics.record_rejection(failed=failed)
+
+    def record_chunk(self) -> None:
+        """One prefill chunk processed (chunked mode)."""
+        prometheus_metrics.record_prefill_chunk()
 
     def _prune(self, dq: deque, cutoff: float) -> None:
         while dq and dq[0][0] < cutoff:

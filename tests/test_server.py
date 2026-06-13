@@ -140,6 +140,21 @@ async def test_generate_custom_max_tokens(client):
 
 
 @pytest.mark.asyncio
+async def test_metrics_endpoint(client):
+    """Prometheus /metrics exposes engine metrics after traffic; gauges + counters + histograms."""
+    await client.post("/generate", json={"text": "Hello world", "max_tokens": 4})
+    r = await client.get("/metrics")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    body = r.text
+    assert "inference_requests_total" in body                      # counter family
+    assert 'inference_requests_total{outcome="completed"}' in body  # a completion was counted
+    assert "inference_ttft_seconds" in body                        # histogram family
+    assert "inference_active_batch_size" in body                   # gauge (refreshed at scrape)
+    assert "inference_http_request_duration_seconds" in body        # middleware histogram
+
+
+@pytest.mark.asyncio
 async def test_generate_missing_text(client):
     response = await client.post("/generate", json={})
     assert response.status_code == 422

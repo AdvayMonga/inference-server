@@ -1,0 +1,79 @@
+{
+  "title": "Inference Server",
+  "uid": "inference-server",
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": { "text": "Prometheus", "value": "Prometheus" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "title": "TTFT (p50/p95/p99)", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(inference_ttft_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(inference_ttft_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(inference_ttft_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 2, "title": "TPOT (p50/p95/p99)", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(inference_tpot_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "expr": "histogram_quantile(0.95, sum(rate(inference_tpot_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "expr": "histogram_quantile(0.99, sum(rate(inference_tpot_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+    {
+      "id": 3, "title": "Token throughput", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "tps" } },
+      "targets": [
+        { "expr": "sum(rate(inference_tokens_generated_total[1m]))", "legendFormat": "tokens/s" }
+      ]
+    },
+    {
+      "id": 4, "title": "Request rate by outcome", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" } },
+      "targets": [
+        { "expr": "sum(rate(inference_requests_total[1m])) by (outcome)", "legendFormat": "{{outcome}}" }
+      ]
+    },
+    {
+      "id": 5, "title": "Batch & queue depth", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        { "expr": "inference_active_batch_size", "legendFormat": "active" },
+        { "expr": "inference_pending_queue_depth", "legendFormat": "pending" },
+        { "expr": "inference_prefilling_depth", "legendFormat": "prefilling" }
+      ]
+    },
+    {
+      "id": 6, "title": "KV pressure", "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "max": 1, "min": 0 } },
+      "targets": [
+        { "expr": "inference_kv_pressure_ratio", "legendFormat": "pressure" }
+      ]
+    }
+  ]
+}

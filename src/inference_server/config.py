@@ -68,6 +68,7 @@ class Settings:
 
     # Observability
     log_level: str = "INFO"
+    log_format: str = "text"  # "text" (dev) or "json" (structured, for prod/Modal log aggregators)
     metrics_port: int = 9090
 
     # Reserved for multi-user extension (ignored for now)
@@ -112,6 +113,7 @@ def load_settings() -> Settings:
         keep_model_warm=os.environ.get("KEEP_MODEL_WARM", str(Settings.keep_model_warm)).lower() == "true",
         compile_model=os.environ.get("COMPILE_MODEL", str(Settings.compile_model)).lower() == "true",
         log_level=os.environ.get("LOG_LEVEL", Settings.log_level),
+        log_format=os.environ.get("LOG_FORMAT", Settings.log_format),
         metrics_port=int(os.environ.get("METRICS_PORT", Settings.metrics_port)),
         max_concurrent_sessions=int(os.environ.get("MAX_CONCURRENT_SESSIONS", Settings.max_concurrent_sessions)),
         per_session_memory_limit_mb=int(os.environ.get("PER_SESSION_MEMORY_LIMIT_MB", Settings.per_session_memory_limit_mb)),

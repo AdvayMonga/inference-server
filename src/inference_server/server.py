@@ -8,12 +8,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
+from inference_server import prometheus_metrics
 from inference_server.backends import create_backend
 from inference_server.config import settings, print_hardware_summary
+from inference_server.logging_config import setup_logging
 from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.sampling import SamplingParams
 from inference_server.scheduler import (
@@ -54,6 +56,7 @@ class GenerateResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app):
     """Load model, tokenizer, cache, and batcher at startup."""
+    setup_logging(settings.log_format, getattr(logging, settings.log_level.upper(), logging.INFO))
     app.state.ready = False
     print_hardware_summary(settings)
 
@@ -219,6 +222,37 @@ async def cache_stats():
 async def scheduler_stats():
     """Return scheduler depth, throughput counters, and rejection count."""
     return app.state.scheduler.stats()
+
+
+@app.get("/metrics")
+async def metrics():
+    """Prometheus exposition (pull-based, scrapable). Aggregate metrics; per-session detail is
+    in /scheduler/stats. Refreshes live gauges from the scheduler before rendering."""
+    scheduler = getattr(app.state, "scheduler", None)
+    if scheduler is not None:
+        prometheus_metrics.set_scheduler_gauges(scheduler.stats())
+    body, content_type = prometheus_metrics.render()
+    return Response(content=body, media_type=content_type)
+
+
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    """Time every HTTP request → per-endpoint histogram + structured log line. Uses the matched
+    route template (not the raw path) as the label to keep cardinality low."""
+    start = time.perf_counter()
+    response = await call_next(request)
+    duration = time.perf_counter() - start
+    route = request.scope.get("route")
+    endpoint = getattr(route, "path", request.url.path)
+    if endpoint != "/metrics":  # don't let scrapes pollute their own histogram
+        prometheus_metrics.HTTP_DURATION.labels(
+            method=request.method, endpoint=endpoint, status=response.status_code,
+        ).observe(duration)
+        logger.info("http_request", extra={
+            "method": request.method, "endpoint": endpoint,
+            "status": response.status_code, "duration_ms": round(duration * 1000, 2),
+        })
+    return response
 
 
 # Load simulator lives in inference_server.simulator (mounted as APIRouter above).

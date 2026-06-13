@@ -21,6 +21,7 @@ image = (
         "CUSTOM_BACKEND_BLOCKS": "2048",          # full-attention pools (grow with sequence)
         "CUSTOM_BACKEND_SLIDING_BLOCKS": "1200",  # sliding pools (capped at window → sized smaller)
         "MAX_ACTIVE_KV_TOKENS": "48000",          # coarse token cap; per-pool window-aware gate is the real limit
+        "LOG_FORMAT": "json",                     # structured logs for Modal's aggregator (Phase 8)
     })
     .add_local_python_source("inference_server")
 )

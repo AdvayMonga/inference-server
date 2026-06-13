@@ -61,7 +61,55 @@ admission would gate. 0 errors; correct sliding-window attention.
 TPOT stays low even at 1000-token context — sliding-window attention caps 28/35 layers'
 attention span at 512 keys, so decode cost doesn't blow up with context length.
 
+## `chunked_prefill_ab.csv` — chunked prefill kills head-of-line blocking
+
+A/B of `PREFILL_MODE` (`scripts/bench_chunked_prefill_modal.py`, A10G/E2B, in-process scheduler).
+Workload: 6 short requests (16-token prompt, 48 max-tokens) decoding, then **one long 2048-token
+prompt injected mid-decode**. The headline is the short cohort's **MAX inter-token gap** — the
+stall a decoder sees while the long prompt prefills.
+
+| mode | short TTFT p95 | short TPOT mean | short MAX gap (stall) | long TTFT |
+|---|---|---|---|---|
+| monolithic | 2607 ms | 74 ms | **2412 ms** | 2456 ms |
+| chunked (256) | 392 ms | 56 ms | **201 ms** | 1801 ms |
+
+- **HOL stall 2412 → 201 ms (12×).** Monolithic runs the long prompt's prefill as one 2048-token
+  forward that freezes every active decoder for ~2.4 s. Chunked slices it into 256-token chunks
+  interleaved with decode, so the worst stall is ~one chunk.
+- Short **TTFT p95 6.7×** better; TPOT mean lower (the stall inflated the monolithic average).
+- **No long-TTFT tradeoff at this size** — chunked's long TTFT (1801 ms) actually beat monolithic
+  (2456 ms): the single 2048-token forward is itself costly enough that interleaving wins on
+  wall-clock too. (A regression could appear at smaller prompts / larger chunks.)
+- One workload/config — magnitude scales with prompt length and chunk size; this is the mechanism,
+  not a universal "12×".
+
+## `sweep_custom_cuda.csv` / `sweep_cuda.csv` — engine vs HF baseline
+
+Concurrency sweep (`scripts/bench_load_sweep_modal.py`, A10G/E2B, decode-bound: 60-token prompt,
+100 max-tokens, bounded distinct prompts). Closed-loop users at each N; **our engine
+(`custom-cuda`) vs the HF `AutoModelForCausalLM` baseline (`cuda`)** under the *same* scheduler —
+isolates what the custom forward + Triton paged kernel + CUDA graph bought us.
+
+| N | tok/s custom / HF | speedup | TPOT p50 custom / HF (ms) | TTFT p50 custom / HF (ms) |
+|---|---|---|---|---|
+| 1  | 45.5 / 21.7  | 2.1× | 21.4 / 45.9 | 75 / 54 |
+| 4  | 167.2 / 81.0 | 2.1× | 21.7 / 47.4 | 245 / 244 |
+| 8  | 300.3 / 154.1 | 1.9× | 22.2 / 47.4 | 467 / 480 |
+| 16 | 493.9 / 282.5 | 1.7× | 23.2 / 47.4 | 930 / 955 |
+| 32 | 752.7 / 479.6 | 1.6× | 24.1 / 48.0 | 1841 / 1895 |
+
+- **~2× lower TPOT (21–24 vs 46–48 ms) at every concurrency** — the decode win (custom forward +
+  paged kernel + CUDA graph vs HF sdpa + DynamicCache). Both hold TPOT flat under load (both are
+  real continuous batchers), so it's a clean per-token advantage.
+- **Throughput speedup 2.1× → 1.6× as N grows:** at N=32 the closed loop is **TTFT-bound, not
+  decode-bound** — each request's cycle is ~1.8 s TTFT (32 users contending for 32 slots) + ~2.4 s
+  decode, capping throughput below the 24 ms-TPOT ceiling. TPOT shows decode has headroom; TTFT
+  (queueing) is the limiter — where more KV headroom / chunked prefill for long prompts would lift it.
+- **TTFT ~identical** — dominated by queueing + (cached, short) prefill, same for both backends.
+
 ## Not captured yet
 
-- vLLM head-to-head — the eventual apples-to-apples comparison (Phase 11). We're now fast
-  *and* correct (sliding window), so it would finally be valid.
+- **vLLM head-to-head** — the gold-standard column. A `custom` vs `vLLM` sweep is the remaining
+  comparison; `bench_load_sweep_modal.py` produces our column, vLLM needs its own driver
+  (OpenAI `/v1/completions` shim + guidellm, DECISIONS [2026-05-18]) and a vLLM-supports-the-model
+  check first (the compat run kept getting killed by the Modal client disconnect, not a real fail).
