@@ -83,6 +83,17 @@ class CustomTorchBackend(InferenceBackend):
         eos = self.tokenizer.eos_token_id
         self._eos_ids = {eos} if isinstance(eos, int) else set(eos)
 
+        # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
+        # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
+        if os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8":
+            from inference_server.models.quant import quantize_model_int8
+            # On CUDA, route layers through the shared compiled GEMV so Inductor fuses the dequant
+            # (keeps weight int8 in HBM — the bandwidth win); composes with the decode CUDA graph.
+            on_cuda = self.device.type == "cuda"
+            nq = quantize_model_int8(self.model, compiled=on_cuda)
+            logger.info("Quantized %d Linear layers to int8 weight-only%s", nq,
+                        " (+compiled)" if on_cuda else "")
+
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
         n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
