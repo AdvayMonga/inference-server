@@ -28,7 +28,10 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm")
     .apt_install("build-essential")  # gcc/g++ for any inductor C++ codegen during graph capture
-    .env({"HF_HUB_ENABLE_HF_TRANSFER": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0"})
+    # BENCH_MODEL must be baked in: the remote fn reads MODEL as a module global, and Modal
+    # re-imports this module in the container (no local-shell env) — else it'd default to E2B.
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "0", "VLLM_USE_FLASHINFER_SAMPLER": "0",
+          "BENCH_GPU": GPU, "BENCH_MODEL": MODEL})
 )
 app = modal.App("vllm-sweep", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)

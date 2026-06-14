@@ -40,7 +40,12 @@ def _hw_tag() -> str:
 # E4B's KV is bigger (42 layers, head_dim 512 on full layers). Each var is env-overridable.
 _BIG = GPU.startswith(("A100", "H100"))
 _g = lambda k, big, small: os.environ.get(k, big if _BIG else small)
+# BENCH_GPU/MODEL must be baked into the image env: the remote function reads MODEL as a
+# module global, and Modal re-imports this module IN the container (where the local shell's
+# env is absent) — so without this they'd silently fall back to the E2B/A10G defaults.
 _kv_env = {
+    "BENCH_GPU": GPU,
+    "BENCH_MODEL": MODEL,
     "CUSTOM_BACKEND_BLOCKS": _g("CUSTOM_BACKEND_BLOCKS", "8192", "2048"),
     "CUSTOM_BACKEND_SLIDING_BLOCKS": _g("CUSTOM_BACKEND_SLIDING_BLOCKS", "4096", "1200"),
     "KV_CACHE_NUM_BLOCKS": _g("KV_CACHE_NUM_BLOCKS", "16384", "4096"),
@@ -85,6 +90,7 @@ def sweep(backend_name: str, prefill_mode: str = "monolithic"):
     from inference_server.kv_cache.cache_manager import CacheManager
     from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
 
+    print(f"[sweep] backend={backend_name} MODEL={MODEL} GPU={GPU}", flush=True)
     backend = create_backend(backend_name)
     backend.load_model(MODEL)
     # Replicate the server's cache wiring (no-op for custom; the cache-pool gate for torch).
