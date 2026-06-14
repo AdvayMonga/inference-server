@@ -57,6 +57,25 @@ def test_prefill_batch_k1_identical_to_single(backend):
     assert dec_b == dec_s                      # KV distributed correctly → identical decode
 
 
+def test_prefill_batch_cache_hit_suffix_only_matches_full(backend):
+    """With a warm prefix cache, prefill_batch forwards only the 1-token suffix against the seeded
+    prefix — must still equal a cold full single prefill (first token + decode)."""
+    p = _toks(backend, PROMPTS_TEXT[1])
+
+    backend.prefix_cache = PrefixCache(pools=backend.pools)          # cold reference
+    cache_s, first_s, _ = backend.prefill(p)
+    dec_s = _decode(backend, cache_s, first_s)
+
+    backend.prefix_cache = PrefixCache(pools=backend.pools)
+    backend.prefill(p)                                               # warm the cache
+    (cache_b, first_b, kvlen_b), = backend.prefill_batch([p])        # → suffix-only path
+    dec_b = _decode(backend, cache_b, first_b)
+
+    assert kvlen_b == len(p)
+    assert first_b == first_s
+    assert dec_b == dec_s
+
+
 def test_prefill_batch_k3_first_tokens_match(backend):
     prompts = [_toks(backend, t) for t in PROMPTS_TEXT]
 

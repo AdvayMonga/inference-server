@@ -265,50 +265,86 @@ class CustomTorchBackend(InferenceBackend):
 
     @torch.no_grad()
     def prefill_batch(self, prompts, session_ids=None):
-        """Prefill K prompts in ONE left-padded forward instead of K serial eager ones — the TTFT
-        lever (prefill is dispatch-bound, ~4× a decode step, so batching pays the dispatch once).
-        Returns a list of (PagedKVCache, first_token, kv_len), one per prompt.
-
-        v1: full prefill, no prefix-cache lookup (per-row cache hits give ragged suffixes that don't
-        batch cleanly); each prompt is stored after, so the single-prefill path stays warm. Left-pad
-        so real tokens are right-aligned; a per-row causal+padding mask keeps rows independent; each
-        row's real-token KV is sliced out and written to its own paged cache."""
+        """Prefix-cache-aware batched prefill — the TTFT lever. Per row: cache-lookup → seed the
+        cached prefix → then ONE batched forward over the (much shorter) SUFFIXES, each attending to
+        its own prefix. For repeated/shared prompts the suffix is ~1 token, so the forward is tiny
+        (dispatch-bound) instead of re-prefilling the full prompt. No cache hit → suffix = full prompt
+        (the v1 behaviour). Returns per-row (PagedKVCache, first_token, kv_len). Device-agnostic
+        (gather + masked SDPA). Left-pad both prefix and suffix; a per-row mask keeps rows independent
+        (suffix query attends to its real prefix keys + causal suffix keys)."""
         from inference_server.models.gemma4 import KVCache
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
         K = len(prompts)
-        lens = [len(p) for p in prompts]
-        Lmax = max(lens)
         nlayers = self.model.model.num_layers
 
-        input_ids = torch.zeros(K, Lmax, dtype=torch.long, device=dev)
-        position_ids = torch.zeros(K, Lmax, dtype=torch.long, device=dev)
-        mask = torch.zeros(K, 1, Lmax, Lmax, dtype=torch.bool, device=dev)
-        idx = torch.arange(Lmax, device=dev)
-        causal = idx[None, :] <= idx[:, None]  # [q, kk] → kk ≤ q
-        for k, p in enumerate(prompts):
-            off = Lmax - lens[k]
-            input_ids[k, off:] = torch.tensor(p, device=dev)
-            position_ids[k, off:] = torch.arange(lens[k], device=dev)
-            mask[k, 0] = (idx[None, :] >= off) & causal  # attend real keys up to the query
+        caches, matched, suffixes = [], [], []
+        for p in prompts:
+            m, shared = self.prefix_cache.lookup(p)
+            if m >= len(p):
+                m = len(p) - 1  # leave ≥1 token so we get next-token logits
+            caches.append(PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=m))
+            matched.append(m)
+            suffixes.append(p[m:])
+        self.last_cache_hit_tokens = matched[-1] if matched else 0
 
-        kv = KVCache(num_layers=nlayers)
-        logits = self.model(input_ids, position_ids=position_ids, kv_cache=kv, attn_mask=mask)
+        Smax = max(len(s) for s in suffixes)
+        Pmax = max(matched) if matched else 0
+
+        input_ids = torch.zeros(K, Smax, dtype=torch.long, device=dev)
+        position_ids = torch.zeros(K, Smax, dtype=torch.long, device=dev)
+        for k in range(K):
+            s, m = suffixes[k], matched[k]
+            input_ids[k, Smax - len(s):] = torch.tensor(s, device=dev)
+            position_ids[k, Smax - len(s):] = torch.arange(m, m + len(s), device=dev)
+
+        # Seed a batched KVCache with each row's gathered prefix, left-padded to Pmax (per layer).
+        seeded = KVCache(num_layers=nlayers)
+        if Pmax > 0:
+            for i in range(nlayers):
+                rows = [caches[k].get(i) for k in range(K)]
+                if all(r is None for r in rows):
+                    continue  # shared layer, or no row has a prefix here
+                ref = next(r for r in rows if r is not None)[0]
+                H, D = ref.shape[1], ref.shape[3]
+                kbuf = torch.zeros(K, H, Pmax, D, dtype=ref.dtype, device=dev)
+                vbuf = torch.zeros(K, H, Pmax, D, dtype=ref.dtype, device=dev)
+                for k, r in enumerate(rows):
+                    if r is not None:
+                        kbuf[k, :, Pmax - matched[k]:, :] = r[0][0]
+                        vbuf[k, :, Pmax - matched[k]:, :] = r[1][0]
+                seeded.k[i], seeded.v[i] = kbuf, vbuf
+
+        # Mask [K,1,Smax,Pmax+Smax]: suffix query attends to its real prefix keys + causal suffix keys.
+        Ktot = Pmax + Smax
+        mask = torch.zeros(K, 1, Smax, Ktot, dtype=torch.bool, device=dev)
+        qi = torch.arange(Smax, device=dev)
+        ki = torch.arange(Ktot, device=dev)
+        for k in range(K):
+            L, m = len(suffixes[k]), matched[k]
+            soff = Smax - L
+            real_q = (qi >= soff)[:, None]                                       # [Smax,1]
+            prefix_key = ((ki < Pmax) & (ki >= Pmax - m))[None, :]               # [1,Ktot]
+            suffix_key = ((ki >= Pmax + soff))[None, :] & ((ki[None, :] - Pmax) <= qi[:, None])
+            mask[k, 0] = real_q & (prefix_key | suffix_key)
+
+        logits = self.model(input_ids, position_ids=position_ids, kv_cache=seeded, attn_mask=mask)
 
         results = []
         for k in range(K):
-            off = Lmax - lens[k]
+            L = len(suffixes[k])
             first = int(sample(logits[k:k + 1, -1, :], GREEDY).item())
-            cache = PagedKVCache(pools=self.pools)
+            cache = caches[k]
             for i in range(nlayers):
-                kvi = kv.get(i)
-                if kvi is None:  # KV-shared layer — reads the source layer's pool, nothing to store
+                kvi = seeded.get(i)
+                if kvi is None:  # KV-shared layer — reads the source layer's pool
                     continue
-                ki, vi = kvi
-                cache.append(i, ki[k:k + 1, :, off:, :], vi[k:k + 1, :, off:, :])
+                ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = the last L positions
+                tot = ki_t.shape[2]
+                cache.append(i, ki_t[k:k + 1, :, tot - L:, :], vi_t[k:k + 1, :, tot - L:, :])
             if not cache.any_evicted:
                 self.prefix_cache.store(prompts[k], cache.block_tables)
-            results.append((cache, first, lens[k]))
+            results.append((cache, first, len(prompts[k])))
         return results
 
     @torch.no_grad()
