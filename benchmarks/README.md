@@ -111,28 +111,34 @@ vs sdpa + DynamicCache). vs vLLM: we trail.
   a full batch drain) — needs an open/staggered-arrival probe to separate workload artifact from real
   scheduler-admission deficiency. Either way the fix is smoother admission under load.
 
-## `sweep_custom_cuda_batched.csv` — batched prefill closes most of the TTFT gap
+## `sweep_custom_cuda_batched.csv` — batched prefill closes the TTFT gap (8.6×)
 
 The head-to-head TTFT gap was diagnosed (`scripts/profile_prefill_modal.py`) as **eager, serial
 prefill**: prefill runs eager at ~92 ms (dispatch-bound — even a 1-token prefill is 73ms; 4.4× a
 21ms graphed decode step), and admission ran N of them serially per wave. `PREFILL_MODE=batched`
-(`prefill_batch`) admits the whole wave in ONE padded forward instead.
+admits the whole wave in ONE forward. Three iterations got it to vLLM's neighborhood:
 
-| N | TTFT p50 mono → batched (vLLM) | tok/s mono → batched (vLLM) |
-|---|---|---|
-| 1  | 75 → 50 (19)     | 45.5 → 46.6 (85.1) |
-| 8  | 467 → 104 (38)   | 300.3 → 344.5 (610.0) |
-| 16 | 930 → 188 (55)   | 493.9 → 647.1 (1155.2) |
-| 32 | 1841 → 349 (93)  | 752.7 → 1151.9 (2034.5) |
+**TTFT p50 @ N=32 (ms):**
 
-- **TTFT @ N=32: 1841 → 349 ms (5.3×).** Throughput 753 → 1152 tok/s (1.53×). TPOT unchanged (~24ms).
-- **Gap to vLLM closed:** TTFT ~20× → ~3.7×, throughput 2.7× → ~1.8×.
-- Remaining TTFT gap (349 vs 93): our batched prefill is still *eager* (one amortized dispatch);
-  vLLM *graphs* prefill at bucketed sizes. The TPOT gap (24 vs 14) is the separate kernel/fusion lever.
+| stage | TTFT | tok/s | vs vLLM TTFT | what |
+|---|---|---|---|---|
+| monolithic | 1841 | 753 | 20× | N serial eager prefills/wave |
+| v1 batched (full) | 349 | 1152 | 3.7× | one padded forward, but re-prefills cached tokens |
+| v2 gather (prefix-aware) | 304 | 1098 | 3.3× | suffix-only, but the paged-prefix **gather** ate the win |
+| **v3 kernel (prefix-aware)** | **213** | **1218** | **2.3×** | paged prefill kernel — suffix-only **and** gather-free |
+| vLLM | 93 | 2034 | 1× | (graphs prefill at bucketed sizes) |
+
+- **Full arc: TTFT 1841 → 213 ms (8.6×)**, throughput 753 → 1218 tok/s (1.6×). Gap to vLLM 20× → 2.3×.
+- v3 = `models/paged_attention_kernel.py::paged_prefill_attention` (multi-query, reads paged prefix+
+  suffix via block tables, no gather — the prefill cousin of the decode kernel). Wired via a
+  `_PrefillCtx` `paged_ctx`. CUDA only; CPU keeps the gather path (v2) as reference.
+- Residual TTFT (213 vs 93): the suffix forward is still **eager** (~73ms dispatch); graphing it
+  (fixed [N,1] shape on cache hits) would close most of it. Remaining throughput gap is now **TPOT**
+  (24 vs 14 ms) = kernel-eff/quantization (lever 2, A100).
 
 ## Not captured yet
 
-- **Graph/compile the batched prefill** — close the residual TTFT gap (eager → bucketed graphs, vLLM-style).
+- **Graph the suffix prefill** — close the last TTFT gap (eager 73ms → ~21ms graphed, vLLM-style).
 - **TPOT vs vLLM** (24 vs 14 ms) — kernel/op-fusion lever; biggest remaining decode gap.
 - **guidellm/stopwatch standardized run** — the in-process sweep above is the controlled comparison;
   a published-table number would use the OpenAI `/v1/completions` shim + guidellm (DECISIONS [2026-05-18]).
