@@ -165,7 +165,10 @@ class GemmaAttention(nn.Module):
         # No gather, no padding. Non-shared layers append; shared layers read the source
         # layer's pool (already populated earlier this step). Returns (out, None).
         if paged_ctx is not None:
-            from inference_server.models.paged_attention_kernel import paged_decode_attention
+            from inference_server.models.paged_attention_kernel import (
+                paged_decode_attention, paged_prefill_attention,
+            )
+            is_prefill = getattr(paged_ctx, "is_prefill", False)
             if not self.is_kv_shared:
                 k_new = self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
                 k_new = self.k_norm(k_new)
@@ -174,8 +177,16 @@ class GemmaAttention(nn.Module):
                 v_new = self.v_norm(v_new).transpose(1, 2)
                 paged_ctx.append(kv_layer_idx, k_new, v_new)
             pool = paged_ctx.pools[kv_layer_idx]
-            bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
             window = self.sliding_window if self.sliding_window is not None else (1 << 30)
+            if is_prefill:
+                # Multi-query paged prefill: suffix queries attend (causally) to paged prefix+suffix.
+                bt = paged_ctx.block_table_tensor(kv_layer_idx)
+                out = paged_prefill_attention(
+                    q.transpose(1, 2), pool.k, pool.v, bt,
+                    paged_ctx.prefix_lens, paged_ctx.suffix_lens, scale=1.0, window=window,
+                )
+                return self.o_proj(out.reshape(B, S, -1)), None
+            bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
             out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=1.0, window=window)
             return self.o_proj(out.reshape(B, S, -1)), None
 

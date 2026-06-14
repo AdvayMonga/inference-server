@@ -53,6 +53,39 @@ class _GraphCtx:
         return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), (self.seq_lens + 1).to(torch.int32)
 
 
+class _PrefillCtx:
+    """paged_ctx for batched prefill — multi-query, kernel-backed (no gather). Holds per-row paged
+    caches (each seeded with its cached prefix); the model appends the suffix K/V and the prefill
+    kernel attends over the paged prefix+suffix. `is_prefill=True` routes the model's attention here.
+    Suffix is right-padded (real tokens at [0, suffix_len)); padding queries are skipped in-kernel."""
+
+    is_prefill = True
+
+    def __init__(self, caches, pools, prefix_lens, suffix_lens, device):
+        self.caches = caches                       # list[PagedKVCache], one per row
+        self.pools = pools
+        self._suffix = suffix_lens                 # python list (for the per-row append slice)
+        self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
+        self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
+        self.device = device
+
+    def append(self, layer_idx, k_new, v_new):
+        # k_new/v_new: [B, Hkv, Smax, D] (right-padded). Append each row's real suffix to its cache.
+        for b, cache in enumerate(self.caches):
+            s = self._suffix[b]
+            cache.append(layer_idx, k_new[b:b + 1, :, :s, :], v_new[b:b + 1, :, :s, :])
+
+    def block_table_tensor(self, layer_idx):
+        rows = [c.block_tables[layer_idx] for c in self.caches]
+        maxb = max((len(r) for r in rows), default=1)
+        bt = torch.zeros(len(rows), maxb, dtype=torch.int32, device=self.device)
+        for b, r in enumerate(rows):
+            if r:
+                bt[b, :len(r)] = torch.tensor([x if x >= 0 else 0 for x in r],
+                                              dtype=torch.int32, device=self.device)
+        return bt
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom GemmaForCausalLM forward."""
 
@@ -271,7 +304,11 @@ class CustomTorchBackend(InferenceBackend):
         (dispatch-bound) instead of re-prefilling the full prompt. No cache hit → suffix = full prompt
         (the v1 behaviour). Returns per-row (PagedKVCache, first_token, kv_len). Device-agnostic
         (gather + masked SDPA). Left-pad both prefix and suffix; a per-row mask keeps rows independent
-        (suffix query attends to its real prefix keys + causal suffix keys)."""
+        (suffix query attends to its real prefix keys + causal suffix keys).
+
+        CUDA uses the gather-free paged prefill kernel instead (`_prefill_batch_kernel`)."""
+        if self.device.type == "cuda":
+            return self._prefill_batch_kernel(prompts)
         from inference_server.models.gemma4 import KVCache
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
@@ -345,6 +382,41 @@ class CustomTorchBackend(InferenceBackend):
             if not cache.any_evicted:
                 self.prefix_cache.store(prompts[k], cache.block_tables)
             results.append((cache, first, len(prompts[k])))
+        return results
+
+    @torch.no_grad()
+    def _prefill_batch_kernel(self, prompts):
+        """CUDA batched prefill via the paged prefill kernel — no gather. Per row: cache-lookup →
+        seed prefix blocks → one forward over the right-padded SUFFIXES, where each layer appends
+        the suffix K/V to the blocks and the kernel attends over paged prefix+suffix."""
+        from inference_server.models.paged_kv_cache import PagedKVCache
+        dev = self.device
+        caches, matched, suffixes = [], [], []
+        for p in prompts:
+            m, shared = self.prefix_cache.lookup(p)
+            if m >= len(p):
+                m = len(p) - 1
+            caches.append(PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=m))
+            matched.append(m)
+            suffixes.append(p[m:])
+        self.last_cache_hit_tokens = matched[-1] if matched else 0
+
+        Smax = max(len(s) for s in suffixes)
+        input_ids = torch.zeros(len(prompts), Smax, dtype=torch.long, device=dev)
+        position_ids = torch.zeros(len(prompts), Smax, dtype=torch.long, device=dev)
+        for k, s in enumerate(suffixes):
+            input_ids[k, :len(s)] = torch.tensor(s, device=dev)               # right-padded
+            position_ids[k, :len(s)] = torch.arange(matched[k], matched[k] + len(s), device=dev)
+
+        ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev)
+        logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx)
+
+        results = []
+        for k in range(len(prompts)):
+            first = int(sample(logits[k:k + 1, len(suffixes[k]) - 1, :], GREEDY).item())
+            if not caches[k].any_evicted:
+                self.prefix_cache.store(prompts[k], caches[k].block_tables)
+            results.append((caches[k], first, len(prompts[k])))
         return results
 
     @torch.no_grad()
