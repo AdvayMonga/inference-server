@@ -93,6 +93,13 @@ def run():
     teardown(state)
 
     # --- 2. eager step: per-kernel breakdown (what the graph internally runs) ---
+    # Skip when compiled: without the graph's fixed [maxN,1] shape, the compiled forward hits the
+    # real growing BatchedDecodeState and recompiles every step (block-table shapes drift) → hangs.
+    # Production always uses the graph; the eager breakdown is only meaningful uncompiled.
+    if COMPILE == "1":
+        print("[eager breakdown skipped — compiled forward recompiles on the dynamic eager state; "
+              "the graph headline above is the production number]", flush=True)
+        return
     backend._graph_on, backend._graph = False, None
     state, step = build_state()
     for _ in range(WARMUP):
