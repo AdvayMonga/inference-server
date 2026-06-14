@@ -206,7 +206,13 @@ def main():
                   f"{r['tpot_p50']:>8}/{r['tpot_p95']:>7}")
             rows.append({"N": n, **r})
         suffix = "" if mode == "monolithic" else f"_{mode}"
-        fname = out_dir / f"sweep_{b.replace('-', '_')}{suffix}{_hw_tag()}.csv"
+        # Backend-variant tag so compile/quant runs don't clobber the plain baseline CSV.
+        variant = ""
+        if os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1":
+            variant += "_compile"
+        if os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8":
+            variant += "_int8"
+        fname = out_dir / f"sweep_{b.replace('-', '_')}{suffix}{_hw_tag()}{variant}.csv"
         with open(fname, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["N", "reqs", "tok_s", "ttft_p50", "ttft_p95",
                                               "ttft_p99", "tpot_p50", "tpot_p95"])
