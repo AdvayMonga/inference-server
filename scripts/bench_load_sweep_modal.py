@@ -149,6 +149,10 @@ def sweep(backend_name: str, prefill_mode: str = "monolithic"):
                 "ttft_p99": round(_pct(ttfts, .99)),
                 "tpot_p50": round(_pct(tpots, .50), 1), "tpot_p95": round(_pct(tpots, .95), 1),
             }
+            r = results[n]  # print here too → survives a local client disconnect
+            print(f"[{backend_name}] N={n:>2} reqs={r['reqs']:>4} tok/s={r['tok_s']:>7} "
+                  f"TTFT={r['ttft_p50']}/{r['ttft_p95']}/{r['ttft_p99']}ms "
+                  f"TPOT={r['tpot_p50']}/{r['tpot_p95']}ms", flush=True)
         return results
 
     return asyncio.run(main())
