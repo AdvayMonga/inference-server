@@ -25,6 +25,17 @@ import modal
 GPU = os.environ.get("BENCH_GPU", "A10G")
 MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E2B-it")
 
+
+def _hw_tag() -> str:
+    """Filename suffix keying a CSV to its GPU+model so different sweeps don't clobber.
+
+    A10G/E2B (the original sweep) keeps the bare filename for continuity; others get a tag.
+    """
+    g = GPU.split("-")[0].lower()                       # a10g, a100, h100
+    parts = MODEL.split("/")[-1].split("-")
+    m = (parts[2] if len(parts) > 2 else parts[-1]).lower()  # e2b, e4b
+    return "" if (g == "a10g" and m == "e2b") else f"_{g}_{m}"
+
 # KV pools scale by GPU class: A100/H100 (80GB) has the headroom for far bigger pools, and
 # E4B's KV is bigger (42 layers, head_dim 512 on full layers). Each var is env-overridable.
 _BIG = GPU.startswith(("A100", "H100"))
@@ -186,7 +197,7 @@ def main():
                   f"{r['tpot_p50']:>8}/{r['tpot_p95']:>7}")
             rows.append({"N": n, **r})
         suffix = "" if mode == "monolithic" else f"_{mode}"
-        fname = out_dir / f"sweep_{b.replace('-', '_')}{suffix}.csv"
+        fname = out_dir / f"sweep_{b.replace('-', '_')}{suffix}{_hw_tag()}.csv"
         with open(fname, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["N", "reqs", "tok_s", "ttft_p50", "ttft_p95",
                                               "ttft_p99", "tpot_p50", "tpot_p95"])

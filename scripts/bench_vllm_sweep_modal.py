@@ -16,6 +16,14 @@ import modal
 GPU = os.environ.get("BENCH_GPU", "A10G")
 MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E2B-it")
 
+
+def _hw_tag() -> str:
+    """Filename suffix keying a CSV to its GPU+model (A10G/E2B keeps the bare name)."""
+    g = GPU.split("-")[0].lower()
+    parts = MODEL.split("/")[-1].split("-")
+    m = (parts[2] if len(parts) > 2 else parts[-1]).lower()
+    return "" if (g == "a10g" and m == "e2b") else f"_{g}_{m}"
+
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("vllm")
@@ -123,7 +131,7 @@ def main():
               f"{r['ttft_p50']:>7}/{r['ttft_p95']:>6}/{r['ttft_p99']:>6}   "
               f"{r['tpot_p50']:>8}/{r['tpot_p95']:>7}")
         rows.append({"N": n, **r})
-    fname = Path("benchmarks") / "sweep_vllm.csv"
+    fname = Path("benchmarks") / f"sweep_vllm{_hw_tag()}.csv"
     with open(fname, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["N", "reqs", "tok_s", "ttft_p50", "ttft_p95",
                                           "ttft_p99", "tpot_p50", "tpot_p95"])
