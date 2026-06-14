@@ -95,6 +95,17 @@ def run():
     for cc in caches:
         cc.free_all()
 
+    # batched prefill scaling — dispatch-bound (flat per-row) or compute-bound (total grows with K)?
+    print()
+    for Kb in (1, 8, 32):
+        prompts = [[43000 + j] + list(range(100, 100 + PROMPT_TOKENS)) for j in range(Kb)]
+        sync(); t0 = time.perf_counter()
+        res = backend.prefill_batch(prompts)
+        sync(); bt = (time.perf_counter() - t0) * 1000
+        for cc, _, _ in res:
+            cc.free_all()
+        print(f"prefill_batch K={Kb:2d} (full): {bt:6.1f} ms  (per-row {bt / Kb:.1f})")
+
     print(f"\nprefill uncached (60-tok):  {uncached_ms:6.1f} ms")
     print(f"prefill cached (1-tok hit): {cached_ms:6.1f} ms")
     print(f"graphed decode step:        {decode_ms:6.1f} ms")
