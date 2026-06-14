@@ -71,7 +71,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     # chunk + one decode step per iter, kills HOL blocking). The enum is the forward-compat
     # extension point: `mixed_batch` (V-B) and `disaggregated` (P/D) are future strategies that
     # reuse the same `_prefilling` phase + `prefill_chunk` primitive + `_promote_to_decode` seam.
-    PREFILL_MODES = ("monolithic", "chunked")
+    PREFILL_MODES = ("monolithic", "chunked", "batched")
 
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
                  max_queue_size: int = 1000,
@@ -92,6 +92,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             raise ValueError(f"unknown prefill_mode {self.prefill_mode!r}; expected one of {self.PREFILL_MODES}")
         if self.prefill_mode == "chunked" and prefill_chunk_size <= 0:
             raise ValueError("prefill_mode='chunked' requires prefill_chunk_size > 0")
+        if self.prefill_mode == "batched" and not hasattr(backend, "prefill_batch"):
+            raise ValueError("prefill_mode='batched' requires a backend with prefill_batch (custom-*)")
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -256,12 +258,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
-        while len(self._active) + len(self._prefilling) < self.max_batch_size:
+        to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
+        while len(self._active) + len(self._prefilling) + len(to_admit) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.
                 peeked = self.policy.peek_next()
                 if peeked is None:
-                    return
+                    break  # break, not return: fall through to the batched-prefill flush below
                 reservation = len(peeked.token_ids) + peeked.max_tokens
 
                 # Active-KV gate: protects against decode-time OOM.
@@ -278,7 +281,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     continue
                 if self._active_kv_reserved + reservation > self.max_active_kv_tokens:
                     self._kv_admit_blocked += 1
-                    return
+                    break
 
                 # Cache-pool gate: avoids forced eviction churn.
                 if cache is not None:
@@ -296,17 +299,20 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._reject(peeked, err)
                             continue
                         self._kv_admit_blocked += 1
-                        return
+                        break
 
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
                 if not self.backend.kv_reserve(len(peeked.token_ids), peeked.max_tokens):
                     self._kv_admit_blocked += 1
-                    return
+                    break
 
                 req = self.policy.pick_next()
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
+            if self.prefill_mode == "batched":
+                to_admit.append(req)  # defer the forward; one prefill_batch after the loop
+                continue
             try:
                 if self.prefill_mode == "chunked":
                     # Chunked-prefill mode: lookup only, defer forward pass to _advance_prefill_chunk
@@ -328,6 +334,29 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
+            self._promote_to_decode(req, kv, kv_len, first_token, device)
+            self._total_admitted += 1
+
+        if to_admit:
+            self._admit_batched(to_admit, device)
+
+    def _admit_batched(self, reqs: list[ScheduledRequest], device: str) -> None:
+        """Prefill all reserved reqs in ONE batched forward (prefill_mode='batched'). This is the
+        TTFT lever: prefill is dispatch-bound (~4× a decode step), so a serial per-request admission
+        wave costs N × that — batching pays the dispatch once. On batch failure, reject the whole
+        wave (release each reservation) rather than risk partial/leaked state."""
+        try:
+            results = self.backend.prefill_batch([r.token_ids for r in reqs])
+        except Exception as e:
+            logger.exception("Batched prefill failed (%d reqs)", len(reqs))
+            for req in reqs:
+                self._active_kv_reserved -= len(req.token_ids) + req.max_tokens
+                self.backend.kv_release(len(req.token_ids), req.max_tokens)
+                self.policy.on_request_finished(req)
+                self._reject(req, e)
+            return
+        for req, (kv, first_token, kv_len) in zip(reqs, results):
+            req.cache_hit_tokens = 0  # batched path does a full prefill (no prefix-cache lookup)
             self._promote_to_decode(req, kv, kv_len, first_token, device)
             self._total_admitted += 1
 

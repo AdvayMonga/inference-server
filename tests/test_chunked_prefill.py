@@ -69,6 +69,10 @@ class FakeChunkBackend(InferenceBackend):
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         self.store_calls.append((len(token_ids), matched))
 
+    # --- Batched prefill primitive ---
+    def prefill_batch(self, prompts, session_ids=None):
+        return [(_FakeKV(batch_size=1, seq_len=len(p)), self.FIRST_TOKEN, len(p)) for p in prompts]
+
     # --- Batched decode ---
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row=None):
         next_tokens = current_tokens.squeeze(-1) + 1
@@ -194,3 +198,45 @@ def test_invalid_mode_and_chunked_without_size_raise():
         ContinuousBatchScheduler(FakeChunkBackend(), prefill_mode="disaggregated")  # not implemented yet
     with _pytest.raises(ValueError):
         ContinuousBatchScheduler(FakeChunkBackend(), prefill_mode="chunked", prefill_chunk_size=0)
+
+
+# --- batched prefill mode ---
+
+@pytest.mark.asyncio
+async def test_batched_matches_monolithic_output():
+    """prefill_mode='batched' produces the same generated tokens as monolithic."""
+    out_mono, _ = await _run_one(FakeChunkBackend(), chunk_size=0, prompt_len=25, max_tokens=6)
+    out_batched, stats = await _run_one(FakeChunkBackend(), chunk_size=0, prompt_len=25,
+                                        max_tokens=6, mode="batched")
+    assert out_mono == out_batched
+    assert stats["prefill_mode"] == "batched"
+
+
+@pytest.mark.asyncio
+async def test_batched_admits_concurrent_requests_in_one_forward():
+    """Several concurrent requests all complete under batched admission (one prefill_batch/wave)."""
+    backend = FakeChunkBackend()
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8, prefill_mode="batched")
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=list(range(10 + i)), max_tokens=4,
+                                 session_id=f"u{i}", future=loop.create_future()) for i in range(5)]
+        for r in reqs:
+            sched.enqueue(r)
+        outs = await asyncio.gather(*[r.future for r in reqs])
+        assert all(len(o) == 4 for o in outs)
+        assert sched.stats()["total_admitted"] == 5
+    finally:
+        await sched.stop()
+
+
+def test_batched_mode_requires_prefill_batch():
+    """A backend without prefill_batch can't use batched mode — fails at construction."""
+    import pytest as _pytest
+
+    class Bare:  # no prefill_batch attribute
+        cache_adapter = None
+
+    with _pytest.raises(ValueError):
+        ContinuousBatchScheduler(Bare(), prefill_mode="batched")
