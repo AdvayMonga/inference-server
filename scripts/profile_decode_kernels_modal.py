@@ -123,11 +123,13 @@ def run():
     print(ka.table(sort_by="self_cuda_time_total", row_limit=30), flush=True)
 
     # Bucket GPU self-time → GEMM (weight reads) vs attention vs element-wise/launch tail.
+    # Count DEVICE-KERNEL rows only (self CPU == 0): the aten:: op rows re-report the same GPU
+    # time their kernels do, so summing both double-counts. Device kernels are the ground truth.
     buckets = {"gemm/matmul": 0.0, "attention": 0.0, "elementwise/norm/copy": 0.0, "other": 0.0}
     total = 0.0
     for evt in ka:
         t = dev_us(evt)
-        if t <= 0:
+        if t <= 0 or getattr(evt, "self_cpu_time_total", 0) > 0:
             continue
         total += t
         name = evt.key.lower()
