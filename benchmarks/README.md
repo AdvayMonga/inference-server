@@ -111,10 +111,29 @@ vs sdpa + DynamicCache). vs vLLM: we trail.
   a full batch drain) — needs an open/staggered-arrival probe to separate workload artifact from real
   scheduler-admission deficiency. Either way the fix is smoother admission under load.
 
+## `sweep_custom_cuda_batched.csv` — batched prefill closes most of the TTFT gap
+
+The head-to-head TTFT gap was diagnosed (`scripts/profile_prefill_modal.py`) as **eager, serial
+prefill**: prefill runs eager at ~92 ms (dispatch-bound — even a 1-token prefill is 73ms; 4.4× a
+21ms graphed decode step), and admission ran N of them serially per wave. `PREFILL_MODE=batched`
+(`prefill_batch`) admits the whole wave in ONE padded forward instead.
+
+| N | TTFT p50 mono → batched (vLLM) | tok/s mono → batched (vLLM) |
+|---|---|---|
+| 1  | 75 → 50 (19)     | 45.5 → 46.6 (85.1) |
+| 8  | 467 → 104 (38)   | 300.3 → 344.5 (610.0) |
+| 16 | 930 → 188 (55)   | 493.9 → 647.1 (1155.2) |
+| 32 | 1841 → 349 (93)  | 752.7 → 1151.9 (2034.5) |
+
+- **TTFT @ N=32: 1841 → 349 ms (5.3×).** Throughput 753 → 1152 tok/s (1.53×). TPOT unchanged (~24ms).
+- **Gap to vLLM closed:** TTFT ~20× → ~3.7×, throughput 2.7× → ~1.8×.
+- Remaining TTFT gap (349 vs 93): our batched prefill is still *eager* (one amortized dispatch);
+  vLLM *graphs* prefill at bucketed sizes. The TPOT gap (24 vs 14) is the separate kernel/fusion lever.
+
 ## Not captured yet
 
-- **Closing the TTFT gap vs vLLM** — the main finding; needs an open/staggered-arrival probe to
-  separate closed-loop wave-sync artifact from real admission deficiency, then smoother admission.
+- **Graph/compile the batched prefill** — close the residual TTFT gap (eager → bucketed graphs, vLLM-style).
+- **TPOT vs vLLM** (24 vs 14 ms) — kernel/op-fusion lever; biggest remaining decode gap.
 - **guidellm/stopwatch standardized run** — the in-process sweep above is the controlled comparison;
   a published-table number would use the OpenAI `/v1/completions` shim + guidellm (DECISIONS [2026-05-18]).
 - **A100/H100 + E4B** — int8/fp8 throughput + the head-to-head re-run on serving hardware.
