@@ -264,6 +264,54 @@ class CustomTorchBackend(InferenceBackend):
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
+    def prefill_batch(self, prompts, session_ids=None):
+        """Prefill K prompts in ONE left-padded forward instead of K serial eager ones — the TTFT
+        lever (prefill is dispatch-bound, ~4× a decode step, so batching pays the dispatch once).
+        Returns a list of (PagedKVCache, first_token, kv_len), one per prompt.
+
+        v1: full prefill, no prefix-cache lookup (per-row cache hits give ragged suffixes that don't
+        batch cleanly); each prompt is stored after, so the single-prefill path stays warm. Left-pad
+        so real tokens are right-aligned; a per-row causal+padding mask keeps rows independent; each
+        row's real-token KV is sliced out and written to its own paged cache."""
+        from inference_server.models.gemma4 import KVCache
+        from inference_server.models.paged_kv_cache import PagedKVCache
+        dev = self.device
+        K = len(prompts)
+        lens = [len(p) for p in prompts]
+        Lmax = max(lens)
+        nlayers = self.model.model.num_layers
+
+        input_ids = torch.zeros(K, Lmax, dtype=torch.long, device=dev)
+        position_ids = torch.zeros(K, Lmax, dtype=torch.long, device=dev)
+        mask = torch.zeros(K, 1, Lmax, Lmax, dtype=torch.bool, device=dev)
+        idx = torch.arange(Lmax, device=dev)
+        causal = idx[None, :] <= idx[:, None]  # [q, kk] → kk ≤ q
+        for k, p in enumerate(prompts):
+            off = Lmax - lens[k]
+            input_ids[k, off:] = torch.tensor(p, device=dev)
+            position_ids[k, off:] = torch.arange(lens[k], device=dev)
+            mask[k, 0] = (idx[None, :] >= off) & causal  # attend real keys up to the query
+
+        kv = KVCache(num_layers=nlayers)
+        logits = self.model(input_ids, position_ids=position_ids, kv_cache=kv, attn_mask=mask)
+
+        results = []
+        for k in range(K):
+            off = Lmax - lens[k]
+            first = int(sample(logits[k:k + 1, -1, :], GREEDY).item())
+            cache = PagedKVCache(pools=self.pools)
+            for i in range(nlayers):
+                kvi = kv.get(i)
+                if kvi is None:  # KV-shared layer — reads the source layer's pool, nothing to store
+                    continue
+                ki, vi = kvi
+                cache.append(i, ki[k:k + 1, :, off:, :], vi[k:k + 1, :, off:, :])
+            if not cache.any_evicted:
+                self.prefix_cache.store(prompts[k], cache.block_tables)
+            results.append((cache, first, lens[k]))
+        return results
+
+    @torch.no_grad()
     def prefill_lookup(self, token_ids, session_id="default"):
         """Cache lookup only — no forward pass. Returns (seeded PagedKVCache, matched)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
