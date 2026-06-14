@@ -50,7 +50,7 @@ def _pct(xs, q):
 
 @app.function(gpu="A10G", volumes={"/root/.cache/huggingface": hf_cache},
               secrets=[hf_secret], timeout=1800)
-def sweep(backend_name: str):
+def sweep(backend_name: str, prefill_mode: str = "monolithic"):
     import asyncio, time
     from inference_server.backends import create_backend
     from inference_server.config import settings
@@ -103,6 +103,8 @@ def sweep(backend_name: str):
             sched = ContinuousBatchScheduler(
                 backend, max_batch_size=settings.max_batch_size,
                 max_active_kv_tokens=settings.max_active_kv_tokens,
+                prefill_mode=(None if prefill_mode == "monolithic" else prefill_mode),
+                prefill_chunk_size=256,
             )
             sched.start()
             try:
@@ -144,10 +146,11 @@ def main():
     # One backend per invocation by default (two sequential model loads = a long run that the
     # local Modal client tends to drop). BENCH_BACKENDS overrides. "cuda" = HF baseline.
     backends = _os.environ.get("BENCH_BACKENDS", "custom-cuda,cuda").split(",")
+    mode = _os.environ.get("SWEEP_PREFILL_MODE", "monolithic")  # monolithic|batched|chunked
     all_results = {}
     for b in backends:
         try:
-            all_results[b] = sweep.remote(b)
+            all_results[b] = sweep.remote(b, mode)
         except Exception as e:
             print(f"[{b}] FAILED: {type(e).__name__}: {str(e)[:300]}")
 
@@ -162,7 +165,8 @@ def main():
                   f"{r['ttft_p50']:>7}/{r['ttft_p95']:>6}/{r['ttft_p99']:>6}   "
                   f"{r['tpot_p50']:>8}/{r['tpot_p95']:>7}")
             rows.append({"N": n, **r})
-        fname = out_dir / f"sweep_{b.replace('-', '_')}.csv"
+        suffix = "" if mode == "monolithic" else f"_{mode}"
+        fname = out_dir / f"sweep_{b.replace('-', '_')}{suffix}.csv"
         with open(fname, "w", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["N", "reqs", "tok_s", "ttft_p50", "ttft_p95",
                                               "ttft_p99", "tpot_p50", "tpot_p95"])
