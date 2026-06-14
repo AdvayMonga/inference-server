@@ -21,6 +21,7 @@ MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it")
 N = int(os.environ.get("PROFILE_N", "32"))
 SEQ = int(os.environ.get("PROFILE_SEQ", "160"))
 PEAK_GBPS = float(os.environ.get("PEAK_GBPS", "2039"))  # A100-80GB SXM4 HBM2e
+COMPILE = os.environ.get("CUSTOM_BACKEND_COMPILE", "0")  # "1" → torch.compile the decode forward
 STEPS, WARMUP, PROFILE_STEPS = 50, 10, 20
 
 image = (
@@ -29,7 +30,7 @@ image = (
     .pip_install_from_pyproject("pyproject.toml")
     # Bake BENCH_* + pools into the image env — the remote fn reads them as module globals and
     # Modal re-imports this module in the container (no local-shell env). See the BENCH_MODEL bug.
-    .env({"BENCH_GPU": GPU, "BENCH_MODEL": MODEL,
+    .env({"BENCH_GPU": GPU, "BENCH_MODEL": MODEL, "CUSTOM_BACKEND_COMPILE": COMPILE,
           "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096"})
     .add_local_python_source("inference_server")
 )
@@ -46,7 +47,7 @@ def run():
     from inference_server.backends import create_backend
     from inference_server.models.paged_kv_cache import PagedKVCache
 
-    print(f"GPU={GPU} MODEL={MODEL} N={N} SEQ={SEQ}", flush=True)
+    print(f"GPU={GPU} MODEL={MODEL} N={N} SEQ={SEQ} COMPILE={COMPILE}", flush=True)
     backend = create_backend("custom-cuda")
     backend.load_model(MODEL)
     model, dev = backend.model, backend.device

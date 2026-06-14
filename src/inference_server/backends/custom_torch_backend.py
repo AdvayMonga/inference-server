@@ -149,6 +149,18 @@ class CustomTorchBackend(InferenceBackend):
         self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._graph = None  # captured lazily on first decode
 
+        # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
+        # tail the profiler found — the bandwidth lever on A100). Decode-only because prefill's
+        # ragged shapes would recompile-storm a shared compile; decode is the static [maxN,1]
+        # graph shape. Default mode = fusion, no internal cudagraphs → composes with our manual
+        # CUDA graph. The graph captures the fused kernel stream. CPU path stays uncompiled.
+        self._compile_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
+        if self._compile_on:
+            self._decode_fwd = torch.compile(self.model, dynamic=False)
+            logger.info("torch.compile enabled for decode forward (Inductor fusion)")
+        else:
+            self._decode_fwd = self.model
+
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
         # HF-format CacheManager. Leave cache_adapter=None so the scheduler skips its
@@ -461,7 +473,7 @@ class CustomTorchBackend(InferenceBackend):
                     self._capture_graph()
                 logits = self._replay_decode(current_tokens, position_ids, state)
             else:
-                logits = self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
+                logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
             state.advance()       # bump seq_lens + evict out-of-window blocks
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
@@ -501,15 +513,22 @@ class CustomTorchBackend(InferenceBackend):
             self._g_bt[L] = torch.full((maxN, cols), self._scratch[L], dtype=torch.long, device=dev)
         ctx = _GraphCtx(self.pools, self._g_seqlens, self._g_bt, self._block_size)
         try:
+            if self._compile_on:
+                # Force the Dynamo trace + Inductor compile on the DEFAULT stream first — it must
+                # NOT happen during capture (below) or on the side stream. After this the forward
+                # is fully compiled, so warmup/capture just replay the fused kernels.
+                for _ in range(3):
+                    self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+                torch.cuda.synchronize()
             s = torch.cuda.Stream()
             s.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(s):
                 for _ in range(3):  # warmup (compile kernels, stabilize allocator)
-                    self.model(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+                    self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
             torch.cuda.current_stream().wait_stream(s)
             self._graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self._graph):
-                self._g_out = self.model(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+                self._g_out = self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
             logger.info("Captured CUDA decode graph (max_rows=%d, max_cols=%d)", maxN, cols)
         except Exception:
             logger.exception("CUDA graph capture failed — falling back to eager decode")
@@ -532,7 +551,7 @@ class CustomTorchBackend(InferenceBackend):
             bt = state.block_tables[L]
             self._g_bt[L][:n, :bt.shape[1]].copy_(bt.clamp_min(0))
         if self._graph is None:  # capture fell back to eager
-            return self.model(current_tokens, position_ids=position_ids, paged_ctx=state)
+            return self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
         self._graph.replay()
         return self._g_out[:n]
 
