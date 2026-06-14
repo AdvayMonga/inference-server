@@ -83,33 +83,38 @@ stall a decoder sees while the long prompt prefills.
 - One workload/config — magnitude scales with prompt length and chunk size; this is the mechanism,
   not a universal "12×".
 
-## `sweep_custom_cuda.csv` / `sweep_cuda.csv` — engine vs HF baseline
+## Head-to-head: `sweep_custom_cuda.csv` / `sweep_cuda.csv` / `sweep_vllm.csv`
 
-Concurrency sweep (`scripts/bench_load_sweep_modal.py`, A10G/E2B, decode-bound: 60-token prompt,
-100 max-tokens, bounded distinct prompts). Closed-loop users at each N; **our engine
-(`custom-cuda`) vs the HF `AutoModelForCausalLM` baseline (`cuda`)** under the *same* scheduler —
-isolates what the custom forward + Triton paged kernel + CUDA graph bought us.
+Concurrency sweep, A10G/E2B, decode-bound (60-token prompt, 100 max-tokens, bounded distinct
+prompts), closed-loop users, identical TTFT/TPOT measurement across all three:
+- **custom** — our engine (`bench_load_sweep_modal.py`, `custom-cuda`).
+- **HF** — `AutoModelForCausalLM` baseline (`cuda`) under our *same* scheduler.
+- **vLLM** — vLLM 0.23 V1 in-process (`bench_vllm_sweep_modal.py`), full opts (CUDA graphs +
+  prefix cache + chunked prefill, `max_num_seqs=32`). vLLM runs this model fine (head_dim 512 →
+  its TRITON_ATTN backend, same approach as ours).
 
-| N | tok/s custom / HF | speedup | TPOT p50 custom / HF (ms) | TTFT p50 custom / HF (ms) |
-|---|---|---|---|---|
-| 1  | 45.5 / 21.7  | 2.1× | 21.4 / 45.9 | 75 / 54 |
-| 4  | 167.2 / 81.0 | 2.1× | 21.7 / 47.4 | 245 / 244 |
-| 8  | 300.3 / 154.1 | 1.9× | 22.2 / 47.4 | 467 / 480 |
-| 16 | 493.9 / 282.5 | 1.7× | 23.2 / 47.4 | 930 / 955 |
-| 32 | 752.7 / 479.6 | 1.6× | 24.1 / 48.0 | 1841 / 1895 |
+| N | tok/s custom / HF / vLLM | TPOT p50 custom / HF / vLLM (ms) | TTFT p50 custom / vLLM (ms) |
+|---|---|---|---|
+| 1  | 45.5 / 21.7 / 85.1     | 21.4 / 45.9 / 11.7 | 75 / 19 |
+| 4  | 167.2 / 81.0 / 315.1   | 21.7 / 47.4 / 12.5 | 245 / 34 |
+| 8  | 300.3 / 154.1 / 610.0  | 22.2 / 47.4 / 12.9 | 467 / 38 |
+| 16 | 493.9 / 282.5 / 1155.2 | 23.2 / 47.4 / 13.4 | 930 / 55 |
+| 32 | 752.7 / 479.6 / 2034.5 | 24.1 / 48.0 / 14.2 | 1841 / 93 |
 
-- **~2× lower TPOT (21–24 vs 46–48 ms) at every concurrency** — the decode win (custom forward +
-  paged kernel + CUDA graph vs HF sdpa + DynamicCache). Both hold TPOT flat under load (both are
-  real continuous batchers), so it's a clean per-token advantage.
-- **Throughput speedup 2.1× → 1.6× as N grows:** at N=32 the closed loop is **TTFT-bound, not
-  decode-bound** — each request's cycle is ~1.8 s TTFT (32 users contending for 32 slots) + ~2.4 s
-  decode, capping throughput below the 24 ms-TPOT ceiling. TPOT shows decode has headroom; TTFT
-  (queueing) is the limiter — where more KV headroom / chunked prefill for long prompts would lift it.
-- **TTFT ~identical** — dominated by queueing + (cached, short) prefill, same for both backends.
+**We sit between HF and vLLM.** vs HF: ~2× faster TPOT (custom forward + paged kernel + CUDA graph
+vs sdpa + DynamicCache). vs vLLM: we trail.
+- **TPOT ~1.7× behind vLLM** (21–24 vs 12–14 ms) — vLLM's kernels + Inductor op-fusion vs our
+  Triton kernel + graph. Within 1.7× of SOTA on raw decode for a from-scratch engine.
+- **TTFT is the dominant gap** — at N=32, 1841 ms (custom) vs 93 ms (vLLM), ~20×. Our closed loop is
+  TTFT-bound at saturation; vLLM holds TTFT flat. This drives most of the throughput gap (2.7× @ N=32).
+  Partly closed-loop **wave synchronization** (32 users finish in lockstep → resubmit together → wait
+  a full batch drain) — needs an open/staggered-arrival probe to separate workload artifact from real
+  scheduler-admission deficiency. Either way the fix is smoother admission under load.
 
 ## Not captured yet
 
-- **vLLM head-to-head** — the gold-standard column. A `custom` vs `vLLM` sweep is the remaining
-  comparison; `bench_load_sweep_modal.py` produces our column, vLLM needs its own driver
-  (OpenAI `/v1/completions` shim + guidellm, DECISIONS [2026-05-18]) and a vLLM-supports-the-model
-  check first (the compat run kept getting killed by the Modal client disconnect, not a real fail).
+- **Closing the TTFT gap vs vLLM** — the main finding; needs an open/staggered-arrival probe to
+  separate closed-loop wave-sync artifact from real admission deficiency, then smoother admission.
+- **guidellm/stopwatch standardized run** — the in-process sweep above is the controlled comparison;
+  a published-table number would use the OpenAI `/v1/completions` shim + guidellm (DECISIONS [2026-05-18]).
+- **A100/H100 + E4B** — int8/fp8 throughput + the head-to-head re-run on serving hardware.
