@@ -203,16 +203,16 @@ class PagedKVCache:
         while len(bt) < total_blocks_needed:
             bt.append(pool.alloc())
 
-        # Per-token write loop. Slow at prefill (M2.3 fuses this into the attention kernel).
-        # k_new shape [1, H, S_new, D] → squeeze batch, transpose to [S_new, H, D]
-        k_per_tok = k_new[0].transpose(0, 1)
-        v_per_tok = v_new[0].transpose(0, 1)
-        for t in range(S_new):
-            global_pos = seq_len + t
-            bid = bt[global_pos // block_size]
-            slot = global_pos % block_size
-            pool.k[bid, :, slot, :] = k_per_tok[t]
-            pool.v[bid, :, slot, :] = v_per_tok[t]
+        # Vectorized scatter (was a per-token Python loop — O(S_new) tiny GPU writes, brutal when
+        # distributing a batched prefill). k_new [1, H, S_new, D] → [S_new, H, D]; positions
+        # seq_len..seq_len+S_new-1 map to (block, slot) and write in one indexed assignment.
+        k_per_tok = k_new[0].transpose(0, 1).contiguous()
+        v_per_tok = v_new[0].transpose(0, 1).contiguous()
+        pos = seq_len + torch.arange(S_new, device=k_new.device)
+        bids = torch.tensor(bt, device=k_new.device)[pos // block_size]
+        slots = pos % block_size
+        pool.k[bids, :, slots, :] = k_per_tok
+        pool.v[bids, :, slots, :] = v_per_tok
 
         self.seq_lens[layer_idx] = seq_len + S_new
         self._evict(layer_idx)  # free blocks now fully out of the sliding window
