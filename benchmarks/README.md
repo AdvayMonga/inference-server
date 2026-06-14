@@ -136,10 +136,40 @@ admits the whole wave in ONE forward. Three iterations got it to vLLM's neighbor
   (fixed [N,1] shape on cache hits) would close most of it. Remaining throughput gap is now **TPOT**
   (24 vs 14 ms) = kernel-eff/quantization (lever 2, A100).
 
+## A100/E4B head-to-head — `sweep_{custom_cuda_batched,vllm}_a100_e4b.csv` (2026-06-14)
+
+The real head-to-head on **serving hardware (A100-80GB) + the headline model (E4B)**. Identical
+closed-loop sweep, `PREFILL_MODE=batched`. Set via `BENCH_GPU=A100-80GB BENCH_MODEL=...E4B-it`.
+
+| N | tok/s custom / vLLM | gap | TPOT p50 custom / vLLM (ms) | TTFT p50 custom / vLLM (ms) |
+|---|---|---|---|---|
+| 1  | 39.5 / 112.0   | 2.8× | 24.3 / 8.7  | 107 / 20 |
+| 8  | 225.9 / 805.8  | 3.6× | 31.9 / 9.3  | 127 / 29 |
+| 16 | 388.4 / 1405.8 | 3.6× | 36.8 / 10.3 | 140 / 46 |
+| 32 | 649.7 / 2628.0 | **4.0×** | 43.0 / 11.3 | 189 / 48 |
+
+**The gap widened (1.67× on A10G/E2B → 4.0× here) and the bottleneck MOVED.** A bench bug
+(`BENCH_MODEL` didn't reach the container — first runs silently ran E2B) gave a free **E2B/A100**
+point (`sweep_*_a100_e2b.csv`), so we can decompose:
+
+| config | custom @N=32 | vLLM @N=32 | gap |
+|---|---|---|---|
+| A10G / E2B | 1217 | 2034 | 1.67× |
+| A100 / E2B | 1450 | 4872 | 3.36× |
+| A100 / E4B | 650  | 2628 | 4.0× |
+
+A10G→A100 on the **same E2B**: vLLM 2034→4872 (**2.4×**, cashing in A100's bandwidth); ours
+1217→1450 (**1.19×**). Our E2B TPOT 24→20 ms — **flat under 3× more bandwidth**. On A10G decode was
+bandwidth-bound; on A100 it's **overhead/occupancy-bound** (per-layer Triton launches × 42 layers +
+unfused ops + graph-replay floor — none fixed by more HBM bandwidth). vLLM's Inductor-fused kernels
+scale with the GPU; ours don't yet. **Implication: quantization alone won't close 4× — the new #1
+lever is decode kernel efficiency on A100 (fusion / occupancy / fewer launches).**
+
 ## Not captured yet
 
+- **Decode kernel efficiency on A100** — the new #1 lever (profile the 43 ms/step; fuse per-layer
+  ops; cut the 42-layer launch count). The A10G op-fusion null result assumed bandwidth-bound — false on A100.
 - **Graph the suffix prefill** — close the last TTFT gap (eager 73ms → ~21ms graphed, vLLM-style).
-- **TPOT vs vLLM** (24 vs 14 ms) — kernel/op-fusion lever; biggest remaining decode gap.
+- **Quantization** — int8/fp8; still cuts bytes but no longer expected to close the gap alone.
 - **guidellm/stopwatch standardized run** — the in-process sweep above is the controlled comparison;
   a published-table number would use the OpenAI `/v1/completions` shim + guidellm (DECISIONS [2026-05-18]).
-- **A100/H100 + E4B** — int8/fp8 throughput + the head-to-head re-run on serving hardware.
