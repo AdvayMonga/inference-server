@@ -46,6 +46,9 @@ _g = lambda k, big, small: os.environ.get(k, big if _BIG else small)
 _kv_env = {
     "BENCH_GPU": GPU,
     "BENCH_MODEL": MODEL,
+    # Forward backend knobs into the container too (same module-reimport reason as BENCH_*).
+    "CUSTOM_BACKEND_COMPILE": os.environ.get("CUSTOM_BACKEND_COMPILE", "0"),
+    "CUSTOM_BACKEND_QUANT": os.environ.get("CUSTOM_BACKEND_QUANT", ""),
     "CUSTOM_BACKEND_BLOCKS": _g("CUSTOM_BACKEND_BLOCKS", "8192", "2048"),
     "CUSTOM_BACKEND_SLIDING_BLOCKS": _g("CUSTOM_BACKEND_SLIDING_BLOCKS", "4096", "1200"),
     "KV_CACHE_NUM_BLOCKS": _g("KV_CACHE_NUM_BLOCKS", "16384", "4096"),
