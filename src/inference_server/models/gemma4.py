@@ -424,6 +424,7 @@ class GemmaModel(nn.Module):
         layer_types: list[str],
         sliding_window: int,
         num_kv_shared_layers: int,
+        use_double_wide_mlp: bool = True,   # E2B True; E4B False (config-driven)
         rope_base_sliding: float = 10000.0,
         rope_base_full: float = 1_000_000.0,
         rope_partial_full: float = 0.25,
@@ -484,7 +485,7 @@ class GemmaModel(nn.Module):
             layer_head_dim = head_dim if is_sliding else global_head_dim
             self.layers.append(GemmaDecoderLayer(
                 hidden_size=hidden_size,
-                intermediate_size=intermediate_size * (2 if (i >= first_shared) else 1),  # use_double_wide_mlp on KV-shared
+                intermediate_size=intermediate_size * (2 if (use_double_wide_mlp and i >= first_shared) else 1),
                 num_q_heads=num_q_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=layer_head_dim,
@@ -628,6 +629,7 @@ class GemmaForCausalLM(nn.Module):
             layer_types=list(cfg.layer_types),
             sliding_window=cfg.sliding_window,
             num_kv_shared_layers=cfg.num_kv_shared_layers,
+            use_double_wide_mlp=getattr(cfg, "use_double_wide_mlp", True),
             eps=cfg.rms_norm_eps,
             dtype=dtype,
         )
