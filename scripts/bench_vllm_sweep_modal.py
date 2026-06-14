@@ -8,7 +8,13 @@ caching + chunked prefill on (defaults), max_num_seqs=32 to match our max_batch_
     venv/bin/modal run scripts/bench_vllm_sweep_modal.py
 """
 
+import os
+
 import modal
+
+# Hardware + model are env-driven, matching bench_load_sweep_modal.py so the arms line up.
+GPU = os.environ.get("BENCH_GPU", "A10G")
+MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E2B-it")
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
@@ -20,7 +26,6 @@ app = modal.App("vllm-sweep", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
-MODEL = "google/gemma-4-E2B-it"
 NS = [1, 4, 8, 16, 32]
 PROMPT_TOKENS = 60
 MAX_TOKENS = 100
@@ -38,7 +43,7 @@ def _pct(xs, q):
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
-@app.function(gpu="A10G", volumes={"/root/.cache/huggingface": hf_cache},
+@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
               secrets=[hf_secret], timeout=1800)
 async def sweep():
     import asyncio, time, uuid

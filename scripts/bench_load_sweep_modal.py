@@ -16,21 +16,38 @@ throughput + TPOT under concurrency, which is what the custom backend optimizes.
     venv/bin/modal run --detach scripts/bench_load_sweep_modal.py
 """
 
+import os
+
 import modal
+
+# Hardware + model are env-driven so the same script runs the A10G/E2B and A100/E4B sweeps.
+# Read at module load (the @app.function decorator + image .env() bake these in at import).
+GPU = os.environ.get("BENCH_GPU", "A10G")
+MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E2B-it")
+
+# KV pools scale by GPU class: A100/H100 (80GB) has the headroom for far bigger pools, and
+# E4B's KV is bigger (42 layers, head_dim 512 on full layers). Each var is env-overridable.
+_BIG = GPU.startswith(("A100", "H100"))
+_g = lambda k, big, small: os.environ.get(k, big if _BIG else small)
+_kv_env = {
+    "CUSTOM_BACKEND_BLOCKS": _g("CUSTOM_BACKEND_BLOCKS", "8192", "2048"),
+    "CUSTOM_BACKEND_SLIDING_BLOCKS": _g("CUSTOM_BACKEND_SLIDING_BLOCKS", "4096", "1200"),
+    "KV_CACHE_NUM_BLOCKS": _g("KV_CACHE_NUM_BLOCKS", "16384", "4096"),
+    "MAX_ACTIVE_KV_TOKENS": _g("MAX_ACTIVE_KV_TOKENS", "200000", "48000"),
+    "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "32"),
+}
 
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
-    .env({"CUSTOM_BACKEND_BLOCKS": "2048", "CUSTOM_BACKEND_SLIDING_BLOCKS": "1200",
-          "KV_CACHE_NUM_BLOCKS": "4096", "MAX_ACTIVE_KV_TOKENS": "48000", "MAX_BATCH_SIZE": "32"})
+    .env(_kv_env)
     .add_local_python_source("inference_server")
 )
 app = modal.App("load-sweep", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
-MODEL = "google/gemma-4-E2B-it"
 NS = [1, 4, 8, 16, 32]
 PROMPT_TOKENS = 60
 MAX_TOKENS = 100
@@ -48,7 +65,7 @@ def _pct(xs, q):
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
-@app.function(gpu="A10G", volumes={"/root/.cache/huggingface": hf_cache},
+@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
               secrets=[hf_secret], timeout=1800)
 def sweep(backend_name: str, prefill_mode: str = "monolithic"):
     import asyncio, time
@@ -142,11 +159,10 @@ def main():
     import csv
     from pathlib import Path
 
-    import os as _os
     # One backend per invocation by default (two sequential model loads = a long run that the
     # local Modal client tends to drop). BENCH_BACKENDS overrides. "cuda" = HF baseline.
-    backends = _os.environ.get("BENCH_BACKENDS", "custom-cuda,cuda").split(",")
-    mode = _os.environ.get("SWEEP_PREFILL_MODE", "monolithic")  # monolithic|batched|chunked
+    backends = os.environ.get("BENCH_BACKENDS", "custom-cuda,cuda").split(",")
+    mode = os.environ.get("SWEEP_PREFILL_MODE", "monolithic")  # monolithic|batched|chunked
     all_results = {}
     for b in backends:
         try:
