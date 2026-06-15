@@ -48,6 +48,8 @@ _kv_env = {
     "BENCH_MODEL": MODEL,
     # Forward backend knobs into the container too (same module-reimport reason as BENCH_*).
     "CUSTOM_BACKEND_COMPILE": os.environ.get("CUSTOM_BACKEND_COMPILE", "0"),
+    "CUSTOM_BACKEND_COMPILE_MODE": os.environ.get("CUSTOM_BACKEND_COMPILE_MODE", ""),
+    "CUSTOM_BACKEND_EXPLAIN": os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0"),
     "CUSTOM_BACKEND_QUANT": os.environ.get("CUSTOM_BACKEND_QUANT", ""),
     "CUSTOM_BACKEND_BLOCKS": _g("CUSTOM_BACKEND_BLOCKS", "8192", "2048"),
     "CUSTOM_BACKEND_SLIDING_BLOCKS": _g("CUSTOM_BACKEND_SLIDING_BLOCKS", "4096", "1200"),

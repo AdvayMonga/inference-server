@@ -156,8 +156,12 @@ class CustomTorchBackend(InferenceBackend):
         # CUDA graph. The graph captures the fused kernel stream. CPU path stays uncompiled.
         self._compile_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
         if self._compile_on:
-            self._decode_fwd = torch.compile(self.model, dynamic=False)
-            logger.info("torch.compile enabled for decode forward (Inductor fusion)")
+            # mode=None → default fusion (no internal cudagraphs, composes with our manual graph).
+            # "max-autotune-no-cudagraphs" autotunes GEMMs + fuses harder; the -no-cudagraphs
+            # variant is REQUIRED (plain max-autotune adds its own cudagraphs → conflicts capture).
+            mode = os.environ.get("CUSTOM_BACKEND_COMPILE_MODE") or None
+            self._decode_fwd = torch.compile(self.model, dynamic=False, mode=mode)
+            logger.info("torch.compile enabled for decode forward (mode=%s)", mode or "default")
         else:
             self._decode_fwd = self.model
 
