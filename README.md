@@ -27,6 +27,15 @@ The full interactive architecture — click any block to see into the scheduler,
 
 **Primary metrics:** per-user p95 TTFT/TPOT under concurrent load, and throughput at a fixed tail-latency budget — measured against vLLM on the same model and hardware.
 
+## Results
+
+A100-80GB, Gemma 4 E4B, identical closed-loop concurrency sweep (N=32):
+
+| engine | throughput | TPOT p50 | TTFT p50 |
+|---|---|---|---|
+| this engine | 1151 tok/s | 24 ms | 107 ms |
+| vLLM 0.23 | 2628 tok/s | 11 ms | 48 ms |
+
 ## Setup
 
 ```bash
