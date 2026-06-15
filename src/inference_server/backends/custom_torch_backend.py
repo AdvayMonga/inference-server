@@ -515,6 +515,7 @@ class CustomTorchBackend(InferenceBackend):
                 continue
             self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
             self._g_bt[L] = torch.full((maxN, cols), self._scratch[L], dtype=torch.long, device=dev)
+        import os
         ctx = _GraphCtx(self.pools, self._g_seqlens, self._g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx)
