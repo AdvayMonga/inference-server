@@ -153,7 +153,10 @@ def run():
     total = 0.0
     for evt in ka:
         t = dev_us(evt)
-        if t <= 0:
+        # Skip aten:: dispatcher rows: their self-CUDA = the child device kernel's time (e.g.
+        # aten::mm == the ampere/cutlass gemm rows; aten::copy_ == Memcpy DtoD), so counting both
+        # double-counts. Leaf device + Triton kernels are the ground truth.
+        if t <= 0 or evt.key.startswith("aten::"):
             continue
         total += t
         name = evt.key.lower()
