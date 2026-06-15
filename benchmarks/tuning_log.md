@@ -11,7 +11,8 @@ Columns: date · experiment · change · before→after (tok/s @N=32 · TPOT p50
 | date | experiment | change | tok/s | TPOT | parity | verdict | notes |
 |---|---|---|---|---|---|---|---|
 | 2026-06-14 | **re-anchor** compile-default | re-ran recorded "957" config (COMPILE=1, batched) same session | 957→**1151** | 29→**23.8 ms** | n/a | **anchor** | recorded 957 (last session) was ~20% low — GPU/measurement variance across sessions. Re-anchoring before experiments paid off. Future deltas vs 1151. |
-| 2026-06-14 | graph-break diagnostic | `CUSTOM_BACKEND_EXPLAIN=1` — `torch._dynamo.explain`, break-count-by-reason | — | — | n/a | **kept** (tooling) | ran on A100 but `logger.info` was swallowed (bench containers don't configure logging → INFO dropped). Switched to `print(flush=True)`. Count comes on run 2. |
+| 2026-06-14 | **graph-break count** (MAJOR) | `CUSTOM_BACKEND_EXPLAIN=1` measured the decode forward | — | — | n/a | **finding** | **0 breaks, 1 graph, 2704 ops.** Overturns the ~84-break hypothesis: Dynamo traces `@triton.jit` natively + unrolls the fixed scatter. ⇒ the "wrap kernels as custom ops to kill breaks" lever is **moot — no breaks exist**. The 1.47× was already whole-graph fusion. |
+| 2026-06-14 | max-autotune-no-cudagraphs | `CUSTOM_BACKEND_COMPILE_MODE=max-autotune-no-cudagraphs` | — (died) | — | — | **retry** | killed by Modal heartbeat mid-autotune (attached client can't survive the slow 6s×N-GEMM compile, even laptop-open). No perf number. Retrying via `--detach` + fetch from `modal app logs`. |
 | 2026-06-14 | whole-model torch.compile | `CUSTOM_BACKEND_COMPILE=1` — `torch.compile(self.model, dynamic=False)` on decode forward | 650→957 (→1151 re-anchored) | 43→29 ms | argmax ✓ (job bmdivbgf5) | **kept** | 1.47× end-to-end. Also helped TTFT 189→133 (faster decode drains batch → prefills wait less). Inductor fuses the elementwise/norm/RoPE islands between graph breaks. |
 
 ## Planned / pending measurement
