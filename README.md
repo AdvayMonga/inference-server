@@ -33,6 +33,7 @@ A100-80GB, Gemma 4 E4B, identical closed-loop concurrency sweep (N=32):
 
 | engine | throughput | TPOT p50 | TTFT p50 |
 |---|---|---|---|
+| naive HF (`AutoModelForCausalLM`) | 125 tok/s | 118 ms | 3459 ms |
 | this engine | 1151 tok/s | 24 ms | 107 ms |
 | vLLM 0.23 | 2628 tok/s | 11 ms | 48 ms |
 
