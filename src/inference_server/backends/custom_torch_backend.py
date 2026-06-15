@@ -553,15 +553,14 @@ class CustomTorchBackend(InferenceBackend):
             exp = dynamo.explain(self.model)(
                 self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx
             )
-            logger.info(
-                "decode graph-break report: %d breaks, %d graphs, %d ops captured",
-                exp.graph_break_count, exp.graph_count, exp.op_count,
-            )
+            # print (not logger.info) — bench containers don't configure logging, so INFO is dropped.
+            print(f"[graph-breaks] {exp.graph_break_count} breaks, {exp.graph_count} graphs, "
+                  f"{exp.op_count} ops captured", flush=True)
             reasons = Counter(getattr(r, "reason", str(r)) for r in exp.break_reasons)
             for reason, count in reasons.most_common():
-                logger.info("  %d× %s", count, reason)
-        except Exception:
-            logger.exception("graph-break explain failed (diagnostic only — capture continues)")
+                print(f"[graph-breaks]   {count}x {reason}", flush=True)
+        except Exception as e:
+            print(f"[graph-breaks] explain failed (diagnostic only): {e}", flush=True)
 
     def _replay_decode(self, current_tokens, position_ids, state):
         """Copy this step's inputs into the static buffers (real rows + scratch dummies), replay
