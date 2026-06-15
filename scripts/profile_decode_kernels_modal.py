@@ -97,27 +97,41 @@ def run():
     # real growing BatchedDecodeState and recompiles every step (block-table shapes drift) → hangs.
     # Production always uses the graph; the eager breakdown is only meaningful uncompiled.
     if COMPILE == "1":
-        print("[eager breakdown skipped — compiled forward recompiles on the dynamic eager state; "
-              "the graph headline above is the production number]", flush=True)
-        return
-    backend._graph_on, backend._graph = False, None
-    state, step = build_state()
-    for _ in range(WARMUP):
-        step()
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(STEPS):
-        step()
-    torch.cuda.synchronize()
-    eager_ms = (time.perf_counter() - t0) / STEPS * 1000
-    print(f"[eager] {eager_ms:.2f} ms/step (no graph; gap vs graphed = launch-bubble removed)\n",
-          flush=True)
+        # Profile the COMPILED forward on the FIXED static capture buffers (same [maxN,1] shapes the
+        # CUDA graph used → no recompile, and unlike a graph replay the profiler sees each Inductor
+        # kernel). Section 1 already captured the graph, so _decode_fwd is compiled + buffers exist.
+        from inference_server.backends.custom_torch_backend import _GraphCtx
+        cctx = _GraphCtx(backend.pools, backend._g_seqlens, backend._g_bt, backend._block_size)
+        cfwd = backend._decode_fwd
 
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-        for _ in range(PROFILE_STEPS):
+        def cstep():
+            return cfwd(backend._g_tokens, position_ids=backend._g_pos, paged_ctx=cctx)
+
+        for _ in range(WARMUP):
+            cstep()
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(PROFILE_STEPS):
+                cstep()
+            torch.cuda.synchronize()
+    else:
+        backend._graph_on, backend._graph = False, None
+        state, step = build_state()
+        for _ in range(WARMUP):
             step()
         torch.cuda.synchronize()
-    teardown(state)
+        t0 = time.perf_counter()
+        for _ in range(STEPS):
+            step()
+        torch.cuda.synchronize()
+        eager_ms = (time.perf_counter() - t0) / STEPS * 1000
+        print(f"[eager] {eager_ms:.2f} ms/step (no graph; gap vs graphed = launch-bubble removed)\n",
+              flush=True)
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            for _ in range(PROFILE_STEPS):
+                step()
+            torch.cuda.synchronize()
+        teardown(state)
 
     ka = prof.key_averages()
 
@@ -130,24 +144,28 @@ def run():
 
     print(ka.table(sort_by="self_cuda_time_total", row_limit=30), flush=True)
 
-    # Bucket GPU self-time → GEMM (weight reads) vs attention vs element-wise/launch tail.
-    # Count DEVICE-KERNEL rows only (self CPU == 0): the aten:: op rows re-report the same GPU
-    # time their kernels do, so summing both double-counts. Device kernels are the ground truth.
-    buckets = {"gemm/matmul": 0.0, "attention": 0.0, "elementwise/norm/copy": 0.0, "other": 0.0}
+    # Bucket GPU self-time. Self-CUDA time is a non-overlapping partition (parent aten rows report
+    # CUDA *total*, not self), so summing every Self-CUDA>0 row = the real total with no double-count.
+    # (The old `skip self_cpu>0` heuristic wrongly excluded compiled Inductor/Triton kernels, which
+    # all carry CPU launch time — that dropped the scatter + a paged-attn variant from the totals.)
+    buckets = {"gemm/matmul": 0.0, "attention": 0.0, "kv_scatter(index_put)": 0.0,
+               "norm/rope/act/copy": 0.0, "other": 0.0}
     total = 0.0
     for evt in ka:
         t = dev_us(evt)
-        if t <= 0 or getattr(evt, "self_cpu_time_total", 0) > 0:
+        if t <= 0:
             continue
         total += t
         name = evt.key.lower()
-        if any(s in name for s in ("gemm", "cutlass", "ampere", "sm80", "cublas", "matmul", "addmm", "wgrad", "dot")):
+        if any(s in name for s in ("gemm", "cutlass", "ampere", "sm80", "cublas", "matmul", "addmm", "wgrad", "dot", "splitk")):
             buckets["gemm/matmul"] += t
         elif any(s in name for s in ("attention", "paged", "softmax", "flash", "attn")):
             buckets["attention"] += t
+        elif any(s in name for s in ("index_put", "scatter")):
+            buckets["kv_scatter(index_put)"] += t
         elif any(s in name for s in ("elementwise", "vectorized", "norm", "reduce", "rope", "rotary",
-                                     "cat", "copy", "index", "gather", "scatter", "mul", "add", "gelu", "fill")):
-            buckets["elementwise/norm/copy"] += t
+                                     "cat", "copy", "index", "gather", "mul", "add", "pow", "mean", "gelu", "tanh", "fill")):
+            buckets["norm/rope/act/copy"] += t
         else:
             buckets["other"] += t
 
