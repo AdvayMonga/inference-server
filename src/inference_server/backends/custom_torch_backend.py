@@ -512,6 +512,8 @@ class CustomTorchBackend(InferenceBackend):
             self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
             self._g_bt[L] = torch.full((maxN, cols), self._scratch[L], dtype=torch.long, device=dev)
         ctx = _GraphCtx(self.pools, self._g_seqlens, self._g_bt, self._block_size)
+        if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
+            self._log_graph_breaks(ctx)
         try:
             if self._compile_on:
                 # Force the Dynamo trace + Inductor compile on the DEFAULT stream first — it must
@@ -534,6 +536,27 @@ class CustomTorchBackend(InferenceBackend):
             logger.exception("CUDA graph capture failed — falling back to eager decode")
             self._graph_on = False
             self._graph = None
+
+    @torch.no_grad()
+    def _log_graph_breaks(self, ctx) -> None:
+        """Count torch.compile graph breaks in the decode forward (Inductor fusion headroom).
+        Each break is a fence Inductor can't fuse across — expect one per layer at the raw Triton
+        attention call + the Python scatter. Run via CUSTOM_BACKEND_EXPLAIN=1."""
+        try:
+            import torch._dynamo as dynamo
+            from collections import Counter
+            exp = dynamo.explain(self.model)(
+                self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx
+            )
+            logger.info(
+                "decode graph-break report: %d breaks, %d graphs, %d ops captured",
+                exp.graph_break_count, exp.graph_count, exp.op_count,
+            )
+            reasons = Counter(getattr(r, "reason", str(r)) for r in exp.break_reasons)
+            for reason, count in reasons.most_common():
+                logger.info("  %d× %s", count, reason)
+        except Exception:
+            logger.exception("graph-break explain failed (diagnostic only — capture continues)")
 
     def _replay_decode(self, current_tokens, position_ids, state):
         """Copy this step's inputs into the static buffers (real rows + scratch dummies), replay
