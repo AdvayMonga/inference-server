@@ -35,12 +35,11 @@ benchmarks/results/
 # Jupyter
 .ipynb_checkpoints/
 
-# Project notes
+# Working docs
 CLAUDE.md
-notes.txt
-
-Model_Continuity.md
 DECISIONS.md
 HANDOFF.md
+
+notes/
 
 .claude/
