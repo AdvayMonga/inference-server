@@ -1,0 +1,69 @@
+
+==========================================================================
+  CEILING SWEEP — E4B on A100-80GB, bf16
+==========================================================================
+  dense params (streamed/step): 4.59B (9.2GB bf16)  [attn 0.59B · mlp 3.30B · lm_head 0.67B]
+  PLE table (gathered, NOT streamed): 2.82B  <- the 'effective-4B vs total' gap
+
+  B   L=128   regime      L=512   regime      L=2048  regime      
+  1       222 tok/s mem       221 tok/s mem       221 tok/s mem   
+  4       886 tok/s mem       877 tok/s mem       868 tok/s mem   
+  8      1766 tok/s mem      1733 tok/s mem      1697 tok/s mem   
+  16     3510 tok/s mem      3382 tok/s mem      3246 tok/s mem   
+  32     6932 tok/s mem      6449 tok/s mem      5974 tok/s mem   
+  64    13527 tok/s mem     11802 tok/s mem     10302 tok/s mem   
+  128   25797 tok/s mem     20176 tok/s mem     16154 tok/s mem   
+  256   33806 tok/s com     31268 tok/s mem     22561 tok/s mem   
+
+  ridge batch B* (knee, memory→compute): L=128: 173  L=512: 288  L=2048: 1154
+
+==========================================================================
+  PER-STEP BREAKDOWN — E4B/A100-80GB, B=32 L=160, bf16
+==========================================================================
+  weight-read     4.50ms   (dense weights, once/step — the floor)
+  KV-read         0.14ms   (294MB for 32 seqs)
+  compute         0.95ms   (296 GFLOP)  [memory-bound]
+  ----------------------------------------------
+  IDEAL step      4.65ms   -> ceiling 6889 tok/s
+
+  MEASURED       17.11ms   -> 1870 tok/s  (27% of roof)
+  OVERHEAD       12.47ms   (73% of the step) <- the target
+
+  gap attribution (profile fractions of measured step):
+    small-kernel launch tail       19%  (  3.25ms)
+    DtoD memcpy (KV/act)           16%  (  2.74ms)
+    KV scatter (index_put)         15%  (  2.57ms)
+    = addressable overhead         50%  (fusing these into the kernels is the #1 lever)
+
+==========================================================================
+  LEVER MENU — E4B/A100-80GB, B=32 L=160  (ranked by predicted tok/s)
+==========================================================================
+  baseline (measured): 1870 tok/s   ideal 6889 tok/s (27% of step)   overhead 12.5ms/step
+
+  STACK: fusion + int8 wt + B=256        22272 tok/s  11.9x   the compounded ceiling if we do all three
+  scale to B=256 (bucketed graph)        12768 tok/s   6.8x   more sequences share each weight-read (toward B*)
+  scale to B=128 (bucketed graph)         7296 tok/s   3.9x   more sequences share each weight-read (toward B*)
+  speculative decode (k=3, accept=0.7)    5797 tok/s   3.1x   produce multiple tokens per weight-read while memory-bound
+  kernel fusion (kill KV-move+launches)    3740 tok/s   2.0x   fold scatter+DtoD+launch tail into the kernels
+  int8/fp8 weights (bytes)                2153 tok/s   1.2x   halve weight bytes; A100 has no fp8 TC so compute roof unchanged
+  fp8 KV cache                            1878 tok/s   1.0x   halve KV bytes moved
+
+  Additive-overhead model (overhead held fixed per step) — DIRECTIONAL. Batch-scaling
+  numbers are optimistic (overhead grows with B). Confirm the top pick on real A100.
+
+==========================================================================
+  KV CAPACITY — E4B/A100-80GB  (max concurrent seqs before OOM)
+==========================================================================
+  L=128    bf16 KV:  9103 seqs   fp8 KV: 18207 seqs   (7MB/seq bf16)
+  L=512    bf16 KV:  2275 seqs   fp8 KV:  4551 seqs   (29MB/seq bf16)
+  L=2048   bf16 KV:  1225 seqs   fp8 KV:  2451 seqs   (55MB/seq bf16)
+  L=8192   bf16 KV:   430 seqs   fp8 KV:   861 seqs   (155MB/seq bf16)
+  -> compare to the ~100-256 target: capacity-bound or not?
+
+==========================================================================
+  CROSS-HARDWARE — E4B, bf16, B=32 L=512  (why the bottleneck moves)
+==========================================================================
+  A100-80GB    ceiling   6449 tok/s  [memory-bound]  B*=288   (BW 2.0TB/s, 312 TFLOP)
+  A10G         ceiling   1898 tok/s  [memory-bound]  B*=586   (BW 0.6TB/s, 125 TFLOP)
+  H100-80GB    ceiling  10596 tok/s  [memory-bound]  B*=3838   (BW 3.4TB/s, 990 TFLOP)
+
