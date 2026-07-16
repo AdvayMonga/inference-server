@@ -26,6 +26,17 @@ from inference_server.sampling import GREEDY, SamplingParams, sample
 
 logger = logging.getLogger(__name__)
 
+# Suffix-length buckets for K=1 compiled prefill: pad up to the next so Inductor sees a few
+# STATIC shapes (dynamic=True hit an Inductor symbolic-shape codegen bug). None → over the max.
+_PREFILL_BUCKETS = (64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def _prefill_bucket(s: int) -> int | None:
+    for b in _PREFILL_BUCKETS:
+        if s <= b:
+            return b
+    return None
+
 
 class _GraphCtx:
     """paged_ctx backed by FIXED static buffers, for CUDA-graph capture. Always processes
@@ -162,8 +173,19 @@ class CustomTorchBackend(InferenceBackend):
             mode = os.environ.get("CUSTOM_BACKEND_COMPILE_MODE") or None
             self._decode_fwd = torch.compile(self.model, dynamic=False, mode=mode)
             logger.info("torch.compile enabled for decode forward (mode=%s)", mode or "default")
+            # Prefill (K==1 only): compile dynamic=False and feed BUCKETED suffix lengths so Inductor
+            # sees static shapes. Targets the unloaded-TTFT floor — prefill is ~73ms of pure eager
+            # dispatch (a 1-token prefill is also 73ms) that fusion should cut ~3-4×. Multi-row
+            # prefills stay eager (K-bucketing is a later step). Flag-gated for A/B.
+            self._compile_prefill = os.environ.get("CUSTOM_BACKEND_COMPILE_PREFILL", "1") == "1"
+            self._prefill_fwd = torch.compile(self.model, dynamic=False, mode=mode) \
+                if self._compile_prefill else self.model
+            if self._compile_prefill:
+                logger.info("torch.compile enabled for prefill forward (K=1, bucketed, dynamic=False)")
         else:
             self._decode_fwd = self.model
+            self._compile_prefill = False
+            self._prefill_fwd = self.model
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
@@ -418,14 +440,21 @@ class CustomTorchBackend(InferenceBackend):
         self.last_cache_hit_tokens = matched[-1] if matched else 0
 
         Smax = max(len(s) for s in suffixes)
-        input_ids = torch.zeros(len(prompts), Smax, dtype=torch.long, device=dev)
-        position_ids = torch.zeros(len(prompts), Smax, dtype=torch.long, device=dev)
+        # K==1: pad the suffix to a bucket so the compiled prefill sees a few static shapes.
+        # Padding is transparent — the kernel and KV-append respect suffix_lens (padding ignored).
+        use_compiled = self._compile_prefill and len(prompts) == 1
+        Spad = _prefill_bucket(Smax) if use_compiled else None
+        if Spad is None:                                   # over max bucket, or eager path
+            use_compiled, Spad = False, Smax
+        input_ids = torch.zeros(len(prompts), Spad, dtype=torch.long, device=dev)
+        position_ids = torch.zeros(len(prompts), Spad, dtype=torch.long, device=dev)
         for k, s in enumerate(suffixes):
             input_ids[k, :len(s)] = torch.tensor(s, device=dev)               # right-padded
             position_ids[k, :len(s)] = torch.arange(matched[k], matched[k] + len(s), device=dev)
 
         ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev)
-        logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx)
+        fwd = self._prefill_fwd if use_compiled else self.model
+        logits = fwd(input_ids, position_ids=position_ids, paged_ctx=ctx)
 
         results = []
         for k in range(len(prompts)):
