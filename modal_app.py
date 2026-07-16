@@ -16,11 +16,17 @@ image = (
     .pip_install_from_pyproject("pyproject.toml")
     .env({
         "BACKEND": "custom-cuda",                 # hand-written Gemma 4 forward + paged KV + kernel
+        "MODEL_NAME": "google/gemma-4-E4B-it",    # headline model (image ships no .env → set explicitly)
+        "MAX_BATCH_SIZE": "256",                  # reach the 100-256 regime the roofline flagged
+        "PREFILL_MODE": "batched",                # batched prefill (TTFT 1841→213ms; see benchmarks/README)
+        "CUSTOM_BACKEND_COMPILE": "1",            # torch.compile decode (1.47×; the 1151 tok/s anchor)
         # Windowed KV storage lets sliding pools be smaller (capped at the 512 window) so the
         # binding full pools can be larger at ~equal memory → more concurrent long-context reqs.
-        "CUSTOM_BACKEND_BLOCKS": "2048",          # full-attention pools (grow with sequence)
-        "CUSTOM_BACKEND_SLIDING_BLOCKS": "1200",  # sliding pools (capped at window → sized smaller)
-        "MAX_ACTIVE_KV_TOKENS": "48000",          # coarse token cap; per-pool window-aware gate is the real limit
+        # A100-80GB values mirror scripts/bench_load_sweep_modal.py's proven _BIG config.
+        "CUSTOM_BACKEND_BLOCKS": "8192",          # full-attention pools (grow with sequence)
+        "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",  # sliding pools (capped at window → sized smaller)
+        "KV_CACHE_NUM_BLOCKS": "16384",
+        "MAX_ACTIVE_KV_TOKENS": "200000",         # coarse token cap; per-pool window-aware gate is the real limit
         "LOG_FORMAT": "json",                     # structured logs for Modal's aggregator (Phase 8)
     })
     .add_local_python_source("inference_server")
@@ -33,7 +39,7 @@ app = modal.App("inference-server", image=image)
 
 
 @app.function(
-    gpu="A10G",
+    gpu="A100-80GB",
     volumes={"/root/.cache/huggingface": hf_cache},
     secrets=[hf_secret],
     timeout=600,
