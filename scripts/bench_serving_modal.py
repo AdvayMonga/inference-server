@@ -18,9 +18,11 @@ import modal
 
 GPU = os.environ.get("BENCH_GPU", "A100-80GB")
 MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it")
-RATES = [float(x) for x in os.environ.get("BENCH_RATES", "8,16,32,64,128,256").split(",")]
-DURATION = float(os.environ.get("BENCH_DURATION", "20"))
-WARMUP = float(os.environ.get("BENCH_WARMUP", "3"))
+# Rates are req/s of FULL ShareGPT-sized requests (~150 output tokens each), so each req is
+# heavy — the knee sits at low single-digit req/s, not the dozens. Sweep low to bracket it.
+RATES = [float(x) for x in os.environ.get("BENCH_RATES", "1,2,3,4,6,8").split(",")]
+DURATION = float(os.environ.get("BENCH_DURATION", "30"))
+WARMUP = float(os.environ.get("BENCH_WARMUP", "4"))
 COMPILE = os.environ.get("CUSTOM_BACKEND_COMPILE", "1")
 
 SLO_TTFT_MS, SLO_TPOT_MS = 200.0, 50.0
@@ -29,8 +31,12 @@ PROMPT_MU, PROMPT_SIGMA = 5.48, 0.75  # ShareGPT-ish lognormal: ~240 prompt toke
 OUTPUT_MU, OUTPUT_SIGMA = 5.01, 0.65  # ~150 output tokens
 
 # Env baked into the image (Modal re-imports this module in-container, without the shell env).
+# BENCH_* MUST be here too or the container falls back to defaults (the compile-off smoke bug).
 _env = {
     "BACKEND": "custom-cuda", "MODEL_NAME": MODEL, "BENCH_GPU": GPU, "BENCH_MODEL": MODEL,
+    "BENCH_RATES": os.environ.get("BENCH_RATES", "1,2,3,4,6,8"),
+    "BENCH_DURATION": os.environ.get("BENCH_DURATION", "30"),
+    "BENCH_WARMUP": os.environ.get("BENCH_WARMUP", "4"),
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "256"),
     "PREFILL_MODE": "batched",
     "CUSTOM_BACKEND_COMPILE": COMPILE,
@@ -131,6 +137,7 @@ def sweep():
         sched = ContinuousBatchScheduler(
             backend, max_batch_size=settings.max_batch_size,
             max_active_kv_tokens=settings.max_active_kv_tokens,
+            max_queue_size=4096,   # large: past the knee, overload shows as LATENCY not rejection
             prefill_mode="batched", prefill_chunk_size=256,
         )
         sched.start()
