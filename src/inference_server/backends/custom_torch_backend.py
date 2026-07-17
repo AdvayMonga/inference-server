@@ -26,6 +26,44 @@ from inference_server.sampling import GREEDY, SamplingParams, sample
 
 logger = logging.getLogger(__name__)
 
+# Suffix-length buckets for K=1 CUDA-graph prefill (≤512 so sliding layers never evict mid-prefill).
+_PREFILL_BUCKETS = (64, 128, 256, 512)
+
+
+def _prefill_bucket(s: int) -> int | None:
+    for b in _PREFILL_BUCKETS:
+        if s <= b:
+            return b
+    return None
+
+
+class _PrefillGraphCtx:
+    """Static-buffer paged ctx for K=1 CUDA-graph prefill at a fixed suffix bucket S, no prefix
+    hit (matched=0). Mirrors _GraphCtx: append scatters the S bucket tokens' K/V using the static
+    per-pool block-table buffers; the kernel reads those + the static prefix/suffix lens. Block
+    allocation happens OUTSIDE the graph (at replay); the graph only touches the static buffers."""
+
+    is_prefill = True
+
+    def __init__(self, pools, block_tables, prefix_lens, suffix_lens, bucket, bs):
+        self.pools = pools
+        self.block_tables = block_tables      # per-pool static [1, cols] long (None for shared)
+        self.prefix_lens = prefix_lens        # static [1] int32 (always 0 — no prefix hit)
+        self.suffix_lens = suffix_lens        # static [1] int32
+        self.bs = bs
+        self._pos = torch.arange(bucket, device=prefix_lens.device)   # 0..bucket-1 (prefix_len=0)
+
+    def append(self, layer_idx, k_new, v_new):
+        bt = self.block_tables[layer_idx][0]              # [cols]
+        bids = bt[self._pos // self.bs]
+        slots = self._pos % self.bs
+        pool = self.pools[layer_idx]
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)   # [bucket, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+
+    def block_table_tensor(self, layer_idx):
+        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0)
+
 
 class _GraphCtx:
     """paged_ctx backed by FIXED static buffers, for CUDA-graph capture. Always processes
@@ -164,6 +202,13 @@ class CustomTorchBackend(InferenceBackend):
             logger.info("torch.compile enabled for decode forward (mode=%s)", mode or "default")
         else:
             self._decode_fwd = self.model
+
+        # K=1 CUDA-graph prefill — replays the forward instead of paying ~73ms eager dispatch
+        # (the unloaded-TTFT floor). Captured lazily per suffix bucket on first use (capture is
+        # ~seconds, unlike torch.compile). Flag-gated OFF until verified; deploy unaffected.
+        self._prefill_graph_on = self.device.type == "cuda" and \
+            os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
+        self._prefill_graphs: dict = {}
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
@@ -405,6 +450,17 @@ class CustomTorchBackend(InferenceBackend):
         """CUDA batched prefill via the paged prefill kernel — no gather. Per row: cache-lookup →
         seed prefix blocks → one forward over the right-padded SUFFIXES, where each layer appends
         the suffix K/V to the blocks and the kernel attends over paged prefix+suffix."""
+        # K=1 CUDA-graph fast path: cache-miss prompt ≤512 → replay a captured graph (no eager
+        # dispatch). Multi-row, cache-hit, or long prompts fall through to the eager kernel path.
+        if self._prefill_graph_on and len(prompts) == 1:
+            p = prompts[0]
+            matched0, _ = self.prefix_cache.lookup(p)
+            bucket = _prefill_bucket(len(p))
+            if matched0 == 0 and bucket is not None:
+                if bucket not in self._prefill_graphs:
+                    self._capture_prefill_graph(bucket)
+                self.last_cache_hit_tokens = 0
+                return [self._replay_prefill(p, bucket)]
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
         caches, matched, suffixes = [], [], []
@@ -581,6 +637,60 @@ class CustomTorchBackend(InferenceBackend):
             return self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
         self._graph.replay()
         return self._g_out[:n]
+
+    # --- CUDA-graph prefill (K=1, no prefix, per suffix bucket) ---
+
+    def _capture_prefill_graph(self, bucket: int) -> None:
+        """Capture the prefill forward once over static [1, bucket] buffers. Scratch blocks back the
+        block tables during capture; replay copies in the real block IDs + tokens."""
+        dev, bs, cols = self.device, self._block_size, bucket // self._block_size
+        ids = torch.zeros(1, bucket, dtype=torch.long, device=dev)
+        pos = torch.arange(bucket, device=dev).unsqueeze(0)
+        prefix_lens = torch.zeros(1, dtype=torch.int32, device=dev)
+        suffix_lens = torch.full((1,), bucket, dtype=torch.int32, device=dev)   # all real during capture
+        bts = [None] * len(self.pools)
+        scratch = [None] * len(self.pools)
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            scratch[L] = pool.alloc()                                            # held for the process
+            bts[L] = torch.full((1, cols), scratch[L], dtype=torch.long, device=dev)
+        ctx = _PrefillGraphCtx(self.pools, bts, prefix_lens, suffix_lens, bucket, bs)
+        s = torch.cuda.Stream()
+        s.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(s):
+            for _ in range(3):
+                self.model(ids, position_ids=pos, paged_ctx=ctx)
+        torch.cuda.current_stream().wait_stream(s)
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            out = self.model(ids, position_ids=pos, paged_ctx=ctx)
+        self._prefill_graphs[bucket] = {"graph": g, "ids": ids, "suffix_lens": suffix_lens,
+                                        "bts": bts, "out": out}
+        logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
+
+    def _replay_prefill(self, prompt_ids, bucket):
+        """K=1, no-prefix prefill via graph replay. Allocate blocks, copy IDs into static buffers,
+        replay, return (cache, first_token, kv_len)."""
+        from inference_server.models.paged_kv_cache import PagedKVCache
+        dev, cols, S = self.device, bucket // self._block_size, len(prompt_ids)
+        g = self._prefill_graphs[bucket]
+        cache = PagedKVCache(pools=self.pools)
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            bids = [pool.alloc() for _ in range(cols)]
+            cache.block_tables[L] = bids
+            cache.seq_lens[L] = S
+            g["bts"][L][0].copy_(torch.tensor(bids, device=dev))
+        g["ids"].zero_()
+        g["ids"][0, :S].copy_(torch.tensor(prompt_ids, device=dev))
+        g["suffix_lens"].fill_(S)                                               # padding queries skipped
+        g["graph"].replay()
+        first = int(sample(g["out"][:, S - 1, :], GREEDY).item())
+        if not cache.any_evicted:
+            self.prefix_cache.store(prompt_ids, cache.block_tables)
+        return cache, first, S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
         """Add a newly-prefilled row. CUDA: ingest into the persistent BatchedDecodeState.
