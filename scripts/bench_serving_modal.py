@@ -143,7 +143,13 @@ def sweep():
         sched.start()
         rows = []
         try:
-            await run_rate(sched, RATES[0], WARMUP, rng, None)  # warmup (untimed, triggers compile)
+            # Warmup: single requests ONE AT A TIME, awaited to completion, so the multi-minute
+            # lazy torch.compile (decode + K=1 prefill buckets) happens with an EMPTY queue. An
+            # open-loop burst here piles hundreds of reqs behind the compile → the scheduler then
+            # batch-prefills the whole backlog in one forward → 143GiB OOM (what killed the last run).
+            for i in range(4):
+                ids, o = pool[i % POOL_SIZE]
+                await one(sched, ids, min(o, 16))
             for rate in RATES:
                 collected: list = []
                 t_start = time.perf_counter()
