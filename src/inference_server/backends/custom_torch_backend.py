@@ -590,6 +590,8 @@ class CustomTorchBackend(InferenceBackend):
         bucketing, not of graphs: scripts/diag_pad_numerics_modal.py reproduces it EAGER, with
         no graph anywhere, purely by changing the pad width. vLLM behaves the same way. Output
         is still deterministic at a fixed batch width."""
+        import time
+        t_b = time.perf_counter()
         cols, dev = self._graph_max_cols, self.device
         if self._scratch is None:
             self._scratch = [None] * len(self.pools)
@@ -626,7 +628,8 @@ class CustomTorchBackend(InferenceBackend):
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos,
                                     "seqlens": g_seqlens, "bt": g_bt, "out": out}
-            logger.info("Captured CUDA decode graph (rows=%d, cols=%d)", bucket, cols)
+            print(f"[graphs]   bucket {bucket} captured in {time.perf_counter() - t_b:.1f}s",
+                  flush=True)
         except Exception:
             logger.exception("CUDA graph capture failed — falling back to eager decode")
             self._graph_on = False
@@ -641,8 +644,11 @@ class CustomTorchBackend(InferenceBackend):
             if not self._graph_on:
                 return
             self._capture_graph(bucket)
-        logger.info("Captured %d decode graphs %s in %.1fs", len(self._graphs),
-                    sorted(self._graphs), time.perf_counter() - t0)
+        # print, not logger.info: bench containers do not configure logging and drop INFO.
+        # Capture time matters — with torch.compile on, every bucket is a fresh static shape
+        # and pays its own Inductor compile, so this scales with len(buckets).
+        print(f"[graphs] captured {len(self._graphs)} decode graphs {sorted(self._graphs)} "
+              f"in {time.perf_counter() - t0:.1f}s", flush=True)
 
     def _decode_bucket(self, n: int) -> int:
         """Smallest captured bucket >= n rows."""
