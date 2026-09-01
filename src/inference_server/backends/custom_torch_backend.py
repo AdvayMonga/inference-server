@@ -38,12 +38,15 @@ def _decode_buckets(max_rows: int) -> tuple[int, ...]:
     if override:
         vals = sorted({min(int(x), max_rows) for x in override.split(",") if x.strip()})
         return tuple(vals) or (max_rows,)
-    out, b = [], 1
+    # Starts at 2, not 1: with torch.compile on, a batch-1 shape forces its own Inductor
+    # specialization (Dynamo never makes a dim that can be 1 dynamic), measured at ~126s of
+    # extra startup — to buy 4% at n=1 (17.73 vs 18.53 ms/step). Not worth it.
+    out, b = [], 2
     while b < max_rows:
         out.append(b)
         b *= 2
     out.append(max_rows)
-    return tuple(out)
+    return tuple(dict.fromkeys(out))
 
 
 def _prefill_bucket(s: int) -> int | None:
@@ -221,7 +224,14 @@ class CustomTorchBackend(InferenceBackend):
             # "max-autotune-no-cudagraphs" autotunes GEMMs + fuses harder; the -no-cudagraphs
             # variant is REQUIRED (plain max-autotune adds its own cudagraphs → conflicts capture).
             mode = os.environ.get("CUSTOM_BACKEND_COMPILE_MODE") or None
-            self._decode_fwd = torch.compile(self.model, dynamic=False, mode=mode)
+            # dynamic=None (automatic), NOT dynamic=False. Each bucket is a distinct static
+            # shape, so dynamic=False pays a full Inductor compile per bucket (~92s each,
+            # 553s for a 6-bucket ladder, ~828s for 9). With automatic dynamic shapes the
+            # first bucket compiles static, the second recompiles with the batch dim
+            # symbolic, and every later bucket reuses that artifact — measured at 1.8s each.
+            # dynamic=True is NOT an option: it dies in Inductor codegen with
+            # `NameError: name 's6' is not defined` (same class of bug HANDOFF hit on prefill).
+            self._decode_fwd = torch.compile(self.model, mode=mode)
             logger.info("torch.compile enabled for decode forward (mode=%s)", mode or "default")
         else:
             self._decode_fwd = self.model
