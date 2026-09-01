@@ -50,3 +50,25 @@ def sample(logits: torch.Tensor, params: SamplingParams = GREEDY) -> torch.Tenso
     flat = probs.reshape(-1, probs.shape[-1])
     picked = torch.multinomial(flat, num_samples=1).squeeze(-1)
     return picked.reshape(probs.shape[:-1])
+
+
+def sample_batched(logits: torch.Tensor, params_per_row: list[SamplingParams]) -> torch.Tensor:
+    """Sample one token per row with per-row params. logits: [N, vocab] -> [N].
+
+    Rows sharing identical params are sampled in ONE call, so cost is O(distinct configs),
+    not O(rows). The old per-row Python loop launched a full softmax/top-k/top-p over a
+    [1, 262144] slice N times per decode step — a direct O(N) term in TPOT.
+    """
+    if not params_per_row:
+        return torch.empty(0, dtype=torch.long, device=logits.device)
+    first = params_per_row[0]
+    if all(p == first for p in params_per_row):
+        return sample(logits, first)
+    groups: dict[SamplingParams, list[int]] = {}
+    for i, p in enumerate(params_per_row):
+        groups.setdefault(p, []).append(i)
+    out = torch.empty(len(params_per_row), dtype=torch.long, device=logits.device)
+    for p, idx in groups.items():
+        rows = torch.tensor(idx, device=logits.device)
+        out[rows] = sample(logits.index_select(0, rows), p)
+    return out

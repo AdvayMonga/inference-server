@@ -23,7 +23,7 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import InferenceBackend
-from inference_server.sampling import GREEDY, SamplingParams, sample
+from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,10 @@ class CustomTorchBackend(InferenceBackend):
 
     THINK_START = 100
     THINK_END = 101
+
+    # Each row's paged cache holds only its real tokens and the model derives causality +
+    # sliding window from per-row seq_lens, so the scheduler's [B, S] mask is never read.
+    needs_attention_mask = False
 
     def __init__(self, device: str = "cuda", model_name: str = "google/gemma-4-E2B-it"):
         self.device = torch.device(device)
@@ -571,7 +575,7 @@ class CustomTorchBackend(InferenceBackend):
         if sampling_per_row is None:
             next_tokens = sample(last, GREEDY)
         else:
-            next_tokens = torch.stack([sample(last[i], sampling_per_row[i]) for i in range(n)])
+            next_tokens = sample_batched(last, sampling_per_row)
         return next_tokens, batched_kv
 
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---

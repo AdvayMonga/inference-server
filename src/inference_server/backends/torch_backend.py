@@ -12,7 +12,7 @@ from inference_server.kv_cache.hf_format import (
     blocks_to_dynamic_cache,
     dynamic_cache_to_per_layer_3d,
 )
-from inference_server.sampling import GREEDY, SamplingParams, sample
+from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
 
@@ -327,9 +327,7 @@ class TorchBackend(InferenceBackend):
         if sampling_per_row is None:
             next_tokens = sample(last_logits, GREEDY)
         else:
-            next_tokens = torch.stack([
-                sample(last_logits[i], sampling_per_row[i]) for i in range(last_logits.shape[0])
-            ])
+            next_tokens = sample_batched(last_logits, sampling_per_row)
         return next_tokens, outputs.past_key_values
 
     def stack_caches_left_padded(self, per_row_caches: list, max_kv_len: int) -> object:
