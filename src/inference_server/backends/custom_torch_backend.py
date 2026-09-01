@@ -16,6 +16,7 @@ left-padding and the scheduler's `attention_mask` is ignored. Real batched decod
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Generator
 
@@ -28,6 +29,21 @@ logger = logging.getLogger(__name__)
 
 # Suffix-length buckets for K=1 CUDA-graph prefill (≤512 so sliding layers never evict mid-prefill).
 _PREFILL_BUCKETS = (64, 128, 256, 512)
+
+
+def _decode_buckets(max_rows: int) -> tuple[int, ...]:
+    """Row buckets for decode CUDA graphs: powers of two up to max_rows (<=2x padding waste).
+    Override with CUSTOM_BACKEND_GRAPH_BUCKETS="1,4,16,64" to trade padding for capture time."""
+    override = os.environ.get("CUSTOM_BACKEND_GRAPH_BUCKETS", "")
+    if override:
+        vals = sorted({min(int(x), max_rows) for x in override.split(",") if x.strip()})
+        return tuple(vals) or (max_rows,)
+    out, b = [], 1
+    while b < max_rows:
+        out.append(b)
+        b *= 2
+    out.append(max_rows)
+    return tuple(out)
 
 
 def _prefill_bucket(s: int) -> int | None:
@@ -178,14 +194,17 @@ class CustomTorchBackend(InferenceBackend):
         from inference_server.models.paged_kv_cache import PrefixCache
         self.prefix_cache = PrefixCache(pools=self.pools)
 
-        # CUDA-graph decode: capture one graph at max_batch and replay (pad smaller batches).
-        # We're dispatch-bound (~1000 tiny launches/step), so one graph beats per-bucket capture.
+        # CUDA-graph decode: one graph per ROW BUCKET, replay the smallest bucket >= n_rows.
+        # A single max-batch graph padded every step to max_batch_size (64x waste at 4 active
+        # rows with max_batch=256), which dominated TPOT at the low concurrency the SLO lives at.
         from inference_server.config import settings
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
         self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
-        self._graph = None  # captured lazily on first decode
+        self._graph_buckets = _decode_buckets(self._graph_max_rows)
+        self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
+        self._scratch = None                 # one padding block per pool, shared by every bucket
 
         # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
         # tail the profiler found — the bandwidth lever on A100). Decode-only because prefill's
@@ -528,10 +547,11 @@ class CustomTorchBackend(InferenceBackend):
             state = batched_kv
             n = state.n_rows
             state.prepare_step()  # alloc any boundary-crossing block (once per step)
+            if self._graph_on and not self._graphs:
+                self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             if self._graph_on:
-                if self._graph is None:
-                    self._capture_graph()
-                logits = self._replay_decode(current_tokens, position_ids, state)
+                logits = self._replay_decode(current_tokens, position_ids, state,
+                                             self._decode_bucket(n))
             else:
                 logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
             state.advance()       # bump seq_lens + evict out-of-window blocks
@@ -554,61 +574,92 @@ class CustomTorchBackend(InferenceBackend):
             next_tokens = torch.stack([sample(last[i], sampling_per_row[i]) for i in range(n)])
         return next_tokens, batched_kv
 
-    # --- CUDA-graph decode capture/replay (single max-batch graph; see DECISIONS) ---
+    # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
 
-    def _capture_graph(self) -> None:
-        """Capture the decode forward once over fixed static buffers (maxN rows). Warmup runs
-        eagerly (stabilizes allocator + JITs the Triton kernel) before capture. On any failure
-        we fall back to eager decode."""
-        maxN, cols, dev = self._graph_max_rows, self._graph_max_cols, self.device
-        self._g_tokens = torch.zeros(maxN, 1, dtype=torch.long, device=dev)
-        self._g_pos = torch.zeros(maxN, 1, dtype=torch.long, device=dev)
-        self._g_seqlens = torch.ones(maxN, dtype=torch.long, device=dev)
-        self._g_bt = [None] * len(self.pools)
-        self._scratch = [None] * len(self.pools)
+    def _capture_graph(self, bucket: int) -> None:
+        """Capture the decode forward over static buffers sized to `bucket` rows. Warmup runs
+        eagerly (stabilizes allocator + JITs the Triton kernel) before capture. Falls back to eager.
+
+        Each bucket gets its OWN CUDA-graph memory pool. Sharing one is only safe when graphs are
+        replayed in capture order, and we replay whichever bucket fits the current row count.
+        ~250MB total here (the [B,1,262144] lm_head output dominates) buys that guarantee.
+
+        NOTE on determinism: which bucket a step lands in now depends on how many requests are
+        in flight, and a [B,1,H] GEMM picks a different cuBLAS kernel (different accumulation
+        order) per B. So a prompt's tokens can differ with concurrency. This is a property of
+        bucketing, not of graphs: scripts/diag_pad_numerics_modal.py reproduces it EAGER, with
+        no graph anywhere, purely by changing the pad width. vLLM behaves the same way. Output
+        is still deterministic at a fixed batch width."""
+        cols, dev = self._graph_max_cols, self.device
+        if self._scratch is None:
+            self._scratch = [None] * len(self.pools)
+            for L, pool in enumerate(self.pools):
+                if pool is not None:
+                    self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
+        g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
+        g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
+        g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
+        g_bt = [None] * len(self.pools)
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
-            self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
-            self._g_bt[L] = torch.full((maxN, cols), self._scratch[L], dtype=torch.long, device=dev)
-        import os
-        ctx = _GraphCtx(self.pools, self._g_seqlens, self._g_bt, self._block_size)
+            g_bt[L] = torch.full((bucket, cols), self._scratch[L], dtype=torch.long, device=dev)
+        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
-            self._log_graph_breaks(ctx)
+            self._log_graph_breaks(ctx, g_tokens, g_pos)
         try:
             if self._compile_on:
                 # Force the Dynamo trace + Inductor compile on the DEFAULT stream first — it must
-                # NOT happen during capture (below) or on the side stream. After this the forward
-                # is fully compiled, so warmup/capture just replay the fused kernels.
+                # NOT happen during capture (below) or on the side stream. Each bucket is a new
+                # static shape, so each pays its own compile.
                 for _ in range(3):
-                    self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+                    self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
                 torch.cuda.synchronize()
             s = torch.cuda.Stream()
             s.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(s):
                 for _ in range(3):  # warmup (compile kernels, stabilize allocator)
-                    self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
+                    self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             torch.cuda.current_stream().wait_stream(s)
-            self._graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(self._graph):
-                self._g_out = self._decode_fwd(self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx)
-            logger.info("Captured CUDA decode graph (max_rows=%d, max_cols=%d)", maxN, cols)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):   # private pool per bucket — see docstring
+                out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
+            self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos,
+                                    "seqlens": g_seqlens, "bt": g_bt, "out": out}
+            logger.info("Captured CUDA decode graph (rows=%d, cols=%d)", bucket, cols)
         except Exception:
             logger.exception("CUDA graph capture failed — falling back to eager decode")
             self._graph_on = False
-            self._graph = None
+            self._graphs.clear()
+
+    def _capture_all_graphs(self) -> None:
+        """Capture every bucket up-front, largest first. Done on the first decode (inside
+        warmup) so no request eats a mid-serving capture stall."""
+        import time
+        t0 = time.perf_counter()
+        for bucket in sorted(self._graph_buckets, reverse=True):
+            if not self._graph_on:
+                return
+            self._capture_graph(bucket)
+        logger.info("Captured %d decode graphs %s in %.1fs", len(self._graphs),
+                    sorted(self._graphs), time.perf_counter() - t0)
+
+    def _decode_bucket(self, n: int) -> int:
+        """Smallest captured bucket >= n rows."""
+        for b in self._graph_buckets:
+            if b >= n:
+                return b
+        return self._graph_buckets[-1]
 
     @torch.no_grad()
-    def _log_graph_breaks(self, ctx) -> None:
+    def _log_graph_breaks(self, ctx, g_tokens, g_pos) -> None:
         """Count torch.compile graph breaks in the decode forward (Inductor fusion headroom).
         Each break is a fence Inductor can't fuse across — expect one per layer at the raw Triton
         attention call + the Python scatter. Run via CUSTOM_BACKEND_EXPLAIN=1."""
         try:
             import torch._dynamo as dynamo
             from collections import Counter
-            exp = dynamo.explain(self.model)(
-                self._g_tokens, position_ids=self._g_pos, paged_ctx=ctx
-            )
+            exp = dynamo.explain(self.model)(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             # print (not logger.info) — bench containers don't configure logging, so INFO is dropped.
             print(f"[graph-breaks] {exp.graph_break_count} breaks, {exp.graph_count} graphs, "
                   f"{exp.op_count} ops captured", flush=True)
@@ -618,27 +669,24 @@ class CustomTorchBackend(InferenceBackend):
         except Exception as e:
             print(f"[graph-breaks] explain failed (diagnostic only): {e}", flush=True)
 
-    def _replay_decode(self, current_tokens, position_ids, state):
-        """Copy this step's inputs into the static buffers (real rows + scratch dummies), replay
-        the captured graph, return logits[:n_rows]. The graph reads the static buffers, so its
-        scatter/kernel run on the fresh values — no per-op dispatch."""
+    def _replay_decode(self, current_tokens, position_ids, state, bucket):
+        """Copy this step's inputs into `bucket`'s static buffers (real rows + scratch dummies),
+        replay that bucket's graph, return logits[:n_rows]. The graph reads the static buffers,
+        so its scatter/kernel run on the fresh values — no per-op dispatch."""
         n = state.n_rows
-        self._g_tokens[:n].copy_(current_tokens)
-        self._g_pos[:n].copy_(position_ids)
-        self._g_seqlens[:n].copy_(state.seq_lens)
-        self._g_seqlens[n:] = 1
+        g = self._graphs[bucket]
+        g["tokens"][:n].copy_(current_tokens)
+        g["pos"][:n].copy_(position_ids)
+        g["seqlens"][:n].copy_(state.seq_lens)
+        g["seqlens"][n:] = 1
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
-            self._g_bt[L].fill_(self._scratch[L])           # reset dummies + stale columns to scratch
+            g["bt"][L].fill_(self._scratch[L])           # reset dummies + stale columns to scratch
             bt = state.block_tables[L]
-            self._g_bt[L][:n, :bt.shape[1]].copy_(bt.clamp_min(0))
-        if self._graph is None:  # capture fell back to eager
-            return self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
-        self._graph.replay()
-        return self._g_out[:n]
-
-    # --- CUDA-graph prefill (K=1, no prefix, per suffix bucket) ---
+            g["bt"][L][:n, :bt.shape[1]].copy_(bt.clamp_min(0))
+        g["graph"].replay()
+        return g["out"][:n]
 
     def _capture_prefill_graph(self, bucket: int) -> None:
         """Capture the prefill forward once over static [1, bucket] buffers. Scratch blocks back the

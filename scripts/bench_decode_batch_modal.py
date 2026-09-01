@@ -1,12 +1,10 @@
 """Full-batch decode sweep (A10G): confirm decode is bandwidth-bound + the max-batch graph
 amortizes weight reads across rows.
 
-The CUDA decode graph is captured at max_batch_size (32) and pads smaller batches up — so it
-always does 32 rows of matmul work. Prediction if decode is weight-bandwidth-bound:
-  - graph ON:  ms/step ~FLAT across real N (fixed 32-row weight reads dominate) →
-               tok/s = N * 1000/ms scales ~linearly, ~1600 tok/s at N=32.
-  - graph OFF: ms/step GROWS with N (only N rows of real compute dispatched); the two
-               converge near N=32. This contrast is the bandwidth fingerprint.
+Historical note: this ran when ONE graph was captured at max_batch_size and padded every
+smaller batch up to it, so graph-ON ms/step was ~FLAT across real N (fixed 32-row weight reads)
+while graph-OFF grew with N — the bandwidth fingerprint. Decode graphs are now bucketed per row
+count, so graph-ON tracks N too; the ON/OFF gap here is now dispatch overhead, not padding.
 
     venv/bin/modal run scripts/bench_decode_batch_modal.py
 """
@@ -48,7 +46,7 @@ def run():
 
     def measure(n, graph_on):
         backend._graph_on = graph_on and dev.type == "cuda"
-        backend._graph = None  # force re-capture per config
+        backend._graphs.clear()  # force re-capture per config
         state, cur = None, []
         for i in range(n):
             c = PagedKVCache(pools=backend.pools)
