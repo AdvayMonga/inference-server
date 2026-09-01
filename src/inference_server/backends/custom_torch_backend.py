@@ -204,7 +204,6 @@ class CustomTorchBackend(InferenceBackend):
         self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._graph_buckets = _decode_buckets(self._graph_max_rows)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
-        self._graph_pool = None              # shared CUDA-graph mem pool (sized by the first/largest)
         self._scratch = None                 # one padding block per pool, shared by every bucket
 
         # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
@@ -578,10 +577,19 @@ class CustomTorchBackend(InferenceBackend):
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
 
     def _capture_graph(self, bucket: int) -> None:
-        """Capture the decode forward over static buffers sized to `bucket` rows. All buckets
-        share one scratch block per pool and one CUDA-graph memory pool (replays never overlap,
-        so the pool is safe to reuse and is sized once by the largest bucket). Warmup runs eagerly
-        (stabilizes allocator + JITs the Triton kernel) before capture. Falls back to eager."""
+        """Capture the decode forward over static buffers sized to `bucket` rows. Warmup runs
+        eagerly (stabilizes allocator + JITs the Triton kernel) before capture. Falls back to eager.
+
+        Each bucket gets its OWN CUDA-graph memory pool. Sharing one is only safe when graphs are
+        replayed in capture order, and we replay whichever bucket fits the current row count.
+        ~250MB total here (the [B,1,262144] lm_head output dominates) buys that guarantee.
+
+        NOTE on determinism: which bucket a step lands in now depends on how many requests are
+        in flight, and a [B,1,H] GEMM picks a different cuBLAS kernel (different accumulation
+        order) per B. So a prompt's tokens can differ with concurrency. This is a property of
+        bucketing, not of graphs: scripts/diag_pad_numerics_modal.py reproduces it EAGER, with
+        no graph anywhere, purely by changing the pad width. vLLM behaves the same way. Output
+        is still deterministic at a fixed batch width."""
         cols, dev = self._graph_max_cols, self.device
         if self._scratch is None:
             self._scratch = [None] * len(self.pools)
@@ -614,12 +622,8 @@ class CustomTorchBackend(InferenceBackend):
                     self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             torch.cuda.current_stream().wait_stream(s)
             graph = torch.cuda.CUDAGraph()
-            ctxmgr = (torch.cuda.graph(graph, pool=self._graph_pool) if self._graph_pool is not None
-                      else torch.cuda.graph(graph))
-            with ctxmgr:
+            with torch.cuda.graph(graph):   # private pool per bucket — see docstring
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
-            if self._graph_pool is None:
-                self._graph_pool = graph.pool()
             self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos,
                                     "seqlens": g_seqlens, "bt": g_bt, "out": out}
             logger.info("Captured CUDA decode graph (rows=%d, cols=%d)", bucket, cols)
@@ -629,8 +633,8 @@ class CustomTorchBackend(InferenceBackend):
             self._graphs.clear()
 
     def _capture_all_graphs(self) -> None:
-        """Capture every bucket up-front, largest first so the shared mem pool is sized once.
-        Done on the first decode (inside warmup) so no request eats a mid-serving capture stall."""
+        """Capture every bucket up-front, largest first. Done on the first decode (inside
+        warmup) so no request eats a mid-serving capture stall."""
         import time
         t0 = time.perf_counter()
         for bucket in sorted(self._graph_buckets, reverse=True):

@@ -4,7 +4,10 @@ Baseline (main) captured ONE graph at max_batch_size and replayed it at full siz
 so 4 active rows with max_batch=256 ran a 256-row forward — 64x padding. This measures what
 that cost and proves the bucketed replay is token-identical.
 
-  PARITY: graphed decode must produce the SAME tokens as eager decode at every n.
+  PARITY: replaying bucket B must equal running the SAME ops eagerly over the SAME B-wide
+          static buffers. Comparing against UNPADDED eager is NOT a valid gate: a [B,1,H] GEMM
+          picks a different cuBLAS kernel per B, so pad width alone shifts logits by ~0.5 and
+          flips near-tie argmaxes — reproduced with no graph at all in diag_pad_numerics_modal.
   PERF:   ms/step at each n, bucketed vs forced-max-bucket (the old behavior, same process).
 
     venv/bin/modal run --detach scripts/bench_decode_buckets_modal.py
@@ -18,7 +21,6 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .pip_install("torch>=2.4", index_url="https://download.pytorch.org/whl/cu121")
     .pip_install_from_pyproject("pyproject.toml")
-    .add_local_python_source("inference_server")
     .env({
         "MODEL_NAME": os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it"),
         "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "256"),
@@ -26,6 +28,7 @@ image = (
         "CONTEXT_WINDOW": "8192",
         "CUSTOM_BACKEND_COMPILE": os.environ.get("CUSTOM_BACKEND_COMPILE", "0"),
     })
+    .add_local_python_source("inference_server")   # must be last (no build steps after)
 )
 app = modal.App("decode-bucket-ab", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
@@ -48,6 +51,8 @@ def run():
     from inference_server.config import settings
     from inference_server.models.paged_kv_cache import PagedKVCache
 
+    torch.set_grad_enabled(False)   # these call model() directly; without this every
+                                    # raw forward retains an autograd graph -> OOM
     backend = create_backend("custom-cuda")
     backend.load_model(settings.model_name)
     model, dev = backend.model, backend.device
@@ -83,25 +88,36 @@ def run():
                 out[i].append(t)
         return out
 
-    # ---- PARITY: graphed (bucketed) vs eager, same prompts, same steps ----
-    print("=== parity: bucketed graph vs eager ===", flush=True)
+    # ---- PARITY: graph replay vs eager over the SAME padded static buffers ----
+    from inference_server.backends.custom_torch_backend import _GraphCtx
+
+    print("=== parity: graph replay vs width-matched eager ===", flush=True)
+    backend._graph_on = True
+    if not backend._graphs:
+        backend._capture_all_graphs()
     ok = True
     for n in [1, 3, 5, 17, 32]:
-        backend._graph_on = False
-        s, c = build(n)
-        want = steps(s, c, 8)
-        free(s)
+        bucket = backend._decode_bucket(n)
+        state, cur = build(n)
+        state.prepare_step()
+        tokens = torch.tensor([[t] for t in cur], device=dev)
+        pos = torch.tensor([[int(state.seq_lens[i])] for i in range(n)], device=dev)
 
-        backend._graph_on = True
-        s, c = build(n)
-        got = steps(s, c, 8)
-        free(s)
+        graphed = backend._replay_decode(tokens, pos, state, bucket)[:, -1, :].float().clone()
+        # _replay_decode already staged everything into this bucket's buffers; rerun eagerly
+        # over those exact buffers so the only variable is graph-replay vs live dispatch.
+        g = backend._graphs[bucket]
+        ctx = _GraphCtx(backend.pools, g["seqlens"], g["bt"], backend._block_size)
+        eager = backend._decode_fwd(g["tokens"], position_ids=g["pos"],
+                                    paged_ctx=ctx)[:n, -1, :].float()
+        free(state)
 
-        match = want == got
-        ok &= match
-        print(f"  n={n:<4} {'MATCH' if match else 'MISMATCH'}"
-              f"{'' if match else f' eager={want} graph={got}'}", flush=True)
-    print(f"parity: {'PASS' if ok else 'FAIL'}\n", flush=True)
+        same_tok = torch.equal(graphed.argmax(-1), eager.argmax(-1))
+        diff = float((graphed - eager).abs().max())
+        ok &= same_tok
+        print(f"  n={n:<4} bucket={bucket:<4} argmax {'MATCH' if same_tok else 'MISMATCH'}"
+              f"  maxdiff={diff:.6f}", flush=True)
+    print(f"parity: {'PASS' if ok else 'FAIL'}", flush=True)
 
     # ---- PERF: bucketed vs forced-max (the old single-graph behavior) ----
     backend._graph_on = True
