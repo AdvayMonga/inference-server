@@ -591,11 +591,7 @@ class CustomTorchBackend(InferenceBackend):
         no graph anywhere, purely by changing the pad width. vLLM behaves the same way. Output
         is still deterministic at a fixed batch width."""
         cols, dev = self._graph_max_cols, self.device
-        if self._scratch is None:
-            self._scratch = [None] * len(self.pools)
-            for L, pool in enumerate(self.pools):
-                if pool is not None:
-                    self._scratch[L] = pool.alloc()  # dummy/padding rows point here; held for the process
+        self._ensure_scratch()
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
@@ -631,6 +627,16 @@ class CustomTorchBackend(InferenceBackend):
             logger.exception("CUDA graph capture failed — falling back to eager decode")
             self._graph_on = False
             self._graphs.clear()
+
+    def _ensure_scratch(self) -> None:
+        """One padding block per pool, shared by every captured graph (decode + prefill).
+        Dummy/padding rows point here. Held for the process — never released."""
+        if self._scratch is not None:
+            return
+        self._scratch = [None] * len(self.pools)
+        for L, pool in enumerate(self.pools):
+            if pool is not None:
+                self._scratch[L] = pool.alloc()
 
     def _capture_all_graphs(self) -> None:
         """Capture every bucket up-front, largest first. Done on the first decode (inside
@@ -696,13 +702,12 @@ class CustomTorchBackend(InferenceBackend):
         pos = torch.arange(bucket, device=dev).unsqueeze(0)
         prefix_lens = torch.zeros(1, dtype=torch.int32, device=dev)
         suffix_lens = torch.full((1,), bucket, dtype=torch.int32, device=dev)   # all real during capture
+        self._ensure_scratch()
         bts = [None] * len(self.pools)
-        scratch = [None] * len(self.pools)
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
-            scratch[L] = pool.alloc()                                            # held for the process
-            bts[L] = torch.full((1, cols), scratch[L], dtype=torch.long, device=dev)
+            bts[L] = torch.full((1, cols), self._scratch[L], dtype=torch.long, device=dev)
         ctx = _PrefillGraphCtx(self.pools, bts, prefix_lens, suffix_lens, bucket, bs)
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
@@ -713,8 +718,15 @@ class CustomTorchBackend(InferenceBackend):
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             out = self.model(ids, position_ids=pos, paged_ctx=ctx)
+        # EVERY tensor allocated BEFORE capture that the graph reads must stay referenced.
+        # Tensors allocated DURING capture live in the graph's private pool and are safe; these
+        # do not. `pos`, `prefix_lens` and `ctx` (which owns ctx._pos, the scatter index) were
+        # dropped here, so the allocator recycled their addresses and a later replay read
+        # garbage -> huge q_pos -> out-of-bounds block-table load -> illegal memory access.
+        # That is why the FIRST replay always succeeded and a later one crashed.
         self._prefill_graphs[bucket] = {"graph": g, "ids": ids, "suffix_lens": suffix_lens,
-                                        "bts": bts, "out": out}
+                                        "bts": bts, "out": out,
+                                        "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx}
         logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
 
     def _replay_prefill(self, prompt_ids, bucket):
