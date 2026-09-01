@@ -15,6 +15,46 @@ Columns: date · experiment · change · before→after (tok/s @N=32 · TPOT p50
 | 2026-06-14 | max-autotune-no-cudagraphs | `CUSTOM_BACKEND_COMPILE_MODE=max-autotune-no-cudagraphs` (detached) | 1151→**1178.5** (+2.4%) | 23.8→23.5 ms | argmax expected-equiv (TF32 off; not separately run) | **keep flag, NOT default** | also +11% @N=16 (658→731), +4% @N=1. Marginal at saturation, non-negative everywhere. Cost: ~15–20 min autotune compile (must run `--detach`; attached heartbeat dies). Don't default until the Inductor autotune cache is persisted to the Modal volume so cold start doesn't pay it every boot. |
 | 2026-06-14 | whole-model torch.compile | `CUSTOM_BACKEND_COMPILE=1` — `torch.compile(self.model, dynamic=False)` on decode forward | 650→957 (→1151 re-anchored) | 43→29 ms | argmax ✓ (job bmdivbgf5) | **kept** | 1.47× end-to-end. Also helped TTFT 189→133 (faster decode drains batch → prefills wait less). Inductor fuses the elementwise/norm/RoPE islands between graph breaks. |
 
+## 2026-09-01 — bucketed decode graphs + de-Pythoned step (compile OFF, A100/E4B)
+
+Both sweeps run **simultaneously, identical config** (`BENCH_BACKENDS=custom-cuda`,
+`SWEEP_PREFILL_MODE=batched`, `CUSTOM_BACKEND_COMPILE=0`, `MAX_BATCH_SIZE=32`) so this is a
+controlled A/B, not a comparison against an older recorded run.
+
+| N | item1 only tok/s | +item2 tok/s | delta | TPOT p50 (1→2) | TTFT p50 (1→2) |
+|---|---|---|---|---|---|
+| 1 | 46.7 | 49.1 | +5% | 20.2→19.4 | 114→83 |
+| 4 | 137.3 | 145.3 | +6% | 26.4→24.7 | 138→105 |
+| 8 | 218.7 | 256.1 | +17% | 33.4→28.6 | 147→113 |
+| 16 | 384.4 | 429.3 | +12% | 36.8→32.4 | 168→125 |
+| 32 | 598.2 | **732.3** | **+22%** | 46.0→40.0 | 216→161 |
+
+Gain grows with N — the signature of removing O(N) per-step work. TPOT growth 1→32 fell from
++128% to +106% (vLLM's is +30%, so O(N) work remains). Saved:
+`sweep_custom_cuda_bucketed_depython_a100_e4b.csv`.
+
+⚠️ **Do not compare either column to the older `sweep_custom_cuda_batched_a100_e4b.csv`
+(649.7 @ N=32).** That was recorded in a different session, and this repo has already been
+burned once by cross-session variance (see the 2026-06-14 re-anchor row: the same config
+measured 957 then 1151). The item1-only column reading *below* it is within that band.
+
+### Decode-graph capture cost — the bucketing tax (`probe_graph_capture_cost_modal.py`)
+
+Bucketing makes every bucket a distinct static shape, so with `CUSTOM_BACKEND_COMPILE=1`
+each pays its own Inductor compile. Measured at `MAX_BATCH_SIZE=32` (6 buckets):
+
+| compile mode | per-bucket | total | note |
+|---|---|---|---|
+| `dynamic=False` (current) | ~92s each, uniform | **553s** | scales linearly with ladder; ~828s at a 9-bucket ladder |
+| `dynamic=None` (auto) | 138s, 231s, then **1.8s, 1.8s, 1.9s**, 126s | 500s | one dynamic artifact covers buckets 2/4/8; bucket 32 compiles static first, 16 recompiles dynamic, **bucket 1 re-specializes** (Dynamo 0/1 specialization) |
+| `dynamic=True` (forced) | — | **FAILS** | `NameError: name 's6' is not defined` — the same Inductor dynamic-shape codegen bug HANDOFF recorded for prefill (`s46`) reproduces on decode. 0 buckets captured, fell back to eager. |
+
+**Read:** auto-dynamic wins and the win grows with the ladder (~2.2x at a 9-bucket ladder),
+provided **bucket 1 is dropped** — it costs a full ~126s re-specialization and is worth only
+~4% over bucket 2 at n=1 (17.73 vs 18.53 ms/step). `dynamic=True` is off the table.
+The real fix is the already-deferred **persistent Inductor cache on a Modal volume** — that
+trigger has now fired.
+
 ## Profiling findings (2026-06-14, compiled decode, A100/E4B, isolated N=32)
 
 `profile_decode_kernels_modal.py` (COMPILE=1). Isolated decode = **17 ms/step, ~1870 tok/s, 43% of A100 BW** → NOT bandwidth-bound. Leaf-kernel self-CUDA breakdown (hand-derived from the raw table; auto-buckets were buggy — fixed since: skip `aten::` parents to avoid double-counting `aten::mm`/`aten::copy_` against their child kernels):
