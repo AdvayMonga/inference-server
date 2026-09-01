@@ -90,6 +90,11 @@ class InferenceBackend(ABC):
             f"{type(self).__name__} does not support prefill_store()"
         )
 
+    # Paged backends carry causality/windowing in their own per-row seq_lens and ignore the
+    # scheduler-built mask. Setting this False lets the scheduler skip maintaining it entirely
+    # (it was a growing [B, S] cat every decode step, allocated for nobody).
+    needs_attention_mask: bool = True
+
     def decode_step_batched(
         self,
         current_tokens: object,    # tensor [B, 1]

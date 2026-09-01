@@ -99,6 +99,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._pending_cv = threading.Condition(self._pending_lock)
         self._pending_count = 0
         self._arrival_counter = 0
+        # Backends with paged per-row KV ignore the scheduler-built mask; skip building it.
+        self._needs_mask = getattr(backend, "needs_attention_mask", True)
         self._active: list[_ActiveRow] = []
         self._prefilling: list[_PrefillingRow] = []
         self._batched_kv: object | None = None
@@ -247,7 +249,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if len(self._active) == 0:
                 self._batched_kv = None
                 self._attention_mask = None
-            else:
+            elif self._needs_mask:
                 self._attention_mask = torch.cat([
                     self._attention_mask[:idx],
                     self._attention_mask[idx + 1:],
@@ -419,12 +421,15 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _splice_in(self, new_kv: object, new_kv_len: int, device: str) -> None:
         """Add a new row's KV to the batched cache; backend handles cache surgery."""
-        if self._batched_kv is None:
-            self._batched_kv = self.backend.splice_into_batched(None, new_kv, new_kv_len)
+        first = self._batched_kv is None
+        self._batched_kv = self.backend.splice_into_batched(
+            None if first else self._batched_kv, new_kv, new_kv_len
+        )
+        if not self._needs_mask:
+            return
+        if first:
             self._attention_mask = torch.ones(1, new_kv_len, device=device, dtype=torch.long)
             return
-
-        self._batched_kv = self.backend.splice_into_batched(self._batched_kv, new_kv, new_kv_len)
 
         # Attention mask is torch-typed scheduler state; pad existing rows then append new row.
         # Drive sizing off the mask's OWN width, not kv_length: for paged backends
@@ -448,11 +453,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
             [[r.current_token] for r in self._active],
             device=device,
         )
-        # Extend attention mask by one column for the new input token
-        self._attention_mask = torch.cat([
-            self._attention_mask,
-            torch.ones(batch_size, 1, device=device, dtype=torch.long),
-        ], dim=1)
+        if self._needs_mask:
+            # Extend attention mask by one column for the new input token
+            self._attention_mask = torch.cat([
+                self._attention_mask,
+                torch.ones(batch_size, 1, device=device, dtype=torch.long),
+            ], dim=1)
         position_ids = torch.tensor(
             [[r.real_kv_len] for r in self._active],
             device=device, dtype=torch.long,
@@ -464,8 +470,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             sampling_per_row=sampling_per_row,
         )
 
-        for i, row in enumerate(self._active):
-            row.current_token = int(next_tokens[i].item())
+        # One D2H copy for the whole batch; a per-row .item() is a separate device sync each.
+        for row, tok in zip(self._active, next_tokens.tolist()):
+            row.current_token = tok
             row.real_kv_len += 1
             self.policy.on_tokens_processed(row.request, 1)
 
