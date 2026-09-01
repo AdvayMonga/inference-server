@@ -78,9 +78,11 @@ def run():
         lead[0] += 1
         ids = [50000 + lead[0]] + list(range(100, 100 + n - 1))
         backend._prefill_graph_on = False
-        fe = backend.prefill_batch([ids])[0][1]
+        ce, fe, _ = backend.prefill_batch([ids])[0]
+        ce.free_all()
         backend._prefill_graph_on = True
-        fg = backend.prefill_batch([ids])[0][1]
+        cg, fg, _ = backend.prefill_batch([ids])[0]
+        cg.free_all()
         parity = "OK" if fe == fg else f"X {fe}!={fg}"
 
         eager = time_path(n, False)
