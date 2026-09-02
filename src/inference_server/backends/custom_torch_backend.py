@@ -384,7 +384,10 @@ class CustomTorchBackend(InferenceBackend):
         if matched >= len(token_ids):
             matched = len(token_ids) - 1  # leave ≥1 token so we get next-token logits
         suffix = token_ids[matched:]
-        logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache)
+        # lm_head on the last suffix position only — see GemmaForCausalLM.forward(logits_index).
+        last = torch.tensor([len(suffix) - 1], device=self.device)
+        logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache,
+                            logits_index=last)
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
         if not cache.any_evicted:   # only cache prefixes that fit fully in the window
             self.prefix_cache.store(token_ids, cache.block_tables)
@@ -514,11 +517,15 @@ class CustomTorchBackend(InferenceBackend):
             position_ids[k, :len(s)] = torch.arange(matched[k], matched[k] + len(s), device=dev)
 
         ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev)
-        logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx)
+        # One logit row per sequence, not one per token: the vocab projection over a K x Smax
+        # right-padded wave is the single largest FLOP+bytes item in prefill and we read K rows.
+        last_idx = torch.tensor([len(s) - 1 for s in suffixes], device=dev)
+        logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx,
+                            logits_index=last_idx)
 
         results = []
         for k in range(len(prompts)):
-            first = int(sample(logits[k:k + 1, len(suffixes[k]) - 1, :], GREEDY).item())
+            first = int(sample(logits[k:k + 1, 0, :], GREEDY).item())
             if not caches[k].any_evicted:
                 self.prefix_cache.store(prompts[k], caches[k].block_tables)
             results.append((caches[k], first, len(prompts[k])))
@@ -722,6 +729,7 @@ class CustomTorchBackend(InferenceBackend):
         pos = torch.arange(bucket, device=dev).unsqueeze(0)
         prefix_lens = torch.zeros(1, dtype=torch.int32, device=dev)
         suffix_lens = torch.full((1,), bucket, dtype=torch.int32, device=dev)   # all real during capture
+        logits_index = torch.full((1,), bucket - 1, dtype=torch.long, device=dev)
         self._ensure_scratch()
         bts = [None] * len(self.pools)
         for L, pool in enumerate(self.pools):
@@ -733,11 +741,11 @@ class CustomTorchBackend(InferenceBackend):
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
             for _ in range(3):
-                self.model(ids, position_ids=pos, paged_ctx=ctx)
+                self.model(ids, position_ids=pos, paged_ctx=ctx, logits_index=logits_index)
         torch.cuda.current_stream().wait_stream(s)
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
-            out = self.model(ids, position_ids=pos, paged_ctx=ctx)
+            out = self.model(ids, position_ids=pos, paged_ctx=ctx, logits_index=logits_index)
         # EVERY tensor allocated BEFORE capture that the graph reads must stay referenced.
         # Tensors allocated DURING capture live in the graph's private pool and are safe; these
         # do not. `pos`, `prefix_lens` and `ctx` (which owns ctx._pos, the scatter index) were
@@ -746,7 +754,8 @@ class CustomTorchBackend(InferenceBackend):
         # That is why the FIRST replay always succeeded and a later one crashed.
         self._prefill_graphs[bucket] = {"graph": g, "ids": ids, "suffix_lens": suffix_lens,
                                         "bts": bts, "out": out,
-                                        "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx}
+                                        "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx,
+                                        "logits_index": logits_index}
         logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
 
     def _replay_prefill(self, prompt_ids, bucket):
@@ -766,8 +775,9 @@ class CustomTorchBackend(InferenceBackend):
         g["ids"].zero_()
         g["ids"][0, :S].copy_(torch.tensor(prompt_ids, device=dev))
         g["suffix_lens"].fill_(S)                                               # padding queries skipped
+        g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
-        first = int(sample(g["out"][:, S - 1, :], GREEDY).item())
+        first = int(sample(g["out"][:, 0, :], GREEDY).item())
         if not cache.any_evicted:
             self.prefix_cache.store(prompt_ids, cache.block_tables)
         return cache, first, S

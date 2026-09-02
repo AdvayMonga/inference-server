@@ -598,11 +598,23 @@ class GemmaForCausalLM(nn.Module):
         kv_cache: KVCache | None = None,
         attn_mask: torch.Tensor | None = None,
         paged_ctx: object | None = None,
+        logits_index: torch.Tensor | None = None,
     ):
+        """`logits_index` [B]: run lm_head on ONLY that position per row, returning [B, 1, V].
+
+        Prefill needs exactly one logit row per sequence (the last real suffix token), but
+        lm_head over every position is a [B*S, 2560] @ [2560, 262144] GEMM — for a wave of 8
+        prompts of 240 tokens that is ~2.6 TFLOP and ~1GB of logits materialized, then softcapped,
+        to read 8 rows out of it. Slicing first makes the vocab projection O(B) instead of O(B*S).
+        Leave it None for decode (S=1 already) and for parity tests that want every position.
+        """
         if return_hidden_states:
             h, all_h = self.model(input_ids, position_ids, return_hidden_states=True, kv_cache=kv_cache)
         else:
             h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
+        if logits_index is not None:
+            idx = logits_index.view(-1, 1, 1).expand(-1, 1, h.shape[-1])
+            h = h.gather(1, idx)                     # [B, 1, hidden]
         logits = self.lm_head(h)
         # softcap: tanh(x / s) * s — bounds logits to ±s, helps long-tail tokens
         if self.final_logit_softcapping:
