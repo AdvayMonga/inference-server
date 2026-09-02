@@ -118,29 +118,72 @@ class _PrefillCtx:
 
     is_prefill = True
 
-    def __init__(self, caches, pools, prefix_lens, suffix_lens, device):
+    def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         self.caches = caches                       # list[PagedKVCache], one per row
         self.pools = pools
-        self._suffix = suffix_lens                 # python list (for the per-row append slice)
+        self._suffix = suffix_lens                 # python list of per-row real suffix lengths
         self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
         self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
         self.device = device
+        self._scratch = scratch                    # per-pool padding block (padding writes land here)
+        self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
+        self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
+        self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
 
-    def append(self, layer_idx, k_new, v_new):
-        # k_new/v_new: [B, Hkv, Smax, D] (right-padded). Append each row's real suffix to its cache.
+    def _ensure_blocks(self, layer_idx):
+        """Reserve every row's blocks for this layer up front (Python only, no GPU work)."""
+        pool = self.pools[layer_idx]
+        bs = pool.block_size
         for b, cache in enumerate(self.caches):
-            s = self._suffix[b]
-            cache.append(layer_idx, k_new[b:b + 1, :, :s, :], v_new[b:b + 1, :, :s, :])
+            bt = cache.block_tables[layer_idx]
+            need = (cache.seq_lens[layer_idx] + self._suffix[b] + bs - 1) // bs
+            while len(bt) < need:
+                bt.append(pool.alloc())
 
-    def block_table_tensor(self, layer_idx):
+    def _table(self, layer_idx):
+        """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
+        pool = self.pools[layer_idx]
         rows = [c.block_tables[layer_idx] for c in self.caches]
         maxb = max((len(r) for r in rows), default=1)
-        bt = torch.zeros(len(rows), maxb, dtype=torch.int32, device=self.device)
-        for b, r in enumerate(rows):
-            if r:
-                bt[b, :len(r)] = torch.tensor([x if x >= 0 else 0 for x in r],
-                                              dtype=torch.int32, device=self.device)
-        return bt
+        pad = self._scratch[layer_idx] if self._scratch is not None else 0
+        flat = [[(x if x >= 0 else 0) for x in r] + [pad] * (maxb - len(r)) for r in rows]
+        return torch.tensor(flat, dtype=torch.int32, device=self.device)
+
+    def append(self, layer_idx, k_new, v_new):
+        """One scatter for the whole wave. Was a Python loop over rows calling
+        PagedKVCache.append, i.e. K host->device copies + K scatter launches PER LAYER — 34% of
+        a K=8 prefill forward (probe_prefill_ctx_overhead_modal.py). Padding positions are
+        pointed at the pool's scratch block so they cannot touch a real row's KV."""
+        pool = self.pools[layer_idx]
+        bs = pool.block_size
+        self._ensure_blocks(layer_idx)
+        bt = self._table(layer_idx).long()                              # [K, maxb]
+        self._bt_cache[layer_idx] = bt
+
+        S = k_new.shape[2]
+        ar = self._ar[:S]
+        starts = torch.tensor([c.seq_lens[layer_idx] for c in self.caches],
+                              device=self.device).unsqueeze(1)          # [K, 1]
+        abs_pos = starts + ar                                            # [K, S]
+        valid = self._valid[:, :S]
+        bids = bt.gather(1, (abs_pos // bs).clamp_(max=bt.shape[1] - 1))
+        if self._scratch is not None:
+            bids = torch.where(valid, bids, bids.new_full((), self._scratch[layer_idx]))
+        slots = torch.where(valid, abs_pos % bs, torch.zeros_like(abs_pos))
+
+        pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3)            # [K, S, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3)
+
+        for b, cache in enumerate(self.caches):   # bookkeeping only — no GPU work
+            cache.seq_lens[layer_idx] += self._suffix[b]
+            cache._evict(layer_idx)
+
+    def block_table_tensor(self, layer_idx):
+        # append() already built it for this layer; rebuild only if eviction changed the table.
+        bt = self._bt_cache.pop(layer_idx, None)
+        if bt is None:
+            return self._table(layer_idx)
+        return bt.to(torch.int32)
 
 
 class CustomTorchBackend(InferenceBackend):
@@ -516,7 +559,9 @@ class CustomTorchBackend(InferenceBackend):
             input_ids[k, :len(s)] = torch.tensor(s, device=dev)               # right-padded
             position_ids[k, :len(s)] = torch.arange(matched[k], matched[k] + len(s), device=dev)
 
-        ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev)
+        self._ensure_scratch()
+        ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev,
+                          scratch=self._scratch)
         # One logit row per sequence, not one per token: the vocab projection over a K x Smax
         # right-padded wave is the single largest FLOP+bytes item in prefill and we read K rows.
         last_idx = torch.tensor([len(s) - 1 for s in suffixes], device=dev)
