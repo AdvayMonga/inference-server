@@ -87,7 +87,7 @@ def _pct(xs, q):
 
 
 @app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
-              secrets=[hf_secret], timeout=1800)
+              secrets=[hf_secret], timeout=5400)   # graph capture with compile on can take ~20min
 def sweep(backend_name: str, prefill_mode: str = "monolithic"):
     import asyncio, time
     from inference_server.backends import create_backend

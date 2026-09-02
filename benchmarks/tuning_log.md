@@ -55,6 +55,36 @@ provided **bucket 1 is dropped** — it costs a full ~126s re-specialization and
 The real fix is the already-deferred **persistent Inductor cache on a Modal volume** — that
 trigger has now fired.
 
+## 2026-09-02 — is torch.compile still worth it? (open-loop SLO harness, A100/E4B)
+
+Same harness, same config, prefill graph off, ONLY `CUSTOM_BACKEND_COMPILE` differs.
+
+| rate | ON tok/s | OFF tok/s | ON TPOT p50 | OFF TPOT p50 | ON TTFT p50 | OFF TTFT p50 |
+|---|---|---|---|---|---|---|
+| 1 | 121.4 | 119.4 | **15.4** | 24.5 | 121 | 103 |
+| 2 | 269.1 | 229.4 | **21.2** | 36.9 | 123 | 105 |
+| 3 | 366.1 | 324.2 | 33.3 | 44.2 | 129 | 110 |
+| 4 | 480.0 | 416.2 | 44.7 | 52.8 | 170 | 120 |
+| 6 | 606.3 | 568.0 | 62.7 | 70.2 | 174 | 134 |
+
+**Compile is still a large decode win — 1.59x TPOT at rate 1, 1.74x at rate 2, +15-17% throughput
+above rate 1.** It has NOT eroded now that bucketed graphs / de-Pythoned step / split-K have landed.
+
+**But it buys zero SLO headroom right now: 121 vs 119 tok/s within SLO.** The metric is TTFT-bound
+at rate 1 and compile only touches decode. TTFT is in fact slightly *worse* with compile on
+(121 vs 103 p50 — compile does not touch prefill; likely run variance plus a longer-warmed process).
+
+**Read:** keep compile — it is real headroom that becomes usable the moment prefill stops binding.
+But it is not urgent, so **iterate benchmarks with compile OFF** (whole graph ladder captures in
+5.6s vs ~21 min) and turn it on for headline numbers only, until the persistent Inductor cache lands.
+
+**Operational:** `bench_load_sweep_modal.py` can no longer run with compile on — its Modal function
+timeout is 1800s and graph capture alone took 1329s+ before being killed mid-ladder (4 buckets at
+215-375s each; the automatic-dynamic reuse did NOT kick in on that run, unlike others — the compile
+cost is high-variance run to run). Timeout raised.
+
+Saved: `serving_a100_e4b.csv` (compile ON), `serving_a100_e4b_compileoff.csv` (compile OFF).
+
 ## Profiling findings (2026-06-14, compiled decode, A100/E4B, isolated N=32)
 
 `profile_decode_kernels_modal.py` (COMPILE=1). Isolated decode = **17 ms/step, ~1870 tok/s, 43% of A100 BW** → NOT bandwidth-bound. Leaf-kernel self-CUDA breakdown (hand-derived from the raw table; auto-buckets were buggy — fixed since: skip `aten::` parents to avoid double-counting `aten::mm`/`aten::copy_` against their child kernels):
