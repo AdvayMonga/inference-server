@@ -17,6 +17,9 @@
   <a href="#tick">Per-tick loop</a>·
   <a href="#policies">Policies</a>·
   <a href="#backpressure">Backpressure</a>·
+  <a href="#shedding">Load shedding</a>·
+  <a href="#preemption">Preemption</a>·
+  <a href="#waves">Wave planning</a>·
   <a href="#chunked">Chunked prefill</a>·
   <a href="#reservation">Reservation accounting</a>·
   <a href="arch-backend.html">→ Backend</a>·
@@ -183,8 +186,12 @@
   <tr><td>on_request_finished</td><td>row leaves _active</td><td>cleanup hook; both no-op for now</td></tr>
 </table>
 
-<div class="callout warn">
-  <strong>Preemption is deliberately deferred.</strong> Today's "soft hold" (a fitting request waits for room to open up) is behaviorally equivalent to preemption for the common case. Preemption only becomes load-bearing once strict priority classes or per-tenant SLAs land — see CLAUDE.md.
+<div class="callout">
+  <strong>Preemption exists now, for KV pressure.</strong> The normal path is still a "soft hold" —
+  a fitting request waits for room. But if a decode step fails because blocks ran out, the scheduler
+  preempts the most recently admitted row rather than losing the batch (see
+  <a href="#preemption">Preemption &amp; loop resilience</a>). Preemption for strict priority classes
+  or per-tenant SLAs is still deferred — see CLAUDE.md.
 </div>
 
 <h2 id="backpressure">Backpressure (three gates)</h2>
@@ -277,6 +284,43 @@
 <div class="callout">
   <strong>The disaggregation seam: <code>_promote_to_decode</code>.</strong> Both monolithic admit and the chunked final-chunk path funnel a completed prefill's KV into the decode batch through this one method. Today it's a local splice on the same worker; under <strong>P/D disaggregation</strong> the KV is produced on a prefill worker and <em>transferred</em> here before the row decodes — so disagg adds a transfer at this single point plus a remote prefill loop, not a scheduler rewrite. The loop is already prefill/decode-decoupled, which is what makes that cheap.
 </div>
+
+<h2 id="shedding">Load shedding &amp; the admission deadline</h2>
+<p class="lead">The gates above decide <em>whether</em> a request fits. They do not bound how long it
+waits, and a deep queue turns overload into unbounded latency rather than rejection.</p>
+<p class="lead">Measured before this existed: at rate 48 the pending queue reached <strong>1001
+deep</strong> and end-to-end p95 hit <strong>105 s</strong> while the engine reported almost no
+rejections — it looked healthy while being useless.</p>
+<table>
+  <tr><th>Knob</th><th>Effect</th></tr>
+  <tr><td><code>MAX_QUEUE_WAIT_S</code> (default 30)</td><td>At admission, a request that has already queued longer than this is rejected with a queue-full error instead of admitted. 0 disables. Tune it to your TTFT SLO — a request that waited this long has blown any SLO it had.</td></tr>
+  <tr><td><code>MAX_QUEUE_SIZE</code></td><td>Hard cap on queue depth; rejects at <em>enqueue</em> time.</td></tr>
+</table>
+
+<h2 id="preemption">Preemption &amp; loop resilience</h2>
+<p class="lead">Two things that decide whether a bad moment costs one request or the whole server.</p>
+<ul>
+  <li><strong>Preemption under KV pressure.</strong> If a decode step fails while several rows are in
+  flight, the scheduler evicts the <em>most recently admitted</em> row — freeing its blocks — and
+  retries next tick. The newest request pays; older in-flight work survives. Counted as
+  <code>total_preempted</code>.</li>
+  <li><strong>The worker survives a failed iteration.</strong> It used to not: any exception escaped
+  to <code>_fail_all</code>, which cleared the active batch <em>without</em> releasing its paged
+  blocks and then let the worker thread exit — after which the server accepted requests forever and
+  ran none of them, with the leaked blocks unrecoverable. Now a failed tick drops the in-flight work,
+  <strong>releases its KV</strong>, and keeps serving; the worker only gives up after
+  <code>MAX_CONSECUTIVE_ERRORS</code> failures in a row.</li>
+</ul>
+
+<h2 id="waves">Prefill wave planning (optional)</h2>
+<p class="lead">A batched prefill right-pads every row to <code>Smax</code>, so a wave of mixed
+prompt lengths spends most of its compute on padding. <code>WAVE_WINDOW_MULT</code> lets the
+scheduler reorder within a bounded window to group similar lengths; the window <em>head</em> is
+always included, which is what makes it starvation-free.</p>
+<p class="lead"><strong>Default 0 (off), because it is measured inert below saturation.</strong> The
+<code>wave_sizes</code> histogram in <code>/scheduler/stats</code> shows 83–91% of waves are K=1 at
+rates 1–6: the queue never backs up, so waves never widen and there is no padding to save. Turn it on
+when the engine is actually driven at its 100–256 concurrency target.</p>
 
 <h2 id="reservation">Reservation accounting (the load-bearing invariant)</h2>
 <div class="callout warn">

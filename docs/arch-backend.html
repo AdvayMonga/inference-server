@@ -251,6 +251,40 @@
   <li>Caches internally via its own <code>PrefixCache</code> + paged pools, <em>not</em> the HF-format <code>CacheManager</code>: <code>set_cache_adapter</code> is a no-op, so the scheduler's KV-pressure gate + release are skipped (admission is bounded by <code>MAX_ACTIVE_KV_TOKENS</code> instead; pool exhaustion → request rejection). Block release happens on row eviction via <code>remove_row_from_cache → PagedKVCache.free_all()</code>.</li>
 </ul>
 
+<h2 id="graphs">CUDA graphs, and why the shapes are bucketed</h2>
+<p class="lead">Both prefill and decode are dispatch-bound on this model — 42 layers of eager
+launches cost far more than the arithmetic. CUDA graphs replay a captured launch stream instead.
+A graph is a <em>fixed shape</em>, so the engine keeps a ladder of them.</p>
+<table>
+  <tr><th>Graph</th><th>Bucketed on</th><th>Notes</th></tr>
+  <tr><td>Decode</td><td>row count (powers of two, ladder starts at 2)</td><td>Replays the smallest bucket &ge; active rows. A single max-batch graph padded every step to <code>max_batch_size</code> — 64&times; wasted work at 4 active rows. <code>CUSTOM_BACKEND_GRAPH_BUCKETS</code> overrides the ladder.</td></tr>
+  <tr><td>Prefill (K=1)</td><td>suffix length (64…1024)</td><td>Handles prefix-cache hits: write positions are derived in-graph from a runtime <code>prefix_lens</code>, so one capture serves any prefix. Window-crossing prompts are allowed — eviction happens after the replay, which is safe because the kernel already masks keys below its window bound. Gated by <code>CUSTOM_BACKEND_PREFILL_GRAPH</code>.</td></tr>
+</table>
+<div class="callout warn">
+  <strong>Two properties worth knowing.</strong> (1) Every tensor allocated <em>before</em> capture
+  that the graph reads must stay referenced for the graph's life — tensors allocated <em>during</em>
+  capture live in its private pool and are safe. Dropping one produces an illegal memory access on a
+  <em>later</em> replay, never the first. (2) Bucketing means padded batch width varies with
+  concurrency, and a <code>[B,1,H]</code> GEMM picks a different kernel per <code>B</code> — so decode
+  output is <strong>not batch-invariant</strong>. vLLM behaves the same way. Never gate a test on
+  bitwise agreement across different batch shapes.
+</div>
+<p class="lead">Graphs are captured up front, not lazily: a lazy per-bucket capture puts a
+multi-second stall in the middle of serving, which shows up as a TTFT p95 blow-up rather than as an
+obvious error. With <code>torch.compile</code> on, each decode bucket is also a fresh Inductor
+compile (~21 min for the full ladder), so iterate with compile off and enable it for headline runs.</p>
+
+<h2 id="kernels">Attention kernels</h2>
+<table>
+  <tr><th>Kernel</th><th>When</th><th>Shape of the win</th></tr>
+  <tr><td><code>paged_decode_attention</code></td><td>1 query/row</td><td>Reads K/V straight from block tables, no gather, no padding.</td></tr>
+  <tr><td>split-K variant</td><td>N&times;Hq &lt; 128 programs</td><td>Splits the KV dimension across programs so low batch fills the GPU: 7.1&times; at n=1 / L=2048, exact no-op at n&ge;16. Split count comes from batch shape ONLY, never sequence length — the grid is baked into the CUDA graph.</td></tr>
+  <tr><td><code>paged_prefill_attention</code></td><td>multi-query</td><td>Right-padded suffixes attend over paged prefix+suffix; padding queries exit in-kernel.</td></tr>
+</table>
+<p class="lead">Prefill also runs <code>lm_head</code> on <strong>one position per row</strong>
+(<code>logits_index</code>) rather than all of them — projecting every position into a 262k vocab to
+read one row per sequence cost up to 2 GB of materialized logits.</p>
+
 <h2 id="torch">HF-Transformers Torch backend (original)</h2>
 <p class="lead"><code>backends/torch_backend.py</code>. Wraps a HuggingFace causal LM.</p>
 

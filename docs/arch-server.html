@@ -101,6 +101,13 @@
   </g>
 </svg>
 
+<h3>What the two stats endpoints report</h3>
+<table>
+  <tr><th>Endpoint</th><th>Reports</th></tr>
+  <tr><td><code>/cache/stats</code></td><td>Whichever cache is <em>actually serving</em>. With <code>BACKEND=custom-*</code> that is the backend's <code>PrefixCache</code>: hit rate, entries vs the entry cap, blocks held vs the block watermark, evictions, and pool utilization. It previously always described the HF-format <code>CacheManager</code> — a cache the custom backend does not use — so the numbers referred to nothing the engine was doing.</td></tr>
+  <tr><td><code>/scheduler/stats</code></td><td>Queue depths and counters, including the pressure signals: <code>kv_admit_blocked</code> (soft holds), <code>total_rejected</code>, <code>total_expired</code> (shed at the admission deadline), <code>total_preempted</code> (rows evicted under KV pressure), <code>total_iteration_errors</code>, and <code>wave_sizes</code> (the prefill wave-width histogram — the thing that shows whether the queue is actually backing up).</td></tr>
+</table>
+
 <h2 id="startup">Startup (the lifespan hook)</h2>
 <p class="lead">Modal-style cold start: every expensive thing happens once, before any request lands.</p>
 

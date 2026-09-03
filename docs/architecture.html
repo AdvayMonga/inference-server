@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-06-14.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-03.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -17,6 +17,7 @@
   <a href="arch-scheduler.html">Scheduler</a>·
   <a href="arch-backend.html">Backend</a>·
   <a href="arch-cache.html">KV Cache</a>·
+  <a href="#pressure">Running out of memory</a>·
   <a href="#status">Phase status</a>
 </div>
 
@@ -205,13 +206,27 @@
   <li><strong>Client sends a POST to <code>/generate</code></strong> with the prompt text, max tokens, optional <code>session_id</code>, and optional <code>priority</code>.</li>
   <li><strong>Server tokenizes</strong> the text using the Gemma chat template and wraps it in a <code>ScheduledRequest</code> object that carries the session ID and arrival time.</li>
   <li><strong>Scheduler queues the request</strong>. The fairness policy (FCFS or VTC) decides where it lands relative to other waiting requests.</li>
-  <li><strong>Each tick the scheduler tries to admit pending requests</strong>. It only admits if there's room in both the active-KV budget and the cache block pool. If not, the request waits.</li>
+  <li><strong>Each tick the scheduler tries to admit pending requests</strong>. It only admits if there's room in both the active-KV budget and the cache block pool. If not, the request waits — and if it has already waited past the admission deadline, it is rejected rather than queued forever.</li>
   <li><strong>If the prompt is long, prefill is split into chunks</strong>, one chunk per tick — long prompts no longer freeze every other user's stream.</li>
   <li><strong>The cache is checked for any matching prefix</strong>. If found, those tokens skip the forward pass entirely.</li>
   <li><strong>The backend runs a single batched decode forward pass</strong> across every active request, producing one new token per request per tick.</li>
   <li><strong>Each new token is streamed to its client</strong> via SSE. Metrics track TTFT and TPOT.</li>
   <li><strong>When a request hits EOS or max tokens, it leaves the active batch</strong>, releases its blocks, and frees its KV reservation.</li>
 </ol>
+
+<h2 id="pressure">What happens when it runs out of memory</h2>
+<p class="lead">KV blocks are finite and running out is an <strong>expected operating condition</strong>,
+not a failure. The path, in order:</p>
+<ol>
+  <li><strong>Admission holds.</strong> A request whose reservation does not fit waits rather than starting (<code>kv_admit_blocked</code>).</li>
+  <li><strong>The prefix cache gives blocks back.</strong> The block pool calls into it before declaring exhaustion; cached prefixes are evicted LRU until a block actually frees.</li>
+  <li><strong>Preemption.</strong> If a decode step still fails, the most recently admitted row is evicted so older in-flight work survives.</li>
+  <li><strong>Rejection.</strong> Genuine exhaustion surfaces as a typed <code>KVCacheExhausted</code> converted to a 429-style rejection — never as an engine crash.</li>
+  <li><strong>Shedding.</strong> Requests that queued past the admission deadline are rejected, so overload becomes bounded latency plus refusals instead of unbounded latency.</li>
+</ol>
+<p class="lead">Two invariants hold this together: <strong>no path may abandon blocks it has already
+allocated</strong>, and <strong>a failed scheduler tick must not end the worker</strong> — it drops
+the in-flight work, releases its KV, and keeps serving.</p>
 
 <h2 id="status">Phase status</h2>
 <p class="lead">What's done, what's in progress, what's deferred.</p>
@@ -225,12 +240,13 @@
   <tr><td>4 — Fixed-window batching</td><td>Replaced by Phase 6 continuous batching</td><td><span class="badge b-done">superseded</span></td></tr>
   <tr><td>5 — KV cache</td><td>Block pool, radix tree, exact-match index, three eviction policies</td><td><span class="badge b-done">done</span> <span class="badge b-defer">H2O wiring deferred</span></td></tr>
   <tr><td>6 — Continuous batching</td><td>Iteration-level scheduling, immediate slot fill</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — Fair scheduling</td><td>FCFS + Fair (VTC) + priority hooks</td><td><span class="badge b-done">done</span> <span class="badge b-defer">preemption deferred</span></td></tr>
-  <tr><td>6 — Backpressure</td><td>Queue gate + active-KV gate + cache-pool gate, soft-hold and hard-reject</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Fair scheduling</td><td>FCFS + Fair (VTC) + priority hooks; optional starvation-free length-grouped prefill waves (off by default)</td><td><span class="badge b-done">done</span> <span class="badge b-defer">priority preemption deferred</span></td></tr>
+  <tr><td>6 — Backpressure</td><td>Queue gate + active-KV gate + cache-pool gate, soft-hold and hard-reject, plus cache reclaim, KV-pressure preemption and an admission deadline that sheds stale requests</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — Chunked prefill (alternating)</td><td>Long prompts split across ticks so they don't block decode</td><td><span class="badge b-prog">in progress</span></td></tr>
-  <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Needs custom attention path</td><td><span class="badge b-defer">deferred — CUDA only</span></td></tr>
+  <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Attention path now exists, but measured a large regression: a mixed step cannot replay the decode CUDA graph and our eager forward is dispatch-bound (3–5× tax)</td><td><span class="badge b-defer">measured, not built</span></td></tr>
   <tr><td>6 — Load simulator</td><td>Built-in weighted multi-user simulator with per-user RNG</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — Locust load testing</td><td>External load generator, throughput-vs-latency curves</td><td><span class="badge b-todo">next</span></td></tr>
+  <tr><td>6 — Open-loop + stress harnesses</td><td>SLO-gated Poisson sweep, plus an overload/KV-pressure stress that drives cache-missing traffic past the knee</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>
   <tr><td>7 — Hardware auto-detect</td><td>CUDA → MPS → CPU fallback, partial</td><td><span class="badge b-prog">partial</span></td></tr>
   <tr><td>8 — Observability</td><td>Rolling p50/p95/p99 + Prometheus /metrics (aggregate) + structured JSON logs + timing middleware; Grafana dashboard in monitoring/</td><td><span class="badge b-prog">mostly</span></td></tr>

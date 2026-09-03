@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · KV Cache</div>
 <h1>KV Cache</h1>
-<p class="lead">Paged, session-aware key/value cache with cross-session prefix sharing. Lets repeated and shared prompts skip the prefill cost entirely.</p>
+<p class="lead">Paged, session-aware key/value cache with cross-session prefix sharing. Lets repeated and shared prompts skip the prefill cost entirely. Last updated 2026-09-03.</p>
 
 <div class="nav">
   <a href="#why">Why we need it</a>·
@@ -20,6 +20,8 @@
   <a href="#lookup">Lookup flow</a>·
   <a href="#store">Store flow</a>·
   <a href="#eviction">Eviction policies</a>·
+  <a href="#prefixcache">PrefixCache (custom backend)</a>·
+  <a href="#counters">Stats</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
 </div>
 
@@ -327,7 +329,60 @@
   <tr><td>record_attention(block, score)</td><td>H2O-only hook. backend would call this with attention mass per block.</td></tr>
 </table>
 
+<h2 id="prefixcache">PrefixCache — the cache the custom backend actually uses</h2>
+<p class="lead">Everything above describes the HF-format <code>CacheManager</code> path. When
+<code>BACKEND=custom-*</code> is serving, that path is <strong>not used</strong>: the custom backend
+caches through its own <code>PrefixCache</code> over the paged <code>BlockPool</code>s. Both exist;
+only one is live at a time.</p>
+
+<table>
+  <tr><th>Property</th><th>PrefixCache (custom backend)</th></tr>
+  <tr><td>Key</td><td>tuple of leading tokens, aligned to a block boundary. Sharing only happens on full blocks — slots past <code>seq_len</code> are never written, so a partial block is not safe to share.</td></tr>
+  <tr><td>Value</td><td>per-layer list of block ids, ref-counted in the pool.</td></tr>
+  <tr><td>Order</td><td>LRU. A hit moves the entry to the newest end.</td></tr>
+  <tr><td>Caps</td><td>TWO. <code>PREFIX_CACHE_MAX_ENTRIES</code> bounds host memory (the key tuples); <code>PREFIX_CACHE_BLOCK_FRACTION</code> bounds its share of device blocks (default 0.5).</td></tr>
+  <tr><td>Reclaim</td><td><code>BlockPool.alloc()</code> calls back into the cache when its free list is empty, evicting LRU entries until a block actually returns.</td></tr>
+</table>
+
+<h3>Why two caps and a reclaim hook</h3>
+<p class="lead">Cached blocks are a cache, not a reservation. They must be givable-back on demand,
+and they must not be able to squeeze live requests out.</p>
+<ul>
+  <li><strong>No eviction at all</strong> was the original behaviour: every prefix ever seen kept a
+  refcount forever, so each distinct prompt permanently consumed blocks until <code>alloc()</code>
+  raised on the request path. Measured at 4 blocks leaked per request.</li>
+  <li><strong>Reclaim-on-demand alone</strong> is not enough either — the cache grows to 100% of the
+  pool and every single alloc has to evict first, leaving no headroom for a burst. Hence the block
+  watermark.</li>
+  <li><strong>Reclaim must count blocks that actually became free</strong>, not <code>release()</code>
+  calls. A cached block a live request is also holding frees nothing when the cache drops its ref.</li>
+</ul>
+
+<h3>Running out of blocks is an operating condition, not a bug</h3>
+<p class="lead">The load-bearing invariant of this subsystem.</p>
+<ul>
+  <li>Exhaustion raises a typed <code>KVCacheExhausted</code>, which the scheduler converts into a
+  queue-style rejection (429). It is never reported as an engine failure.</li>
+  <li><strong>No code path may abandon blocks it has already allocated.</strong> All three prefill
+  paths release on failure. When <code>alloc()</code> raised mid-loop, the blocks already taken used
+  to be abandoned with the local cache object, so every rejected request leaked and the pool drained
+  to zero permanently.</li>
+</ul>
+
 <h2 id="counters">Stats &amp; observability</h2>
+<p class="lead"><code>/cache/stats</code> reports whichever cache is actually serving. With a custom
+backend it returns the PrefixCache — it previously always described the CacheManager, i.e. a cache
+the engine was not using.</p>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td>hit_rate, hits, lookups</td><td>prefix-match rate. Strongly dependent on workload: a benchmark that reuses a small prompt pool reports a hit rate real traffic will not.</td></tr>
+  <tr><td>entries / max_entries</td><td>cached prefixes vs the host-memory cap.</td></tr>
+  <tr><td>blocks_held / max_blocks</td><td>device blocks the cache holds vs its watermark.</td></tr>
+  <tr><td>evictions</td><td>LRU entries dropped, by capacity or by reclaim.</td></tr>
+  <tr><td>pool_free_blocks / pool_total_blocks / pool_utilization</td><td>real pool pressure.</td></tr>
+</table>
+
+<h2 id="counters-legacy">Stats (HF CacheManager path)</h2>
 <table>
   <tr><th>Counter</th><th>Where</th></tr>
   <tr><td>hit_count, miss_count, hit_rate</td><td><code>/cache/stats</code></td></tr>
