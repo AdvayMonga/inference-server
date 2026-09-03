@@ -253,8 +253,9 @@ class CustomTorchBackend(InferenceBackend):
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
         from inference_server.config import settings
-        from inference_server.models.paged_kv_cache import PrefixCache
-        self.prefix_cache = PrefixCache(
+        from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
+        cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
+        self.prefix_cache = cache_cls(
             pools=self.pools,
             max_entries=settings.prefix_cache_max_entries,
             max_block_fraction=settings.prefix_cache_block_fraction,

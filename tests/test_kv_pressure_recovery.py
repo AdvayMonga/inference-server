@@ -19,7 +19,15 @@ import pytest
 import torch
 
 from inference_server.backends.base import InferenceBackend
-from inference_server.models.paged_kv_cache import BlockPool, PagedKVCache, PrefixCache
+from inference_server.models.paged_kv_cache import (
+    BlockPool,
+    PagedKVCache,
+    PrefixCache,
+    RadixPrefixCache,
+)
+
+# Both cache implementations must satisfy every pressure guarantee below.
+CACHE_IMPLS = [PrefixCache, RadixPrefixCache]
 from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
 
 BS = 16
@@ -42,20 +50,22 @@ def _run_prompt(pools, pc, prompt):
 
 # ---------------------------------------------------------------- prefix cache
 
-def test_distinct_prompts_do_not_exhaust_the_pool():
+@pytest.mark.parametrize("impl", CACHE_IMPLS)
+def test_distinct_prompts_do_not_exhaust_the_pool(impl):
     """The regression: every distinct prompt used to leak its blocks permanently."""
     pools = [_pool(64)]
-    pc = PrefixCache(pools)
+    pc = impl(pools)
     for i in range(500):                       # far more prompts than the pool can hold
         _run_prompt(pools, pc, list(range(i * 999, i * 999 + 64)))
     assert pools[0].free_count > 0
     assert pc.evictions > 0
 
 
-def test_cache_stays_under_its_block_watermark():
+@pytest.mark.parametrize("impl", CACHE_IMPLS)
+def test_cache_stays_under_its_block_watermark(impl):
     """Reclaim-on-demand alone would let the cache own 100% of the pool, leaving no headroom."""
     pools = [_pool(64)]
-    pc = PrefixCache(pools, max_block_fraction=0.5)
+    pc = impl(pools, max_block_fraction=0.5)
     for i in range(200):
         _run_prompt(pools, pc, list(range(i * 999, i * 999 + 64)))
     st = pc.stats()
@@ -63,9 +73,10 @@ def test_cache_stays_under_its_block_watermark():
     assert pools[0].free_count >= 32
 
 
-def test_recent_prefixes_still_hit_after_eviction():
+@pytest.mark.parametrize("impl", CACHE_IMPLS)
+def test_recent_prefixes_still_hit_after_eviction(impl):
     pools = [_pool(64)]
-    pc = PrefixCache(pools)
+    pc = impl(pools)
     prompt = list(range(500_000, 500_000 + 64))
     _run_prompt(pools, pc, prompt)
     for i in range(3):                          # a little churn, not enough to evict it
@@ -85,19 +96,21 @@ def test_lru_evicts_the_least_recently_used():
     assert _run_prompt(pools, pc, b) == 0       # evicted
 
 
-def test_alloc_reclaims_instead_of_raising():
+@pytest.mark.parametrize("impl", CACHE_IMPLS)
+def test_alloc_reclaims_instead_of_raising(impl):
     """BlockPool asks its reclaimer before declaring exhaustion."""
     pools = [_pool(8)]
-    pc = PrefixCache(pools, max_block_fraction=1.0)
+    pc = impl(pools, max_block_fraction=1.0)
     _run_prompt(pools, pc, list(range(0, 8 * BS)))       # cache now owns the whole pool
     assert pools[0].free_count == 0
     assert pools[0].alloc() >= 0                          # must reclaim, not raise
     assert pc.evictions > 0
 
 
-def test_reclaim_reports_blocks_freed():
+@pytest.mark.parametrize("impl", CACHE_IMPLS)
+def test_reclaim_reports_blocks_freed(impl):
     pools = [_pool(32)]
-    pc = PrefixCache(pools)
+    pc = impl(pools)
     for i in range(4):
         _run_prompt(pools, pc, list(range(i * 999, i * 999 + 64)))
     before = pools[0].free_count
@@ -261,3 +274,52 @@ async def test_deadline_off_admits_everything():
         await sched.stop()
     assert all(not isinstance(r, Exception) for r in out)
     assert sched._total_expired == 0
+
+
+# ---------------------------------------------------------------- radix specifics
+
+def test_radix_shares_a_common_system_prompt_the_dict_cannot():
+    """The reason for the radix trie. The dict keys WHOLE aligned prefixes, so it only matches a
+    complete previously-stored prompt: N requests sharing a system prompt but differing after it
+    reuse nothing. A trie shares at every block boundary."""
+    system = list(range(500, 500 + 128))
+    convs = [system + list(range(i * 7000, i * 7000 + 64)) for i in range(20)]
+
+    def reused(impl):
+        pools = [_pool(400)]
+        pc = impl(pools)
+        total = 0
+        for p in convs:
+            total += _run_prompt(pools, pc, p)
+        return total
+
+    assert reused(PrefixCache) == 0
+    assert reused(RadixPrefixCache) > 2000
+
+
+def test_radix_stores_shared_blocks_once():
+    """'A B C' then 'A B D' must not duplicate refs for A and B."""
+    pools = [_pool(400)]
+    pc = RadixPrefixCache(pools)
+    a = list(range(100, 100 + 48))
+    _run_prompt(pools, pc, a + list(range(900, 900 + 16)))
+    n_after_first = pc.stats()["entries"]
+    _run_prompt(pools, pc, a + list(range(800, 800 + 16)))
+    # only the differing final chunk is new
+    assert pc.stats()["entries"] == n_after_first + 1
+
+
+def test_radix_never_evicts_an_interior_node_in_use():
+    """Evicting a node that is somebody's path would orphan its children."""
+    pools = [_pool(24)]
+    pc = RadixPrefixCache(pools, max_block_fraction=1.0)
+    root_prefix = list(range(300, 300 + 32))
+    for i in range(30):
+        _run_prompt(pools, pc, root_prefix + list(range(i * 500, i * 500 + 32)))
+    stack = [pc.root]
+    while stack:
+        n = stack.pop()
+        for child in n.children.values():
+            assert child.parent is n
+            stack.append(child)
+    assert pools[0].free_count >= 0

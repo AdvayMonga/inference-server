@@ -55,6 +55,9 @@ class Settings:
     # Admission deadline: reject requests that have queued longer than this instead of letting
     # overload become unbounded latency. 0 disables. Tune to your TTFT SLO.
     max_queue_wait_s: float = 30.0
+    # "radix" shares at every block boundary (a shared system prompt with different tails hits);
+    # "dict" only matches complete previously-stored prompts. Kept switchable for A/B.
+    prefix_cache_impl: str = "radix"
     prefix_cache_max_entries: int = 1024
     prefix_cache_block_fraction: float = 0.5
 
@@ -114,6 +117,7 @@ def load_settings() -> Settings:
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
         max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
+        prefix_cache_impl=os.environ.get("PREFIX_CACHE_IMPL", Settings.prefix_cache_impl),
         prefix_cache_max_entries=int(os.environ.get(
             "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),
         prefix_cache_block_fraction=float(os.environ.get(
