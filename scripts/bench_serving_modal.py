@@ -184,6 +184,15 @@ def sweep():
                 # backs up, every arrival is its own K=1 wave and there is nothing to group.
                 print(f"           wave sizes (K->count): {sched.stats().get('wave_sizes')}",
                       flush=True)
+                pc = getattr(backend, "prefix_cache", None)
+                if pc is not None:
+                    c = pc.stats()
+                    # Quote this with any prefill number: a small POOL_SIZE makes this a
+                    # cache-HIT benchmark and the two regimes are not comparable without it.
+                    print(f"           cache: hit_rate={c['hit_rate']} entries={c['entries']} "
+                          f"evictions={c['evictions']} "
+                          f"blocks={c['blocks_held']}/{c['max_blocks']} "
+                          f"pool_util={c['pool_utilization']}", flush=True)
                 await asyncio.sleep(2)
         finally:
             await sched.stop()
