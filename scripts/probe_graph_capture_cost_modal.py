@@ -20,6 +20,7 @@ _env = {
     "MODEL_NAME": MODEL,
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "32"),
     "CUSTOM_BACKEND_COMPILE": os.environ.get("BENCH_COMPILE", "1"),
+    "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
     "KV_CACHE_NUM_BLOCKS": "16384", "CONTEXT_WINDOW": "8192",
     "BENCH_DYNAMIC": os.environ.get("BENCH_DYNAMIC", "false"),
@@ -34,11 +35,16 @@ image = (
 )
 app = modal.App("graph-capture-cost", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
+# Inductor artifacts survive across runs. torch.compile is the whole reason cold start
+# costs ~21 min (each decode graph bucket is a fresh static shape = a fresh compile);
+# without this every run pays it again.
+inductor_cache = modal.Volume.from_name("inductor-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
 @app.function(gpu=os.environ.get("BENCH_GPU", "A100-80GB"),
-              volumes={"/root/.cache/huggingface": hf_cache},
+              volumes={"/root/.cache/huggingface": hf_cache,
+                       "/root/.cache/inductor": inductor_cache},
               secrets=[hf_secret], timeout=5400)
 def run():
     import time
@@ -70,6 +76,7 @@ def run():
     backend._capture_all_graphs()
     total = time.perf_counter() - t0
     print(f"[probe] TOTAL capture = {total:.1f}s for {len(backend._graphs)} buckets", flush=True)
+    inductor_cache.commit()   # persist compiled artifacts so the next run does not recompile
 
     # sanity: every captured bucket replays and produces a token
     for b in sorted(backend._graphs):

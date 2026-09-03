@@ -46,6 +46,7 @@ _env = {
     "BENCH_POOL_SIZE": os.environ.get("BENCH_POOL_SIZE", "64"),
     "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
+    "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
     "KV_CACHE_NUM_BLOCKS": "16384", "MAX_ACTIVE_KV_TOKENS": "200000",
@@ -59,6 +60,10 @@ image = (
 )
 app = modal.App("serving-sweep", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
+# Inductor artifacts survive across runs. torch.compile is the whole reason cold start
+# costs ~21 min (each decode graph bucket is a fresh static shape = a fresh compile);
+# without this every run pays it again.
+inductor_cache = modal.Volume.from_name("inductor-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
@@ -71,7 +76,8 @@ def _pct(xs, q):
     return s[f] + (s[min(f + 1, len(s) - 1)] - s[f]) * (k - f)
 
 
-@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
+@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache,
+                       "/root/.cache/inductor": inductor_cache},
               secrets=[hf_secret], timeout=1800)
 def sweep():
     import asyncio
@@ -196,6 +202,7 @@ def sweep():
                 await asyncio.sleep(2)
         finally:
             await sched.stop()
+            inductor_cache.commit()   # persist compiled artifacts for the next run
         return rows
 
     return asyncio.run(main())
