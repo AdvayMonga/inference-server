@@ -26,7 +26,11 @@ WARMUP = float(os.environ.get("BENCH_WARMUP", "4"))
 COMPILE = os.environ.get("CUSTOM_BACKEND_COMPILE", "1")
 
 SLO_TTFT_MS, SLO_TPOT_MS = 200.0, 50.0
-POOL_SIZE = 64                       # bounded distinct prompts (PrefixCache has no eviction → no leak)
+# Distinct prompts drawn from. NOTE: this is a prefix-cache-HIT benchmark at small values —
+# with 64 prompts and a warm cache, after warmup almost every request hits with a tiny suffix,
+# which flatters prefill work and hides cache-miss behaviour. Raise it (BENCH_POOL_SIZE) for a
+# miss-heavy curve; scripts/bench_stress_modal.py covers the miss + overload case directly.
+POOL_SIZE = int(os.environ.get("BENCH_POOL_SIZE", "64"))
 PROMPT_MU, PROMPT_SIGMA = 5.48, 0.75  # ShareGPT-ish lognormal: ~240 prompt tokens
 OUTPUT_MU, OUTPUT_SIGMA = 5.01, 0.65  # ~150 output tokens
 
@@ -39,6 +43,7 @@ _env = {
     "BENCH_WARMUP": os.environ.get("BENCH_WARMUP", "4"),
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "256"),
     "PREFILL_MODE": "batched",
+    "BENCH_POOL_SIZE": os.environ.get("BENCH_POOL_SIZE", "64"),
     "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
