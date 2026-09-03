@@ -547,11 +547,11 @@ class CustomTorchBackend(InferenceBackend):
                 shared0 = None
             bucket = _prefill_bucket(len(p) - matched0)
             # The graphed path does no window eviction, so only take it when prefix+suffix
-            # cannot cross a sliding window mid-prefill.
+            # cannot cross a sliding window mid-prefill. `bucket` is None for suffixes past the
+            # largest bucket — check that FIRST, it is not a number.
             window = min((pool.window for pool in self.pools
                           if pool is not None and pool.window is not None), default=None)
-            fits = window is None or matched0 + bucket <= window
-            if bucket is not None and fits:
+            if bucket is not None and (window is None or matched0 + bucket <= window):
                 if bucket not in self._prefill_graphs:
                     self._capture_prefill_graph(bucket)
                 self.last_cache_hit_tokens = matched0

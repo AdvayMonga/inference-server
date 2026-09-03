@@ -109,6 +109,30 @@ def run():
               f"fired={'Y' if fired else 'N'}  first_tok={re_[1]}/{rg[1]} "
               f"{'MATCH' if parity else 'MISMATCH'}  kv={'OK' if kvok else 'BAD'}", flush=True)
 
+    # ---------- 3b: fall back cleanly when the graph cannot take it ----------
+    # Suffix past the largest bucket -> _prefill_bucket returns None; prefix+suffix past the
+    # sliding window -> ineligible. Both must fall back to eager, not raise. (A None-check
+    # ordered after the arithmetic crashed the scheduler here with TypeError: int + NoneType,
+    # which showed up as TTFT p95 815ms rather than as an obvious failure.)
+    print("\n=== ineligible prompts must fall back to eager, not raise ===", flush=True)
+    long_base = list(range(2000, 2000 + 1200))
+    for label, prompt in (
+        ("suffix > largest bucket", long_base[:900]),
+        ("prefix+suffix > window", long_base[:600]),
+    ):
+        backend.prefix_cache = type(backend.prefix_cache)(pools=backend.pools)
+        backend._prefill_graph_on = True
+        try:
+            r = backend.prefill_batch([prompt])[0]
+            good = isinstance(r[1], int) and r[2] == len(prompt)
+            r[0].free_all()
+        except Exception as e:
+            good = False
+            print(f"  {label:<26} RAISED {type(e).__name__}: {str(e)[:120]}", flush=True)
+        ok &= good
+        if good:
+            print(f"  {label:<26} len={len(prompt):<5} fell back OK", flush=True)
+
     # ---------- 4: IMA stress ----------
     print("\n=== IMA stress: 60 graphed prefix-hit replays with alloc/free churn ===", flush=True)
     backend.prefix_cache = type(backend.prefix_cache)(pools=backend.pools)
