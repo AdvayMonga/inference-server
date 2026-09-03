@@ -552,10 +552,11 @@ class CustomTorchBackend(InferenceBackend):
             window = min((pool.window for pool in self.pools
                           if pool is not None and pool.window is not None), default=None)
             if bucket is not None and (window is None or matched0 + bucket <= window):
-                if bucket not in self._prefill_graphs:
-                    self._capture_prefill_graph(bucket)
-                self.last_cache_hit_tokens = matched0
-                return [self._replay_prefill(p, bucket, matched0, shared0)]
+                if not self._prefill_graphs:
+                    self._capture_all_prefill_graphs()
+                if bucket in self._prefill_graphs:
+                    self.last_cache_hit_tokens = matched0
+                    return [self._replay_prefill(p, bucket, matched0, shared0)]
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
         caches, matched, suffixes = [], [], []
@@ -822,6 +823,25 @@ class CustomTorchBackend(InferenceBackend):
                                         "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx,
                                         "logits_index": logits_index}
         logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
+
+    def _capture_all_prefill_graphs(self) -> None:
+        """Capture every prefill bucket at once, on first use.
+
+        Capturing lazily per bucket meant the first request to reach each bucket ate a
+        multi-second stall mid-serving: it showed up as TTFT p95 730ms at rate 1 (where p95 is
+        essentially the single worst request) while p50 was 56ms. Prefill graphs do not go
+        through torch.compile — capture is seconds, not minutes — so taking it all at once
+        during warmup is cheap and makes the tail honest."""
+        import time
+        t0 = time.perf_counter()
+        for b in _PREFILL_BUCKETS:
+            if b not in self._prefill_graphs:
+                try:
+                    self._capture_prefill_graph(b)
+                except Exception:
+                    logger.exception("prefill graph capture failed (bucket=%d) — eager fallback", b)
+        print(f"[graphs] captured {len(self._prefill_graphs)} prefill graphs "
+              f"{sorted(self._prefill_graphs)} in {time.perf_counter() - t0:.1f}s", flush=True)
 
     def _replay_prefill(self, prompt_ids, bucket, matched=0, shared=None):
         """K=1 prefill via graph replay, with or without a prefix-cache hit.
