@@ -45,6 +45,10 @@ class Settings:
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
+    # Batched-prefill wave planning: free-slot-multiples of the pending queue the scheduler may
+    # reorder within to group similar prompt lengths. 0 = strict policy order (default; measured
+    # inert below the queued regime — 83-91% of waves are K=1 there).
+    wave_window_mult: int = 0
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
@@ -100,6 +104,7 @@ def load_settings() -> Settings:
         max_active_kv_tokens=int(os.environ.get("MAX_ACTIVE_KV_TOKENS", Settings.max_active_kv_tokens)),
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
+        wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
         backend_name=os.environ.get("BACKEND", Settings.backend_name),

@@ -64,6 +64,35 @@ class _PrefillingRow:
     partial_kv: object | None    # KV so far; None if no cache hit and no chunk fed yet
 
 
+def plan_wave(window: list["ScheduledRequest"], k: int) -> list["ScheduledRequest"]:
+    """Pick up to `k` requests from `window` (policy order) that pad together well.
+
+    A prefill wave is right-padded to Smax, so a ragged wave wastes most of its compute: on a
+    ShareGPT-ish length distribution a K=8 wave is ~59% padding. Grouping similar lengths
+    recovers a large part of that.
+
+    The window HEAD is always included. That is what makes this starvation-free: no request can
+    be passed over once it reaches the front, so reordering never defers anyone past their turn
+    as head. It costs about half the achievable saving versus an unbounded sort — deliberately,
+    because TTFT p95 is the SLO metric and the p95 requests are precisely the long prompts an
+    unbounded sort would keep deferring.
+    """
+    if k <= 0 or not window:
+        return []
+    if k >= len(window):
+        return list(window)
+    order = sorted(range(len(window)), key=lambda i: len(window[i].token_ids))
+    head_at = order.index(0)
+    best = None
+    for start in range(max(0, head_at - k + 1), min(head_at + 1, len(order) - k + 1)):
+        sel = order[start:start + k]
+        lens = [len(window[i].token_ids) for i in sel]
+        cost = max(lens) * len(lens) - sum(lens)          # padded tokens this wave would add
+        if best is None or cost < best[0]:
+            best = (cost, sel)
+    return [window[i] for i in sorted(best[1])]           # admit in policy order within the wave
+
+
 class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
@@ -78,7 +107,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  policy: SchedulingPolicy | None = None,
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
-                 prefill_mode: str | None = None):
+                 prefill_mode: str | None = None,
+                 wave_window_mult: int = 0):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -94,6 +124,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
             raise ValueError("prefill_mode='chunked' requires prefill_chunk_size > 0")
         if self.prefill_mode == "batched" and not hasattr(backend, "prefill_batch"):
             raise ValueError("prefill_mode='batched' requires a backend with prefill_batch (custom-*)")
+        # Window (as a multiple of free slots) that batched-mode wave planning may reorder
+        # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
+        # current workload: at rates 1-6 the queue never backs up, so 83-91% of prefill waves
+        # are K=1 and there is no padding to save (see wave_sizes in stats()). Turn it on when
+        # the engine actually runs queued at the 100-256 concurrency target, where waves are
+        # wide and padding is 59%+ of prefill. Only affects prefill_mode='batched'.
+        self.wave_window_mult = wave_window_mult
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -116,6 +153,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._kv_admit_blocked = 0
         self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
         self._prefill_chunks_processed = 0
+        # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
+        # WIDE; if the queue never backs up every arrival is its own K=1 wave and there is
+        # nothing to group. This is how we tell those regimes apart.
+        self._wave_sizes: dict[int, int] = {}
         self._metrics = MetricsTracker()
 
     # --- Public interface ---
@@ -183,6 +224,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
             "prefill_chunks_processed": self._prefill_chunks_processed,
+            "wave_sizes": dict(sorted(self._wave_sizes.items())),
             **self._metrics.snapshot(),
         }
 
@@ -256,22 +298,37 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 ], dim=0)
         self._resolve(row.request)
 
+    def _consume(self, request: "ScheduledRequest", plan: list) -> None:
+        """Remove `request` from the policy and from this wave's plan (caller holds the lock)."""
+        self.policy.pick(request)
+        if plan and plan[0] is request:
+            plan.pop(0)
+
     # --- Phase 2: admit new requests ---
 
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
         to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
+        plan: list[ScheduledRequest] = []
+        if self.prefill_mode == "batched" and self.wave_window_mult > 0:
+            # One prefill_batch pads every row to Smax, so choose a wave that pads well.
+            # plan_wave always includes the window head → nobody is deferred past their turn.
+            free = self.max_batch_size - len(self._active) - len(self._prefilling)
+            if free > 0:
+                with self._pending_cv:
+                    window = self.policy.peek_window(free * self.wave_window_mult)
+                plan = plan_wave(window, free)
         while len(self._active) + len(self._prefilling) + len(to_admit) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.
-                peeked = self.policy.peek_next()
+                peeked = plan[0] if plan else self.policy.peek_next()
                 if peeked is None:
                     break  # break, not return: fall through to the batched-prefill flush below
                 reservation = len(peeked.token_ids) + peeked.max_tokens
 
                 # Active-KV gate: protects against decode-time OOM.
                 if reservation > self.max_active_kv_tokens:
-                    self.policy.pick_next()
+                    self._consume(peeked, plan)
                     self._pending_count -= 1
                     self._total_rejected += 1
                     err = QueueFullError(
@@ -290,7 +347,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     needed = cache.blocks_needed(reservation)
                     if needed > cache.free_blocks:
                         if needed > cache.total_blocks:
-                            self.policy.pick_next()
+                            self._consume(peeked, plan)
                             self._pending_count -= 1
                             self._total_rejected += 1
                             err = QueueFullError(
@@ -309,7 +366,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._kv_admit_blocked += 1
                     break
 
-                req = self.policy.pick_next()
+                req = peeked
+                self._consume(req, plan)
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
             if self.prefill_mode == "batched":
@@ -348,6 +406,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         wave costs N × that — batching pays the dispatch once. On batch failure, reject the whole
         wave (release each reservation) rather than risk partial/leaked state."""
         try:
+            self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
             results = self.backend.prefill_batch([r.token_ids for r in reqs])
         except Exception as e:
             logger.exception("Batched prefill failed (%d reqs)", len(reqs))

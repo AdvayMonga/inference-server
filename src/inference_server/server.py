@@ -86,6 +86,7 @@ async def lifespan(app):
         max_active_kv_tokens=settings.max_active_kv_tokens,
         prefill_chunk_size=settings.prefill_chunk_size,
         prefill_mode=settings.prefill_mode or None,
+        wave_window_mult=settings.wave_window_mult,
         policy=create_scheduling_policy(settings.scheduling_policy),
     )
     scheduler.start()

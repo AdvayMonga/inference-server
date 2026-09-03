@@ -39,6 +39,7 @@ _env = {
     "BENCH_WARMUP": os.environ.get("BENCH_WARMUP", "4"),
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "256"),
     "PREFILL_MODE": "batched",
+    "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
@@ -140,6 +141,7 @@ def sweep():
             max_active_kv_tokens=settings.max_active_kv_tokens,
             max_queue_size=4096,   # large: past the knee, overload shows as LATENCY not rejection
             prefill_mode="batched", prefill_chunk_size=256,
+            wave_window_mult=settings.wave_window_mult,
         )
         sched.start()
         rows = []
@@ -173,6 +175,10 @@ def sweep():
                 print(f"[serving] rate={rate:>5} reqs={row['reqs']:>4} tok/s={row['tok_s']:>7} "
                       f"TTFT={row['ttft_p50']}/{row['ttft_p95']}ms TPOT={row['tpot_p50']}/"
                       f"{row['tpot_p95']}ms SLO={'ok' if row['within_slo'] else 'X'}", flush=True)
+                # Padding waste only exists when prefill waves are WIDE. If the queue never
+                # backs up, every arrival is its own K=1 wave and there is nothing to group.
+                print(f"           wave sizes (K->count): {sched.stats().get('wave_sizes')}",
+                      flush=True)
                 await asyncio.sleep(2)
         finally:
             await sched.stop()
