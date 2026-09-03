@@ -1,7 +1,5 @@
 """Unit tests for SchedulingPolicy implementations."""
 
-import asyncio
-
 from inference_server.scheduler import ScheduledRequest
 from inference_server.scheduling_policy import (
     FCFSPolicy,
@@ -15,7 +13,10 @@ def _req(session_id: str, arrival_seq: int, priority: int = 0) -> ScheduledReque
         token_ids=[1, 2, 3],
         max_tokens=4,
         session_id=session_id,
-        future=asyncio.Future(),
+        # No asyncio.Future here: these are sync tests and the policies never touch it.
+        # Constructing one grabs the ambient event loop, so once another test closed a loop
+        # this whole module failed depending on test ORDER (6 failures, green in isolation).
+        future=None,
         arrival_seq=arrival_seq,
         priority=priority,
     )

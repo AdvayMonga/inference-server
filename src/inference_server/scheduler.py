@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import torch
 
 from inference_server.backends.base import InferenceBackend
+from inference_server.models.paged_kv_cache import KVCacheExhausted
 from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams, sample
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
@@ -19,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 class QueueFullError(Exception):
     """Raised by submit() when the pending queue has no capacity."""
+
+
+def _as_backpressure(exc: BaseException) -> BaseException:
+    """Running out of KV blocks is overload, not a crash — surface it as a queue rejection
+    (429) so it is counted and served as backpressure instead of an engine failure."""
+    if isinstance(exc, KVCacheExhausted):
+        return QueueFullError(f"KV cache exhausted under load: {exc}")
+    return exc
 
 
 @dataclass
@@ -96,6 +105,10 @@ def plan_wave(window: list["ScheduledRequest"], k: int) -> list["ScheduledReques
 class ContinuousBatchScheduler(SchedulerInterface):
     """Iteration-level scheduler: per-step admit, decode, evict. FIFO admission."""
 
+    # Consecutive failed iterations before the worker gives up. One bad step is survivable
+    # (drop the in-flight work and keep serving); a persistent failure is not.
+    MAX_CONSECUTIVE_ERRORS = 5
+
     # Prefill strategies. `monolithic` = one forward on admit; `chunked` = V-A (one prefill
     # chunk + one decode step per iter, kills HOL blocking). The enum is the forward-compat
     # extension point: `mixed_batch` (V-B) and `disaggregated` (P/D) are future strategies that
@@ -108,7 +121,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
                  prefill_mode: str | None = None,
-                 wave_window_mult: int = 0):
+                 wave_window_mult: int = 0,
+                 max_queue_wait_s: float = 30.0):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -131,6 +145,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # the engine actually runs queued at the 100-256 concurrency target, where waves are
         # wide and padding is 59%+ of prefill. Only affects prefill_mode='batched'.
         self.wave_window_mult = wave_window_mult
+        # Shed load instead of queueing it forever. A deep queue turns overload into unbounded
+        # latency rather than rejection: under stress at rate 48 the queue reached 1001 deep and
+        # end-to-end p95 hit 105s while the engine reported almost no rejections. A request that
+        # has already waited this long has blown any SLO it had; fail it fast and free the slot.
+        # 0 disables the deadline.
+        self.max_queue_wait_s = max_queue_wait_s
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -153,6 +173,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._kv_admit_blocked = 0
         self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
         self._prefill_chunks_processed = 0
+        self._total_iteration_errors = 0
+        self._total_preempted = 0
+        self._total_expired = 0
         # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
         # WIDE; if the queue never backs up every arrival is its own K=1 wave and there is
         # nothing to group. This is how we tell those regimes apart.
@@ -225,6 +248,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "prefill_chunk_size": self.prefill_chunk_size,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             "wave_sizes": dict(sorted(self._wave_sizes.items())),
+            "total_preempted": self._total_preempted,
+            "total_expired": self._total_expired,
+            "max_queue_wait_s": self.max_queue_wait_s,
+            "total_iteration_errors": self._total_iteration_errors,
             **self._metrics.snapshot(),
         }
 
@@ -233,16 +260,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _run(self) -> None:
         """Single-threaded scheduler loop."""
         device = self.backend.device_str
-        try:
-            while not self._stop_event.is_set():
-                # If nothing in-flight and nothing pending, wait on the cv.
-                if not self._active and not self._prefilling:
-                    with self._pending_cv:
-                        if self._pending_count == 0 and not self._stop_event.is_set():
-                            self._pending_cv.wait(timeout=0.1)
-                    if self._stop_event.is_set():
-                        break
+        errors_in_a_row = 0
+        while not self._stop_event.is_set():
+            # If nothing in-flight and nothing pending, wait on the cv.
+            if not self._active and not self._prefilling:
+                with self._pending_cv:
+                    if self._pending_count == 0 and not self._stop_event.is_set():
+                        self._pending_cv.wait(timeout=0.1)
+                if self._stop_event.is_set():
+                    break
 
+            try:
                 with self.backend._lock:  # serialize against legacy generate/stream
                     # Order matters: admit (lookup-only when chunked) → advance one prefill
                     # chunk (may promote a row to _active with a fresh first_token) → evict
@@ -251,10 +279,31 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._advance_prefill_chunk(device)
                     self._evict_finished()
                     if self._active:
-                        self._decode_step(device)
-        except Exception as e:
-            logger.exception("Scheduler crashed: %s", e)
-            self._fail_all(e)
+                        try:
+                            self._decode_step(device)
+                        except Exception as e:
+                            # Under genuine KV pressure the NEWEST request should pay, not the
+                            # whole batch. Preempt one row (freeing its blocks) and let the next
+                            # iteration retry; only escalate if we are down to a single row.
+                            if len(self._active) > 1:
+                                self._preempt_newest(e)
+                            else:
+                                raise
+                errors_in_a_row = 0
+            except Exception as e:
+                # A failed iteration must NOT end the worker. It used to: any exception escaped
+                # to _fail_all and the thread exited, after which the server accepted requests
+                # forever and ran none of them. Drop the in-flight work (releasing its KV), then
+                # keep serving. Only give up if we cannot make progress at all.
+                errors_in_a_row += 1
+                self._total_iteration_errors += 1
+                logger.exception("scheduler iteration failed (%d in a row)", errors_in_a_row)
+                self._fail_inflight(e)
+                if errors_in_a_row >= self.MAX_CONSECUTIVE_ERRORS:
+                    logger.error("scheduler wedged after %d consecutive failures — stopping",
+                                 errors_in_a_row)
+                    self._fail_all(e)
+                    break
 
     # --- Phase 1: process tokens, evict finished rows ---
 
@@ -280,7 +329,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self.policy.on_request_finished(row.request)
             self._evict_row(i)
 
-    def _evict_row(self, idx: int) -> None:
+    def _evict_row(self, idx: int, resolve: bool = True) -> None:
         row = self._active.pop(idx)
         self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
         self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
@@ -296,7 +345,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._attention_mask[:idx],
                     self._attention_mask[idx + 1:],
                 ], dim=0)
-        self._resolve(row.request)
+        if resolve:
+            self._resolve(row.request)
 
     def _consume(self, request: "ScheduledRequest", plan: list) -> None:
         """Remove `request` from the policy and from this wave's plan (caller holds the lock)."""
@@ -324,6 +374,21 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 peeked = plan[0] if plan else self.policy.peek_next()
                 if peeked is None:
                     break  # break, not return: fall through to the batched-prefill flush below
+
+                # Queue-time deadline: drop what is already too stale to be useful.
+                if (self.max_queue_wait_s > 0 and peeked.enqueue_ts
+                        and time.perf_counter() - peeked.enqueue_ts > self.max_queue_wait_s):
+                    waited = time.perf_counter() - peeked.enqueue_ts
+                    self._consume(peeked, plan)
+                    self._pending_count -= 1
+                    self._total_rejected += 1
+                    self._total_expired += 1
+                    self.policy.on_request_finished(peeked)
+                    self._reject(peeked, QueueFullError(
+                        f"queued {waited:.1f}s, over the {self.max_queue_wait_s:.0f}s admission "
+                        f"deadline — server overloaded"))
+                    continue
+
                 reservation = len(peeked.token_ids) + peeked.max_tokens
 
                 # Active-KV gate: protects against decode-time OOM.
@@ -388,7 +453,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
-                logger.exception("Prefill failed for session %s", req.session_id)
+                e = _as_backpressure(e)
+                logger.warning("prefill rejected for session %s: %s", req.session_id, e)
                 self._active_kv_reserved -= reservation
                 self.backend.kv_release(len(req.token_ids), req.max_tokens)
                 self.policy.on_request_finished(req)
@@ -409,7 +475,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
             results = self.backend.prefill_batch([r.token_ids for r in reqs])
         except Exception as e:
-            logger.exception("Batched prefill failed (%d reqs)", len(reqs))
+            e = _as_backpressure(e)
+            logger.warning("batched prefill rejected (%d reqs): %s", len(reqs), e)
             for req in reqs:
                 self._active_kv_reserved -= len(req.token_ids) + req.max_tokens
                 self.backend.kv_release(len(req.token_ids), req.max_tokens)
@@ -578,13 +645,44 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 request.future.set_exception(exc)
         self._loop.call_soon_threadsafe(_set)
 
-    def _fail_all(self, exc: BaseException) -> None:
-        for row in self._active:
+    def _preempt_newest(self, exc: BaseException) -> None:
+        """Evict the most recently admitted active row to relieve KV pressure."""
+        idx = max(range(len(self._active)),
+                  key=lambda i: self._active[i].request.arrival_seq)
+        row = self._active[idx]
+        self._total_preempted += 1
+        logger.warning("preempting session %s under KV pressure (%d active): %s",
+                       row.request.session_id, len(self._active), exc)
+        self.policy.on_request_finished(row.request)
+        self._evict_row(idx, resolve=False)       # releases reservation AND frees paged blocks
+        self._reject(row.request, QueueFullError(
+            f"preempted under KV pressure after {len(row.request.generated)} tokens"))
+
+    def _fail_inflight(self, exc: BaseException) -> None:
+        """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.
+
+        The blocks matter: the old _fail_all cleared _active without routing through
+        remove_row_from_cache, so every active row's paged blocks leaked permanently and the
+        pool never recovered from a single bad step.
+        """
+        for i in range(len(self._active) - 1, -1, -1):
+            row = self._active[i]
             self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
+            if self._batched_kv is not None:
+                try:
+                    self._batched_kv = self.backend.remove_row_from_cache(self._batched_kv, i)
+                except Exception:
+                    logger.exception("failed to release KV for a dropped row")
             self.policy.on_request_finished(row.request)
             self._reject(row.request, exc)
         for prow in self._prefilling:
             self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
+            free = getattr(prow.partial_kv, "free_all", None)
+            if callable(free):
+                try:
+                    free()
+                except Exception:
+                    logger.exception("failed to release partial prefill KV")
             self.policy.on_request_finished(prow.request)
             self._reject(prow.request, exc)
         self._active.clear()
@@ -592,3 +690,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._active_kv_reserved = 0
         self._batched_kv = None
         self._attention_mask = None
+
+    def _fail_all(self, exc: BaseException) -> None:
+        self._fail_inflight(exc)

@@ -87,6 +87,7 @@ async def lifespan(app):
         prefill_chunk_size=settings.prefill_chunk_size,
         prefill_mode=settings.prefill_mode or None,
         wave_window_mult=settings.wave_window_mult,
+        max_queue_wait_s=settings.max_queue_wait_s,
         policy=create_scheduling_policy(settings.scheduling_policy),
     )
     scheduler.start()
@@ -218,7 +219,13 @@ async def generate(request: GenerateRequest):
 
 @app.get("/cache/stats")
 async def cache_stats():
-    """Return KV cache statistics."""
+    """KV cache statistics. The custom backend caches through its own PrefixCache + block
+    pools rather than the HF-format CacheManager, so report that when it is the one serving —
+    otherwise the endpoint silently describes a cache the engine is not using."""
+    backend = getattr(app.state, "backend", None)
+    prefix_cache = getattr(backend, "prefix_cache", None)
+    if prefix_cache is not None:
+        return {"backend": type(backend).__name__, "prefix_cache": prefix_cache.stats()}
     return app.state.cache_adapter.hit_rate_info
 
 
