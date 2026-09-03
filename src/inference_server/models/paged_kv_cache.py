@@ -216,6 +216,167 @@ class PrefixCache:
         }
 
 
+class _RadixNode:
+    """One block-sized chunk of a cached prefix. Path from root = the aligned prefix."""
+
+    __slots__ = ("chunk", "children", "blocks", "parent", "last_used")
+
+    def __init__(self, chunk=(), parent=None):
+        self.chunk = chunk
+        self.parent = parent
+        self.children: dict[tuple, "_RadixNode"] = {}
+        self.blocks: dict[int, int] = {}      # layer_idx -> block id for THIS chunk
+        self.last_used = 0
+
+
+class RadixPrefixCache:
+    """Block-granular radix trie over cached prefixes. Drop-in for PrefixCache.
+
+    The dict version keyed whole aligned prefixes, so it could only match a prefix that had been
+    STORED — i.e. a complete earlier prompt. Two requests sharing a long system prompt but
+    differing after it matched nothing unless that exact boundary happened to be a stored key, and
+    storing "A B C" then "A B D" duplicated the refs for A and B.
+
+    A trie shares at EVERY block boundary: each node owns one block per layer, so any common
+    leading blocks are reused automatically and stored once. Lookup is one dict probe per block
+    instead of building an O(prompt^2) pile of prefix tuples.
+    """
+
+    def __init__(self, pools: list[BlockPool | None], max_entries: int = 1024,
+                 max_block_fraction: float = 0.5):
+        self.pools = pools
+        self.block_size = next(p.block_size for p in pools if p is not None)
+        self._live = [i for i, p in enumerate(pools) if p is not None]
+        self.root = _RadixNode()
+        live = [pools[i].num_blocks for i in self._live]
+        # One node holds one block per layer, so the node cap IS the per-pool block cap.
+        self.max_blocks = int(max_block_fraction * min(live)) if live else 0
+        self.max_entries = max_entries
+        self._nodes = 0
+        self._clock = 0
+        self.hits = 0
+        self.lookups = 0
+        self.evictions = 0
+        for pool in pools:
+            if pool is not None:
+                pool.set_reclaimer(self.reclaim)
+
+    # ---- internals ----
+
+    def _tick(self) -> int:
+        self._clock += 1
+        return self._clock
+
+    def _capacity(self) -> int:
+        return min(self.max_blocks, self.max_entries)
+
+    def _evict_lru_leaf(self) -> int:
+        """Drop the least recently used LEAF (an interior node is still someone's path)."""
+        best, stack = None, [self.root]
+        while stack:
+            n = stack.pop()
+            if n is not self.root and not n.children:
+                if best is None or n.last_used < best.last_used:
+                    best = n
+            stack.extend(n.children.values())
+        if best is None:
+            return 0
+        freed = 0
+        for layer_idx, bid in best.blocks.items():
+            if self.pools[layer_idx].release(bid):
+                freed += 1
+        best.parent.children.pop(best.chunk, None)
+        best.parent = None
+        self._nodes -= 1
+        self.evictions += 1
+        return freed
+
+    # ---- public API (same shape as PrefixCache) ----
+
+    def lookup(self, token_ids: list[int]) -> tuple[int, dict[int, list[int]]]:
+        self.lookups += 1
+        node, matched = self.root, 0
+        per_layer: dict[int, list[int]] = {i: [] for i in self._live}
+        bs = self.block_size
+        for i in range(len(token_ids) // bs):
+            child = node.children.get(tuple(token_ids[i * bs:(i + 1) * bs]))
+            if child is None:
+                break
+            node = child
+            node.last_used = self._tick()
+            for layer_idx, bid in node.blocks.items():
+                per_layer[layer_idx].append(bid)
+            matched += bs
+        if matched == 0:
+            return 0, {}
+        self.hits += 1
+        for layer_idx, bids in per_layer.items():
+            for bid in bids:
+                self.pools[layer_idx].acquire(bid)
+        return matched, per_layer
+
+    def store(self, token_ids: list[int], block_tables: list[list[int]]) -> None:
+        bs = self.block_size
+        n_chunks = len(token_ids) // bs
+        if n_chunks == 0:
+            return
+        # A node is only usable if EVERY live layer has a real block for that chunk; a layer that
+        # evicted its leading blocks (sliding window) caps how deep we can store.
+        for layer_idx in self._live:
+            bids = block_tables[layer_idx]
+            usable = 0
+            for b in bids[:n_chunks]:
+                if b is None or b < 0:
+                    break
+                usable += 1
+            n_chunks = min(n_chunks, usable)
+        if n_chunks == 0:
+            return
+
+        node = self.root
+        for i in range(n_chunks):
+            key = tuple(token_ids[i * bs:(i + 1) * bs])
+            child = node.children.get(key)
+            if child is None:
+                while self._nodes >= self._capacity():
+                    if self._evict_lru_leaf() == 0:
+                        break
+                if self._nodes >= self._capacity():
+                    return                       # cannot make room; stop growing the trie
+                child = _RadixNode(chunk=key, parent=node)
+                for layer_idx in self._live:
+                    bid = block_tables[layer_idx][i]
+                    child.blocks[layer_idx] = bid
+                    self.pools[layer_idx].acquire(bid)
+                node.children[key] = child
+                self._nodes += 1
+            node = child
+            node.last_used = self._tick()
+
+    def reclaim(self, min_blocks: int = 1) -> int:
+        freed = 0
+        while freed < min_blocks and self._nodes > 0:
+            got = self._evict_lru_leaf()
+            if got == 0 and self._nodes == 0:
+                break
+            freed += got
+        return freed
+
+    def stats(self) -> dict:
+        free = min((self.pools[i].free_count for i in self._live), default=0)
+        total = min((self.pools[i].num_blocks for i in self._live), default=0)
+        return {
+            "impl": "radix",
+            "entries": self._nodes, "max_entries": self.max_entries,
+            "lookups": self.lookups, "hits": self.hits,
+            "hit_rate": round(self.hits / self.lookups, 4) if self.lookups else 0.0,
+            "evictions": self.evictions,
+            "blocks_held": self._nodes, "max_blocks": self._capacity(),
+            "pool_free_blocks": free, "pool_total_blocks": total,
+            "pool_utilization": round(1 - free / total, 4) if total else 0.0,
+        }
+
+
 class PagedKVCache:
     """Per-session, per-layer block tables. Shares pools with other sessions.
 
