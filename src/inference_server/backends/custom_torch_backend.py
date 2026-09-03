@@ -27,8 +27,11 @@ from inference_server.sampling import GREEDY, SamplingParams, sample, sample_bat
 
 logger = logging.getLogger(__name__)
 
-# Suffix-length buckets for K=1 CUDA-graph prefill (≤512 so sliding layers never evict mid-prefill).
-_PREFILL_BUCKETS = (64, 128, 256, 512)
+# Suffix-length buckets for K=1 CUDA-graph prefill. Past 512 a sliding layer WILL evict during
+# the prompt; that is handled after the replay (see _replay_prefill) rather than avoided, because
+# the p95 prompt on our workload is ~830 tokens and those were the requests still stuck on the
+# ~100ms eager path — i.e. exactly the ones setting TTFT p95.
+_PREFILL_BUCKETS = (64, 128, 256, 512, 1024)
 
 
 def _decode_buckets(max_rows: int) -> tuple[int, ...]:
@@ -545,13 +548,9 @@ class CustomTorchBackend(InferenceBackend):
             if matched0 >= len(p):
                 matched0 = 0            # need >=1 suffix token to get next-token logits
                 shared0 = None
+            # `bucket` is None for suffixes past the largest bucket — those stay eager.
             bucket = _prefill_bucket(len(p) - matched0)
-            # The graphed path does no window eviction, so only take it when prefix+suffix
-            # cannot cross a sliding window mid-prefill. `bucket` is None for suffixes past the
-            # largest bucket — check that FIRST, it is not a number.
-            window = min((pool.window for pool in self.pools
-                          if pool is not None and pool.window is not None), default=None)
-            if bucket is not None and (window is None or matched0 + bucket <= window):
+            if bucket is not None:
                 if not self._prefill_graphs:
                     self._capture_all_prefill_graphs()
                 if bucket in self._prefill_graphs:
@@ -853,7 +852,7 @@ class CustomTorchBackend(InferenceBackend):
         S = len(prompt_ids) - matched
         g = self._prefill_graphs[bucket]
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
-        need = (matched + bucket + bs - 1) // bs          # blocks covering prefix + the full bucket
+        need = (matched + S + bs - 1) // bs               # only the blocks this prompt REALLY uses
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
@@ -861,6 +860,10 @@ class CustomTorchBackend(InferenceBackend):
             while len(bt) < need:
                 bt.append(pool.alloc())
             cache.seq_lens[L] = matched + S
+            # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
+            # positions, so the entries past this prompt's real blocks must point somewhere
+            # harmless — otherwise padding K/V lands in whichever request used this buffer last.
+            g["bts"][L][0].fill_(self._scratch[L])
             row = torch.tensor([x if x >= 0 else 0 for x in bt], device=dev)
             g["bts"][L][0, :row.shape[0]].copy_(row)
         g["ids"].zero_()
@@ -870,6 +873,12 @@ class CustomTorchBackend(InferenceBackend):
         g["suffix_lens"].fill_(S)                                               # padding queries skipped
         g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
+        # Free blocks that fell out of a sliding window during this prompt. Deferring eviction
+        # until after the forward is safe: the kernel already masks keys below its window bound,
+        # so extra live blocks are simply never read.
+        for L, pool in enumerate(self.pools):
+            if pool is not None and pool.window is not None:
+                cache._evict(L)
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
         if not cache.any_evicted:
             self.prefix_cache.store(prompt_ids, cache.block_tables)
