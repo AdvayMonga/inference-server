@@ -57,25 +57,33 @@ def _prefill_bucket(s: int) -> int | None:
 
 
 class _PrefillGraphCtx:
-    """Static-buffer paged ctx for K=1 CUDA-graph prefill at a fixed suffix bucket S, no prefix
-    hit (matched=0). Mirrors _GraphCtx: append scatters the S bucket tokens' K/V using the static
-    per-pool block-table buffers; the kernel reads those + the static prefix/suffix lens. Block
-    allocation happens OUTSIDE the graph (at replay); the graph only touches the static buffers."""
+    """Static-buffer paged ctx for K=1 CUDA-graph prefill at a fixed suffix bucket S, with or
+    without a prefix-cache hit. Mirrors _GraphCtx: append scatters the S bucket tokens' K/V using
+    the static per-pool block-table buffers; the kernel reads those + the static prefix/suffix
+    lens. Block allocation happens OUTSIDE the graph (at replay); the graph only touches the
+    static buffers.
+
+    `prefix_lens` is a RUNTIME value, so the absolute write positions are derived inside the
+    captured graph (prefix + 0..S-1) rather than baked at capture. That is what lets one captured
+    graph serve any prefix length, which matters because with a warm prefix cache almost every
+    request is a hit and the old matched==0 gate meant the graph never fired."""
 
     is_prefill = True
 
     def __init__(self, pools, block_tables, prefix_lens, suffix_lens, bucket, bs):
         self.pools = pools
         self.block_tables = block_tables      # per-pool static [1, cols] long (None for shared)
-        self.prefix_lens = prefix_lens        # static [1] int32 (always 0 — no prefix hit)
-        self.suffix_lens = suffix_lens        # static [1] int32
+        self.prefix_lens = prefix_lens        # static [1] int32 — set per replay
+        self.suffix_lens = suffix_lens        # static [1] int32 — set per replay
         self.bs = bs
-        self._pos = torch.arange(bucket, device=prefix_lens.device)   # 0..bucket-1 (prefix_len=0)
+        self._ar = torch.arange(bucket, device=prefix_lens.device)   # 0..bucket-1
 
     def append(self, layer_idx, k_new, v_new):
-        bt = self.block_tables[layer_idx][0]              # [cols]
-        bids = bt[self._pos // self.bs]
-        slots = self._pos % self.bs
+        # Absolute positions computed IN-GRAPH from the runtime prefix length.
+        pos = self.prefix_lens[0].long() + self._ar        # [bucket]
+        bt = self.block_tables[layer_idx][0]               # [cols]
+        bids = bt[pos // self.bs]
+        slots = pos % self.bs
         pool = self.pools[layer_idx]
         pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)   # [bucket, Hkv, D]
         pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
@@ -533,13 +541,22 @@ class CustomTorchBackend(InferenceBackend):
         # dispatch). Multi-row, cache-hit, or long prompts fall through to the eager kernel path.
         if self._prefill_graph_on and len(prompts) == 1:
             p = prompts[0]
-            matched0, _ = self.prefix_cache.lookup(p)
-            bucket = _prefill_bucket(len(p))
-            if matched0 == 0 and bucket is not None:
-                if bucket not in self._prefill_graphs:
-                    self._capture_prefill_graph(bucket)
-                self.last_cache_hit_tokens = 0
-                return [self._replay_prefill(p, bucket)]
+            matched0, shared0 = self.prefix_cache.lookup(p)
+            if matched0 >= len(p):
+                matched0 = 0            # need >=1 suffix token to get next-token logits
+                shared0 = None
+            bucket = _prefill_bucket(len(p) - matched0)
+            # The graphed path does no window eviction, so only take it when prefix+suffix
+            # cannot cross a sliding window mid-prefill. `bucket` is None for suffixes past the
+            # largest bucket — check that FIRST, it is not a number.
+            window = min((pool.window for pool in self.pools
+                          if pool is not None and pool.window is not None), default=None)
+            if bucket is not None and (window is None or matched0 + bucket <= window):
+                if not self._prefill_graphs:
+                    self._capture_all_prefill_graphs()
+                if bucket in self._prefill_graphs:
+                    self.last_cache_hit_tokens = matched0
+                    return [self._replay_prefill(p, bucket, matched0, shared0)]
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
         caches, matched, suffixes = [], [], []
@@ -768,8 +785,12 @@ class CustomTorchBackend(InferenceBackend):
 
     def _capture_prefill_graph(self, bucket: int) -> None:
         """Capture the prefill forward once over static [1, bucket] buffers. Scratch blocks back the
-        block tables during capture; replay copies in the real block IDs + tokens."""
-        dev, bs, cols = self.device, self._block_size, bucket // self._block_size
+        block tables during capture; replay copies in the real block IDs + tokens.
+
+        The block table is sized for the whole context, not just the bucket, because with a
+        prefix-cache hit the write positions start at prefix_len rather than 0."""
+        dev, bs = self.device, self._block_size
+        cols = self._graph_max_cols
         ids = torch.zeros(1, bucket, dtype=torch.long, device=dev)
         pos = torch.arange(bucket, device=dev).unsqueeze(0)
         prefix_lens = torch.zeros(1, dtype=torch.int32, device=dev)
@@ -803,29 +824,56 @@ class CustomTorchBackend(InferenceBackend):
                                         "logits_index": logits_index}
         logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
 
-    def _replay_prefill(self, prompt_ids, bucket):
-        """K=1, no-prefix prefill via graph replay. Allocate blocks, copy IDs into static buffers,
-        replay, return (cache, first_token, kv_len)."""
+    def _capture_all_prefill_graphs(self) -> None:
+        """Capture every prefill bucket at once, on first use.
+
+        Capturing lazily per bucket meant the first request to reach each bucket ate a
+        multi-second stall mid-serving: it showed up as TTFT p95 730ms at rate 1 (where p95 is
+        essentially the single worst request) while p50 was 56ms. Prefill graphs do not go
+        through torch.compile — capture is seconds, not minutes — so taking it all at once
+        during warmup is cheap and makes the tail honest."""
+        import time
+        t0 = time.perf_counter()
+        for b in _PREFILL_BUCKETS:
+            if b not in self._prefill_graphs:
+                try:
+                    self._capture_prefill_graph(b)
+                except Exception:
+                    logger.exception("prefill graph capture failed (bucket=%d) — eager fallback", b)
+        print(f"[graphs] captured {len(self._prefill_graphs)} prefill graphs "
+              f"{sorted(self._prefill_graphs)} in {time.perf_counter() - t0:.1f}s", flush=True)
+
+    def _replay_prefill(self, prompt_ids, bucket, matched=0, shared=None):
+        """K=1 prefill via graph replay, with or without a prefix-cache hit.
+
+        Seeds the cached prefix blocks, allocates blocks for the suffix, stages everything into
+        this bucket's static buffers, replays. Returns (cache, first_token, kv_len)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
-        dev, cols, S = self.device, bucket // self._block_size, len(prompt_ids)
+        dev, bs = self.device, self._block_size
+        S = len(prompt_ids) - matched
         g = self._prefill_graphs[bucket]
-        cache = PagedKVCache(pools=self.pools)
+        cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
+        need = (matched + bucket + bs - 1) // bs          # blocks covering prefix + the full bucket
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
-            bids = [pool.alloc() for _ in range(cols)]
-            cache.block_tables[L] = bids
-            cache.seq_lens[L] = S
-            g["bts"][L][0].copy_(torch.tensor(bids, device=dev))
+            bt = cache.block_tables[L]                    # already holds the shared prefix blocks
+            while len(bt) < need:
+                bt.append(pool.alloc())
+            cache.seq_lens[L] = matched + S
+            row = torch.tensor([x if x >= 0 else 0 for x in bt], device=dev)
+            g["bts"][L][0, :row.shape[0]].copy_(row)
         g["ids"].zero_()
-        g["ids"][0, :S].copy_(torch.tensor(prompt_ids, device=dev))
+        g["ids"][0, :S].copy_(torch.tensor(prompt_ids[matched:], device=dev))
+        g["pos"][0].copy_(torch.arange(matched, matched + bucket, device=dev))
+        g["prefix_lens"].fill_(matched)
         g["suffix_lens"].fill_(S)                                               # padding queries skipped
         g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
         if not cache.any_evicted:
             self.prefix_cache.store(prompt_ids, cache.block_tables)
-        return cache, first, S
+        return cache, first, matched + S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
         """Add a newly-prefilled row. CUDA: ingest into the persistent BatchedDecodeState.
