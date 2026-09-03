@@ -56,6 +56,7 @@ _kv_env = {
     "KV_CACHE_NUM_BLOCKS": _g("KV_CACHE_NUM_BLOCKS", "16384", "4096"),
     "MAX_ACTIVE_KV_TOKENS": _g("MAX_ACTIVE_KV_TOKENS", "200000", "48000"),
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "32"),
+    "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
 }
 
 image = (
@@ -143,6 +144,7 @@ def sweep(backend_name: str, prefill_mode: str = "monolithic"):
                 backend, max_batch_size=settings.max_batch_size,
                 max_active_kv_tokens=settings.max_active_kv_tokens,
                 prefill_mode=(None if prefill_mode == "monolithic" else prefill_mode),
+                wave_window_mult=settings.wave_window_mult,
                 prefill_chunk_size=256,
             )
             sched.start()

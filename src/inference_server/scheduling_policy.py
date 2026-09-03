@@ -33,6 +33,20 @@ class SchedulingPolicy(ABC):
         """Called when a request leaves the running batch."""
         pass
 
+    def peek_window(self, n: int) -> list["ScheduledRequest"]:
+        """Up to `n` next requests in policy order, without removing them.
+
+        Lets the scheduler form a prefill wave out of similarly-sized prompts (a ragged wave is
+        right-padded to Smax, so mixed lengths waste most of the prefill). Default returns just
+        the head, i.e. no reordering — a custom policy keeps strict ordering unless it opts in.
+        """
+        head = self.peek_next()
+        return [head] if head is not None else []
+
+    def pick(self, request: "ScheduledRequest") -> None:
+        """Remove a SPECIFIC request that peek_window returned. Default: unsupported."""
+        raise NotImplementedError(f"{type(self).__name__} does not support pick()")
+
 
 class FCFSPolicy(SchedulingPolicy):
     """First-come-first-served, with priority as the dominant key.
@@ -58,6 +72,12 @@ class FCFSPolicy(SchedulingPolicy):
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         self._pending.append(request)
+
+    def peek_window(self, n: int) -> list["ScheduledRequest"]:
+        return sorted(self._pending, key=lambda r: (-r.priority, r.arrival_seq))[:n]
+
+    def pick(self, request: "ScheduledRequest") -> None:
+        self._pending.remove(request)
 
 
 class FairPolicy(SchedulingPolicy):
@@ -100,6 +120,15 @@ class FairPolicy(SchedulingPolicy):
             active = [c for s, c in self._counters.items() if s in pending_sids]
             self._counters[sid] = min(active) if active else 0.0
         self._pending.append(request)
+
+    def peek_window(self, n: int) -> list["ScheduledRequest"]:
+        return sorted(
+            self._pending,
+            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
+        )[:n]
+
+    def pick(self, request: "ScheduledRequest") -> None:
+        self._pending.remove(request)
 
     def on_tokens_processed(self, request: "ScheduledRequest", n_tokens: int) -> None:
         self._counters[request.session_id] = (

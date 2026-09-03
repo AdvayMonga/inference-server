@@ -39,6 +39,7 @@ _env = {
     "BENCH_WARMUP": os.environ.get("BENCH_WARMUP", "4"),
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "256"),
     "PREFILL_MODE": "batched",
+    "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
@@ -140,6 +141,7 @@ def sweep():
             max_active_kv_tokens=settings.max_active_kv_tokens,
             max_queue_size=4096,   # large: past the knee, overload shows as LATENCY not rejection
             prefill_mode="batched", prefill_chunk_size=256,
+            wave_window_mult=settings.wave_window_mult,
         )
         sched.start()
         rows = []
