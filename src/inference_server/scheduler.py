@@ -108,7 +108,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
                  prefill_mode: str | None = None,
-                 wave_window_mult: int = 4):
+                 wave_window_mult: int = 0):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -124,9 +124,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
             raise ValueError("prefill_mode='chunked' requires prefill_chunk_size > 0")
         if self.prefill_mode == "batched" and not hasattr(backend, "prefill_batch"):
             raise ValueError("prefill_mode='batched' requires a backend with prefill_batch (custom-*)")
-        # Window (as a multiple of the free slots) that batched-mode wave planning may reorder
-        # within. 0 disables grouping. Only affects prefill_mode='batched' — the other modes
-        # prefill one request at a time, so there is no padding to save.
+        # Window (as a multiple of free slots) that batched-mode wave planning may reorder
+        # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
+        # current workload: at rates 1-6 the queue never backs up, so 83-91% of prefill waves
+        # are K=1 and there is no padding to save (see wave_sizes in stats()). Turn it on when
+        # the engine actually runs queued at the 100-256 concurrency target, where waves are
+        # wide and padding is 59%+ of prefill. Only affects prefill_mode='batched'.
         self.wave_window_mult = wave_window_mult
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
@@ -150,6 +153,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._kv_admit_blocked = 0
         self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
         self._prefill_chunks_processed = 0
+        # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
+        # WIDE; if the queue never backs up every arrival is its own K=1 wave and there is
+        # nothing to group. This is how we tell those regimes apart.
+        self._wave_sizes: dict[int, int] = {}
         self._metrics = MetricsTracker()
 
     # --- Public interface ---
@@ -217,6 +224,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
             "prefill_chunks_processed": self._prefill_chunks_processed,
+            "wave_sizes": dict(sorted(self._wave_sizes.items())),
             **self._metrics.snapshot(),
         }
 
@@ -398,6 +406,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         wave costs N × that — batching pays the dispatch once. On batch failure, reject the whole
         wave (release each reservation) rather than risk partial/leaked state."""
         try:
+            self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
             results = self.backend.prefill_batch([r.token_ids for r in reqs])
         except Exception as e:
             logger.exception("Batched prefill failed (%d reqs)", len(reqs))

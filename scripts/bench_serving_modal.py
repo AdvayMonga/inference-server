@@ -175,6 +175,10 @@ def sweep():
                 print(f"[serving] rate={rate:>5} reqs={row['reqs']:>4} tok/s={row['tok_s']:>7} "
                       f"TTFT={row['ttft_p50']}/{row['ttft_p95']}ms TPOT={row['tpot_p50']}/"
                       f"{row['tpot_p95']}ms SLO={'ok' if row['within_slo'] else 'X'}", flush=True)
+                # Padding waste only exists when prefill waves are WIDE. If the queue never
+                # backs up, every arrival is its own K=1 wave and there is nothing to group.
+                print(f"           wave sizes (K->count): {sched.stats().get('wave_sizes')}",
+                      flush=True)
                 await asyncio.sleep(2)
         finally:
             await sched.stop()

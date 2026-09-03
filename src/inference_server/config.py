@@ -45,9 +45,10 @@ class Settings:
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
-    # Batched-prefill wave planning: how many free-slot-multiples of the pending queue the
-    # scheduler may reorder within to group similar prompt lengths. 0 = strict policy order.
-    wave_window_mult: int = 4
+    # Batched-prefill wave planning: free-slot-multiples of the pending queue the scheduler may
+    # reorder within to group similar prompt lengths. 0 = strict policy order (default; measured
+    # inert below the queued regime — 83-91% of waves are K=1 there).
+    wave_window_mult: int = 0
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
