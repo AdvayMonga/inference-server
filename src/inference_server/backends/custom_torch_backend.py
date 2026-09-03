@@ -252,13 +252,17 @@ class CustomTorchBackend(InferenceBackend):
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
+        from inference_server.config import settings
         from inference_server.models.paged_kv_cache import PrefixCache
-        self.prefix_cache = PrefixCache(pools=self.pools)
+        self.prefix_cache = PrefixCache(
+            pools=self.pools,
+            max_entries=settings.prefix_cache_max_entries,
+            max_block_fraction=settings.prefix_cache_block_fraction,
+        )
 
         # CUDA-graph decode: one graph per ROW BUCKET, replay the smallest bucket >= n_rows.
         # A single max-batch graph padded every step to max_batch_size (64x waste at 4 active
         # rows with max_batch=256), which dominated TPOT at the low concurrency the SLO lives at.
-        from inference_server.config import settings
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
@@ -440,8 +444,12 @@ class CustomTorchBackend(InferenceBackend):
         suffix = token_ids[matched:]
         # lm_head on the last suffix position only — see GemmaForCausalLM.forward(logits_index).
         last = torch.tensor([len(suffix) - 1], device=self.device)
-        logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache,
-                            logits_index=last)
+        try:
+            logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache,
+                                logits_index=last)
+        except BaseException:
+            cache.free_all()            # do not abandon partially allocated blocks
+            raise
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
         if not cache.any_evicted:   # only cache prefixes that fit fully in the window
             self.prefix_cache.store(token_ids, cache.block_tables)
@@ -576,6 +584,16 @@ class CustomTorchBackend(InferenceBackend):
             position_ids[k, :len(s)] = torch.arange(matched[k], matched[k] + len(s), device=dev)
 
         self._ensure_scratch()
+        try:
+            return self._prefill_batch_forward(prompts, caches, matched, suffixes,
+                                               input_ids, position_ids, dev)
+        except BaseException:
+            for c in caches:            # same partial-allocation leak as the graphed path
+                c.free_all()
+            raise
+
+    def _prefill_batch_forward(self, prompts, caches, matched, suffixes,
+                               input_ids, position_ids, dev):
         ctx = _PrefillCtx(caches, self.pools, matched, [len(s) for s in suffixes], dev,
                           scratch=self._scratch)
         # One logit row per sequence, not one per token: the vocab projection over a K x Smax
@@ -848,23 +866,42 @@ class CustomTorchBackend(InferenceBackend):
         Seeds the cached prefix blocks, allocates blocks for the suffix, stages everything into
         this bucket's static buffers, replays. Returns (cache, first_token, kv_len)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
-        dev, bs = self.device, self._block_size
         S = len(prompt_ids) - matched
         g = self._prefill_graphs[bucket]
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
-        need = (matched + S + bs - 1) // bs               # only the blocks this prompt REALLY uses
+        try:
+            return self._replay_prefill_inner(cache, g, prompt_ids, bucket, matched, S)
+        except BaseException:
+            # Blocks allocated before the failure would otherwise be abandoned with the local
+            # cache. Under KV pressure alloc() raises MID-LOOP, so every rejected request used
+            # to leak whatever it had already taken — the pool drained to zero and stayed there.
+            cache.free_all()
+            raise
+
+    def _replay_prefill_inner(self, cache, g, prompt_ids, bucket, matched, S):
+        dev, bs = self.device, self._block_size
+        total = matched + S
+        need = (total + bs - 1) // bs                     # only the blocks this prompt REALLY uses
         for L, pool in enumerate(self.pools):
             if pool is None:
                 continue
             bt = cache.block_tables[L]                    # already holds the shared prefix blocks
+            # A sliding layer keeps only the last `window` tokens. The graph writes every
+            # position, but positions that are ALREADY outside the window when this prefill
+            # ends never need a real block — point them at scratch instead of allocating.
+            # Without this a long prompt transiently holds prompt-many blocks in a sliding pool,
+            # overshooting the window-capped footprint admission reserved, and exhausting it.
+            keep_from = max(0, total - pool.window) // bs if pool.window is not None else 0
             while len(bt) < need:
-                bt.append(pool.alloc())
-            cache.seq_lens[L] = matched + S
+                bt.append(-1 if len(bt) < keep_from else pool.alloc())
+            cache.seq_lens[L] = total
             # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
             # positions, so the entries past this prompt's real blocks must point somewhere
             # harmless — otherwise padding K/V lands in whichever request used this buffer last.
             g["bts"][L][0].fill_(self._scratch[L])
-            row = torch.tensor([x if x >= 0 else 0 for x in bt], device=dev)
+            # -1 = already evicted. Map it to the scratch block, NOT block 0, which is a real
+            # block another request may own; the graph writes every position it is given.
+            row = torch.tensor([x if x >= 0 else self._scratch[L] for x in bt], device=dev)
             g["bts"][L][0, :row.shape[0]].copy_(row)
         g["ids"].zero_()
         g["ids"][0, :S].copy_(torch.tensor(prompt_ids[matched:], device=dev))

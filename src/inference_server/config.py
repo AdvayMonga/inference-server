@@ -49,6 +49,14 @@ class Settings:
     # reorder within to group similar prompt lengths. 0 = strict policy order (default; measured
     # inert below the queued regime — 83-91% of waves are K=1 there).
     wave_window_mult: int = 0
+    # Cross-session prefix cache. It holds refcounts on real KV blocks, so it needs BOTH a
+    # count cap (host memory for the key tuples) and a share-of-pool cap (device blocks) —
+    # otherwise a warm cache starves live requests and alloc() fails on the request path.
+    # Admission deadline: reject requests that have queued longer than this instead of letting
+    # overload become unbounded latency. 0 disables. Tune to your TTFT SLO.
+    max_queue_wait_s: float = 30.0
+    prefix_cache_max_entries: int = 1024
+    prefix_cache_block_fraction: float = 0.5
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
@@ -105,6 +113,11 @@ def load_settings() -> Settings:
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
+        max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
+        prefix_cache_max_entries=int(os.environ.get(
+            "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),
+        prefix_cache_block_fraction=float(os.environ.get(
+            "PREFIX_CACHE_BLOCK_FRACTION", Settings.prefix_cache_block_fraction)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
         backend_name=os.environ.get("BACKEND", Settings.backend_name),

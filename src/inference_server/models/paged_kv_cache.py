@@ -20,8 +20,18 @@ Storage layout per pool: `[num_blocks, num_kv_heads, block_size, head_dim]`
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import torch
 import torch.nn.functional as F
+
+
+class KVCacheExhausted(RuntimeError):
+    """No KV block available even after reclaiming the prefix cache.
+
+    A typed error so the scheduler can treat it as BACKPRESSURE (reject the request, 429) rather
+    than as an engine failure. It is an expected operating condition under overload, not a bug.
+    """
 
 
 class BlockPool:
@@ -40,10 +50,20 @@ class BlockPool:
         self.v = torch.zeros_like(self.k)
         self._refcounts: list[int] = [0] * num_blocks
         self._free: list[int] = list(reversed(range(num_blocks)))
+        # Called when the free list is empty, to reclaim blocks held only by a cache.
+        # Without it, blocks parked in the PrefixCache are unreachable and alloc() raises
+        # RuntimeError on the request path — a crash where backpressure belongs.
+        self._reclaim = None
+
+    def set_reclaimer(self, fn) -> None:
+        """Register a callback that frees cache-held blocks on demand. Returns blocks freed."""
+        self._reclaim = fn
 
     def alloc(self) -> int:
+        if not self._free and self._reclaim is not None:
+            self._reclaim(1)
         if not self._free:
-            raise RuntimeError(f"BlockPool exhausted ({self.num_blocks} blocks)")
+            raise KVCacheExhausted(f"BlockPool exhausted ({self.num_blocks} blocks)")
         bid = self._free.pop()
         self._refcounts[bid] = 1
         return bid
@@ -53,11 +73,14 @@ class BlockPool:
         assert self._refcounts[block_idx] > 0, "acquiring a freed block"
         self._refcounts[block_idx] += 1
 
-    def release(self, block_idx: int) -> None:
-        """Drop a reference; return to free list when last reference drops."""
+    def release(self, block_idx: int) -> bool:
+        """Drop a reference; return to free list when the last reference drops.
+        Returns True only if the block ACTUALLY became free."""
         self._refcounts[block_idx] -= 1
         if self._refcounts[block_idx] == 0:
             self._free.append(block_idx)
+            return True
+        return False
 
     @property
     def free_count(self) -> int:
@@ -70,24 +93,45 @@ class PrefixCache:
     boundaries (partial blocks aren't safe to share — slots after seq_len aren't written).
     """
 
-    def __init__(self, pools: list[BlockPool | None]):
+    def __init__(self, pools: list[BlockPool | None], max_entries: int = 1024,
+                 max_block_fraction: float = 0.5):
         self.pools = pools
         self.block_size = next(p.block_size for p in pools if p is not None)
         # key = tuple of leading tokens aligned to block boundary
         # value = dict[layer_idx] -> list of block ids (one per full block)
-        self.entries: dict[tuple[int, ...], dict[int, list[int]]] = {}
+        # OrderedDict = LRU order: least-recently-used first, hits move to the end.
+        self.entries: "OrderedDict[tuple[int, ...], dict[int, list[int]]]" = OrderedDict()
+        self.max_entries = max_entries
+        # Block counts present in the cache, so we only build lookup keys for lengths that
+        # actually exist (building every aligned prefix tuple is O(prompt^2) per lookup).
+        self._lengths: dict[int, int] = {}
+        # Cap the cache's share of the pool. Reclaim-on-demand alone is a safety net, not a
+        # policy: without this the cache grows to 100% of the pool and every single alloc has
+        # to evict first, leaving zero headroom for a burst of live requests.
+        live = [p.num_blocks for p in pools if p is not None]
+        self.max_blocks = int(max_block_fraction * min(live)) if live else 0
+        self._blocks_held = 0          # per-pool block count held across all entries
         self.hits = 0
         self.lookups = 0
+        self.evictions = 0
+        for pool in pools:
+            if pool is not None:
+                pool.set_reclaimer(self.reclaim)
 
     def lookup(self, token_ids: list[int]) -> tuple[int, dict[int, list[int]]]:
         """Return (matched_tokens, per_layer_block_ids). Acquires blocks for the caller."""
         self.lookups += 1
         n_full_blocks = len(token_ids) // self.block_size
-        # Walk back from longest aligned prefix.
+        # Walk back from the longest aligned prefix, skipping block counts the cache has never
+        # seen — otherwise every lookup builds one tuple per block boundary, which is O(n^2)
+        # in prompt length on the prefill hot path.
         for n in range(n_full_blocks, 0, -1):
+            if n not in self._lengths:
+                continue
             key = tuple(token_ids[: n * self.block_size])
             if key in self.entries:
                 self.hits += 1
+                self.entries.move_to_end(key)          # LRU: this entry is now the newest
                 layer_blocks = self.entries[key]
                 # The caller becomes an additional owner.
                 for layer_idx, bids in layer_blocks.items():
@@ -103,7 +147,12 @@ class PrefixCache:
             return
         key = tuple(token_ids[: n_full_blocks * self.block_size])
         if key in self.entries:
+            self.entries.move_to_end(key)
             return  # already cached
+        while (len(self.entries) >= self.max_entries
+               or self._blocks_held + n_full_blocks > self.max_blocks):
+            if self._evict_one() == 0:
+                break
         entry: dict[int, list[int]] = {}
         for layer_idx, bids in enumerate(block_tables):
             if self.pools[layer_idx] is None:
@@ -115,6 +164,56 @@ class PrefixCache:
             for bid in full_bids:
                 self.pools[layer_idx].acquire(bid)
         self.entries[key] = entry
+        self._blocks_held += n_full_blocks
+        self._lengths[n_full_blocks] = self._lengths.get(n_full_blocks, 0) + 1
+
+    def _evict_one(self) -> int:
+        """Drop the least-recently-used entry, releasing its refs. Returns blocks released."""
+        if not self.entries:
+            return 0
+        key, entry = self.entries.popitem(last=False)
+        n = len(key) // self.block_size
+        self._blocks_held -= n
+        if self._lengths.get(n, 0) <= 1:
+            self._lengths.pop(n, None)
+        else:
+            self._lengths[n] -= 1
+        # Count blocks that actually returned to a free list, NOT release() calls. A cached
+        # block that a live request is also holding frees nothing when the cache drops its ref;
+        # counting the call made reclaim() report success having freed zero, so the caller
+        # stopped evicting and alloc() raised anyway.
+        released = 0
+        for layer_idx, bids in entry.items():
+            for bid in bids:
+                if self.pools[layer_idx].release(bid):
+                    released += 1
+        self.evictions += 1
+        return released
+
+    def reclaim(self, min_blocks: int = 1) -> int:
+        """Free cache-held blocks until at least `min_blocks` have been released.
+
+        This is what BlockPool calls when its free list runs dry. Cached blocks are a cache,
+        not a reservation: they must be givable-back on demand, or a warm cache slowly starves
+        the pool and alloc() raises mid-request.
+        """
+        released = 0
+        while released < min_blocks and self.entries:
+            released += self._evict_one()   # may be 0 if those blocks are still live elsewhere
+        return released
+
+    def stats(self) -> dict:
+        free = min((p.free_count for p in self.pools if p is not None), default=0)
+        total = min((p.num_blocks for p in self.pools if p is not None), default=0)
+        return {
+            "entries": len(self.entries), "max_entries": self.max_entries,
+            "lookups": self.lookups, "hits": self.hits,
+            "hit_rate": round(self.hits / self.lookups, 4) if self.lookups else 0.0,
+            "evictions": self.evictions,
+            "blocks_held": self._blocks_held, "max_blocks": self.max_blocks,
+            "pool_free_blocks": free, "pool_total_blocks": total,
+            "pool_utilization": round(1 - free / total, 4) if total else 0.0,
+        }
 
 
 class PagedKVCache:
