@@ -1,0 +1,3 @@
+rate,reqs,tok_s,ttft_p50,ttft_p95,tpot_p50,tpot_p95,within_slo
+2.0,165,256.2,56,238,34.3,39.6,False
+4.0,356,535.9,65,346,46.3,54.4,False
