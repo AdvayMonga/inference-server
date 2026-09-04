@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "bfccfe3"
+    }
+  ],
+  "branch": "perf/bucketed-decode-graphs",
+  "cost_usd": 0.5,
+  "delta": {
+    "decode_ms_by_bucket": {
+      "after": 17.73,
+      "before": 31.84,
+      "pct": -44.3
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": false,
+      "reason": "1.80x ms/step at n=1; startup +~21min, declared not hidden"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "1.80x ms/step at n=1; startup +~21min, declared not hidden"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "1.80x ms/step at n=1; startup +~21min, declared not hidden"
+    }
+  },
+  "hypothesis_id": "backfill:perf/bucketed-decode-graphs",
+  "id": "exp-backfill-perf-bucketed-decode-graphs",
+  "source": "reconstructed",
+  "started_at": 1788555629.5105448,
+  "verdict": "confirmed"
+}

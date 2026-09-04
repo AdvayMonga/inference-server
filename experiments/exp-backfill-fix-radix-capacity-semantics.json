@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "d7843dd"
+    }
+  ],
+  "branch": "fix/radix-capacity-semantics",
+  "cost_usd": 0.0,
+  "delta": {
+    "cache_max_blocks": {
+      "after": 4096,
+      "before": 1024,
+      "pct": 300.0
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "declared"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "as measured"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "as judged"
+    }
+  },
+  "hypothesis_id": "backfill:fix/radix-capacity-semantics",
+  "id": "exp-backfill-fix-radix-capacity-semantics",
+  "source": "reconstructed",
+  "started_at": 1788555629.512973,
+  "verdict": "confirmed"
+}

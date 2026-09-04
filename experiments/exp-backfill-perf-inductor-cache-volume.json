@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "676222b"
+    }
+  ],
+  "branch": "perf/inductor-cache-volume",
+  "cost_usd": 0.6,
+  "delta": {
+    "graph_capture_s": {
+      "after": 574.5,
+      "before": 705.5,
+      "pct": -18.6
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "-19%; the artifact cache is not the lever, bucket count is"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "-19%; the artifact cache is not the lever, bucket count is"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "-19%; the artifact cache is not the lever, bucket count is"
+    }
+  },
+  "hypothesis_id": "backfill:perf/inductor-cache-volume",
+  "id": "exp-backfill-perf-inductor-cache-volume",
+  "source": "reconstructed",
+  "started_at": 1788555629.5122151,
+  "verdict": "confirmed"
+}

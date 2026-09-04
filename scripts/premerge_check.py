@@ -88,9 +88,9 @@ def main() -> int:
             mark = "ok  " if g.get("passed") else "FAIL"
             print(f"    [{mark}] {name}: {g.get('reason', '')}")
 
-    if not exp.all_gates_green():
-        failed = [n for n, g in exp.gates.items() if not g.get("passed")]
-        print(f"\nFAIL  experiment {exp.id} has failing gate(s): {', '.join(failed) or 'missing'}")
+    ok, why = exp.authorises_merge()
+    if not ok:
+        print(f"\nFAIL  {why}")
         return 1
 
     delta = ", ".join(f"{k} {v.get('pct', 0):+.1f}%" for k, v in exp.delta.items()) or "recorded"

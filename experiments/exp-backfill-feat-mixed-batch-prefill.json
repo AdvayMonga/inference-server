@@ -1,0 +1,51 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    }
+  ],
+  "branch": "feat/mixed-batch-prefill",
+  "cost_usd": 0.4,
+  "delta": {
+    "decode_ms_by_bucket": {
+      "after": 75.6,
+      "before": 20.6,
+      "pct": 266.9
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "mixed step cannot replay the decode graph; 3.2-5.3x eager tax"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": false,
+      "reason": "mixed step cannot replay the decode graph; 3.2-5.3x eager tax"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "mixed step cannot replay the decode graph; 3.2-5.3x eager tax"
+    }
+  },
+  "hypothesis_id": "backfill:feat/mixed-batch-prefill",
+  "id": "exp-backfill-feat-mixed-batch-prefill",
+  "source": "reconstructed",
+  "started_at": 1788555629.513271,
+  "verdict": "rejected"
+}

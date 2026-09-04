@@ -1,0 +1,51 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    }
+  ],
+  "branch": "perf/graph-capture-order",
+  "cost_usd": 0.6,
+  "delta": {
+    "graph_capture_s": {
+      "after": 1348.0,
+      "before": 1288.0,
+      "pct": 4.7
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "ascending capture is no better; Dynamo re-specialises regardless"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": false,
+      "reason": "ascending capture is no better; Dynamo re-specialises regardless"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "ascending capture is no better; Dynamo re-specialises regardless"
+    }
+  },
+  "hypothesis_id": "backfill:perf/graph-capture-order",
+  "id": "exp-backfill-perf-graph-capture-order",
+  "source": "reconstructed",
+  "started_at": 1788555629.513397,
+  "verdict": "rejected"
+}

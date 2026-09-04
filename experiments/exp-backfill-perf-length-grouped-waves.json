@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "a525018"
+    }
+  ],
+  "branch": "perf/length-grouped-waves",
+  "cost_usd": 0.8,
+  "delta": {
+    "tok_s_within_slo": {
+      "after": 565.0,
+      "before": 529.1,
+      "pct": 6.8
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "83-91% of prefill waves are K=1 \u2014 the harness cannot test wave composition"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "83-91% of prefill waves are K=1 \u2014 the harness cannot test wave composition"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": false,
+      "reason": "83-91% of prefill waves are K=1 \u2014 the harness cannot test wave composition"
+    }
+  },
+  "hypothesis_id": "backfill:perf/length-grouped-waves",
+  "id": "exp-backfill-perf-length-grouped-waves",
+  "source": "reconstructed",
+  "started_at": 1788555629.51195,
+  "verdict": "invalid"
+}

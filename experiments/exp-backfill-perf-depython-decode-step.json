@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "d875176"
+    }
+  ],
+  "branch": "perf/depython-decode-step",
+  "cost_usd": 1.0,
+  "delta": {
+    "tok_s_within_slo": {
+      "after": 732.3,
+      "before": 598.2,
+      "pct": 22.4
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "declared"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "as measured"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "as judged"
+    }
+  },
+  "hypothesis_id": "backfill:perf/depython-decode-step",
+  "id": "exp-backfill-perf-depython-decode-step",
+  "source": "reconstructed",
+  "started_at": 1788555629.5108411,
+  "verdict": "confirmed"
+}

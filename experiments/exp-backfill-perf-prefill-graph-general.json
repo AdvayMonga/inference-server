@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "7171dfd"
+    }
+  ],
+  "branch": "perf/prefill-graph-general",
+  "cost_usd": 0.4,
+  "delta": {
+    "ttft_prefill_p50": {
+      "after": 228.0,
+      "before": 282.3,
+      "pct": -19.2
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "declared"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "as measured"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "as judged"
+    }
+  },
+  "hypothesis_id": "backfill:perf/prefill-graph-general",
+  "id": "exp-backfill-perf-prefill-graph-general",
+  "source": "reconstructed",
+  "started_at": 1788555629.511401,
+  "verdict": "confirmed"
+}

@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "990642c"
+    }
+  ],
+  "branch": "perf/split-k-decode-attention",
+  "cost_usd": 0.4,
+  "delta": {
+    "decode_ms_by_bucket": {
+      "after": 0.0795,
+      "before": 0.5635,
+      "pct": -85.9
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "7.09x at n=1 L=2048; end-to-end within noise on 60-tok prompts"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "7.09x at n=1 L=2048; end-to-end within noise on 60-tok prompts"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "7.09x at n=1 L=2048; end-to-end within noise on 60-tok prompts"
+    }
+  },
+  "hypothesis_id": "backfill:perf/split-k-decode-attention",
+  "id": "exp-backfill-perf-split-k-decode-attention",
+  "source": "reconstructed",
+  "started_at": 1788555629.511143,
+  "verdict": "confirmed"
+}

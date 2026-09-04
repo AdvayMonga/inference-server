@@ -263,6 +263,10 @@ class Experiment:
     gates: dict[str, Any] = field(default_factory=dict)   # name -> GateResult.to_dict()
     delta: dict[str, Any] = field(default_factory=dict)   # metric -> {before, after, pct}
     cost_usd: float = 0.0
+    # "loop" = produced by the loop's own gates. "reconstructed" = written after the fact from
+    # notes. Reconstructed records are history, NOT authorisation: premerge refuses them, or the
+    # gate could be satisfied by prose about a run nobody can reproduce.
+    source: str = "loop"
     id: str = field(default_factory=lambda: _new_id("exp"))
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -273,11 +277,23 @@ class Experiment:
         if self.verdict not in self.VERDICTS:
             raise SchemaError(f"verdict must be one of {self.VERDICTS}")
 
+    SOURCES = ("loop", "reconstructed")
+
     def all_gates_green(self) -> bool:
         required = {"validity", "significance", "correctness", "cost"}
         if not required.issubset(self.gates):
             return False
         return all(self.gates[g].get("passed") for g in required)
+
+    def authorises_merge(self) -> tuple[bool, str]:
+        """Only a record the loop actually produced may gate a merge."""
+        if self.source != "loop":
+            return False, (f"experiment {self.id} is {self.source}, not produced by the loop — "
+                           f"history, not authorisation")
+        if not self.all_gates_green():
+            failed = [n for n, g in self.gates.items() if not g.get("passed")]
+            return False, f"gate(s) not green: {', '.join(failed) or 'missing gates'}"
+        return True, f"{self.id} verdict={self.verdict}, four gates green"
 
 
 @dataclass

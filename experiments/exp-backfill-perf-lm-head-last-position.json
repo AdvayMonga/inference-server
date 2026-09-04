@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "67e5e54"
+    }
+  ],
+  "branch": "perf/lm-head-last-position",
+  "cost_usd": 0.3,
+  "delta": {
+    "ttft_prefill_p50": {
+      "after": 50.07,
+      "before": 51.36,
+      "pct": -2.5
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "3-8%, smaller than predicted; kept for the 2GB logits saving"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "3-8%, smaller than predicted; kept for the 2GB logits saving"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "3-8%, smaller than predicted; kept for the 2GB logits saving"
+    }
+  },
+  "hypothesis_id": "backfill:perf/lm-head-last-position",
+  "id": "exp-backfill-perf-lm-head-last-position",
+  "source": "reconstructed",
+  "started_at": 1788555629.511275,
+  "verdict": "confirmed"
+}

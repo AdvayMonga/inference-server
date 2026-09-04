@@ -175,3 +175,20 @@ def test_premerge_classifies_engine_vs_exempt_changes():
     assert pm.behavioural(engine) == engine
     assert pm.behavioural(exempt) == []
     assert pm.behavioural(engine + exempt) == engine
+
+
+def test_reconstructed_experiments_are_history_not_authorisation():
+    """Back-filled records let the loop see what was already tried, but must never satisfy the
+    merge gate — otherwise prose about an unreproducible run becomes evidence."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    green = {g: {"passed": True} for g in ("validity", "significance", "correctness", "cost")}
+    hist = Experiment(hypothesis_id="h", engine_sha_base="a", arms=[Arm("treatment", "bbb")],
+                      gates=green, verdict="confirmed", source="reconstructed")
+    assert hist.all_gates_green()
+    ok, why = hist.authorises_merge()
+    assert not ok and "not produced by the loop" in why
+
+    live = Experiment(hypothesis_id="h", engine_sha_base="a", arms=[Arm("treatment", "bbb")],
+                      gates=green, verdict="confirmed", source="loop")
+    assert live.authorises_merge()[0]

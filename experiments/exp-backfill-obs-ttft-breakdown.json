@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "89ada71"
+    }
+  ],
+  "branch": "obs/ttft-breakdown",
+  "cost_usd": 0.5,
+  "delta": {
+    "ttft_prefill_p50": {
+      "after": 35.0,
+      "before": 44.0,
+      "pct": -20.5
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "instrument change: split TTFT into queue vs prefill; ruled out scheduling levers"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "instrument change: split TTFT into queue vs prefill; ruled out scheduling levers"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "instrument change: split TTFT into queue vs prefill; ruled out scheduling levers"
+    }
+  },
+  "hypothesis_id": "backfill:obs/ttft-breakdown",
+  "id": "exp-backfill-obs-ttft-breakdown",
+  "source": "reconstructed",
+  "started_at": 1788555629.513128,
+  "verdict": "confirmed"
+}

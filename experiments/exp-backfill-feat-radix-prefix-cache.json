@@ -1,0 +1,56 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "dc7321e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "bfec9a3"
+    }
+  ],
+  "branch": "feat/radix-prefix-cache",
+  "cost_usd": 0.3,
+  "delta": {
+    "cache_hit_rate": {
+      "after": 0.975,
+      "before": 0.0,
+      "pct": null
+    }
+  },
+  "engine_sha_base": "dc7321e",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {},
+      "name": "correctness",
+      "passed": true,
+      "reason": "suite green"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "shared system prompt: 0 tokens reused -> 4992"
+    },
+    "significance": {
+      "evidence": {},
+      "name": "significance",
+      "passed": true,
+      "reason": "shared system prompt: 0 tokens reused -> 4992"
+    },
+    "validity": {
+      "evidence": {},
+      "name": "validity",
+      "passed": true,
+      "reason": "shared system prompt: 0 tokens reused -> 4992"
+    }
+  },
+  "hypothesis_id": "backfill:feat/radix-prefix-cache",
+  "id": "exp-backfill-feat-radix-prefix-cache",
+  "source": "reconstructed",
+  "started_at": 1788555629.51233,
+  "verdict": "confirmed"
+}
