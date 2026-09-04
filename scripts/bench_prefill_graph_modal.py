@@ -15,7 +15,6 @@ GPU = os.environ.get("BENCH_GPU", "A100-80GB")
 MODEL = os.environ.get("BENCH_MODEL", "google/gemma-4-E4B-it")
 
 _env = {
-    "CUDA_LAUNCH_BLOCKING": "1",              # synchronous CUDA errors → traceback points at the op
     "CUSTOM_BACKEND_PREFILL_GRAPH": "1",      # allow graph capture (we toggle its use in-process)
     "MODEL_NAME": MODEL, "BENCH_GPU": GPU, "BENCH_MODEL": MODEL, "MAX_BATCH_SIZE": "256",
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
