@@ -195,6 +195,9 @@ def sweep():
                 # backs up, every arrival is its own K=1 wave and there is nothing to group.
                 print(f"           wave sizes (K->count): {sched.stats().get('wave_sizes')}",
                       flush=True)
+                print(f"           TTFT split — queue p50/p95={_pct(queue_ms, .50):.0f}/"
+                      f"{_pct(queue_ms, .95):.0f}ms  prefill p50/p95={_pct(prefill_ms, .50):.0f}/"
+                      f"{_pct(prefill_ms, .95):.0f}ms", flush=True)
                 st = sched.stats()
                 print(f"           active={st['active_size']} pending={st['pending_depth']} "
                       f"queue_hw={st['pending_high_water']} kv_blocked={st['kv_admit_blocked']} "

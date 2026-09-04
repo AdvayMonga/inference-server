@@ -31,7 +31,13 @@ logger = logging.getLogger(__name__)
 # the prompt; that is handled after the replay (see _replay_prefill) rather than avoided, because
 # the p95 prompt on our workload is ~830 tokens and those were the requests still stuck on the
 # ~100ms eager path — i.e. exactly the ones setting TTFT p95.
-_PREFILL_BUCKETS = (64, 128, 256, 512, 1024)
+#
+# The ladder is finer than powers of two because a graph processes its WHOLE bucket: a 600-token
+# suffix in a 1024 bucket wastes 40% of the forward, and prefill is now the entire TTFT tail
+# (measured at rate 1: queue p95 21ms vs prefill p95 203ms). Prefill graphs do not go through
+# torch.compile — all eight capture in a few seconds — so extra buckets are nearly free here,
+# unlike the DECODE ladder where each bucket costs a ~140s compile.
+_PREFILL_BUCKETS = (64, 128, 192, 256, 384, 512, 768, 1024)
 
 
 def _decode_buckets(max_rows: int, coarse: bool = False) -> tuple[int, ...]:
