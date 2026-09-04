@@ -1,0 +1,20 @@
+{
+  "created_at": 1788235200.0,
+  "evidence": [],
+  "id": "kb-20260901-010",
+  "status": "resolved",
+  "summary": "Bucketed decode graphs turned one Inductor compile into one per bucket. `dynamic=False`:\n~92s per bucket, uniform (553s for 6 buckets, ~828s for the 9-bucket production ladder).\n`dynamic=None` (now default) collapses that to 2 compiles + ~1.5s per remaining bucket, but\nthose 2 compiles are expensive and wildly variable (138+231s one run, 264+503s another).\n`dynamic=True` is unusable: Inductor codegen `NameError: name 's6' is not defined` (same class\nas the `s46` bug HANDOFF hit on prefill). With compile OFF the whole ladder captures in 5.6s,\nso 100% of this cost is torch.compile. **Caching Inductor artifacts to a Modal volume is now\nthe highest-value startup fix, and it also unblocks any 2D graph ladder (see V-B above).**",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "compile",
+    "decode",
+    "graph",
+    "kv",
+    "modal",
+    "prefill"
+  ],
+  "title": "Persistent Inductor cache",
+  "triggers": [],
+  "updated_at": 1788551463.8429859
+}

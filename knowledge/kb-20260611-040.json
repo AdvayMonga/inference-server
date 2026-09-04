@@ -1,0 +1,19 @@
+{
+  "created_at": 1781150400.0,
+  "evidence": [],
+  "id": "kb-20260611-040",
+  "status": "deferred",
+  "summary": "Context: weighing mixed-batch chunked prefill (V-B) vs other work. Mixed-batch exists mainly to stop a long prompt's prefill from stalling ongoing decodes (HOL blocking) when both share one GPU. The modern production direction is **P/D disaggregation**: run prefill on one GPU pool and decode on another, ship the KV blocks between them. Prefill is compute-bound, decode is memory-bandwidth-bound \u2014 separating them lets each be sized/optimized independently and removes the interference that mixed-batch works around. **Decision:** keep mixed-batch prefill (V-B) deferred; if/when prefill interference becomes the bottleneck, prefer disaggregation. V-B's varlen kernel is also the single biggest remaining lift (our Triton kernel is decode-only). **Trigger:** after CUDA graphs + a mixed/long-workload sweep, if TTFT-under-load is the gap. Disaggregation is a bigger architectural change (KV transfer, two pools, routing) \u2014 Phase 7+ territory; revisit with the platform layer.",
+  "superseded_by": null,
+  "tags": [
+    "decode",
+    "graph",
+    "kernel",
+    "kv",
+    "memory",
+    "prefill"
+  ],
+  "title": "Prefer prefill/decode disaggregation over mixed-batch prefill",
+  "triggers": [],
+  "updated_at": 1788551463.8473878
+}

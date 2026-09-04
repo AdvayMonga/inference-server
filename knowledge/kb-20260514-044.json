@@ -1,0 +1,15 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-044",
+  "status": "resolved",
+  "summary": "Radix `insert` silently bailed on mid-block divergence (chat-template prefix), causing repeat-prompt misses. Two-layer lookup (exact dict \u2192 radix prefix) now matches SGLang/vLLM shape.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "kv"
+  ],
+  "title": "`CacheManager` exact-match index in front of radix",
+  "triggers": [],
+  "updated_at": 1788551463.847924
+}

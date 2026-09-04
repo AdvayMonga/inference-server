@@ -1,0 +1,15 @@
+{
+  "created_at": 1781323200.0,
+  "evidence": [],
+  "id": "kb-20260613-016",
+  "status": "resolved",
+  "summary": "Context: CLAUDE.md's architecture table originally said \"Prometheus metrics \u2014 all labeled by `session_id`.\" But `session_id` is unbounded in production, and a per-session label makes one time series per session \u2192 Prometheus memory/cardinality blowup (a well-known anti-pattern).\n**Decision (with user):** `/metrics` exposes **aggregate** metrics with only low-cardinality labels (outcome; HTTP method/endpoint/status). **Per-session detail stays in `/scheduler/stats`** (JSON, pull-on-demand, not stored as time series). Honors the spirit (per-session observability exists) without the cardinality footgun. Updated the CLAUDE.md line to match. If bounded per-session Prometheus metrics are ever needed (e.g. the `sim-*` simulator), add an opt-in low-cardinality label like a priority/tenant *class*, never raw session_id.",
+  "superseded_by": null,
+  "tags": [
+    "memory",
+    "scheduler"
+  ],
+  "title": "Prometheus metrics: aggregate, NOT session_id-labeled",
+  "triggers": [],
+  "updated_at": 1788551463.843829
+}

@@ -1,0 +1,15 @@
+{
+  "created_at": 1780027200.0,
+  "evidence": [],
+  "id": "kb-20260529-041",
+  "status": "resolved",
+  "summary": "`modal_app.py` installs `torch>=2.4` from `https://download.pytorch.org/whl/cu121` *before* `pip_install_from_pyproject`. Reason: default PyPI torch wheel can resolve to the CPU variant on Linux x86_64; our `_detect_device()` would silently fall through CUDA \u2192 MPS \u2192 CPU and we'd benchmark CPU on a GPU host without noticing. Explicit pin = guaranteed GPU torch + loud failure if the base image's CUDA version drifts from cu121. Trade-off: if Modal moves to a non-CUDA-12 base, we bump the URL.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "modal"
+  ],
+  "title": "Modal image pins CUDA torch wheel explicitly",
+  "triggers": [],
+  "updated_at": 1788551463.847559
+}

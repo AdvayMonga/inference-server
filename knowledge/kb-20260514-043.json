@@ -1,0 +1,17 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-043",
+  "status": "resolved",
+  "summary": "`BlockManager` owns per-layer `k_pools[l]`, `v_pools[l]` shaped `(num_blocks, n_kv_heads, block_size, head_dim)`. Allocated once; `Block.k_tensor`/`v_tensor` are pool slices; `_store_kv_in_blocks` does in-place `copy_`. Eliminates per-request alloc churn; predictable peak memory.\n**Per-layer (not stacked)** because Gemma 4 is heterogeneous (12 layers `(1,256)`, 3 layers `(1,512)`). Probed via `TorchBackend.kv_shape_per_layer()` \u2014 works for any HF causal LM.\n**vLLM forward-compat:** layout matches PagedAttention. Migration path: add `block_table` per row, swap `_splice_in`/`_batched_kv` reconstruction for block-table tracking, plug in paged-attention kernel. Pool/BlockManager/RadixTree/eviction/CacheManager API all stay.\n**Pool-less mode preserved** for tests that don't pass `layer_shapes` (store becomes no-op).",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "kernel",
+    "kv",
+    "memory"
+  ],
+  "title": "Pre-allocated per-layer KV pools",
+  "triggers": [],
+  "updated_at": 1788551463.847818
+}

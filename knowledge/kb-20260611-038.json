@@ -1,0 +1,18 @@
+{
+  "created_at": 1781150400.0,
+  "evidence": [],
+  "id": "kb-20260611-038",
+  "status": "open",
+  "summary": "Context: the custom backend caches via its own `PrefixCache` + paged pools, not the HF-format `CacheManager`. So `set_cache_adapter` is a no-op (`cache_adapter` stays `None`), and the scheduler's cache-pool admission gate (`blocks_needed` vs `free_blocks`) + `release()` are skipped for this backend \u2014 only the active-KV-token gate and queue-size limit apply. Pool exhaustion surfaces as a caught `BlockPool` `RuntimeError` in `_admit_pending` \u2192 request rejected (degrades, doesn't crash). Also: `/cache/stats` reports the unused `CacheManager`, not the real `PrefixCache` hits/lookups; and `_fail_all` (scheduler-crash path) nulls `_batched_kv` without `free_all()` \u2192 blocks leak only on a scheduler crash. **Trigger:** if the CUDA load-test shows KV-pressure churn or we want graceful backpressure for `custom-*`. Fix = expose pool free-count/`blocks_needed`/`total_blocks` from the backend (a thin `cache_adapter`-shaped view over the pools) so the existing gates light up; surface `PrefixCache` stats on `/cache/stats`; free pools in `_fail_all`.",
+  "superseded_by": null,
+  "tags": [
+    "backpressure",
+    "cache",
+    "kv",
+    "memory",
+    "scheduler"
+  ],
+  "title": "Custom backend skips scheduler-visible KV backpressure (M2.4)",
+  "triggers": [],
+  "updated_at": 1788551463.847009
+}

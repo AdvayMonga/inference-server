@@ -1,0 +1,19 @@
+{
+  "created_at": 1788321600.0,
+  "evidence": [],
+  "id": "kb-20260902-004",
+  "status": "open",
+  "summary": "`bench_serving_modal.py` at the default `POOL_SIZE=64` is a prefix-cache-HIT benchmark: after\nwarmup nearly every request hits with a tiny suffix. That flatters prefill work (the prefix-hit\ngraph especially) and completely hides miss behaviour, which is where the KV bugs above lived.\n`BENCH_POOL_SIZE` now raises it; `bench_stress_modal.py` covers misses and overload. **Quote the\nregime alongside any prefill number.**",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "cache",
+    "graph",
+    "kv",
+    "modal",
+    "prefill"
+  ],
+  "title": "Benchmarks must state their cache-hit regime",
+  "triggers": [],
+  "updated_at": 1788551463.842069
+}

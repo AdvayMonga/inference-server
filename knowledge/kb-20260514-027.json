@@ -1,0 +1,14 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-027",
+  "status": "deferred",
+  "summary": "Out of scope until engine done. `session_id` scoping already in place \u2192 additive when needed.",
+  "superseded_by": null,
+  "tags": [
+    "kv"
+  ],
+  "title": "Per-session KV quotas",
+  "triggers": [],
+  "updated_at": 1788551463.8454452
+}

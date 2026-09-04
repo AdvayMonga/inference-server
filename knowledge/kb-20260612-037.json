@@ -1,0 +1,22 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-037",
+  "status": "resolved",
+  "summary": "Gemma 4 is 28/35 `sliding_attention` (window=512); the forward stored `sliding_window` but never applied it \u2014 all layers attended to full history. The 5-token parity fixture never caught it (5 \u226a 512), so long-context outputs were silently wrong. **Fix (all 3 attention paths, keyed on the layer's `sliding_window`):** prefill SDPA builds an explicit position-based causal(+window) mask; batched-decode gather adds a rightmost-W column cutoff; the Triton kernel takes a `window` arg (skips fully-out blocks via `start_b`, masks `offs >= L - window`). **Conditional design preserves parity:** keep the exact `is_causal` path when the window doesn't bite (`S_k \u2264 window`) and there's no cache offset \u2192 all byte-identical (`torch.equal`) parity tests still pass. **Bonus:** the position-based mask also fixed a latent causality bug \u2014 prefix-cached prefill with a multi-token suffix was running NON-causal (old `is_causal = S_q==S_k` went `False` with a cache offset; only ever tested with a 1-token suffix). **Validation:** `tests/test_sliding_window.py` (CPU, 600-token prompt vs HF \u2014 argmax + logits within bf16 tol); kernel windowed-reference parity on Modal (D=256/512, seq_lens spanning the window). **Follow-up DONE:** windowed KV *storage* \u2014 sliding layers now free out-of-window blocks (see the windowed-KV-storage entry above). What remains is window-aware admission to turn the freed memory into higher concurrency.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "decode",
+    "kernel",
+    "kv",
+    "memory",
+    "modal",
+    "numerics",
+    "prefill",
+    "scheduler"
+  ],
+  "title": "Sliding-window attention",
+  "triggers": [],
+  "updated_at": 1788551463.846864
+}

@@ -1,0 +1,18 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-032",
+  "status": "resolved",
+  "summary": "Follows [[m2-3-paged-attention-kernel]]. The kernel removed the gather, but TPOT still sloped (N=32 173 ms vs N=1 50 ms): every decode step ran a Python per-row loop doing per-row tensor writes for the scatter-append (~N\u00d7non-shared-layers tiny GPU launches/step) and rebuilt the per-layer block table from Python lists. **Fix:** `BatchedPagedKVCache.append` now does ONE vectorized indexed write (`pool.k[block_ids, :, slots, :] = k_new`) for the whole batch (block-boundary alloc stays in Python \u2014 rare, no tensor writes); `block_table_tensor` builds with a single host\u2192device copy. **Result:** N=32 TPOT 173\u219299 ms, decode throughput 185\u2192323 tok/s (short workload). Net vs row-by-row at N=32: ~20\u00d7. Remaining slope (N=1 47 \u2192 N=32 99 ms) is partly real compute (A10G nearing compute-bound) + per-layer kernel launches \u2014 CUDA graphs is the lever for the rest.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "decode",
+    "graph",
+    "kernel",
+    "kv"
+  ],
+  "title": "De-Python the decode step (vectorized scatter + one-shot block table)",
+  "triggers": [],
+  "updated_at": 1788551463.846236
+}

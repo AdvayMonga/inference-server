@@ -1,0 +1,19 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-034",
+  "status": "resolved",
+  "summary": "`_splice_in` sized the attention-mask `torch.cat` off `backend.kv_length(batched_kv)`. For `TorchBackend` (DynamicCache) that equals the mask width forever. But the **custom backend's `kv_length = max(per-row seq_len)` DROPS when the longest row is evicted**, while the mask width doesn't shrink \u2192 a later admit cat'd mismatched widths \u2192 `RuntimeError` \u2192 worker died (`_fail_all`) \u2192 all later requests timed out. This is exactly why **short (uniform lengths) survived but mixed (a long row finishing among short ones) crashed**, and why no single-process repro reproduced it (only the server's evict-longest-then-admit pattern triggers it). **Fix:** drive mask bookkeeping off the mask's own width (`self._attention_mask.shape[1]`), not `kv_length` \u2014 equivalent for `TorchBackend`, correct for paged. Regression test `tests/test_scheduler_splice.py` (CPU, fake paged backend; confirmed to hang pre-fix). **Lasting rule:** scheduler-owned tensor state must be self-consistent, not derived from a backend metric that has different invariants per backend.",
+  "superseded_by": null,
+  "tags": [
+    "backpressure",
+    "cache",
+    "kernel",
+    "kv",
+    "numerics",
+    "scheduler"
+  ],
+  "title": "Scheduler mask width must not assume `== kv_length`",
+  "triggers": [],
+  "updated_at": 1788551463.846476
+}

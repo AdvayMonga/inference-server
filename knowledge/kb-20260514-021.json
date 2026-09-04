@@ -1,0 +1,14 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-021",
+  "status": "open",
+  "summary": "`eviction_benchmark.py` measures throughput/latency/hit-rate, not output quality over N turns. **Trigger:** picking a default policy for production, or H2O wiring lands.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark"
+  ],
+  "title": "Eviction quality benchmarks not run",
+  "triggers": [],
+  "updated_at": 1788551463.844702
+}

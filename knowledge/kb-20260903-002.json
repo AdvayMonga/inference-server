@@ -1,0 +1,19 @@
+{
+  "created_at": 1788408000.0,
+  "evidence": [],
+  "id": "kb-20260903-002",
+  "status": "open",
+  "summary": "Decode graphs go through `torch.compile`, so each bucket costs a fresh compile (~140s, linear in\nbucket count: 2 buckets 285s, 5 buckets 574s). A persistent Inductor cache on a Modal volume\nrecovers only ~19% (705s -> 574s) because most of the cost is Dynamo tracing, not codegen. So the\nDECODE ladder is coarse when compiling (powers of four) and fine otherwise. Prefill graphs do NOT\ngo through compile \u2014 all eight capture in 6.9s \u2014 so the PREFILL ladder is fine-grained, because\nthere a graph processes its whole bucket and padding is pure waste. Do not \"unify\" them.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "compile",
+    "decode",
+    "graph",
+    "modal",
+    "prefill"
+  ],
+  "title": "The two graph ladders are tuned in OPPOSITE directions \u2014 deliberate",
+  "triggers": [],
+  "updated_at": 1788551463.841768
+}

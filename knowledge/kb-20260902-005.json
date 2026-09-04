@@ -1,0 +1,19 @@
+{
+  "created_at": 1788321600.0,
+  "evidence": [],
+  "id": "kb-20260902-005",
+  "status": "open",
+  "summary": "`bench_serving_modal.py` draws from a pool of 64 prompts (`POOL_SIZE = 64`) against a PrefixCache\nwith no eviction. After warmup nearly every request is a cache HIT with a tiny suffix. Consequences\nwe measured directly:\n- Extending prefill graph buckets to 1024 for long prompts is **neutral** here (255.5 vs 256.2\n  tok/s at rate 2, TTFT p95 239 vs 238, at 164 requests) \u2014 the suffixes are too short to reach\n  the new buckets. It should matter on real traffic, which misses far more often.\n- Conversely the prefix-hit graph work is *over*-rewarded here relative to a realistic miss rate.\n**Before trusting any prefill number as representative, raise POOL_SIZE or add cache eviction.**",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "cache",
+    "graph",
+    "kv",
+    "modal",
+    "prefill"
+  ],
+  "title": "The serving harness is a prefix-cache-HIT benchmark",
+  "triggers": [],
+  "updated_at": 1788551463.842201
+}

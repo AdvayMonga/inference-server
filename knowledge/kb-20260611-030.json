@@ -1,0 +1,21 @@
+{
+  "created_at": 1781150400.0,
+  "evidence": [],
+  "id": "kb-20260611-030",
+  "status": "resolved",
+  "summary": "<a name=\"m2-3-paged-attention-kernel\"></a>Context: the batched gather+SDPA decode (above) regressed at N=32 because every step rebuilt a dense `[N,H,Lmax,D]` tensor with a Python per-row pad/cat loop + padded SDPA on short rows. **Decision:** write our own Triton kernel (`models/paged_attention_kernel.py::paged_decode_attention`) reading K/V directly from the scattered blocks via the block table \u2014 no gather, no padding, FlashAttention-style online softmax. **Triton, not raw CUDA C++:** Triton compiles to PTX/GPU (it *is* a CUDA kernel), ships with torch (no toolchain on the Modal image), ~90 lines vs many hundreds, and is what the serving stack (vLLM Triton kernels, FlashInfer) uses for exactly this. **Why our own and not vLLM's/FlashInfer's prebuilt kernel:** Gemma 4's full-attention layers have `head_dim=512`, the same ceiling that ruled out FA2 (see [2026-05-30 FA2]); prebuilt kernels cap at 256. A hand-written Triton kernel tiles `D` via a constexpr \u2192 handles 256 (sliding) and 512 (full) in one kernel. Also GQA (Hq query heads share num_kv_heads), scale=1.0 (norms absorb scaling). Wired behind a `paged_ctx` kwarg threaded `forward \u2192 layer \u2192 attention`; only the attention K/V-assembly+SDPA core is replaced, every norm/MLP/RoPE/projection path untouched. CPU/MPS keep the gather+SDPA path as portable reference (`decode_step_batched` branches on `device.type == \"cuda\"`). **Validation (GPU, Modal):** isolated kernel vs torch reference max|diff| 5e-4 across D\u2208{256,512} & GQA; single-step identical-input argmax agrees with gather on every row (full-model logit diff ~0.3 \u2248 1% of the \u00b130 softcap, from online-softmax vs SDPA reduction-order over 35 layers); full-sequence kernel output == gather. **Result:** N=32 TPOT 385\u2192173 ms, decode throughput 83\u2192185 tok/s and monotonic in batch (knee gone). Net vs original row-by-row: ~12\u00d7 at N=32. **Parity caveat:** greedy tokens are NOT byte-identical to the SDPA/HF path \u2014 ~1% logit noise flips near-ties (same reason vLLM \u2260 HF bit-exact); validation is by tolerance + argmax-agreement, not `torch.equal`. **Still open:** the slope isn't flat (N=32 TPOT 173 ms vs N=1 50 ms) \u2014 residual per-step Python (`block_table_tensor` built per-layer) + per-layer kernel-launch overhead across 35 layers; **CUDA graphs** is the next lever. Prefill still uses per-row SDPA (kernel is decode-only).",
+  "superseded_by": null,
+  "tags": [
+    "compile",
+    "decode",
+    "graph",
+    "kernel",
+    "kv",
+    "modal",
+    "numerics",
+    "prefill"
+  ],
+  "title": "M2.3 \u2014 Triton paged-attention decode kernel",
+  "triggers": [],
+  "updated_at": 1788551463.845951
+}

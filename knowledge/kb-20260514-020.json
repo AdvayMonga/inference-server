@@ -1,0 +1,14 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-020",
+  "status": "open",
+  "summary": "Only last row's value survives. Not user-facing (no endpoint routes through `generate_batch`). **Trigger:** any metric starts depending on per-row hit accounting there.",
+  "superseded_by": null,
+  "tags": [
+    "cache"
+  ],
+  "title": "Per-row `last_cache_hit_tokens` overwritten in `generate_batch`",
+  "triggers": [],
+  "updated_at": 1788551463.8445811
+}

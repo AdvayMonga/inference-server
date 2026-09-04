@@ -1,0 +1,18 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-023",
+  "status": "deferred",
+  "summary": "Single packed forward combining decode + one prefill chunk via varlen attention. **Blocker:** HF `AutoModelForCausalLM.forward` requires rectangular inputs and treats every token as new KV \u2014 needs FlashAttention-varlen (CUDA-only) or a custom per-layer attention path. This is why vLLM is its own runtime. **Sequencing:** after CUDA swap, as part of vLLM head-to-head. V-A's `_prefilling` state + `prefill_chunk` primitive is what V-B extends. **Trigger:** CUDA live AND V-A shipped AND starting vLLM benchmark.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "decode",
+    "kernel",
+    "kv",
+    "prefill"
+  ],
+  "title": "Chunked Prefill \u2014 Version B (mixed-batch, vLLM-style)",
+  "triggers": [],
+  "updated_at": 1788551463.8450072
+}

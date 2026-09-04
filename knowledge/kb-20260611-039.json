@@ -1,0 +1,18 @@
+{
+  "created_at": 1781150400.0,
+  "evidence": [],
+  "id": "kb-20260611-039",
+  "status": "open",
+  "summary": "Context: to keep M2.4 a pure plumbing change, `CustomTorchBackend.prefill`/`prefill_chunk` mirror `generate()`/`TorchBackend` behavior exactly rather than fixing two latent edges. (1) Full-cache-hit (`matched == len(prompt)`, only possible when the prompt is an exact multiple of `block_size` and fully cached) resets `matched = len-1` and re-forwards the last token at position `len` (should be `len-1`) \u2014 double-counts one position. Rare. (2) The first token after prefill is sampled greedily (the `prefill` ABC method takes no `sampling` arg), ignoring `req.sampling`; only decode tokens honor temperature/top-k/top-p. Both are identical to the existing `TorchBackend` path. **Trigger:** if either bites a correctness test or a sampling-quality benchmark. Fix for (2) would thread `sampling` through `prefill` for both backends (interface change).",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "cache",
+    "decode",
+    "kv",
+    "prefill"
+  ],
+  "title": "Custom prefill mirrors two pre-existing edge bugs (M2.4)",
+  "triggers": [],
+  "updated_at": 1788551463.8471591
+}

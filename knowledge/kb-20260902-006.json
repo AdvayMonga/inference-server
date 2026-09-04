@@ -1,0 +1,16 @@
+{
+  "created_at": 1788321600.0,
+  "evidence": [],
+  "id": "kb-20260902-006",
+  "status": "rejected",
+  "summary": "83-91% of prefill waves are K=1 at rates 1-6 (`wave_sizes` in scheduler stats), because\nMAX_BATCH_SIZE=256 admits every arrival immediately and the queue never backs up. At K=1 there is\nno padding, so grouping has nothing to do: A/B was noise at and below the knee, +6.8% only at\nrate 6. **This also removes the varlen/framework option from the near-term table** \u2014 varlen and\nlength-grouping both attack padding waste, and there is none at K=1. Kept behind\n`WAVE_WINDOW_MULT` (default 0); turn it on when the engine is actually driven at its stated\n100-256 concurrency target, where waves are wide.",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "scheduler",
+    "wave-planning"
+  ],
+  "title": "Length-grouped prefill waves \u2014 BUILT, DEFAULT OFF, inert below saturation",
+  "triggers": [],
+  "updated_at": 1788551492.203541
+}

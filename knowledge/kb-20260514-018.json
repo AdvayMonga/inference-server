@@ -1,0 +1,16 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-018",
+  "status": "open",
+  "summary": "H2OPolicy stores scores but no backend code extracts attention weights \u2192 H2O behaves like degenerate-LRU. Fix needs `output_attentions=True` + per-block aggregation through HF forward path. Defer until H2O is load-bearing for a benchmark.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "kernel",
+    "kv"
+  ],
+  "title": "H2O `record_attention()` never called",
+  "triggers": [],
+  "updated_at": 1788551463.844339
+}

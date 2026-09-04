@@ -1,0 +1,15 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-045",
+  "status": "resolved",
+  "summary": "Roadmap \"FP16\" was outdated shorthand. `dtype=torch.bfloat16` already in `load_model`. Same memory as FP16; modern default.",
+  "superseded_by": null,
+  "tags": [
+    "memory",
+    "numerics"
+  ],
+  "title": "bf16 weights, not FP16",
+  "triggers": [],
+  "updated_at": 1788551463.8480692
+}

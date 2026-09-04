@@ -1,0 +1,20 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-022",
+  "status": "resolved",
+  "summary": "Two forward passes per iter: one batched decode + one prefill chunk for an admitting request. MPS-feasible. Captures HOL-blocking fix (long prompt no longer freezes active users' decode). `_prefilling` queue; rows promote to `_active` on final chunk. Backend `prefill_chunk(chunk, partial_kv) -> extended_kv`. Cache lookup at admit, store after final chunk. **Shipped + tested** (`tests/test_chunked_prefill.py`, 8 tests).\n**Made disaggregation-ready (2026-06-13).** Two forward-compat seams so P/D disaggregation slots in without a scheduler rewrite:\n- **`PREFILL_MODE` config** (`monolithic`|`chunked`; `mixed_batch`/`disaggregated` are future values of the same enum). Derived from `PREFILL_CHUNK_SIZE` when unset (back-compat); unimplemented modes raise at construction.\n- **`_promote_to_decode(request, kv, kv_len, first_token)`** \u2014 the single point where a completed prefill's KV joins the decode batch (both monolithic admit + chunked final-chunk funnel through it). Today a local splice; under P/D disagg this is where the KV **transfer** from prefill-worker\u2192decode-worker plugs in. The loop is already prefill/decode-decoupled (`_prefilling` phase + `prefill_chunk` primitive), so disagg = a transfer at this seam + a remote prefill loop, not a rewrite.\n**P/D disaggregation itself stays deferred** (KV serialization/transfer over NCCL/RDMA, separate worker processes, control plane \u2014 real work, premature now). It attaches at the two seams above. Trigger: after the A100/H100 move + vLLM head-to-head, if prefill/decode interference is the measured tail-latency culprit. V-B (mixed-batch) is the intermediate step; see entry below.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "cache",
+    "decode",
+    "graph",
+    "kv",
+    "prefill",
+    "scheduler"
+  ],
+  "title": "Chunked Prefill \u2014 Version A (alternating)",
+  "triggers": [],
+  "updated_at": 1788551463.844874
+}

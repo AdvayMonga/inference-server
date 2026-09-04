@@ -1,0 +1,12 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-028",
+  "status": "open",
+  "summary": "Derivable from `active_size / max_active`. Add when dashboard needs the rolled-up number.",
+  "superseded_by": null,
+  "tags": [],
+  "title": "Batch utilization % metric",
+  "triggers": [],
+  "updated_at": 1788551463.845571
+}

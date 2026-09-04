@@ -1,0 +1,18 @@
+{
+  "created_at": 1780113600.0,
+  "evidence": [],
+  "id": "kb-20260530-017",
+  "status": "rejected",
+  "summary": "Context: tried `attn_implementation=\"flash_attention_2\"` in the Modal image. Lifespan crashed with `RuntimeError: FlashAttention forward only supports head dimension at most 256`. Gemma 4 E2B's head_dim exceeds 256; FA2's kernel ceiling on Ampere is hard. **Resolution:** stay on HF's default `sdpa` (which itself dispatches to FA2 when shapes allow, cuDNN otherwise). FA3 on H100 would lift the head_dim cap to 512 \u2014 revisit if/when we move off A10G. `torch.compile` kept (independent optimization).",
+  "superseded_by": null,
+  "tags": [
+    "backpressure",
+    "compile",
+    "flash-attention",
+    "kernel",
+    "modal"
+  ],
+  "title": "FlashAttention-2 ruled out on Gemma 4 + A10G",
+  "triggers": [],
+  "updated_at": 1788551492.2038689
+}

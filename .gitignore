@@ -44,3 +44,5 @@ PLAN.md
 notes/
 
 .claude/
+# Research loop: raw run panels (regenerable, large)
+runs/

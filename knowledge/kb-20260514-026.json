@@ -1,0 +1,15 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-026",
+  "status": "open",
+  "summary": "MPS `torch.compile` is shaky; continuous-batching's dynamic batch shape can trigger recompile storms. Flip on after CUDA deploy and benchmark.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "compile"
+  ],
+  "title": "`COMPILE_MODEL` default off",
+  "triggers": [],
+  "updated_at": 1788551463.84534
+}

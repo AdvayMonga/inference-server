@@ -1,0 +1,21 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-036",
+  "status": "resolved",
+  "summary": "Follows the sliding-window-attention entry below. Sliding layers (28/35) only need the last 512 tokens of KV, but were storing the full history. **Decision \u2014 sentinel eviction, no kernel change:** `BlockPool.window` carries the per-layer window (set from `attn.sliding_window` in `make_pools_for_gemma`); `PagedKVCache.append` (and `BatchedPagedKVCache.append`) call `_evict()` after each write \u2014 once a block is fully out of window it's `pool.release()`d and its block-table slot set to `-1`. The decode kernel's existing `start_b = (L-window)//block_size` already skips exactly those slots (`start_b == evicted count`), so **the kernel is unchanged**; `free_all`/`get`/`block_table_tensor` treat `-1` as \"skip / map to 0\" (out-of-window positions are masked anyway). **Prefix-cache interaction:** only cache prefixes \u2264 window \u2014 if a sliding layer evicted (prompt > 512), `prefill` skips `store()` (`cache.any_evicted`). This avoids offset-tracking in the PrefixCache; long-prefix sharing (rare, previously on wrong outputs) is dropped. **Validation:** unit test (blocks freed, in-window tail readable, clean `free_all`); 540-token windowed-decode-vs-HF (CPU); long-workload Modal sweep 0 errors, no perf regression. **Follow-up DONE:** window-aware per-pool admission now turns the freed memory into concurrency (see entry above). **Still OPEN (minor):** block-table list/tensor grows with context (sentinels kept, no offset trim) \u2014 tiny int32 data, a long-context micro-opt.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "decode",
+    "kernel",
+    "kv",
+    "memory",
+    "modal",
+    "prefill",
+    "scheduler"
+  ],
+  "title": "Windowed KV storage (free out-of-window blocks on sliding layers)",
+  "triggers": [],
+  "updated_at": 1788551463.846736
+}

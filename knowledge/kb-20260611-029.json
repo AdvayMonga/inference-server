@@ -1,0 +1,19 @@
+{
+  "created_at": 1781150400.0,
+  "evidence": [],
+  "id": "kb-20260611-029",
+  "status": "resolved",
+  "summary": "Context: M2.4 made `CustomTorchBackend` scheduler-drivable. The batched KV is a plain `list[PagedKVCache]` (one per active row); `decode_step_batched` looped `self.model(...)` once per row \u2014 correct, but ~B sequential forwards, no GPU-batching win. CUDA load-test confirmed it: TPOT scaled perfectly linearly (64 ms \u00d7 N) and aggregate decode throughput was pinned flat at ~15.7 tok/s regardless of batch size. **Resolution:** real batched decode \u2014 one forward over all rows. Two stages, both landed: (1) **batched gather+SDPA** \u2014 `BatchedPagedKVCache` left-pad-gathers all rows to `[N,H,Lmax,D]`, one masked SDPA; bf16-exact vs row-by-row in test. Throughput then scaled with batch (15\u2192114 tok/s @ N=16, ~7\u00d7) but regressed at N=32 (114\u219283) from the Python per-row pad/cat loop. (2) **[[m2-3-paged-attention-kernel]]** removed that knee. See that entry. The scheduler's `attention_mask` is still ignored by the custom backend (we build our own).",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "decode",
+    "kernel",
+    "kv",
+    "numerics",
+    "scheduler"
+  ],
+  "title": "Custom backend decode is row-by-row, not GPU-batched (M2.4)",
+  "triggers": [],
+  "updated_at": 1788551463.845767
+}

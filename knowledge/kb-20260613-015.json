@@ -1,0 +1,22 @@
+{
+  "created_at": 1781323200.0,
+  "evidence": [],
+  "id": "kb-20260613-015",
+  "status": "deferred",
+  "summary": "Context: decode is weight-bandwidth-bound (full-batch sweep: flat ms/step, 1481 tok/s @ N=32 A10G/E2B), so int8 weights = ~2\u00d7 fewer bytes/step = the real lever.\n**Built (`models/quant.py`, committed):** per-output-channel symmetric int8 RTN \u2014 `QuantizedLinear` + `quantize_model_int8` (in-place `nn.Linear` swap, `lm_head` excluded \u2014 tied to embeddings). Knob `CUSTOM_BACKEND_QUANT=int8`. **Accuracy near-lossless** (Gemma4, vs bf16): 0.93\u20130.96 top-1, 0.9999 logit cosine, ~0.97 ppl ratio \u2014 softcap/QK-norm/per-layer-embedding quirks don't break it.\n**Why deferred:** the CUDA throughput kernel doesn't land on A10G. `torch._weight_int8pack_mm` is CPU/MPS-only (no CUDA kernel). The CUDA win needs the dequant fused into the GEMV via `torch.compile`; on A10G that OOMs during Inductor autotune (24 GB, mostly KV pools), and `dynamic=True` (required to avoid a 276-layer recompile storm) doesn't fuse \u2014 it materializes the bf16 weight (no win). Static-shape fusion (gpt-fast) needs a fixed-shape model + memory headroom A10G lacks.\n**Decision (with user):** A10G is validation hardware; defer int8 *throughput* + E4B + vLLM head-to-head to the A100 80 GB / H100 phase, where (a) no OOM wall and (b) the fused paths work (A100: torchao int8 / static compile; H100: fp8 \u2014 the better method for that GPU). **Trigger:** the A100/H100 move. **Then:** wire a fusing GEMV into `QuantizedLinear.forward` (torchao / fp8 / custom Triton W8A16), flip `bench_quant_modal.py` to `gpu=\"A100\"`, measure ~2\u00d7. Foundation + accuracy done; only kernel + measurement remain.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "compile",
+    "decode",
+    "kernel",
+    "kv",
+    "memory",
+    "modal",
+    "numerics",
+    "quantization"
+  ],
+  "title": "int8 weight-only quantization",
+  "triggers": [],
+  "updated_at": 1788551463.8436742
+}

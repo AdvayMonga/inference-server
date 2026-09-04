@@ -1,0 +1,20 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-035",
+  "status": "resolved",
+  "summary": "Turns the windowed-storage memory savings into actual long-context concurrency. **Insight:** with all pools equal-sized, the FULL-attention pools bind (they grow with sequence; sliding pools cap at the window), so windowing alone doesn't raise admission \u2014 and naively shrinking the reservation for sliding layers would under-protect the full pools \u2192 OOM. **Two changes together:** (1) **right-size pools** \u2014 `make_pools_for_gemma(sliding_blocks=...)` + `CUSTOM_BACKEND_SLIDING_BLOCKS`; sliding pools shrink (capped at window), freeing memory to enlarge the full pools. (2) **per-pool window-aware gate** \u2014 `CustomTorchBackend.kv_reserve/kv_release` (base class no-op so `TorchBackend` is unaffected) reserve per-request *per-pool* block footprints (sliding capped at `window//bs + 1`) and admit only if EVERY pool fits; wired into `_admit_pending` (soft-hold on False) with `kv_release` on every exit (evict / prefill-fail / chunk-fail / `_fail_all`). The scalar `MAX_ACTIVE_KV_TOKENS` stays as a coarse cap. **Demonstrated (Modal, A10G):** long (1000-token) workload to N=32 with 0 rejections at ~equal memory (full=2048 + sliding=1200 \u2248 422 MB vs baseline 432 MB), where the baseline's 22000 token cap blocked ~1/3 at N=32 \u2192 ~1.45\u00d7 concurrency. Win scales with context/window ratio (\u22481/16 at 8k context). Tests: `tests/test_kv_admission.py` (footprint cap, full-pool binding, reject doesn't mutate state). **Note:** footprint is reservation-based (worst case `prompt + max_tokens`), not live usage \u2014 conservative, prevents decode OOM.",
+  "superseded_by": null,
+  "tags": [
+    "decode",
+    "kernel",
+    "kv",
+    "memory",
+    "modal",
+    "prefill",
+    "scheduler"
+  ],
+  "title": "Window-aware per-pool KV admission",
+  "triggers": [],
+  "updated_at": 1788551463.8466089
+}

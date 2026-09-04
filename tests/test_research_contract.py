@@ -192,3 +192,66 @@ def test_knowledge_entry_validates():
     k.validate()
     with pytest.raises(SchemaError):
         KnowledgeEntry(title="t", summary="s", status="maybe").validate()
+
+
+# ---------------------------------------------------------------- knowledge base
+
+def test_kb_roundtrip_and_index(tmp_path):
+    from inference_server.research.kb import (
+        already_rejected,
+        generate_index,
+        load_entries,
+        query,
+        save_entry,
+    )
+    d = tmp_path / "kb"
+    save_entry(KnowledgeEntry(title="Mixed-batch prefill", status="rejected",
+                              tags=["prefill", "scheduler"],
+                              summary="Eager forward is dispatch-bound; 3-5x tax.",
+                              triggers=["a cheap variable-shape forward exists"]), d)
+    save_entry(KnowledgeEntry(title="Radix prefix cache", status="resolved", tags=["cache"],
+                              summary="Shares at every block boundary."), d)
+
+    entries = load_entries(d)
+    assert len(entries) == 2
+    assert len(query(entries, tags=["cache"])) == 1
+    assert len(query(entries, status="rejected")) == 1
+    assert len(query(entries, text="dispatch")) == 1
+
+    idx = generate_index(entries)
+    assert "Do not retry blind" in idx          # the rejected section carries its warning
+    assert "Mixed-batch prefill" in idx
+    assert "**Revisit when:**" in idx
+
+
+def test_kb_flags_a_rehash_of_a_rejected_idea(tmp_path):
+    """The guard that stops the loop re-proposing a measured dead end."""
+    from inference_server.research.kb import already_rejected, save_entry
+    d = tmp_path / "kb"
+    save_entry(KnowledgeEntry(
+        title="Mixed-batch chunked prefill rejected",
+        summary="A mixed step cannot replay the decode graph; eager forward is dispatch bound.",
+        status="rejected", tags=["prefill"]), d)
+    from inference_server.research.kb import load_entries
+    entries = load_entries(d)
+    hits = already_rejected("try mixed-batch chunked prefill to overlap decode", entries)
+    assert hits, "should flag a restatement of a rejected idea"
+    assert not already_rejected("add int8 weight quantisation to the decode path", entries)
+
+
+def test_experiment_ledger_roundtrip(tmp_path):
+    from inference_server.research.kb import (
+        experiment_for_sha,
+        load_experiments,
+        save_experiment,
+    )
+    from inference_server.research.schemas import Arm
+    d = tmp_path / "exp"
+    e = Experiment(hypothesis_id="hyp-1", engine_sha_base="aaa1111", branch="perf/x",
+                   arms=[Arm(name="baseline", sha="aaa1111"),
+                         Arm(name="treatment", sha="bbb2222")], verdict="confirmed")
+    save_experiment(e, d)
+    back = load_experiments(d)
+    assert len(back) == 1 and back[0].arms[1].sha == "bbb2222"
+    assert experiment_for_sha("bbb2222", d) is not None
+    assert experiment_for_sha("ccc3333", d) is None

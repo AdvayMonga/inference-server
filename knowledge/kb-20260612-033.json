@@ -1,0 +1,17 @@
+{
+  "created_at": 1781236800.0,
+  "evidence": [],
+  "id": "kb-20260612-033",
+  "status": "rejected",
+  "summary": "The paged kernel originally took `MAX_BLOCKS` (= block_tables width) as a `tl.constexpr` loop bound. Triton recompiles per distinct constexpr value, so under the mixed/long sweep (sequence lengths grow and vary widely) it recompiled for nearly every block-count \u2014 ~1 s each, holding the backend lock \u2014 which looked like a hang (worker stalls, requests pile to `pending` and time out, no traceback). Fixed by making the loop bound a **runtime** per-sequence `n_blocks` derived from `seq_len` (compiles once; also optimal \u2014 no padding-block iterations). Confirmed on GPU: block-counts 2\u2192128 all 0.1\u20130.5 ms, no spikes. **Lasting rule:** never put a value that varies with input shape/length in a Triton `constexpr` \u2014 only genuinely-fixed things (head_dim, block_size).",
+  "superseded_by": null,
+  "tags": [
+    "compile",
+    "kernel",
+    "kv",
+    "triton"
+  ],
+  "title": "Triton constexpr on a data-varying value \u2192 recompile storm",
+  "triggers": [],
+  "updated_at": 1788551492.2040582
+}

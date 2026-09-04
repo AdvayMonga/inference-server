@@ -1,0 +1,16 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-024",
+  "status": "deferred",
+  "summary": "Today: hard-reject only for impossible requests; soft-hold (HOL-wait) is behaviorally equivalent to preemption for \"fits eventually\". Preemption only matters when strict priority/SLAs need to bump active rows *now*. Design sketch when revisited: recompute-preempt (re-prefill on resume, right for short prompts) or swap-preempt (CPU swap pool, right for long prompts); victim selection must coordinate with FairPolicy; reservation accounting must release/re-add `(prompt_len + max_tokens)` from `_active_kv_reserved`. **Triggers:** strict priority semantics, per-tenant SLAs, or tail-latency-vs-vLLM gap traced to wait-or-reject.",
+  "superseded_by": null,
+  "tags": [
+    "backpressure",
+    "kv",
+    "prefill"
+  ],
+  "title": "Preemption",
+  "triggers": [],
+  "updated_at": 1788551463.8451252
+}

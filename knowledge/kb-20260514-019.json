@@ -1,0 +1,15 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-019",
+  "status": "deferred",
+  "summary": "`mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "kv"
+  ],
+  "title": "MLX backend has no cache integration",
+  "triggers": [],
+  "updated_at": 1788551463.844466
+}

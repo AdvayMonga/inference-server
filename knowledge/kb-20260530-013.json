@@ -1,0 +1,17 @@
+{
+  "created_at": 1780113600.0,
+  "evidence": [],
+  "id": "kb-20260530-013",
+  "status": "deferred",
+  "summary": "Idea: mount a Modal Volume at `~/.cache/torch/inductor/` so compiled graphs survive cold starts (~20s saved per fresh container). Same pattern as our hf-cache volume. **Trigger:** revisit only after compile actually works on Gemma 4 (today it crashes before producing any artifact to cache, so persistence is moot). ~5 lines when the time comes.",
+  "superseded_by": null,
+  "tags": [
+    "cache",
+    "compile",
+    "graph",
+    "modal"
+  ],
+  "title": "Persistent `torch.inductor` cache via Modal Volume",
+  "triggers": [],
+  "updated_at": 1788551463.843371
+}

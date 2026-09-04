@@ -1,0 +1,15 @@
+{
+  "created_at": 1788235200.0,
+  "evidence": [],
+  "id": "kb-20260901-012",
+  "status": "resolved",
+  "summary": "`add_local_python_source(\"inference_server\")` resolves the package via the local import path.\nThe venv has an editable install pointing at the MAIN checkout, so a `modal run` launched from\na worktree silently shipped main's code and the container ran the unchanged backend. Always\n`PYTHONPATH=$PWD/src venv/bin/modal run ...` from a worktree (same for pytest). Cost one wasted\nA100 run that failed with `AttributeError: no attribute '_graph_buckets'`.",
+  "superseded_by": null,
+  "tags": [
+    "graph",
+    "modal"
+  ],
+  "title": "Modal runs from a git worktree ship the WRONG source",
+  "triggers": [],
+  "updated_at": 1788551463.8432589
+}

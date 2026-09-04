@@ -1,0 +1,15 @@
+{
+  "created_at": 1778731200.0,
+  "evidence": [],
+  "id": "kb-20260514-047",
+  "status": "resolved",
+  "summary": "Skipped at ship time; vLLM also treats as optional. Full design sketch + revisit triggers under the open \"Preemption \u2014 DEFERRED\" entry above.",
+  "superseded_by": null,
+  "tags": [
+    "backpressure",
+    "scheduler"
+  ],
+  "title": "Preemption skipped in initial FairScheduler",
+  "triggers": [],
+  "updated_at": 1788551463.8483148
+}

@@ -1,0 +1,19 @@
+{
+  "created_at": 1788321600.0,
+  "evidence": [],
+  "id": "kb-20260902-008",
+  "status": "rejected",
+  "summary": "Automatic-dynamic compile only generalizes over LARGE batch dims; Dynamo re-specializes on small\nones regardless of capture order. At `MAX_BATCH_SIZE=256` (8 buckets):\ndescending 1287.7s (256:155s, 128:262s, 64/32/16: ~1.8s each, then 8:295s, 4:283s, 2:288s);\nascending 1347.7s (2:212s, 4:386s, 8:368s, 16:368s, then 32/64/128/256: ~3.3s each).\nEither way ~4 expensive compiles and ~21 minutes of startup. Order is not the lever; the number of\nSMALL buckets is. Options, unresolved: a coarse ladder (e.g. 8/32/128/256, <=4x padding), dropping\ntorch.compile entirely (whole ladder captures in 5.6s without it \u2014 is compile still worth 1.47x now\nthat graphs, the de-Pythoned step and split-K have landed? unmeasured), or the persistent Inductor\ncache. Kept descending: it front-loads the two cheap-to-generalize large shapes.",
+  "superseded_by": null,
+  "tags": [
+    "benchmark",
+    "cache",
+    "capture-order",
+    "compile",
+    "decode",
+    "graph"
+  ],
+  "title": "Decode-graph capture order does not fix the compile blow-up",
+  "triggers": [],
+  "updated_at": 1788551492.2037618
+}
