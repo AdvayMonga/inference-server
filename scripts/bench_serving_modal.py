@@ -190,6 +190,12 @@ def sweep():
                 # backs up, every arrival is its own K=1 wave and there is nothing to group.
                 print(f"           wave sizes (K->count): {sched.stats().get('wave_sizes')}",
                       flush=True)
+                st = sched.stats()
+                print(f"           active={st['active_size']} pending={st['pending_depth']} "
+                      f"queue_hw={st['pending_high_water']} kv_blocked={st['kv_admit_blocked']} "
+                      f"rejected={st['total_rejected']} expired={st['total_expired']} "
+                      f"preempted={st['total_preempted']} iter_errors={st['total_iteration_errors']}",
+                      flush=True)
                 pc = getattr(backend, "prefix_cache", None)
                 if pc is not None:
                     c = pc.stats()
