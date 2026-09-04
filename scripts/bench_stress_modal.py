@@ -75,6 +75,7 @@ def run():
 
     from inference_server.backends import create_backend
     from inference_server.config import settings
+    from inference_server.research import harness as H
     from inference_server.scheduler import (
         ContinuousBatchScheduler,
         QueueFullError,
@@ -152,6 +153,28 @@ def run():
                       f"pool_free={free} util={cs['pool_utilization']}", flush=True)
                 if err:
                     print(f"            !! {err[:3]}", flush=True)
+                H.emit(H.panel_from_stats(
+                    H.build_validity(
+                        "bench_stress",
+                        {"model": settings.model_name, "gpu": GPU,
+                         "max_batch_size": settings.max_batch_size, "prefill_mode": "batched",
+                         "compile": "0",
+                         "prefill_graph": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "1"),
+                         "blocks": os.environ.get("CUSTOM_BACKEND_BLOCKS"),
+                         "sliding_blocks": os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS"),
+                         "context_window": os.environ.get("CONTEXT_WINDOW"),
+                         "rates": str(rate), "duration": DURATION, "pool_size": None,
+                         "max_queue_wait_s": settings.max_queue_wait_s,
+                         "prefix_cache_impl": settings.prefix_cache_impl,
+                         "wave_window_mult": settings.wave_window_mult,
+                         "hit_rate_target": HIT_RATE},
+                        n_samples=len(ok), workload_regime=H.infer_regime(cs.get("hit_rate")),
+                        stderr_value=H.stderr([x[1] for x in ok]),
+                        concurrency_observed=st.get("pending_high_water"),
+                        notes=f"overload sweep, rate={rate}, {len(err)} hard errors"),
+                    scheduler_stats=st, cache_stats=cs,
+                    ttft_p95=p95, wall_s=DURATION), label=f"stress rate={rate}")
+
                 # The engine must still be alive and serving after each level.
                 probe = []
                 await one(probe)

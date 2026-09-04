@@ -306,3 +306,29 @@ if __name__ == "__main__":
     section_capacity(m, hw)
     section_cross_hw(m)
     print()
+
+
+# ---------------------------------------------------------------------------- research loop
+
+def emit_panel(pct_of_roof: float | None = None, ridge_batch: int | None = None,
+               config: dict | None = None):
+    """Emit the attribution slice of the vitals panel (LOOP.md step 1 input).
+
+    CPU-only and analytical, so this is the cheapest thing the loop can measure — tier 1 in the
+    screening ladder, and it runs on every iteration before anything touches a GPU.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+    from inference_server.research import harness as H
+
+    cfg = {"model": None, "gpu": None, "max_batch_size": None, "prefill_mode": None,
+           "compile": None, "prefill_graph": None, "blocks": None, "sliding_blocks": None,
+           "context_window": None, "rates": None, "duration": None, "pool_size": None,
+           "max_queue_wait_s": None, "prefix_cache_impl": None, "wave_window_mult": None,
+           "analytical": True}
+    cfg.update(config or {})
+    return H.emit(H.panel_from_stats(
+        H.build_validity("roofline", cfg, n_samples=1, workload_regime="synthetic",
+                         notes="analytical ceiling; no GPU"),
+        pct_of_memory_roof=pct_of_roof, ridge_batch=ridge_batch), label="roofline")

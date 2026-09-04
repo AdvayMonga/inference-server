@@ -86,6 +86,7 @@ def sweep():
 
     from inference_server.backends import create_backend
     from inference_server.config import settings
+    from inference_server.research import harness as H
     from inference_server.kv_cache.cache_manager import CacheManager
     from inference_server.scheduler import ContinuousBatchScheduler, QueueFullError, ScheduledRequest
 
@@ -204,6 +205,41 @@ def sweep():
                       f"rejected={st['total_rejected']} expired={st['total_expired']} "
                       f"preempted={st['total_preempted']} iter_errors={st['total_iteration_errors']}",
                       flush=True)
+                # Machine record for the research loop; the tables above stay for humans.
+                cache_stats = (backend.prefix_cache.stats()
+                               if getattr(backend, "prefix_cache", None) else {})
+                cfg = {
+                    "model": MODEL, "gpu": GPU, "max_batch_size": settings.max_batch_size,
+                    "prefill_mode": "batched", "compile": COMPILE,
+                    "prefill_graph": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
+                    "blocks": os.environ.get("CUSTOM_BACKEND_BLOCKS"),
+                    "sliding_blocks": os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS"),
+                    "context_window": os.environ.get("CONTEXT_WINDOW"),
+                    "rates": str(rate), "duration": DURATION, "pool_size": POOL_SIZE,
+                    "max_queue_wait_s": settings.max_queue_wait_s,
+                    "prefix_cache_impl": settings.prefix_cache_impl,
+                    "wave_window_mult": settings.wave_window_mult,
+                }
+                H.emit(H.panel_from_stats(
+                    H.build_validity(
+                        "bench_serving", cfg,
+                        n_samples=len(collected),
+                        workload_regime=H.infer_regime(cache_stats.get("hit_rate"), POOL_SIZE),
+                        stderr_value=H.stderr(ttfts),
+                        concurrency_observed=st.get("pending_high_water"),
+                        notes=f"open-loop Poisson, rate={rate}",
+                    ),
+                    scheduler_stats=st, cache_stats=cache_stats,
+                    tok_s_within_slo=row["tok_s"] if row["within_slo"] else None,
+                    slo_ttft_ms=SLO_TTFT_MS, slo_tpot_ms=SLO_TPOT_MS,
+                    ttft_p50=row["ttft_p50"], ttft_p95=row["ttft_p95"],
+                    ttft_queue_p50=_pct(queue_ms, .50), ttft_queue_p95=_pct(queue_ms, .95),
+                    ttft_prefill_p50=_pct(prefill_ms, .50),
+                    ttft_prefill_p95=_pct(prefill_ms, .95),
+                    tpot_p50=row["tpot_p50"], tpot_p95=row["tpot_p95"],
+                    wall_s=window,
+                ), label=f"serving rate={rate}")
+
                 pc = getattr(backend, "prefix_cache", None)
                 if pc is not None:
                     c = pc.stats()
