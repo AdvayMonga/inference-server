@@ -249,9 +249,13 @@ class RadixPrefixCache:
         self._live = [i for i, p in enumerate(pools) if p is not None]
         self.root = _RadixNode()
         live = [pools[i].num_blocks for i in self._live]
-        # One node holds one block per layer, so the node cap IS the per-pool block cap.
+        # One node holds one block per layer, so for the trie the block watermark IS the node
+        # cap and `max_entries` is redundant. They must NOT be combined: `max_entries` counts
+        # whole PROMPTS for the dict implementation but single BLOCKS here, so taking the min
+        # shrank the trie to 1024 blocks of a 4096 allowance and made it thrash (22589 evictions
+        # for a 0.0015 hit rate under load).
         self.max_blocks = int(max_block_fraction * min(live)) if live else 0
-        self.max_entries = max_entries
+        self.max_entries = max_entries      # kept for API parity; not a binding cap here
         self._nodes = 0
         self._clock = 0
         self.hits = 0
@@ -268,7 +272,7 @@ class RadixPrefixCache:
         return self._clock
 
     def _capacity(self) -> int:
-        return min(self.max_blocks, self.max_entries)
+        return self.max_blocks
 
     def _evict_lru_leaf(self) -> int:
         """Drop the least recently used LEAF (an interior node is still someone's path)."""
