@@ -323,3 +323,19 @@ def test_radix_never_evicts_an_interior_node_in_use():
             assert child.parent is n
             stack.append(child)
     assert pools[0].free_count >= 0
+
+
+def test_radix_capacity_is_the_block_watermark_not_the_entry_count():
+    """`max_entries` counts whole PROMPTS for the dict but single BLOCKS for the trie. Taking
+    the min of the two shrank the trie to a quarter of its allowance and made it thrash —
+    22589 evictions for a 0.0015 hit rate under load."""
+    pools = [_pool(800)]
+    pc = RadixPrefixCache(pools, max_entries=64, max_block_fraction=0.5)
+    assert pc.stats()["max_blocks"] == 400          # the watermark, not min(400, 64)
+
+    # and it actually fills up to that watermark rather than stopping at max_entries
+    for i in range(300):
+        _run_prompt(pools, pc, list(range(i * 999, i * 999 + 64)))
+    st = pc.stats()
+    assert st["blocks_held"] > 64
+    assert st["blocks_held"] <= 400
