@@ -125,7 +125,8 @@ def sweep():
             if tok is None:
                 break
             stamps.append(time.perf_counter())
-        return (t0, stamps) if stamps else None
+        # req.admit_ts splits TTFT: queue-wait (admit - enqueue) vs prefill (first token - admit).
+        return (t0, stamps, req.admit_ts) if stamps else None
 
     async def run_rate(sched, rate, duration, rng, collect):
         """Open-loop: fire on a Poisson schedule for `duration`s regardless of completions."""
@@ -170,8 +171,12 @@ def sweep():
                 await run_rate(sched, rate, DURATION, rng, collected)
                 window = time.perf_counter() - t_start
                 ttfts, tpots, tok = [], [], 0
-                for t0, stamps in collected:
+                queue_ms, prefill_ms = [], []
+                for t0, stamps, admit_ts in collected:
                     ttfts.append((stamps[0] - t0) * 1000)
+                    if admit_ts:
+                        queue_ms.append((admit_ts - t0) * 1000)
+                        prefill_ms.append((stamps[0] - admit_ts) * 1000)
                     tok += len(stamps)
                     if len(stamps) > 1:
                         tpots.append((stamps[-1] - stamps[0]) / (len(stamps) - 1) * 1000)

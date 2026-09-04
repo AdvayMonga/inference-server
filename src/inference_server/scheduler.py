@@ -44,6 +44,8 @@ class ScheduledRequest:
     priority: int = 0           # higher = more important; tiebreak field for policies
     enqueue_ts: float = 0.0     # set by scheduler at enqueue (perf_counter)
     first_token_ts: float = 0.0 # set when first token is produced
+    admit_ts: float = 0.0       # set when the scheduler picks it up — splits TTFT into
+                                # queue-wait (admit - enqueue) and prefill (first_token - admit)
     sampling: SamplingParams = field(default_factory=SamplingParams)
 
 
@@ -432,6 +434,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     break
 
                 req = peeked
+                req.admit_ts = time.perf_counter()
                 self._consume(req, plan)
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
