@@ -14,13 +14,22 @@ from typing import Any, Callable
 from inference_server.research.compare import Significance, comparable, significance
 from inference_server.research.schemas import REPO_ROOT, GateResult, Hypothesis, Vitals
 
+def _k1_share(wave_sizes: dict[str, int]) -> float:
+    total = sum(wave_sizes.values())
+    return (wave_sizes.get("1", 0) / total) if total else 1.0
+
+
 # A change to X is only believable if the run actually exercised X. Maps a hypothesis's target
 # metric / tags to the panel evidence that proves the harness reached it.
 _EXERCISE_CHECKS: dict[str, Callable[[Vitals], tuple[bool, str]]] = {
+    # Not "is any wave wider than 1" — that is too lenient. The measured reality was 83-91%
+    # K=1, which still leaves a few K=2 waves while making wave planning inert. Require that
+    # K=1 is not overwhelmingly dominant, matching the threshold attribute.py flags.
     "wave_sizes": lambda v: (
-        sum(int(k) * n for k, n in v.wave_sizes.items() if int(k) > 1) > 0,
-        "every prefill wave was K=1, so wave planning could not have had any effect "
-        "(this is exactly how length-grouped waves looked like a win before measurement)",
+        _k1_share(v.wave_sizes) < 0.8,
+        f"{_k1_share(v.wave_sizes):.0%} of prefill waves were K=1, so there is nothing for "
+        f"wave composition to change (this is exactly how length-grouped waves looked like a "
+        f"win before the histogram was measured)",
     ),
     "cache_hit_rate": lambda v: (
         (v.cache_lookups or 0) > 0,
