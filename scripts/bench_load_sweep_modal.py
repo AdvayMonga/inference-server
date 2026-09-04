@@ -48,6 +48,7 @@ _kv_env = {
     "BENCH_MODEL": MODEL,
     # Forward backend knobs into the container too (same module-reimport reason as BENCH_*).
     "CUSTOM_BACKEND_COMPILE": os.environ.get("CUSTOM_BACKEND_COMPILE", "0"),
+    "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_COMPILE_MODE": os.environ.get("CUSTOM_BACKEND_COMPILE_MODE", ""),
     "CUSTOM_BACKEND_EXPLAIN": os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0"),
     "CUSTOM_BACKEND_QUANT": os.environ.get("CUSTOM_BACKEND_QUANT", ""),
@@ -68,6 +69,10 @@ image = (
 )
 app = modal.App("load-sweep", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
+# Inductor artifacts survive across runs. torch.compile is the whole reason cold start
+# costs ~21 min (each decode graph bucket is a fresh static shape = a fresh compile);
+# without this every run pays it again.
+inductor_cache = modal.Volume.from_name("inductor-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 NS = [1, 4, 8, 16, 32]
@@ -87,7 +92,8 @@ def _pct(xs, q):
     return s[f] + (s[c] - s[f]) * (k - f)
 
 
-@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
+@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache,
+                       "/root/.cache/inductor": inductor_cache},
               secrets=[hf_secret], timeout=5400)   # graph capture with compile on can take ~20min
 def sweep(backend_name: str, prefill_mode: str = "monolithic"):
     import asyncio, time
@@ -178,6 +184,8 @@ def sweep(backend_name: str, prefill_mode: str = "monolithic"):
                   f"TTFT={r['ttft_p50']}/{r['ttft_p95']}/{r['ttft_p99']}ms "
                   f"TPOT={r['tpot_p50']}/{r['tpot_p95']}ms", flush=True)
         return results
+
+    inductor_cache.commit()   # persist compiled artifacts
 
     return asyncio.run(main())
 

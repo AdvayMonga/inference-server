@@ -37,6 +37,7 @@ _env = {
     "MAX_BATCH_SIZE": os.environ.get("MAX_BATCH_SIZE", "64"),
     "PREFILL_MODE": "batched",
     "CUSTOM_BACKEND_COMPILE": "0",
+    "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "1"),
     # Deliberately small so KV pressure arrives in seconds rather than hours.
     "CUSTOM_BACKEND_BLOCKS": os.environ.get("CUSTOM_BACKEND_BLOCKS", "1200"),
@@ -55,10 +56,15 @@ image = (
 )
 app = modal.App("kv-stress", image=image)
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
+# Inductor artifacts survive across runs. torch.compile is the whole reason cold start
+# costs ~21 min (each decode graph bucket is a fresh static shape = a fresh compile);
+# without this every run pays it again.
+inductor_cache = modal.Volume.from_name("inductor-cache", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
-@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache},
+@app.function(gpu=GPU, volumes={"/root/.cache/huggingface": hf_cache,
+                       "/root/.cache/inductor": inductor_cache},
               secrets=[hf_secret], timeout=5400)
 def run():
     import asyncio
@@ -152,6 +158,7 @@ def run():
                 print(f"            alive-after-level: {probe[0][0]}\n", flush=True)
         finally:
             await sched.stop()
+            inductor_cache.commit()   # persist compiled artifacts for the next run
 
     asyncio.run(main())
     print("[stress] completed without the worker dying", flush=True)

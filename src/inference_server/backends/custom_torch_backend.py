@@ -34,13 +34,29 @@ logger = logging.getLogger(__name__)
 _PREFILL_BUCKETS = (64, 128, 256, 512, 1024)
 
 
-def _decode_buckets(max_rows: int) -> tuple[int, ...]:
-    """Row buckets for decode CUDA graphs: powers of two up to max_rows (<=2x padding waste).
-    Override with CUSTOM_BACKEND_GRAPH_BUCKETS="1,4,16,64" to trade padding for capture time."""
+def _decode_buckets(max_rows: int, coarse: bool = False) -> tuple[int, ...]:
+    """Row buckets for decode CUDA graphs.
+
+    Default is powers of two (<=2x padding waste). With torch.compile on, EVERY bucket is a
+    distinct static shape and costs its own compile — measured at ~140s each, linear in bucket
+    count (2 buckets 285s, 5 buckets 574s). A persistent Inductor cache only recovers ~19% of
+    that, because most of it is Dynamo tracing rather than codegen. So when compiling, step by
+    4x instead: <=4x padding (n=1 costs 20.2ms/step at bucket 8 vs 17.7ms at bucket 1, ~14%)
+    for half the buckets and half the startup.
+
+    Override with CUSTOM_BACKEND_GRAPH_BUCKETS="1,4,16,64" to pick the trade yourself.
+    """
     override = os.environ.get("CUSTOM_BACKEND_GRAPH_BUCKETS", "")
     if override:
         vals = sorted({min(int(x), max_rows) for x in override.split(",") if x.strip()})
         return tuple(vals) or (max_rows,)
+    if coarse:
+        out, b = [], 4
+        while b < max_rows:
+            out.append(b)
+            b *= 4
+        out.append(max_rows)
+        return tuple(dict.fromkeys(out))
     # Starts at 2, not 1: with torch.compile on, a batch-1 shape forces its own Inductor
     # specialization (Dynamo never makes a dim that can be 1 dynamic), measured at ~126s of
     # extra startup — to buy 4% at n=1 (17.73 vs 18.53 ms/step). Not worth it.
@@ -268,7 +284,8 @@ class CustomTorchBackend(InferenceBackend):
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
         self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
-        self._graph_buckets = _decode_buckets(self._graph_max_rows)
+        self._compile_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
+        self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
         self._scratch = None                 # one padding block per pool, shared by every bucket
 
@@ -277,7 +294,6 @@ class CustomTorchBackend(InferenceBackend):
         # ragged shapes would recompile-storm a shared compile; decode is the static [maxN,1]
         # graph shape. Default mode = fusion, no internal cudagraphs → composes with our manual
         # CUDA graph. The graph captures the fused kernel stream. CPU path stays uncompiled.
-        self._compile_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
         if self._compile_on:
             # mode=None → default fusion (no internal cudagraphs, composes with our manual graph).
             # "max-autotune-no-cudagraphs" autotunes GEMMs + fuses harder; the -no-cudagraphs
