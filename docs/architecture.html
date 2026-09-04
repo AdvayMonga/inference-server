@@ -17,6 +17,7 @@
   <a href="arch-scheduler.html">Scheduler</a>·
   <a href="arch-backend.html">Backend</a>·
   <a href="arch-cache.html">KV Cache</a>·
+  <a href="#loop">Research loop</a>·
   <a href="#pressure">Running out of memory</a>·
   <a href="#status">Phase status</a>
 </div>
@@ -213,6 +214,24 @@
   <li><strong>Each new token is streamed to its client</strong> via SSE. Metrics track TTFT and TPOT.</li>
   <li><strong>When a request hits EOS or max tokens, it leaves the active batch</strong>, releases its blocks, and frees its KV reservation.</li>
 </ol>
+
+<h2 id="loop">The research loop</h2>
+<p class="lead">The engine is the <em>subject</em>; the loop is how it changes. Method in
+<code>LOOP.md</code>, code in <code>src/inference_server/research/</code>.</p>
+<table>
+  <tr><th>Layer</th><th>Job</th></tr>
+  <tr><td>Engine (<code>src/inference_server/</code>)</td><td>Serve tokens. Knows nothing about the loop.</td></tr>
+  <tr><td>Instruments (<code>scripts/</code>)</td><td>Know engine internals intimately. Emit a fixed vitals panel to <code>runs/*.json</code> via <code>research.harness</code>.</td></tr>
+  <tr><td>Loop (<code>research/</code>)</td><td>Knows only the panel contract: attribute gaps, screen hypotheses cheapest-first, judge four gates, record. Engine-agnostic.</td></tr>
+  <tr><td>Memory (<code>knowledge/</code>, <code>experiments/</code>)</td><td>One JSON per record, git-tracked. <code>DECISIONS.md</code> is a generated view.</td></tr>
+</table>
+<p class="lead">Four gates decide a merge, judged <strong>in this order</strong>: <strong>validity</strong>
+(did this harness exercise the change?) → <strong>significance</strong> (does it clear the variance
+budget on the metric predicted beforehand?) → <strong>correctness</strong> (fast suite green, no new
+iteration errors) → <strong>cost</strong> (undeclared startup or memory regressions fail).
+Validity is first because a confident number from a blind harness is worse than no number —
+this project shipped one for about a month. <code>scripts/premerge_check.py</code> enforces that
+an engine change cannot reach main without a green experiment record.</p>
 
 <h2 id="pressure">What happens when it runs out of memory</h2>
 <p class="lead">KV blocks are finite and running out is an <strong>expected operating condition</strong>,
