@@ -7,6 +7,7 @@ the docstrings say which. Records are plain JSON on disk so they diff, review an
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 import uuid
@@ -30,15 +31,28 @@ def _new_id(prefix: str) -> str:
 
 
 def git_sha(short: bool = True) -> str:
-    cmd = ["git", "rev-parse", "--short" if short else "HEAD", "HEAD"]
+    """Engine SHA for the validity block.
+
+    Instruments run inside an ephemeral container with no git repo, so the launching side
+    passes it through RESEARCH_ENGINE_SHA. Without that a panel measured on Modal would carry
+    `unknown` and could not be attributed to a commit at all — which defeats the point of
+    recording provenance.
+    """
+    from_env = os.environ.get("RESEARCH_ENGINE_SHA")
+    if from_env:
+        return from_env
+    cmd = ["git", "rev-parse"] + (["--short"] if short else []) + ["HEAD"]
     try:
-        return subprocess.run(cmd[: 3 if short else 3], cwd=REPO_ROOT, capture_output=True,
-                              text=True, check=True).stdout.strip()
+        return subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True,
+                              text=True, check=True).stdout.strip() or "unknown"
     except Exception:
         return "unknown"
 
 
 def git_dirty() -> bool:
+    env = os.environ.get("RESEARCH_ENGINE_DIRTY")
+    if env is not None:
+        return env not in ("0", "false", "False", "")
     try:
         out = subprocess.run(["git", "status", "--porcelain"], cwd=REPO_ROOT,
                              capture_output=True, text=True, check=True).stdout

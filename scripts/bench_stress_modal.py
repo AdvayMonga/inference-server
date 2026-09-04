@@ -30,6 +30,11 @@ DURATION = float(os.environ.get("BENCH_DURATION", "30"))
 HIT_RATE = float(os.environ.get("BENCH_HIT_RATE", "0.3"))
 
 _env = {
+    # Panels are emitted inside an ephemeral container with no git repo; carry the
+    # launching side's sha in so the validity block can attribute the run.
+    "RESEARCH_ENGINE_SHA": os.environ.get("RESEARCH_ENGINE_SHA", ""),
+    "RESEARCH_ENGINE_DIRTY": os.environ.get("RESEARCH_ENGINE_DIRTY", ""),
+    "RESEARCH_RUN_GROUP": os.environ.get("RESEARCH_RUN_GROUP", ""),
     "BACKEND": "custom-cuda", "MODEL_NAME": MODEL, "BENCH_GPU": GPU, "BENCH_MODEL": MODEL,
     "BENCH_RATES": os.environ.get("BENCH_RATES", "4,16,48"),
     "BENCH_DURATION": os.environ.get("BENCH_DURATION", "30"),

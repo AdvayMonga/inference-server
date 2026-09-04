@@ -68,3 +68,22 @@ def test_emit_writes_a_loadable_record(tmp_path):
 def test_stderr_needs_more_than_one_sample():
     assert H.stderr([1.0]) is None
     assert H.stderr([1.0, 2.0, 3.0]) is not None
+
+
+def test_engine_sha_comes_from_the_environment_inside_a_container(monkeypatch):
+    """Instruments run where there is no git repo. Without the passthrough every Modal panel
+    would carry sha=unknown and be unattributable to a commit — which defeats provenance."""
+    from inference_server.research.schemas import git_dirty, git_sha
+    monkeypatch.setenv("RESEARCH_ENGINE_SHA", "deadbee")
+    monkeypatch.setenv("RESEARCH_ENGINE_DIRTY", "1")
+    assert git_sha() == "deadbee"
+    assert git_dirty() is True
+    monkeypatch.setenv("RESEARCH_ENGINE_DIRTY", "0")
+    assert git_dirty() is False
+
+
+def test_engine_sha_falls_back_to_real_git_locally(monkeypatch):
+    from inference_server.research.schemas import git_sha
+    monkeypatch.delenv("RESEARCH_ENGINE_SHA", raising=False)
+    sha = git_sha()
+    assert sha != "unknown" and len(sha) >= 7, "local sha lookup is broken"

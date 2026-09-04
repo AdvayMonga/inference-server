@@ -37,6 +37,11 @@ OUTPUT_MU, OUTPUT_SIGMA = 5.01, 0.65  # ~150 output tokens
 # Env baked into the image (Modal re-imports this module in-container, without the shell env).
 # BENCH_* MUST be here too or the container falls back to defaults (the compile-off smoke bug).
 _env = {
+    # Panels are emitted inside an ephemeral container with no git repo; carry the
+    # launching side's sha in so the validity block can attribute the run.
+    "RESEARCH_ENGINE_SHA": os.environ.get("RESEARCH_ENGINE_SHA", ""),
+    "RESEARCH_ENGINE_DIRTY": os.environ.get("RESEARCH_ENGINE_DIRTY", ""),
+    "RESEARCH_RUN_GROUP": os.environ.get("RESEARCH_RUN_GROUP", ""),
     "BACKEND": "custom-cuda", "MODEL_NAME": MODEL, "BENCH_GPU": GPU, "BENCH_MODEL": MODEL,
     "BENCH_RATES": os.environ.get("BENCH_RATES", "1,2,3,4,6,8"),
     "BENCH_DURATION": os.environ.get("BENCH_DURATION", "30"),
@@ -147,6 +152,8 @@ def sweep():
         if tasks:
             await asyncio.wait(tasks, timeout=300.0)
 
+    panels: list = []
+
     async def main():
         rng = random.Random(0)
         sched = ContinuousBatchScheduler(
@@ -220,7 +227,7 @@ def sweep():
                     "prefix_cache_impl": settings.prefix_cache_impl,
                     "wave_window_mult": settings.wave_window_mult,
                 }
-                H.emit(H.panel_from_stats(
+                panels.append(H.panel_from_stats(
                     H.build_validity(
                         "bench_serving", cfg,
                         n_samples=len(collected),
@@ -238,7 +245,8 @@ def sweep():
                     ttft_prefill_p95=_pct(prefill_ms, .95),
                     tpot_p50=row["tpot_p50"], tpot_p95=row["tpot_p95"],
                     wall_s=window,
-                ), label=f"serving rate={rate}")
+                ))
+                panels[-1].validate()   # fail here, in the run, not on the way home
 
                 pc = getattr(backend, "prefix_cache", None)
                 if pc is not None:
@@ -255,15 +263,19 @@ def sweep():
             inductor_cache.commit()   # persist compiled artifacts for the next run
         return rows
 
-    return asyncio.run(main())
+    rows = asyncio.run(main())
+    return {"rows": rows, "panels": [p.to_dict() for p in panels]}
 
 
 @app.local_entrypoint()
 def main():
     import csv
+    import sys
     from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-    rows = sweep.remote()
+    result = sweep.remote()
+    rows, panels = result["rows"], result["panels"]
     within = [r for r in rows if r["within_slo"]]
     best = max(within, key=lambda r: r["tok_s"], default=None)
     knee = next((r for r in rows if not r["within_slo"]), None)
@@ -285,3 +297,15 @@ def main():
         w.writeheader()
         w.writerows(rows)
     print(f"saved {out}")
+
+    # Persist the machine records locally — the container's filesystem is gone by now.
+    from inference_server.research.schemas import Vitals
+    runs = Path("runs")
+    for d in panels:
+        v = Vitals.from_dict(d)
+        v.to_json(runs / f"{v.validity.run_id}.json")
+    if panels:
+        grp = panels[0]["validity"]["run_group"]
+        print(f"wrote {len(panels)} panel(s) to runs/ (run_group={grp})")
+        print("  compare arms with: python -m inference_server.research.loop attribute "
+              f"runs/{panels[0]['validity']['run_id']}.json")
