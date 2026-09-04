@@ -74,7 +74,8 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
 
 @dataclass
 class Significance:
-    verdict: str            # "significant" | "noise" | "insufficient_samples" | "not_comparable"
+    # significant | noise | insufficient_samples | not_comparable | non_numeric_metric
+    verdict: str
     metric: str
     before: float | None
     after: float | None
@@ -123,6 +124,14 @@ def significance(
     if before is None or after is None:
         return Significance("insufficient_samples", metric, before, after, None, None,
                             f"{metric} missing from one arm")
+
+    # Some panel fields are structural, not scalar (wave_sizes, *_by_bucket). They are evidence
+    # for the VALIDITY gate, not something a t-test can judge — say so instead of crashing.
+    if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
+        return Significance(
+            "non_numeric_metric", metric, None, None, None, None,
+            f"{metric} is structural ({type(before).__name__}); it can support a validity "
+            f"check but cannot be tested for significance — pick a scalar metric")
 
     delta = after - before
     pct = (delta / before * 100.0) if before else None
