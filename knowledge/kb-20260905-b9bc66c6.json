@@ -1,0 +1,27 @@
+{
+  "created_at": 1788624301.3097348,
+  "evidence": [
+    {
+      "script": "scripts/probe_prefill_breakdown_modal.py"
+    },
+    {
+      "run_group": "iter2-prefill-breakdown"
+    }
+  ],
+  "id": "kb-20260905-b9bc66c6",
+  "status": "open",
+  "summary": "Measured on A100/E4B, one graphed 824-token prefill: attention takes **112.6 ms of 178 ms (63.5%)** while doing **0.12 of 7.68 TFLOP (1.5%)** of the work. That is **1.07 TFLOPS, or 0.34% of A100 peak** \u2014 roughly 100x off what the arithmetic allows.\n\nTime also scales superlinearly while FLOPs barely move: 12.7 -> 51.3 -> 112.6 ms for 240 -> 512 -> 824 tokens.\n\n**Cause (from the kernel's shape, to be confirmed):** `_paged_prefill_kernel` launches one program per (sequence, head, query token) and each program walks its own row's KV blocks serially. Nothing is shared between query tokens, so K/V blocks are re-read from HBM once per query \u2014 O(S^2) memory traffic for O(S^2) *arithmetic that is tiny*. This is exactly the problem FlashAttention-style tiling solves: block the queries, load each K/V tile once, reuse it across the whole tile.\n\n**This is now the single biggest lever in the engine.** TTFT p95 is the only thing breaking the SLO, prefill is 81% of that p95, and attention is 63% of prefill. Nothing else measured comes close.\n\nNot to be confused with the DECODE attention kernel, which was already given split-K (7.09x at n=1) \u2014 decode has one query per row, so it has no reuse to exploit. Prefill has S queries and currently exploits none of it.",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "kernel",
+    "attention",
+    "triton",
+    "roofline"
+  ],
+  "title": "The prefill attention kernel has no data reuse \u2014 0.34% of peak, 63% of the time",
+  "triggers": [
+    "a tiled prefill attention kernel is written and A/B'd against the current one"
+  ],
+  "updated_at": 1788624301.309736
+}

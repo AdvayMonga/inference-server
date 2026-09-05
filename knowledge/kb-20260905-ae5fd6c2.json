@@ -1,0 +1,17 @@
+{
+  "created_at": 1788624301.309995,
+  "evidence": [],
+  "id": "kb-20260905-ae5fd6c2",
+  "status": "resolved",
+  "summary": "Iteration 1 computed FLOPs, found prefill 4.4x off its ceiling, and concluded 'attention is only 1.5% of the work, so attention is not the cost'. Iteration 2 profiled it and found attention is 63.5% of the time. Both statements are true: the kernel does 1.5% of the FLOPs in 63.5% of the time.\n\n**Rule:** FLOP arithmetic answers *is there a gap and how big*. It cannot answer *where the gap is*, because it assumes every op runs at the same efficiency \u2014 and the whole point of a gap is that something does not. Tier 1 sizes the prize; tier 3 attributes it. Never let a tier-1 result close an attribution question.\n\nThe ladder still worked exactly as intended \u2014 tier 1 cost $0, killed two hypotheses, and pointed at the right area. It was the *conclusion drawn* that overreached.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark"
+  ],
+  "title": "LOOP: tier-1 arithmetic can locate a gap but must not be used to attribute it",
+  "triggers": [
+    "a future iteration attributes cost from arithmetic alone"
+  ],
+  "updated_at": 1788624301.3099961
+}

@@ -10,17 +10,18 @@
   ],
   "id": "kb-20260905-dcb78725",
   "status": "open",
-  "summary": "At the observed workload (lognormal 5.48/0.75: p50 240 tok, p95 824 tok) on A100/E4B:\n\n| prompt | attention | GEMM | total | floor @50% peak |\n|---|---|---|---|---|\n| p50 240 | 0.01 TFLOP | 2.20 | 2.21 | 14.2 ms |\n| p95 824 | 0.12 TFLOP | 7.56 | 7.68 | 49.2 ms |\n\nMeasured prefill p95 is **218 ms vs a 49 ms floor = 4.4x**. Attention is only **1.5%** of the FLOPs, so the long-standing assumption that the prefill tail is irreducible O(S^2) attention is false \u2014 the dense GEMM dominates and the gap is overhead.\n\nSensitivity: at a more realistic 25% of peak for this stack the floor is ~98 ms and the gap ~2.2x. Still a real lever either way.\n\n**This is where prefill work should go.** Not attention kernels, not scheduling (ruled out separately: queue p95 21 ms vs prefill p95 203 ms), not bucket boundaries (falsified below).",
+  "summary": "At the observed workload (lognormal 5.48/0.75: p50 240 tok, p95 824 tok) on A100/E4B:\n\n| prompt | attention | GEMM | total | floor @50% peak |\n|---|---|---|---|---|\n| p50 240 | 0.01 TFLOP | 2.20 | 2.21 | 14.2 ms |\n| p95 824 | 0.12 TFLOP | 7.56 | 7.68 | 49.2 ms |\n\nMeasured prefill p95 is **218 ms vs a 49 ms floor = 4.4x**. Attention is only **1.5%** of the FLOPs, so the long-standing assumption that the prefill tail is irreducible O(S^2) attention is false \u2014 the dense GEMM dominates and the gap is overhead.\n\nSensitivity: at a more realistic 25% of peak for this stack the floor is ~98 ms and the gap ~2.2x. Still a real lever either way.\n\n**This is where prefill work should go.** Not attention kernels, not scheduling (ruled out separately: queue p95 21 ms vs prefill p95 203 ms), not bucket boundaries (falsified below).\n\n**REFINED by tier 3 (iteration 2).** The FLOP arithmetic above is correct but the conclusion drawn from it was not. Profiling one graphed prefill by op category:\n\n| tokens | wall | attention | GEMM | norm/rope | kv_scatter |\n|---|---|---|---|---|---|\n| 240 | 41.4 ms | 12.7 (31%) | 12.9 (31%) | 7.3 | 5.2 |\n| 512 | 95.0 ms | 51.3 (55%) | 22.6 (24%) | 10.1 | 6.8 |\n| 824 | 178.0 ms | **112.6 (63.5%)** | 35.1 (20%) | 16.1 | 9.6 |\n\n**Attention IS the dominant cost** \u2014 while being 1.5% of the FLOPs. So the original claim ('the tail is attention') was right about WHERE and wrong about WHY; my correction was right about the FLOPs and wrong to conclude attention was not the cost. Both were wrong. The kernel is simply extremely inefficient, and that makes it reclaimable, not irreducible.",
   "superseded_by": null,
   "tags": [
-    "prefill",
+    "benchmark",
     "kernel",
-    "roofline",
-    "benchmark"
+    "prefill",
+    "refined",
+    "roofline"
   ],
-  "title": "Prefill is 4.4x off its arithmetic ceiling, and attention is not the cost",
+  "title": "Prefill is 4.4x off its arithmetic ceiling (tier-1 sizing; see refinement for where it goes)",
   "triggers": [
     "a tier-3 probe attributes the 4.4x to specific ops"
   ],
-  "updated_at": 1788581515.1165571
+  "updated_at": 1788624319.356357
 }
