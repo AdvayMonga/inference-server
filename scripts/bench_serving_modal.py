@@ -185,6 +185,16 @@ def sweep():
                 if arm_tiled is not None:
                     from inference_server.models import paged_attention_kernel as _K
                     _K._TILED_PREFILL = arm_tiled
+                    # Start every arm from a COLD prefix cache. Running arms in sequence lets
+                    # the cache warm between them, so the second arm measures a different
+                    # workload — the validity gate caught exactly this (cache_miss_heavy vs
+                    # mixed) and refused the comparison.
+                    pc = getattr(backend, "prefix_cache", None)
+                    if pc is not None:
+                        backend.prefix_cache = type(pc)(
+                            pools=backend.pools,
+                            max_entries=settings.prefix_cache_max_entries,
+                            max_block_fraction=settings.prefix_cache_block_fraction)
                 collected: list = []
                 t_start = time.perf_counter()
                 await run_rate(sched, rate, DURATION, rng, collected)

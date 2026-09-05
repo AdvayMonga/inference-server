@@ -1,0 +1,82 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260905-0e1f041a"
+      ],
+      "sha": "a7e11de"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260905-87839f96"
+      ],
+      "sha": "a7e11de"
+    }
+  ],
+  "branch": "perf/tiled-prefill-attention",
+  "cost_usd": 0.0,
+  "delta": {
+    "ttft_prefill_p95": {
+      "after": null,
+      "before": null,
+      "delta": null,
+      "detail": "workload_regime cache_miss_heavy vs mixed: e.g. a cache-hit run flatters prefill work that a cache-miss run does not",
+      "metric": "ttft_prefill_p95",
+      "pct": null,
+      "verdict": "not_comparable"
+    }
+  },
+  "engine_sha_base": "a7e11de",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "207 passed, 34 skipped, 2 warnings in 10.34s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "significance": {
+      "evidence": {
+        "after": null,
+        "before": null,
+        "delta": null,
+        "detail": "workload_regime cache_miss_heavy vs mixed: e.g. a cache-hit run flatters prefill work that a cache-miss run does not",
+        "metric": "ttft_prefill_p95",
+        "pct": null,
+        "verdict": "not_comparable"
+      },
+      "name": "significance",
+      "passed": false,
+      "reason": "not_comparable: workload_regime cache_miss_heavy vs mixed: e.g. a cache-hit run flatters prefill work that a cache-miss run does not"
+    },
+    "validity": {
+      "evidence": {
+        "reasons": [
+          "workload_regime cache_miss_heavy vs mixed: e.g. a cache-hit run flatters prefill work that a cache-miss run does not"
+        ]
+      },
+      "name": "validity",
+      "passed": false,
+      "reason": "arms are not comparable: workload_regime cache_miss_heavy vs mixed: e.g. a cache-hit run flatters prefill work that a cache-miss run does not"
+    }
+  },
+  "hypothesis_id": "hyp-iter3-tiled-prefill",
+  "id": "exp-20260905-520667e1",
+  "source": "loop",
+  "started_at": 1788628820.885997,
+  "verdict": "invalid"
+}
