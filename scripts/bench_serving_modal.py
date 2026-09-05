@@ -24,6 +24,10 @@ RATES = [float(x) for x in os.environ.get("BENCH_RATES", "1,2,3,4,6,8").split(",
 DURATION = float(os.environ.get("BENCH_DURATION", "30"))
 WARMUP = float(os.environ.get("BENCH_WARMUP", "4"))
 COMPILE = os.environ.get("CUSTOM_BACKEND_COMPILE", "1")
+# Interleave two arms inside ONE container. Arms in separate containers are not
+# comparable even with a shared run_group label: a tiled-prefill A/B showed TPOT p50
+# 95.3 vs 46.4ms between arms differing only in a PREFILL flag — machine variation.
+AB_TILED = os.environ.get("BENCH_AB_TILED", "0") == "1"
 
 SLO_TTFT_MS, SLO_TPOT_MS = 200.0, 50.0
 # Distinct prompts drawn from. NOTE: this is a prefix-cache-HIT benchmark at small values —
@@ -51,6 +55,7 @@ _env = {
     "BENCH_POOL_SIZE": os.environ.get("BENCH_POOL_SIZE", "64"),
     "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
+    "BENCH_AB_TILED": os.environ.get("BENCH_AB_TILED", "0"),
     "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
@@ -173,7 +178,13 @@ def sweep():
             for i in range(4):
                 ids, o = pool[i % POOL_SIZE]
                 await one(sched, ids, min(o, 16))
-            for rate in RATES:
+            plan = ([(r, n, t) for r in RATES
+                     for n, t in (("baseline", False), ("treatment", True))]
+                    if AB_TILED else [(r, "", None) for r in RATES])
+            for rate, arm_name, arm_tiled in plan:
+                if arm_tiled is not None:
+                    from inference_server.models import paged_attention_kernel as _K
+                    _K._TILED_PREFILL = arm_tiled
                 collected: list = []
                 t_start = time.perf_counter()
                 await run_rate(sched, rate, DURATION, rng, collected)
@@ -196,7 +207,7 @@ def sweep():
                     "within_slo": bool(collected) and p95t < SLO_TTFT_MS and p95p < SLO_TPOT_MS,
                 }
                 rows.append(row)
-                print(f"[serving] rate={rate:>5} reqs={row['reqs']:>4} tok/s={row['tok_s']:>7} "
+                print(f"[serving] {arm_name:<9} rate={rate:>5} reqs={row['reqs']:>4} tok/s={row['tok_s']:>7} "
                       f"TTFT={row['ttft_p50']}/{row['ttft_p95']}ms TPOT={row['tpot_p50']}/"
                       f"{row['tpot_p95']}ms SLO={'ok' if row['within_slo'] else 'X'}", flush=True)
                 # Padding waste only exists when prefill waves are WIDE. If the queue never
@@ -234,7 +245,8 @@ def sweep():
                         workload_regime=H.infer_regime(cache_stats.get("hit_rate"), POOL_SIZE),
                         stderr_value=H.stderr(ttfts),
                         concurrency_observed=st.get("pending_high_water"),
-                        notes=f"open-loop Poisson, rate={rate}",
+                        notes=f"open-loop Poisson, rate={rate}"
+                              + (f", arm={arm_name}" if arm_name else ""),
                     ),
                     scheduler_stats=st, cache_stats=cache_stats,
                     tok_s_within_slo=row["tok_s"] if row["within_slo"] else None,
