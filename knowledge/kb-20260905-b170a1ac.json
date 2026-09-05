@@ -1,0 +1,27 @@
+{
+  "created_at": 1788651807.2551591,
+  "evidence": [
+    {
+      "experiment": "exp-20260905-26c0e0f5"
+    },
+    {
+      "script": "scripts/test_tiled_prefill_modal.py"
+    }
+  ],
+  "id": "kb-20260905-b170a1ac",
+  "status": "open",
+  "summary": "Sliding layers cap attention at `window` keys (512), so their attention cost is bounded regardless of prompt length. Full-attention layers (head_dim **512**, no window) attend to the whole prompt, so on an 824-token prompt they dominate the 63% of prefill time that attention takes.\n\nTiling currently wins 1.57x at D=256 and LOSES 0.53x at D=512, because the [BLOCK_M, D] accumulator must shrink to BLOCK_M=16 and spills. So the tiled kernel is fast exactly where the work is bounded, and slow exactly where the work is.\n\n**Next lever:** make tiling work at D=512 \u2014 chunk the head dimension so the accumulator fits (process D in two halves of 256, or keep acc in shared memory), then re-A/B. Until then the isolated 1.57x is not reachable end-to-end.",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "kernel",
+    "attention",
+    "triton",
+    "roofline"
+  ],
+  "title": "The prefill attention lever is head_dim 512 (full-attention layers), not 256",
+  "triggers": [
+    "a D=512 tiled variant beats the untiled kernel in isolation"
+  ],
+  "updated_at": 1788651807.25516
+}
