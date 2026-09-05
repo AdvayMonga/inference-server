@@ -1,0 +1,98 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260905-b7d6fcc7"
+      ],
+      "sha": "ce61cd8"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260905-cb64e935"
+      ],
+      "sha": "ce61cd8"
+    }
+  ],
+  "branch": "perf/tiled-prefill-attention",
+  "cost_usd": 0.0,
+  "delta": {
+    "ttft_prefill_p95": {
+      "after": 194.0476675999714,
+      "before": 214.18877749998444,
+      "delta": -20.14110990001305,
+      "detail": "|t|=1.40 < 2.0: within the variance budget",
+      "metric": "ttft_prefill_p95",
+      "pct": -9.403438469139456,
+      "verdict": "noise"
+    }
+  },
+  "engine_sha_base": "ce61cd8",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "210 passed, 34 skipped, 2 warnings in 7.48s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "sanity": {
+      "evidence": {
+        "tpot_p50": {
+          "after": 85.9,
+          "before": 84.9,
+          "drift_pct": 1.2
+        },
+        "tpot_p95": {
+          "after": 95.5,
+          "before": 97.3,
+          "drift_pct": 1.8
+        }
+      },
+      "name": "sanity",
+      "passed": true,
+      "reason": "2 untouchable metric(s) held within 25%"
+    },
+    "significance": {
+      "evidence": {
+        "after": 194.0476675999714,
+        "before": 214.18877749998444,
+        "delta": -20.14110990001305,
+        "detail": "|t|=1.40 < 2.0: within the variance budget",
+        "metric": "ttft_prefill_p95",
+        "pct": -9.403438469139456,
+        "verdict": "noise"
+      },
+      "name": "significance",
+      "passed": false,
+      "reason": "noise: |t|=1.40 < 2.0: within the variance budget"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "bench_serving",
+        "regime": "cache_miss_heavy"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-iter4-tiled-prefill",
+  "id": "exp-20260905-26c0e0f5",
+  "source": "loop",
+  "started_at": 1788651768.7147021,
+  "verdict": "noise"
+}

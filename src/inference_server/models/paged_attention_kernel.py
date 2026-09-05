@@ -43,13 +43,34 @@ TILED_MIN_TOKENS = 512
 TILED_MAX_HEAD_DIM = 256
 
 
+# (BLOCK_M, num_warps) per head_dim. The accumulator is [BLOCK_M, D] fp32 spread across the
+# block's threads, so warps and tile size trade off against the register file together — leaving
+# num_warps to Triton's default heuristic is what made D=512 spill.
+# Swept on A100 (sweep_tiled_launch_modal.py), untiled = 1.0x:
+#
+#   D=256 S=824   BLOCK_M=16 w=4  10.84x  | BLOCK_M=32 w=4  1.81x  | BLOCK_M=64 w=8  0.83x
+#   D=256 S=512   BLOCK_M=16 w=4   8.10x  | BLOCK_M=32 w=4  1.01x
+#   D=512 S=824   BLOCK_M=16 w=4   0.59x  | nothing beats untiled at any config
+#
+# BLOCK_M=16 beats 32 by ~6x, which is the opposite of the "bigger tile = more reuse" intuition:
+# past a point the [BLOCK_M, D] accumulator costs more in occupancy than the reuse is worth.
+# Hand-picking 32 is what made the first end-to-end A/B read as noise.
+#
+# D=512 is absent deliberately: no launch config wins there, so those layers keep the untiled
+# kernel until a chunked-head-dim variant exists.
+LAUNCH_BY_HEAD_DIM = {256: (16, 4)}
+
+
+def prefill_launch(head_dim: int, n_tokens: int) -> tuple[int, int]:
+    """(queries per program, num_warps). BLOCK_M 0 means use the untiled kernel."""
+    if not _TILED_PREFILL or n_tokens < TILED_MIN_TOKENS:
+        return 0, 4
+    cfg = LAUNCH_BY_HEAD_DIM.get(head_dim)
+    return cfg if cfg else (0, 4)
+
+
 def prefill_block_m(head_dim: int, n_tokens: int) -> int:
-    """Queries per program, or 0 to use the untiled kernel."""
-    if not _TILED_PREFILL:
-        return 0
-    if head_dim > TILED_MAX_HEAD_DIM or n_tokens < TILED_MIN_TOKENS:
-        return 0
-    return 32
+    return prefill_launch(head_dim, n_tokens)[0]
 
 
 @triton.jit
@@ -435,7 +456,7 @@ def paged_prefill_attention(
     out = torch.empty(N, Sq, Hq, D, dtype=torch.float32, device=q.device)
     q = q.contiguous()
 
-    block_m = prefill_block_m(D, Sq)
+    block_m, warps = prefill_launch(D, Sq)
     if block_m:
         grid = (N, Hq, triton.cdiv(Sq, block_m))
         _paged_prefill_tiled_kernel[grid](
@@ -446,6 +467,7 @@ def paged_prefill_attention(
             block_tables.stride(0),
             scale, window,
             GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, BLOCK_M=block_m,
+            num_warps=warps,
         )
         return out.to(q.dtype)
 
