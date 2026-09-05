@@ -1,0 +1,17 @@
+{
+  "created_at": 1788629508.859294,
+  "evidence": [],
+  "id": "kb-20260905-c6904d17",
+  "status": "resolved",
+  "summary": "Iteration 3 tried to land a kernel that is correct and 1.57x faster in isolation. Each end-to-end A/B was invalid for a different reason:\n\n1. **Separate containers.** Same `run_group` label, different machines. Gates said CONFIRMED -48.2%; TPOT p50 differed 95.3 vs 46.4 ms between arms that differ only in a *prefill* flag, which is impossible. Caught by sanity, not by the gate.\n2. **Warm cache between arms.** Arms run in sequence share a prefix cache, so the second measures a different workload. **Caught by the validity gate** (cache_miss_heavy vs mixed) \u2014 refused before it could mislead.\n3. **CUDA-graph capture.** The flag flip had no effect on graphed prefills.\n\n**Lesson:** an isolated kernel win is not evidence for a merge, and 'all four gates green' is only as strong as the arms. Add a same-run sanity check \u2014 a metric the change CANNOT affect (here TPOT for a prefill change) must not move; if it does, the arms are contaminated regardless of what the gates say.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark"
+  ],
+  "title": "LOOP: three A/B attempts, three confounds \u2014 the gates earned their keep",
+  "triggers": [
+    "gates pass while an unrelated metric moves"
+  ],
+  "updated_at": 1788629508.8597271
+}

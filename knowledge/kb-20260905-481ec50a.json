@@ -1,0 +1,27 @@
+{
+  "created_at": 1788629508.8592808,
+  "evidence": [
+    {
+      "script": "scripts/test_tiled_prefill_modal.py"
+    },
+    {
+      "run_group": "iter3-tiled-prefill / iter3-ab / iter3-ab2 / iter3-ab3"
+    }
+  ],
+  "id": "kb-20260905-481ec50a",
+  "status": "open",
+  "summary": "FlashAttention-style tiling of `_paged_prefill_kernel` (one program per BLOCK_M queries, each K/V block loaded once instead of once per query). Written, correct, **not merged** \u2014 see below.\n\n**Correctness: 9/9** vs the untiled kernel, incl. ragged tails, prefix hits, sliding windows, head_dim 512 and a ragged batch (rel <= 3.8e-3).\n\n**Isolated speed (A100):**\n\n| tokens | D | untiled | tiled | speedup |\n|---|---|---|---|---|\n| 240 | 256 | 0.392 | 0.470 | 0.83x |\n| 512 | 256 | 1.545 | 1.222 | 1.26x |\n| 824 | 256 | 3.154 | 2.004 | **1.57x** |\n| 240 | 512 | 0.328 | 0.686 | 0.48x |\n| 512 | 512 | 1.288 | 1.978 | 0.65x |\n| 824 | 512 | 2.618 | 4.967 | **0.53x** |\n\nThe win needs enough queries to amortise the K/V load AND a head_dim small enough that the [BLOCK_M, D] accumulator stays in registers. At D=512 the tile must shrink to 16, halving reuse and spilling \u2014 consistently worse. Hence routing (D<=256 and S>=512), not blanket enabling.\n\n**Why not merged: no trustworthy end-to-end evidence.** Three A/B attempts, three different confounds (see the loop entry). The only clean run showed prefill p95 *worse* (259 -> 457 ms), and that run was itself invalid because CUDA-graph capture defeats the toggle. Isolated kernel wins do not entitle a merge.\n\nBranch `perf/tiled-prefill-attention` holds the work.",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "kernel",
+    "attention",
+    "triton"
+  ],
+  "title": "Tiled prefill attention: correct, wins in isolation, NOT merged",
+  "triggers": [
+    "an A/B that toggles tiling at CAPTURE time, not after, shows an end-to-end win",
+    "the D=512 register spill is solved (e.g. splitting D)"
+  ],
+  "updated_at": 1788629508.859295
+}

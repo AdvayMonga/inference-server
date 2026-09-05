@@ -16,6 +16,18 @@ export RESEARCH_ENGINE_DIRTY="${RESEARCH_ENGINE_DIRTY:-$([ -n "$(git status --po
 export RESEARCH_RUN_GROUP="${RESEARCH_RUN_GROUP:-grp-$(date +%Y%m%d)-$(openssl rand -hex 3)}"
 export PYTHONPATH="$PWD/src:${PYTHONPATH:-}"
 
+# Worktrees have no venv of their own; fall back to the main checkout's.
+VENV="${VENV:-}"
+if [ -z "$VENV" ]; then
+  if [ -x "venv/bin/modal" ]; then
+    VENV="venv"
+  else
+    MAIN_WT="$(git rev-parse --path-format=absolute --git-common-dir)/.."
+    [ -x "$MAIN_WT/venv/bin/modal" ] && VENV="$MAIN_WT/venv"
+  fi
+fi
+[ -x "$VENV/bin/modal" ] || { echo "[error] no modal venv found; set VENV=/path/to/venv" >&2; exit 1; }
+
 echo "[provenance] sha=$RESEARCH_ENGINE_SHA dirty=$RESEARCH_ENGINE_DIRTY group=$RESEARCH_RUN_GROUP"
 [ "$RESEARCH_ENGINE_DIRTY" = "1" ] && echo "[warn] working tree is dirty — this panel cannot be attributed to a clean commit"
-exec venv/bin/modal run --detach "$@"
+exec "$VENV/bin/modal" run --detach "$@"

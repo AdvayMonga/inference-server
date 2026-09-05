@@ -1,0 +1,18 @@
+{
+  "created_at": 1788629508.8592892,
+  "evidence": [],
+  "id": "kb-20260905-c1c2a5d5",
+  "status": "resolved",
+  "summary": "Flipping a module flag between arms inside one container does NOT change behaviour for anything already captured into a CUDA graph: the graph replays whichever kernel was active at capture time. The tiled-prefill treatment arm therefore mostly ran the UNTILED kernel and the comparison was meaningless.\n\n**Rule:** an A/B toggle must take effect before capture, or the arms must be separate processes with the flag set from the environment \u2014 and then the machine confound returns, so the harness must additionally re-measure the baseline in each container. Any flag consumed inside a captured graph cannot be A/B'd by flipping it at runtime.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark",
+    "graph"
+  ],
+  "title": "LOOP: an in-process A/B is defeated by CUDA-graph capture",
+  "triggers": [
+    "a future in-process A/B touches a graphed code path"
+  ],
+  "updated_at": 1788629508.8595421
+}
