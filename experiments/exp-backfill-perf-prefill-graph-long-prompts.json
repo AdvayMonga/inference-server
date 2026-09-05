@@ -35,6 +35,12 @@
       "passed": true,
       "reason": "neutral on this harness; correct and kept for cache-miss traffic"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

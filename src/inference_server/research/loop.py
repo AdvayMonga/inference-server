@@ -95,7 +95,7 @@ def cmd_judge(args) -> int:
     print(f"hypothesis: {hyp.statement}")
     print(f"predicted:  {hyp.predicted_metric} {hyp.predicted_direction} "
           f"by {hyp.predicted_magnitude}\n")
-    for name in ("validity", "significance", "correctness", "cost"):
+    for name in ("validity", "sanity", "significance", "correctness", "cost"):
         g = j.gates[name]
         print(f"  [{'PASS' if g.passed else 'FAIL'}] {name:13} {g.reason}")
     print(f"\nverdict: {j.verdict.upper()}")

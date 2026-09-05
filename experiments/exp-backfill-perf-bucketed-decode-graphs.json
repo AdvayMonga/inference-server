@@ -35,6 +35,12 @@
       "passed": false,
       "reason": "1.80x ms/step at n=1; startup +~21min, declared not hidden"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

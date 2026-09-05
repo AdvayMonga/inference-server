@@ -35,6 +35,12 @@
       "passed": true,
       "reason": "declared"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

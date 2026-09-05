@@ -35,6 +35,12 @@
       "passed": true,
       "reason": "rate 48: 0 completions -> 454, pool_free 0 -> 637"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

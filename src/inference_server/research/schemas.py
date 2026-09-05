@@ -225,6 +225,11 @@ class Hypothesis:
     # ruled out by an entry about TTFT being prefill-bound, because they share almost no words.
     tags: list[str] = field(default_factory=list)
     kb_check: list[str] = field(default_factory=list)   # KnowledgeEntry ids actually consulted
+    # Panel fields this change CANNOT affect. If one of them moves, the arms are contaminated
+    # regardless of how good the headline number looks. Iteration 3 produced a CONFIRMED
+    # "-48.2%" from two different machines while TPOT p50 differed 95.3 vs 46.4ms between arms
+    # that only differed in a PREFILL flag — a sanity metric would have caught that instantly.
+    sanity_metrics: list[str] = field(default_factory=list)
     status: str = "proposed"         # proposed | screened_out | testing | confirmed | rejected
     id: str = field(default_factory=lambda: _new_id("hyp"))
     created_at: float = field(default_factory=time.time)
@@ -284,7 +289,7 @@ class Experiment:
     SOURCES = ("loop", "reconstructed")
 
     def all_gates_green(self) -> bool:
-        required = {"validity", "significance", "correctness", "cost"}
+        required = {"validity", "sanity", "significance", "correctness", "cost"}
         if not required.issubset(self.gates):
             return False
         return all(self.gates[g].get("passed") for g in required)

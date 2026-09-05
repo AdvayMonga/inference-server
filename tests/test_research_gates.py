@@ -8,6 +8,7 @@ import pytest
 
 from inference_server.research.gates import (
     correctness_gate,
+    sanity_gate,
     cost_gate,
     judge,
     significance_gate,
@@ -144,12 +145,12 @@ def test_judge_verdict_noise_when_effect_within_variance():
     assert j.verdict == "noise"
 
 
-def test_judge_confirms_a_clean_win_and_records_all_four_gates():
+def test_judge_confirms_a_clean_win_and_records_every_gate():
     a = _panel(ttft_p95=200.0, validity=_v(stderr=1.0))
     b = _panel(ttft_p95=100.0, validity=_v(stderr=1.0))
     j = judge(_hyp(), a, b, run_tests=False)
     assert j.passed and j.verdict == "confirmed"
-    assert set(j.to_dict()) == {"validity", "significance", "correctness", "cost"}
+    assert set(j.to_dict()) == {"validity", "sanity", "significance", "correctness", "cost"}
 
 
 # ---------------------------------------------------------------- pre-merge enforcement
@@ -182,7 +183,8 @@ def test_reconstructed_experiments_are_history_not_authorisation():
     merge gate — otherwise prose about an unreproducible run becomes evidence."""
     from inference_server.research.schemas import Arm, Experiment
 
-    green = {g: {"passed": True} for g in ("validity", "significance", "correctness", "cost")}
+    green = {g: {"passed": True}
+             for g in ("validity", "sanity", "significance", "correctness", "cost")}
     hist = Experiment(hypothesis_id="h", engine_sha_base="a", arms=[Arm("treatment", "bbb")],
                       gates=green, verdict="confirmed", source="reconstructed")
     assert hist.all_gates_green()
@@ -192,3 +194,31 @@ def test_reconstructed_experiments_are_history_not_authorisation():
     live = Experiment(hypothesis_id="h", engine_sha_base="a", arms=[Arm("treatment", "bbb")],
                       gates=green, verdict="confirmed", source="loop")
     assert live.authorises_merge()[0]
+
+
+# ---------------------------------------------------------------- sanity (contamination)
+
+def test_sanity_gate_catches_contaminated_arms():
+    """Iteration 3's confound #1: gates said CONFIRMED -48.2% while TPOT p50 differed 95.3 vs
+    46.4ms between arms that only differed in a PREFILL flag. Decode cannot move."""
+    h = _hyp(sanity_metrics=["tpot_p50"])
+    a = _panel(ttft_p95=200.0, tpot_p50=95.3, validity=_v(stderr=1.0))
+    b = _panel(ttft_p95=100.0, tpot_p50=46.4, validity=_v(stderr=1.0))
+    g = sanity_gate(h, a, b)
+    assert not g.passed and "cannot affect it" in g.reason
+
+    j = judge(h, a, b, run_tests=False)
+    assert not j.passed and j.verdict == "contaminated", \
+        "a huge headline win on contaminated arms must not read as confirmed"
+
+
+def test_sanity_gate_allows_normal_drift():
+    h = _hyp(sanity_metrics=["tpot_p50"])
+    a = _panel(ttft_p95=200.0, tpot_p50=91.4, validity=_v(stderr=1.0))
+    b = _panel(ttft_p95=100.0, tpot_p50=86.5, validity=_v(stderr=1.0))
+    assert sanity_gate(h, a, b).passed
+
+
+def test_sanity_gate_is_a_noop_when_none_declared():
+    g = sanity_gate(_hyp(), _panel(), _panel())
+    assert g.passed and "no sanity metrics" in g.reason

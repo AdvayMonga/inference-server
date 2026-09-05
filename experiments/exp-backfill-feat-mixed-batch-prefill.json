@@ -30,6 +30,12 @@
       "passed": true,
       "reason": "mixed step cannot replay the decode graph; 3.2-5.3x eager tax"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

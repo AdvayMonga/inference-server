@@ -76,6 +76,38 @@ def validity_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals) -
                        "harness": baseline.validity.harness})
 
 
+SANITY_TOLERANCE = 0.25     # a metric the change cannot touch may drift this much, no more
+
+
+def sanity_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
+                tolerance: float = SANITY_TOLERANCE) -> GateResult:
+    """Did something move that this change could not possibly have moved?
+
+    The cheapest contamination detector there is. A prefill change cannot alter decode speed; if
+    TPOT moves 2x between arms, the arms differ by something other than the treatment — a
+    different machine, a warmed cache, a different container — and the headline number is
+    meaningless no matter how significant it looks.
+    """
+    if not hypothesis.sanity_metrics:
+        return GateResult("sanity", True, "no sanity metrics declared (consider adding some)",
+                          {"declared": []})
+    moved = {}
+    for m in hypothesis.sanity_metrics:
+        b, t = getattr(baseline, m, None), getattr(treatment, m, None)
+        if not isinstance(b, (int, float)) or not isinstance(t, (int, float)) or not b:
+            continue
+        drift = abs(t - b) / abs(b)
+        moved[m] = {"before": b, "after": t, "drift_pct": round(drift * 100, 1)}
+        if drift > tolerance:
+            return GateResult(
+                "sanity", False,
+                f"{m} moved {drift:.0%} ({b} -> {t}) but this change cannot affect it — the arms "
+                f"are contaminated, so the headline result is not evidence",
+                moved)
+    return GateResult("sanity", True,
+                      f"{len(moved)} untouchable metric(s) held within {tolerance:.0%}", moved)
+
+
 def significance_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
                       **kw: Any) -> GateResult:
     """Does the effect clear the variance budget, on the metric predicted beforehand?"""
@@ -164,6 +196,8 @@ class Judgement:
             return "confirmed"
         if not self.gates["validity"].passed:
             return "invalid"
+        if not self.gates.get("sanity", GateResult("sanity", True, "")).passed:
+            return "contaminated"
         sig = self.gates.get("significance")
         if sig and not sig.passed and sig.evidence.get("verdict") in ("noise",
                                                                      "insufficient_samples"):
@@ -176,10 +210,11 @@ class Judgement:
 
 def judge(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
           *, run_tests: bool = True) -> Judgement:
-    """Run all four gates in order. Later gates still run so the record is complete, but the
+    """Run the gates in order. Later gates still run so the record is complete, but the
     verdict is decided by the earliest failure."""
     gates = {
         "validity": validity_gate(hypothesis, baseline, treatment),
+        "sanity": sanity_gate(hypothesis, baseline, treatment),
         "significance": significance_gate(hypothesis, baseline, treatment),
         "correctness": correctness_gate(baseline, treatment, run_tests=run_tests),
         "cost": cost_gate(baseline, treatment),

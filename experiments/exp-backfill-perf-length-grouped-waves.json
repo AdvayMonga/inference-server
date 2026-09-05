@@ -35,6 +35,12 @@
       "passed": true,
       "reason": "83-91% of prefill waves are K=1 \u2014 the harness cannot test wave composition"
     },
+    "sanity": {
+      "evidence": {},
+      "name": "sanity",
+      "passed": true,
+      "reason": "n/a \u2014 predates the sanity gate"
+    },
     "significance": {
       "evidence": {},
       "name": "significance",

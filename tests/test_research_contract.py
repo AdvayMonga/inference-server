@@ -179,8 +179,9 @@ def test_hypothesis_can_target_the_loop_itself():
 def test_experiment_requires_all_four_gates_green():
     e = Experiment(hypothesis_id="h", engine_sha_base="abc")
     assert not e.all_gates_green()
-    e.gates = {g: {"passed": True} for g in ("validity", "significance", "correctness")}
-    assert not e.all_gates_green(), "three of four is not enough"
+    e.gates = {g: {"passed": True}
+               for g in ("validity", "sanity", "significance", "correctness")}
+    assert not e.all_gates_green(), "four of five is not enough"
     e.gates["cost"] = {"passed": True}
     assert e.all_gates_green()
     e.gates["correctness"] = {"passed": False}

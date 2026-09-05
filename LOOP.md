@@ -103,14 +103,19 @@ Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
 - repeat to `n` until `stderr` fits the variance budget
 - baseline arm re-run in the same session even if a baseline "already exists"
 
-## Step 5 — JUDGE (all four gates, in order)
+## Step 5 — JUDGE (all five gates, in order)
 
 1. **Validity** — did the harness exercise the thing that changed? (`wave_sizes` for a wave
    change; `workload_regime` for a cache change.) Fail ⇒ result discarded, not "inconclusive".
-2. **Significance** — effect exceeds the variance budget on the panel's primary metric.
-3. **Correctness** — fast suite green; parity gates **width-matched**, never across batch shapes;
+2. **Sanity** — did a metric this change *cannot* affect move anyway? A prefill change cannot
+   alter decode speed. Iteration 3 produced a CONFIRMED "-48.2%" from two different machines
+   while TPOT p50 differed 95.3 vs 46.4ms between arms that only differed in a prefill flag.
+   Declare `sanity_metrics` on every hypothesis; if one moves, the arms are contaminated and
+   the headline number is not evidence, however significant it looks.
+3. **Significance** — effect exceeds the variance budget on the panel's primary metric.
+4. **Correctness** — fast suite green; parity gates **width-matched**, never across batch shapes;
    no new `total_iteration_errors`.
-4. **Cost** — startup, memory and $ regressions declared, not just latency.
+5. **Cost** — startup, memory and $ regressions declared, not just latency.
 
 ## Step 6 — RECORD (always, both outcomes)
 
@@ -121,7 +126,7 @@ blind.
 
 ## Step 7 — MERGE, THEN RE-MEASURE
 
-Merge only on four green gates. Then **re-run Step 0**: the bottleneck moves. It moved three
+Merge only on five green gates. Then **re-run Step 0**: the bottleneck moves. It moved three
 times in one day here — decode → prefill dispatch → prefill compute — and a plan written before
 the move was stale immediately.
 
