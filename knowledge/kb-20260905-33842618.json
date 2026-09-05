@@ -1,0 +1,22 @@
+{
+  "created_at": 1788581515.116551,
+  "evidence": [
+    {
+      "script": "scripts/probe_prefill_ceiling.py"
+    }
+  ],
+  "id": "kb-20260905-33842618",
+  "status": "rejected",
+  "summary": "Hypothesis: add a bucket near 896 so an ~824-token suffix stops rounding up into the 1024 bucket (19.6% padding).\n\n**Falsified at tier 1 for $0.** The prefill kernel exits padding queries immediately (`if qj >= suffix_len: return`), so 200 padded positions x 8 heads = 1603 grid slots that do no work \u2014 padding is a launch cost, not a share of the compute. Refining the ladder cannot move prefill p95.\n\nNote this does NOT contradict the earlier ladder refinement, which improved prefill p50 by 10-20%: that came from smaller buckets doing less *real* work on short prompts, not from removing padding waste.",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "graph",
+    "kernel"
+  ],
+  "title": "Prefill bucket padding costs grid slots, not compute",
+  "triggers": [
+    "the kernel stops early-exiting padding queries"
+  ],
+  "updated_at": 1788581515.116723
+}

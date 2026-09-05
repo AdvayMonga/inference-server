@@ -1,0 +1,26 @@
+{
+  "created_at": 1788581515.116544,
+  "evidence": [
+    {
+      "script": "scripts/probe_prefill_ceiling.py"
+    },
+    {
+      "run_id": "runs/ (rate 2, group=first-real-panel)"
+    }
+  ],
+  "id": "kb-20260905-dcb78725",
+  "status": "open",
+  "summary": "At the observed workload (lognormal 5.48/0.75: p50 240 tok, p95 824 tok) on A100/E4B:\n\n| prompt | attention | GEMM | total | floor @50% peak |\n|---|---|---|---|---|\n| p50 240 | 0.01 TFLOP | 2.20 | 2.21 | 14.2 ms |\n| p95 824 | 0.12 TFLOP | 7.56 | 7.68 | 49.2 ms |\n\nMeasured prefill p95 is **218 ms vs a 49 ms floor = 4.4x**. Attention is only **1.5%** of the FLOPs, so the long-standing assumption that the prefill tail is irreducible O(S^2) attention is false \u2014 the dense GEMM dominates and the gap is overhead.\n\nSensitivity: at a more realistic 25% of peak for this stack the floor is ~98 ms and the gap ~2.2x. Still a real lever either way.\n\n**This is where prefill work should go.** Not attention kernels, not scheduling (ruled out separately: queue p95 21 ms vs prefill p95 203 ms), not bucket boundaries (falsified below).",
+  "superseded_by": null,
+  "tags": [
+    "prefill",
+    "kernel",
+    "roofline",
+    "benchmark"
+  ],
+  "title": "Prefill is 4.4x off its arithmetic ceiling, and attention is not the cost",
+  "triggers": [
+    "a tier-3 probe attributes the 4.4x to specific ops"
+  ],
+  "updated_at": 1788581515.1165571
+}

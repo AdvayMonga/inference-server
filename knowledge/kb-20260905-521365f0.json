@@ -1,0 +1,17 @@
+{
+  "created_at": 1788581515.116556,
+  "evidence": [],
+  "id": "kb-20260905-521365f0",
+  "status": "open",
+  "summary": "First real iteration, step 3. `already_rejected()` matches on keyword overlap and got both directions wrong:\n\n- **False positive:** flagged the roofline hypothesis as a rehash of 'length-grouped prefill waves' on shared words. That hypothesis was the one that found the 4.4x gap.\n- **False negative:** did NOT flag 'chunk long prefills across ticks', which is a scheduling lever that `kb-20260903-001` already rules out (queue p95 21ms vs prefill p95 203ms).\n\nA detector that flags good ideas and misses bad ones is worse than none \u2014 it teaches you to ignore the flag. It should surface *related* entries across all statuses for reading, ranked by relevance, and stop claiming a verdict.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "knowledge-base"
+  ],
+  "title": "LOOP: the rehash detector has false positives AND false negatives",
+  "triggers": [
+    "it fires wrongly again on a real iteration"
+  ],
+  "updated_at": 1788581515.1168342
+}

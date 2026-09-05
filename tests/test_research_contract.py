@@ -255,3 +255,27 @@ def test_experiment_ledger_roundtrip(tmp_path):
     assert len(back) == 1 and back[0].arms[1].sha == "bbb2222"
     assert experiment_for_sha("bbb2222", d) is not None
     assert experiment_for_sha("ccc3333", d) is None
+
+
+def test_related_finds_settled_entries_by_tag_not_wording(tmp_path):
+    """The first real iteration's false negative: 'chunk long prefills across ticks' shares
+    almost no words with the entry that rules it out, so free-text matching missed it. Tags are
+    declared rather than inferred, so they do not miss."""
+    from inference_server.research.kb import related, save_entry
+    d = tmp_path / "kb"
+    save_entry(KnowledgeEntry(
+        id_ := KnowledgeEntry(title="x", summary="y").id and "TTFT p95 is prefill compute",
+        summary="Queue p95 21ms vs prefill p95 203ms; scheduling levers are ruled out.",
+        status="resolved", tags=["prefill", "scheduler"]), d)
+    save_entry(KnowledgeEntry(title="Unrelated quantisation note", summary="int8 weights",
+                              status="open", tags=["quantization"]), d)
+    from inference_server.research.kb import load_entries
+    entries = load_entries(d)
+
+    hits = related("chunk long prefills across scheduler ticks", entries,
+                   tags=["prefill", "scheduler"])
+    assert hits, "tagged lookup must surface the entry that rules this out"
+    assert hits[0][1].title.startswith("TTFT p95")
+
+    # and it must not drag in everything
+    assert all(e.title != "Unrelated quantisation note" for _, e in hits)

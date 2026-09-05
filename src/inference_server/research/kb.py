@@ -91,19 +91,49 @@ def query(
     return items
 
 
+def related(statement: str, entries: Iterable[KnowledgeEntry] | None = None,
+            limit: int = 5, tags: Iterable[str] = ()) -> list[tuple[float, KnowledgeEntry]]:
+    """Entries worth reading before proposing `statement`, most relevant first.
+
+    Advisory, and deliberately not a verdict. The first real iteration proved a verdict-shaped
+    detector is worse than none: matching keywords against only the `rejected` set flagged the
+    hypothesis that went on to find a 4.4x gap, while missing 'chunk long prefills across ticks'
+    — a scheduling lever an already-`resolved` entry rules out. So: search EVERY status (a
+    resolved finding rules things out just as hard as a rejected one), score by weighted term
+    overlap, and let the caller read.
+    """
+    items = list(entries) if entries is not None else load_entries()
+    terms = {w for w in _slug(statement).split("-") if len(w) > 3}
+    if not terms:
+        return []
+
+    want_tags = set(tags)
+    scored: list[tuple[float, KnowledgeEntry]] = []
+    for e in items:
+        # Tag overlap dominates: it is declared, not inferred, so it does not miss an entry
+        # just because the wording differs.
+        tag_hits = len(want_tags & set(e.tags))
+        title_terms = {w for w in _slug(e.title).split("-") if len(w) > 3}
+        body_terms = {w for w in _slug(e.summary).split("-") if len(w) > 3}
+        tag_terms = {w for t in e.tags for w in _slug(t).split("-") if len(w) > 3}
+        # A title or tag hit means the entry is ABOUT this; a body hit only mentions it.
+        score = (6.0 * tag_hits
+                 + 3.0 * len(terms & title_terms)
+                 + 2.0 * len(terms & tag_terms)
+                 + 1.0 * len(terms & body_terms) / max(len(body_terms), 1) * 4)
+        # A settled finding constrains new work more than an open question does.
+        if e.status in ("rejected", "resolved"):
+            score *= 1.5
+        if score >= 3.0:
+            scored.append((round(score, 2), e))
+    scored.sort(key=lambda kv: -kv[0])
+    return scored[:limit]
+
+
 def already_rejected(statement: str, entries: Iterable[KnowledgeEntry] | None = None,
                      ) -> list[KnowledgeEntry]:
-    """Cheap guard against re-proposing a measured dead end. Keyword overlap, not semantics —
-    it is a prompt to read, not an authority."""
-    items = [e for e in (entries if entries is not None else load_entries())
-             if e.status == "rejected"]
-    words = {w for w in _slug(statement).split("-") if len(w) > 4}
-    hits = []
-    for e in items:
-        ewords = {w for w in _slug(e.title + "-" + e.summary).split("-") if len(w) > 4}
-        if len(words & ewords) >= 2:
-            hits.append(e)
-    return hits
+    """Kept for callers that want only the hard 'this was tried and failed' set."""
+    return [e for _, e in related(statement, entries, limit=10) if e.status == "rejected"]
 
 
 # --------------------------------------------------------------------------- experiments

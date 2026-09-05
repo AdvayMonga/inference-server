@@ -23,7 +23,7 @@ from pathlib import Path
 from inference_server.research.attribute import attribute
 from inference_server.research.gates import judge
 from inference_server.research.kb import (
-    already_rejected,
+    related,
     load_entries,
     query,
     save_experiment,
@@ -62,15 +62,25 @@ def cmd_screen(args) -> int:
         h.validate()
 
     for h in sorted(hyps, key=lambda x: x.falsification_tier):
-        dead = already_rejected(h.statement, entries)
-        flag = "  <-- MATCHES A REJECTED ENTRY" if dead else ""
+        hits = related(h.statement, entries, tags=h.tags)
+        blocking = [e for _, e in hits if e.status in ("rejected", "resolved")]
+        flag = "  <-- READ THE RELATED ENTRIES FIRST" if blocking else ""
         print(f"tier {h.falsification_tier} ({TIER_NAMES[h.falsification_tier]}){flag}")
         print(f"  {h.id}  {h.statement}")
         print(f"  predicts {h.predicted_metric} {h.predicted_direction} by "
               f"{h.predicted_magnitude}")
         print(f"  falsify with: {h.falsification_test}")
-        for d in dead:
-            print(f"    ! {d.id}: {d.title}")
+        for score, e in hits:
+            print(f"    ~{score:5.1f} [{e.status}] {e.id}: {e.title[:66]}")
+        if not hits:
+            print("    (no related knowledge — genuinely new ground, or the tags are missing)")
+        if not h.tags:
+            print("    ! no tags on this hypothesis: knowledge lookup fell back to free text, "
+                  "which is unreliable. Add tags.")
+        uncited = [e.id for _, e in hits
+                   if e.status in ("rejected", "resolved") and e.id not in h.kb_check]
+        if uncited:
+            print(f"    ! settled entries not cited in kb_check: {', '.join(uncited[:3])}")
         print()
     print("Run the cheapest tier first; never enter tier N+1 while tier N could still falsify.")
     return 0

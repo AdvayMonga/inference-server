@@ -220,7 +220,11 @@ class Hypothesis:
     falsification_tier: int          # 1 static, 2 CPU, 3 single-GPU probe, 4 full sweep
     falsification_test: str          # the cheapest thing that could prove this wrong
     kind: str = "engine_change"      # engine_change | instrument_change | harness_change
-    kb_check: list[str] = field(default_factory=list)   # KnowledgeEntry ids consulted
+    # Tags are the reliable matching key into the knowledge base. Free-text relevance proved
+    # too weak on the first real iteration: it missed that "chunk long prefills across ticks" is
+    # ruled out by an entry about TTFT being prefill-bound, because they share almost no words.
+    tags: list[str] = field(default_factory=list)
+    kb_check: list[str] = field(default_factory=list)   # KnowledgeEntry ids actually consulted
     status: str = "proposed"         # proposed | screened_out | testing | confirmed | rejected
     id: str = field(default_factory=lambda: _new_id("hyp"))
     created_at: float = field(default_factory=time.time)
