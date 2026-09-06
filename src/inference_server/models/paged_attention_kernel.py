@@ -14,9 +14,63 @@ CUDA-only (Triton). Import lazily on the GPU path; do not import on CPU/MPS.
 
 from __future__ import annotations
 
+import os
+
 import torch
 import triton
 import triton.language as tl
+
+# Tiled prefill attention. On by default; CUSTOM_BACKEND_TILED_PREFILL=0 falls back to the
+# one-program-per-query kernel for A/B.
+_TILED_PREFILL = os.environ.get("CUSTOM_BACKEND_TILED_PREFILL", "1") == "1"
+
+
+# Where tiling actually wins, measured on A100 (test_tiled_prefill_modal.py):
+#
+#   tokens   D    untiled    tiled   speedup
+#      240  256    0.392     0.470     0.83x
+#      512  256    1.545     1.222     1.26x
+#      824  256    3.154     2.004     1.57x
+#      240  512    0.328     0.686     0.48x
+#      512  512    1.288     1.978     0.65x
+#      824  512    2.618     4.967     0.53x
+#
+# The win needs BOTH enough queries to amortise the K/V load AND a head_dim small enough that
+# the [BLOCK_M, D] accumulator stays in registers. At D=512 the tile must shrink to 16, which
+# both halves the reuse and spills — tiling is consistently WORSE there. So route, do not
+# blanket-enable.
+TILED_MIN_TOKENS = 512
+TILED_MAX_HEAD_DIM = 256
+
+
+# (BLOCK_M, num_warps) per head_dim. The accumulator is [BLOCK_M, D] fp32 spread across the
+# block's threads, so warps and tile size trade off against the register file together — leaving
+# num_warps to Triton's default heuristic is what made D=512 spill.
+# Swept on A100 (sweep_tiled_launch_modal.py), untiled = 1.0x:
+#
+#   D=256 S=824   BLOCK_M=16 w=4  10.84x  | BLOCK_M=32 w=4  1.81x  | BLOCK_M=64 w=8  0.83x
+#   D=256 S=512   BLOCK_M=16 w=4   8.10x  | BLOCK_M=32 w=4  1.01x
+#   D=512 S=824   BLOCK_M=16 w=4   0.59x  | nothing beats untiled at any config
+#
+# BLOCK_M=16 beats 32 by ~6x, which is the opposite of the "bigger tile = more reuse" intuition:
+# past a point the [BLOCK_M, D] accumulator costs more in occupancy than the reuse is worth.
+# Hand-picking 32 is what made the first end-to-end A/B read as noise.
+#
+# D=512 is absent deliberately: no launch config wins there, so those layers keep the untiled
+# kernel until a chunked-head-dim variant exists.
+LAUNCH_BY_HEAD_DIM = {256: (16, 4)}
+
+
+def prefill_launch(head_dim: int, n_tokens: int) -> tuple[int, int]:
+    """(queries per program, num_warps). BLOCK_M 0 means use the untiled kernel."""
+    if not _TILED_PREFILL or n_tokens < TILED_MIN_TOKENS:
+        return 0, 4
+    cfg = LAUNCH_BY_HEAD_DIM.get(head_dim)
+    return cfg if cfg else (0, 4)
+
+
+def prefill_block_m(head_dim: int, n_tokens: int) -> int:
+    return prefill_launch(head_dim, n_tokens)[0]
 
 
 @triton.jit
@@ -56,7 +110,7 @@ def _paged_decode_kernel(
         kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
         k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)  # [BLOCK_SIZE, D]
         s = tl.sum(q[None, :] * k, axis=1) * scale              # [BLOCK_SIZE]
-        s = tl.where(valid, s, -float("inf"))
+        s = tl.where(valid, s, NEG)
 
         m_new = tl.maximum(m, tl.max(s, axis=0))
         alpha = tl.exp(m - m_new)
@@ -297,6 +351,94 @@ def _paged_prefill_kernel(
     tl.store(Out + seq * so_n + qj * so_s + qh * so_h + d, out)
 
 
+@triton.jit
+def _paged_prefill_tiled_kernel(
+    Q, Kp, Vp, BT, PL, SL, Out,
+    sq_n, sq_s, sq_h,
+    sk_b, sk_h, sk_s,
+    so_n, so_s, so_h,
+    bt_n,
+    scale, window,
+    GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
+):
+    """FlashAttention-style tiled paged prefill: one program per BLOCK_M query tokens.
+
+    The untiled kernel runs one program per QUERY TOKEN, so each K/V block is re-read from HBM
+    once per query — O(S^2) memory traffic for arithmetic that is only 1.5% of the prefill's
+    FLOPs. Measured consequence: 63% of prefill time at 0.34% of A100 peak.
+
+    Here a program loads each K/V block ONCE and scores it against BLOCK_M queries at a time,
+    so HBM traffic falls by a factor of BLOCK_M. Softmax stays numerically identical: the same
+    online (m, l) rescaling, just carried per-row across a tile instead of per-program.
+    """
+    seq = tl.program_id(0)
+    qh = tl.program_id(1)
+    tile = tl.program_id(2)
+    kvh = qh // GROUP
+
+    suffix_len = tl.load(SL + seq)
+    prefix_len = tl.load(PL + seq)
+
+    offs_m = tile * BLOCK_M + tl.arange(0, BLOCK_M)          # query index within the suffix
+    d = tl.arange(0, D)
+    slots = tl.arange(0, BLOCK_SIZE)
+
+    # A tile is entirely padding iff it starts past the real suffix — a scalar test, so no
+    # tensor-derived control flow.
+    tile_start = tile * BLOCK_M
+    if tile_start >= suffix_len:
+        return
+
+    real = offs_m < suffix_len                                # right-padded tail
+    q_pos = prefix_len + offs_m                               # absolute position per query
+    q = tl.load(Q + seq * sq_n + offs_m[:, None] * sq_s + qh * sq_h + d[None, :],
+                mask=real[:, None], other=0.0).to(tl.float32)  # [BLOCK_M, D]
+
+    # Causal bound for the whole tile: no query here attends past the tile's last real position.
+    # tl.minimum/maximum are elementwise; tl.min/max are reductions and are wrong on scalars.
+    last_in_tile = tl.minimum(tile_start + BLOCK_M - 1, suffix_len - 1)
+    last_pos = prefix_len + last_in_tile
+    n_blocks = (last_pos + 1 + BLOCK_SIZE - 1) // BLOCK_SIZE
+    lo = prefix_len + tile_start + 1 - window                 # window bound at the tile's first query
+    start_b = tl.maximum(lo, 0) // BLOCK_SIZE
+
+    # Finite sentinel, not -inf. Tiling shares one start block across BLOCK_M queries, so a row
+    # whose window begins later WILL see a fully-masked block; with -inf that gives
+    # exp(-inf - -inf) = NaN and poisons the whole tile. The untiled kernel never hits this
+    # because it computes the start block per query.
+    NEG: tl.constexpr = -1e30
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) + NEG
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
+
+    for b in range(start_b, n_blocks):
+        blk = tl.load(BT + seq * bt_n + b)
+        offs_n = b * BLOCK_SIZE + slots                       # absolute key positions
+
+        kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
+        k = tl.load(kptr).to(tl.float32)                      # [BLOCK_SIZE, D] — loaded ONCE
+        s = tl.dot(q, tl.trans(k)) * scale                    # [BLOCK_M, BLOCK_SIZE]
+
+        # causal (key <= query) and sliding window (key > query - window), per (query, key)
+        valid = (offs_n[None, :] <= q_pos[:, None]) &                 (offs_n[None, :] > q_pos[:, None] - window) & real[:, None]
+        s = tl.where(valid, s, -float("inf"))
+
+        m_new = tl.maximum(m_i, tl.max(s, axis=1))
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(s - m_new[:, None])
+        p = tl.where(valid, p, 0.0)
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+
+        vptr = Vp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
+        v = tl.load(vptr).to(tl.float32)                      # [BLOCK_SIZE, D] — loaded ONCE
+        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+        m_i = m_new
+
+    out = acc / tl.where(l_i == 0.0, 1.0, l_i)[:, None]
+    tl.store(Out + seq * so_n + offs_m[:, None] * so_s + qh * so_h + d[None, :],
+             out, mask=real[:, None])
+
+
 def paged_prefill_attention(
     q: torch.Tensor,             # [N, S_q, Hq, D] — suffix query tokens (right-padded), per sequence
     k_pool: torch.Tensor,        # [num_blocks, num_kv_heads, block_size, D]
@@ -313,6 +455,22 @@ def paged_prefill_attention(
     num_kv_heads = k_pool.shape[1]
     out = torch.empty(N, Sq, Hq, D, dtype=torch.float32, device=q.device)
     q = q.contiguous()
+
+    block_m, warps = prefill_launch(D, Sq)
+    if block_m:
+        grid = (N, Hq, triton.cdiv(Sq, block_m))
+        _paged_prefill_tiled_kernel[grid](
+            q, k_pool, v_pool, block_tables, prefix_lens, suffix_lens, out,
+            q.stride(0), q.stride(1), q.stride(2),
+            k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
+            out.stride(0), out.stride(1), out.stride(2),
+            block_tables.stride(0),
+            scale, window,
+            GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, BLOCK_M=block_m,
+            num_warps=warps,
+        )
+        return out.to(q.dtype)
+
     _paged_prefill_kernel[(N, Hq, Sq)](
         q, k_pool, v_pool, block_tables, prefix_lens, suffix_lens, out,
         q.stride(0), q.stride(1), q.stride(2),

@@ -1,0 +1,81 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260905-f29887c9"
+      ],
+      "sha": "7998c8b"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260905-d7defd85"
+      ],
+      "sha": "7998c8b"
+    }
+  ],
+  "branch": "perf/tiled-prefill-attention",
+  "cost_usd": 0.0,
+  "delta": {
+    "ttft_prefill_p95": {
+      "after": 281.24661349998803,
+      "before": 542.7201237000002,
+      "delta": -261.47351020001213,
+      "detail": "|t|=2.70 >= 2.0, moved as predicted",
+      "metric": "ttft_prefill_p95",
+      "pct": -48.17833332167854,
+      "verdict": "significant"
+    }
+  },
+  "engine_sha_base": "7998c8b",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "207 passed, 34 skipped, 2 warnings in 13.92s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "significance": {
+      "evidence": {
+        "after": 281.24661349998803,
+        "before": 542.7201237000002,
+        "delta": -261.47351020001213,
+        "detail": "|t|=2.70 >= 2.0, moved as predicted",
+        "metric": "ttft_prefill_p95",
+        "pct": -48.17833332167854,
+        "verdict": "significant"
+      },
+      "name": "significance",
+      "passed": true,
+      "reason": "-48.2% on ttft_prefill_p95 (|t|=2.70 >= 2.0, moved as predicted)"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "bench_serving",
+        "regime": "cache_miss_heavy"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-iter3-tiled-prefill",
+  "id": "exp-20260905-e5da5d8a",
+  "source": "loop",
+  "started_at": 1788628296.125141,
+  "verdict": "confirmed"
+}
