@@ -18,7 +18,7 @@
 
 **5. Explain before coding.** Before writing code, say what you're building, why you're building it, and how it works conceptually. Then code.
 
-**6. Concise code docs.** Comments and docstrings are short one-liners. Detailed explanations go in chat, not source. After each change, update Claude.md to make sure it reflects the codebase.
+**6. Concise code docs.** Comments and docstrings are short one-liners. Detailed explanations go in chat, not source. After each change, update CLAUDE.md to make sure it reflects the codebase.
 
 **7. Pedagogical mode for canonical-choice points.** Whenever we hit a place where the field/paper/canonical implementation made a non-obvious design choice explain in chat: (a) what the canonical choice is, (b) why they made it — the failure mode it solves or the win it produces, (c) what alternatives exist and the tradeoff, (d) where in our code we could customize it later in a novel way. Use simple language, concrete examples, analogies from physical intuition, and ASCII diagrams of shapes/flow when they help understanding. Goal: build the user's intuition so they could one day make these choices themselves rather than copy them. Only on the larger important ones.
 
