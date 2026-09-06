@@ -85,27 +85,34 @@ def main() -> int:
     # itself moves HEAD past it. So accept a record whose treatment sha is an ancestor of the
     # tip — but only if nothing behavioural changed since, or the record would be vouching for
     # code it never ran.
+    # Try EVERY candidate before giving up. Bailing on the first ancestor match let one stale
+    # record block a valid one — the drift report is only useful if nothing else vouches.
     exp = None
+    stale: list[tuple[str, str, list[str]]] = []
     for candidate in load_experiments():
-        if candidate.source != "loop":
+        if candidate.source != "loop" or not candidate.all_gates_green():
             continue
         for arm in candidate.arms:
-            if arm.name != "treatment" or not arm.sha:
-                continue
-            if not is_ancestor(arm.sha, args.ref):
+            if arm.name != "treatment" or not arm.sha or not is_ancestor(arm.sha, args.ref):
                 continue
             drifted = behavioural(changed_files(args.ref, arm.sha))
             if drifted:
-                print(f"\nFAIL  {candidate.id} validated {arm.sha[:12]}, but engine files "
-                      f"changed after it:")
-                for f in drifted:
-                    print(f"          {f}")
-                print("      Re-run the experiment against the current code.")
-                return 1
+                stale.append((candidate.id, arm.sha, drifted))
+                continue
             exp = candidate
             break
         if exp:
             break
+
+    if exp is None and stale:
+        print("\nFAIL  every matching experiment predates an engine change:")
+        for eid, sha, files in stale[:3]:
+            print(f"        {eid} validated {sha[:12]}, but since then:")
+            for f in files:
+                print(f"            {f}")
+        print("      Re-run the experiment against the current code "
+              "(and do not rebase after measuring).")
+        return 1
 
     if exp is None:
         print(f"\nFAIL  no loop-produced experiment validates {sha[:12]} or an ancestor of it.")

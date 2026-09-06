@@ -584,7 +584,7 @@ class CustomTorchBackend(InferenceBackend):
             if bucket is not None:
                 if not self._prefill_graphs:
                     self._capture_all_prefill_graphs()
-                if bucket in self._prefill_graphs:
+                if any(k[0] == bucket for k in self._prefill_graphs):
                     self.last_cache_hit_tokens = matched0
                     return [self._replay_prefill(p, bucket, matched0, shared0)]
         from inference_server.models.paged_kv_cache import PagedKVCache
@@ -823,12 +823,19 @@ class CustomTorchBackend(InferenceBackend):
         g["graph"].replay()
         return g["out"][:n]
 
-    def _capture_prefill_graph(self, bucket: int) -> None:
+    def _capture_prefill_graph(self, bucket: int, tiled: bool | None = None) -> None:
         """Capture the prefill forward once over static [1, bucket] buffers. Scratch blocks back the
         block tables during capture; replay copies in the real block IDs + tokens.
 
         The block table is sized for the whole context, not just the bucket, because with a
-        prefix-cache hit the write positions start at prefix_len rather than 0."""
+        prefix-cache hit the write positions start at prefix_len rather than 0.
+
+        Captured under a SPECIFIC kernel variant. A graph freezes whichever kernel was active at
+        capture, so a runtime flag can never change a replay — the only way to A/B a graphed path
+        is to capture one graph per variant and choose which to replay."""
+        from inference_server.models import paged_attention_kernel as _K
+        variant = _K._TILED_PREFILL if tiled is None else tiled
+        prev, _K._TILED_PREFILL = _K._TILED_PREFILL, variant
         dev, bs = self.device, self._block_size
         cols = self._graph_max_cols
         ids = torch.zeros(1, bucket, dtype=torch.long, device=dev)
@@ -858,11 +865,13 @@ class CustomTorchBackend(InferenceBackend):
         # dropped here, so the allocator recycled their addresses and a later replay read
         # garbage -> huge q_pos -> out-of-bounds block-table load -> illegal memory access.
         # That is why the FIRST replay always succeeded and a later one crashed.
-        self._prefill_graphs[bucket] = {"graph": g, "ids": ids, "suffix_lens": suffix_lens,
+        _K._TILED_PREFILL = prev
+        self._prefill_graphs[(bucket, variant)] = {
+                                       "graph": g, "ids": ids, "suffix_lens": suffix_lens,
                                         "bts": bts, "out": out,
                                         "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx,
                                         "logits_index": logits_index}
-        logger.info("Captured CUDA prefill graph (bucket=%d)", bucket)
+        logger.info("Captured CUDA prefill graph (bucket=%d, tiled=%s)", bucket, variant)
 
     def _capture_all_prefill_graphs(self) -> None:
         """Capture every prefill bucket at once, on first use.
@@ -873,11 +882,20 @@ class CustomTorchBackend(InferenceBackend):
         through torch.compile — capture is seconds, not minutes — so taking it all at once
         during warmup is cheap and makes the tail honest."""
         import time
+        from inference_server.models import paged_attention_kernel as _K
+
+        # By default capture only the active variant. PREFILL_GRAPH_VARIANTS=both captures each
+        # bucket twice (tiled and untiled) so the GRAPHED path — the production one — can be
+        # A/B'd by flipping the flag between arms. Costs ~0.5s and one graph pool per extra
+        # capture, so it is worth it only while running an experiment.
+        want = ([False, True] if os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS") == "both"
+                else [_K._TILED_PREFILL])
         t0 = time.perf_counter()
         for b in _PREFILL_BUCKETS:
-            if b not in self._prefill_graphs:
+          for variant in want:
+            if (b, variant) not in self._prefill_graphs:
                 try:
-                    self._capture_prefill_graph(b)
+                    self._capture_prefill_graph(b, tiled=variant)
                 except Exception:
                     logger.exception("prefill graph capture failed (bucket=%d) — eager fallback", b)
         print(f"[graphs] captured {len(self._prefill_graphs)} prefill graphs "
@@ -890,7 +908,11 @@ class CustomTorchBackend(InferenceBackend):
         this bucket's static buffers, replays. Returns (cache, first_token, kv_len)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
         S = len(prompt_ids) - matched
-        g = self._prefill_graphs[bucket]
+        from inference_server.models import paged_attention_kernel as _K
+        key = (bucket, _K._TILED_PREFILL)
+        if key not in self._prefill_graphs:                 # only one variant was captured
+            key = next(k for k in self._prefill_graphs if k[0] == bucket)
+        g = self._prefill_graphs[key]
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
         try:
             return self._replay_prefill_inner(cache, g, prompt_ids, bucket, matched, S)

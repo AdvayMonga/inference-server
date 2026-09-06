@@ -1,0 +1,99 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260906-9138d2c4",
+        "run-20260906-97e2f218",
+        "run-20260906-f3c3193b",
+        "run-20260906-515b0526"
+      ],
+      "sha": "1b33900"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260906-cfee42cc",
+        "run-20260906-98ee8a32",
+        "run-20260906-348e5d2c",
+        "run-20260906-cf487809"
+      ],
+      "sha": "1b33900"
+    }
+  ],
+  "branch": "feat/prefill-graph-variants",
+  "cost_usd": 0.55,
+  "delta": {
+    "ttft_prefill_p95": {
+      "after": 92.56801361664952,
+      "before": 103.61103443332992,
+      "delta": -11.043020816680396,
+      "detail": "|t|=0.43 < 2.0 across 3v3 runs (sd 26.1/36.4)",
+      "metric": "ttft_prefill_p95",
+      "pct": -10.658151303166647,
+      "verdict": "noise"
+    }
+  },
+  "engine_sha_base": "1b33900",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "213 passed, 34 skipped, 2 warnings in 6.60s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "sanity": {
+      "evidence": {
+        "tpot_p50": {
+          "after": 39.6,
+          "before": 39.3,
+          "drift_pct": 0.8
+        }
+      },
+      "name": "sanity",
+      "passed": true,
+      "reason": "1 untouchable metric(s) held within 25%"
+    },
+    "significance": {
+      "evidence": {
+        "after": 92.56801361664952,
+        "before": 103.61103443332992,
+        "delta": -11.043020816680396,
+        "detail": "|t|=0.43 < 2.0 across 3v3 runs (sd 26.1/36.4)",
+        "metric": "ttft_prefill_p95",
+        "pct": -10.658151303166647,
+        "verdict": "noise"
+      },
+      "name": "significance",
+      "passed": false,
+      "reason": "noise: |t|=0.43 < 2.0 across 3v3 runs (sd 26.1/36.4)"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "bench_serving",
+        "regime": "cache_miss_heavy"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-iter9-graph-variants",
+  "id": "exp-20260905-4a8ad526",
+  "source": "loop",
+  "started_at": 1788663917.051019,
+  "verdict": "noise"
+}

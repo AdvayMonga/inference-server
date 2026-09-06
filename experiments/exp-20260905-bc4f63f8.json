@@ -1,0 +1,99 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260906-1b83c16d",
+        "run-20260906-0b48fc32",
+        "run-20260906-1c6e6b6b",
+        "run-20260906-a99c0af7"
+      ],
+      "sha": "6ae983c"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260906-6b59b0aa",
+        "run-20260906-c5682965",
+        "run-20260906-52a9bf8c",
+        "run-20260906-c0791abe"
+      ],
+      "sha": "6ae983c"
+    }
+  ],
+  "branch": "feat/prefill-graph-variants",
+  "cost_usd": 0.55,
+  "delta": {
+    "ttft_prefill_p95": {
+      "after": 144.1040891166768,
+      "before": 126.90045813332817,
+      "delta": 17.203630983348617,
+      "detail": "|t|=0.58 < 2.0 across 3v3 runs (sd 21.3/47.1)",
+      "metric": "ttft_prefill_p95",
+      "pct": 13.55679186380367,
+      "verdict": "noise"
+    }
+  },
+  "engine_sha_base": "6ae983c",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "215 passed, 34 skipped, 2 warnings in 7.40s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "sanity": {
+      "evidence": {
+        "tpot_p50": {
+          "after": 104.2,
+          "before": 103.6,
+          "drift_pct": 0.6
+        }
+      },
+      "name": "sanity",
+      "passed": true,
+      "reason": "1 untouchable metric(s) held within 25%"
+    },
+    "significance": {
+      "evidence": {
+        "after": 144.1040891166768,
+        "before": 126.90045813332817,
+        "delta": 17.203630983348617,
+        "detail": "|t|=0.58 < 2.0 across 3v3 runs (sd 21.3/47.1)",
+        "metric": "ttft_prefill_p95",
+        "pct": 13.55679186380367,
+        "verdict": "noise"
+      },
+      "name": "significance",
+      "passed": true,
+      "reason": "instrument_change: no measurable change, as intended"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "bench_serving",
+        "regime": "cache_miss_heavy"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-iter9-graph-variants",
+  "id": "exp-20260905-bc4f63f8",
+  "source": "loop",
+  "started_at": 1788665193.956308,
+  "verdict": "confirmed"
+}
