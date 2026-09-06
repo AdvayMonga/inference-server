@@ -1,7 +1,7 @@
 """Refuse a merge that has no experiment behind it.
 
 The rule: anything that changes engine behaviour reaches main only with an `experiments/*.json`
-record whose four gates are green. This is what makes "clear cause and effect" enforceable
+record whose gates are all green. This is what makes "clear cause and effect" enforceable
 instead of aspirational — without it the loop can change code indefinitely and nobody can say
 which change did what.
 
@@ -106,9 +106,9 @@ def main() -> int:
 
     if exp is None and stale:
         print("\nFAIL  every matching experiment predates an engine change:")
-        for eid, sha, files in stale[:3]:
-            print(f"        {eid} validated {sha[:12]}, but since then:")
-            for f in files:
+        for eid, vsha, vfiles in stale[:3]:
+            print(f"        {eid} validated {vsha[:12]}, but since then:")
+            for f in vfiles:
                 print(f"            {f}")
         print("      Re-run the experiment against the current code "
               "(and do not rebase after measuring).")
