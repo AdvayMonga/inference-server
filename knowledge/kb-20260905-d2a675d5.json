@@ -1,0 +1,23 @@
+{
+  "created_at": 1788659941.819363,
+  "evidence": [
+    {
+      "run_group": "iter8-replicated"
+    }
+  ],
+  "id": "kb-20260905-d2a675d5",
+  "status": "resolved",
+  "summary": "The tiled prefill kernel is **10.84x** faster than the untiled one in a tight microbenchmark, and produced **no measurable end-to-end benefit** \u2014 a significant +24.3% regression on prefill p95, everything else noise.\n\nWhy that is not a contradiction: the kernel is routed to sliding layers (D=256) on long prompts (S>=512) only, so it touches a minority of layers on a minority of requests; and the A/B ran with the prefill graph off, where dispatch dominates and kernel time is a smaller share.\n\n**Rule: a microbenchmark sizes a kernel, it does not justify shipping one.** Always carry the isolated number through to a replicated service-level A/B before defaulting it on. This repo now has two examples of an isolated win evaporating.",
+  "superseded_by": null,
+  "tags": [
+    "kernel",
+    "benchmark",
+    "loop",
+    "prefill"
+  ],
+  "title": "An isolated kernel win of 10x can be worth nothing end to end",
+  "triggers": [
+    "a kernel is defaulted on from microbenchmark evidence alone"
+  ],
+  "updated_at": 1788659941.819365
+}

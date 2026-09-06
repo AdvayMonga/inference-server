@@ -22,7 +22,16 @@ import triton.language as tl
 
 # Tiled prefill attention. On by default; CUSTOM_BACKEND_TILED_PREFILL=0 falls back to the
 # one-program-per-query kernel for A/B.
-_TILED_PREFILL = os.environ.get("CUSTOM_BACKEND_TILED_PREFILL", "1") == "1"
+# DEFAULT OFF. The kernel is correct and 10.84x faster in isolation, but a properly replicated
+# A/B (4 runs per arm, ABBA order, first discarded as warmup) found NO end-to-end benefit and a
+# significant +24.3% REGRESSION on ttft_prefill_p95. An isolated win that does not reach the
+# service level is not a win. Set CUSTOM_BACKEND_TILED_PREFILL=1 to re-test.
+#
+# Open question: that A/B necessarily ran with the prefill CUDA graph OFF, because a flag
+# consumed inside a captured graph cannot be toggled at runtime. With the graph ON, dispatch is
+# removed and attention is 63% of prefill, so tiling could matter more there — untested, and
+# untestable by in-process toggle. Testing it needs capture-time variants.
+_TILED_PREFILL = os.environ.get("CUSTOM_BACKEND_TILED_PREFILL", "0") == "1"
 
 
 # Where tiling actually wins, measured on A100 (test_tiled_prefill_modal.py):
