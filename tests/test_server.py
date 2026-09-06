@@ -3,10 +3,8 @@
 import asyncio
 import threading
 from dataclasses import dataclass
-from typing import Generator
 
 import pytest
-import torch
 from httpx import ASGITransport, AsyncClient
 
 from inference_server.backends.base import InferenceBackend

@@ -210,7 +210,6 @@ def test_knowledge_entry_validates():
 
 def test_kb_roundtrip_and_index(tmp_path):
     from inference_server.research.kb import (
-        already_rejected,
         generate_index,
         load_entries,
         query,
@@ -276,7 +275,7 @@ def test_related_finds_settled_entries_by_tag_not_wording(tmp_path):
     from inference_server.research.kb import related, save_entry
     d = tmp_path / "kb"
     save_entry(KnowledgeEntry(
-        id_ := KnowledgeEntry(title="x", summary="y").id and "TTFT p95 is prefill compute",
+        "TTFT p95 is prefill compute",
         summary="Queue p95 21ms vs prefill p95 203ms; scheduling levers are ruled out.",
         status="resolved", tags=["prefill", "scheduler"]), d)
     save_entry(KnowledgeEntry(title="Unrelated quantisation note", summary="int8 weights",

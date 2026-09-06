@@ -37,7 +37,6 @@ def run():
     import time
 
     import torch
-    import triton
 
     from inference_server.models import paged_attention_kernel as K
 

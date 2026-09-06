@@ -80,7 +80,6 @@ async def run_one(backend, tok, policy_name):
     ]
     # Let A saturate the batch before B arrives.
     await asyncio.sleep(B_DELAY_SECONDS)
-    t_b_arrival = time.perf_counter()
     b_task = asyncio.create_task(submit_streaming(sched, tok, b_prompt, B_MAX_TOKENS, "B"))
 
     b_ttft, b_total, _ = await b_task

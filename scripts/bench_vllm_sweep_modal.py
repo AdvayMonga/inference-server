@@ -125,7 +125,7 @@ def main():
     import csv
     from pathlib import Path
     res = sweep.remote()
-    print(f"\n=== vllm ===")
+    print("\n=== vllm ===")
     print(f"{'N':>3} {'reqs':>5} {'tok/s':>8} {'TTFT p50/p95/p99 (ms)':>24} {'TPOT p50/p95 (ms)':>18}")
     rows = []
     for n in NS:

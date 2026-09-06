@@ -1,6 +1,5 @@
 """Tests for the radix tree prefix lookup."""
 
-import pytest
 
 from inference_server.kv_cache.block import Block
 from inference_server.kv_cache.radix_tree import RadixTree

@@ -34,7 +34,10 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W"]
+# Bugs only. E/W/I/N are style; N in particular fights this codebase on purpose, where
+# S, D, K, W are the names the papers use. F catches what tests cannot: undefined names
+# on GPU-only paths that never execute on a laptop.
+select = ["F"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
