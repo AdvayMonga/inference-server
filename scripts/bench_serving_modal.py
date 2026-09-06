@@ -56,6 +56,9 @@ _env = {
     "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
     "BENCH_AB_TILED": os.environ.get("BENCH_AB_TILED", "0"),
+    # Capture BOTH kernel variants so the graphed (production) path is A/B-able.
+    "CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS": os.environ.get(
+        "CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS", ""),
     "TORCHINDUCTOR_CACHE_DIR": "/root/.cache/inductor",
     "CUSTOM_BACKEND_PREFILL_GRAPH": os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0"),
     "CUSTOM_BACKEND_BLOCKS": "8192", "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
