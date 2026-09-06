@@ -178,9 +178,18 @@ def sweep():
             for i in range(4):
                 ids, o = pool[i % POOL_SIZE]
                 await one(sched, ids, min(o, 16))
-            plan = ([(r, n, t) for r in RATES
-                     for n, t in (("baseline", False), ("treatment", True))]
-                    if AB_TILED else [(r, "", None) for r in RATES])
+            # ABBA, not ABAB. Three identical back-to-back runs measured 1494 / 401 / 229 ms
+            # — strictly decreasing — so whichever arm runs second is systematically favoured.
+            # Alternating the pair order balances that out across replicates.
+            if AB_TILED:
+                plan = []
+                for i, r in enumerate(RATES):
+                    pair = [("baseline", False), ("treatment", True)]
+                    if i % 2:
+                        pair.reverse()
+                    plan += [(r, n, t) for n, t in pair]
+            else:
+                plan = [(r, "", None) for r in RATES]
             for rate, arm_name, arm_tiled in plan:
                 if arm_tiled is not None:
                     from inference_server.models import paged_attention_kernel as _K
