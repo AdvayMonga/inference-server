@@ -126,6 +126,21 @@ def significance_gate(hypothesis: Hypothesis, baseline, treatment, **kw: Any) ->
     else:
         s = significance(baseline, treatment, hypothesis.predicted_metric,
                          direction=hypothesis.predicted_direction, **kw)
+    # For an instrument_change, "no change" IS the success condition — the point is to see
+    # something, or to make something testable, without moving the engine. Demanding a
+    # significant effect there would either block behaviour-neutral instrumentation or push
+    # people to dress it up as an optimisation.
+    if hypothesis.kind in ("instrument_change", "harness_change"):
+        if s.verdict in ("noise", "significant"):
+            direction = ("no measurable change, as intended" if s.verdict == "noise"
+                         else f"NOTE: it also moved {s.pct:+.1f}%")
+            passed = s.verdict == "noise"
+            return GateResult("significance", passed,
+                              f"{hypothesis.kind}: {direction}", s.to_dict())
+        return GateResult("significance", False,
+                          f"{hypothesis.kind} needs a measurement showing it changed nothing; "
+                          f"got {s.verdict}: {s.detail}", s.to_dict())
+
     if s.verdict != "significant":
         return GateResult("significance", False, f"{s.verdict}: {s.detail}", s.to_dict())
     if "AGAINST the prediction" in s.detail:

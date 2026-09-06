@@ -236,3 +236,21 @@ def test_sanity_gate_allows_normal_drift():
 def test_sanity_gate_is_a_noop_when_none_declared():
     g = sanity_gate(_hyp(), _panel(), _panel())
     assert g.passed and "no sanity metrics" in g.reason
+
+
+def test_instrument_change_passes_when_nothing_moved():
+    """Instrumentation succeeds by changing nothing. Requiring a significant effect would block
+    behaviour-neutral tooling, or push people to dress it up as an optimisation."""
+    h = _hyp(kind="instrument_change")
+    runs_a = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 200, 202, 198)]
+    runs_b = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 201, 199, 203)]
+    g = significance_gate(h, runs_a, runs_b)
+    assert g.passed and "as intended" in g.reason
+
+
+def test_instrument_change_fails_if_it_actually_moved_the_engine():
+    h = _hyp(kind="instrument_change")
+    runs_a = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 200, 202, 198)]
+    runs_b = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 100, 103, 99)]
+    g = significance_gate(h, runs_a, runs_b)
+    assert not g.passed and "it also moved" in g.reason
