@@ -21,15 +21,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 from inference_server.research.attribute import attribute
-from inference_server.research.gates import judge
 from inference_server.research.kb import (
     related,
     load_entries,
     query,
-    save_experiment,
     write_index,
 )
-from inference_server.research.schemas import Arm, Experiment, Hypothesis, Vitals
+from inference_server.research.schemas import Hypothesis, Vitals
+from inference_server.research.session import NotMeasurable, format_judgement, judge_group
 
 TIER_NAMES = {1: "static/arithmetic (seconds)", 2: "CPU repro (seconds)",
               3: "single-GPU probe (5-10 min)", 4: "full sweep (15-30 min, real $)"}
@@ -87,35 +86,18 @@ def cmd_screen(args) -> int:
 
 
 def cmd_judge(args) -> int:
+    """Thin shim. The procedure lives in session.judge_group so the CLI cannot drift from it —
+    this one did, silently: it took a single panel per arm long after single-run arms stopped
+    being able to clear the significance gate."""
     hyp = Hypothesis(**json.loads(Path(args.hyp).read_text()))
-    hyp.validate()
-    baseline, treatment = Vitals.load(args.baseline), Vitals.load(args.treatment)
-
-    j = judge(hyp, baseline, treatment, run_tests=not args.no_tests)
-    print(f"hypothesis: {hyp.statement}")
-    print(f"predicted:  {hyp.predicted_metric} {hyp.predicted_direction} "
-          f"by {hyp.predicted_magnitude}\n")
-    for name in ("validity", "sanity", "significance", "correctness", "cost"):
-        g = j.gates[name]
-        print(f"  [{'PASS' if g.passed else 'FAIL'}] {name:13} {g.reason}")
-    print(f"\nverdict: {j.verdict.upper()}")
-
-    exp = Experiment(
-        hypothesis_id=hyp.id,
-        engine_sha_base=baseline.validity.engine_sha,
-        branch=args.branch or "",
-        arms=[Arm("baseline", baseline.validity.engine_sha, [baseline.validity.run_id]),
-              Arm("treatment", treatment.validity.engine_sha, [treatment.validity.run_id])],
-        verdict=j.verdict,
-        gates=j.to_dict(),
-        delta={hyp.predicted_metric:
-               j.gates["significance"].evidence or {}},
-    )
-    path = save_experiment(exp)
-    print(f"recorded {exp.id} -> {path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path}")
-    if j.verdict != "confirmed":
-        print("\nThis is a RESULT, not a failure. Write it to knowledge/ so the loop does not "
-              "re-propose it.")
+    try:
+        j, exp = judge_group(hyp, args.run_group, baseline=args.baseline,
+                             treatment=args.treatment, branch=args.branch or "",
+                             run_tests=not args.no_tests, check_drift=not args.no_drift_check)
+    except NotMeasurable as e:
+        print(f"NOT MEASURABLE: {e}")
+        return 2
+    print(format_judgement(j, hyp, exp))
     return 0
 
 
@@ -147,11 +129,15 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("screen", help="order hypotheses cheapest-first, flag dead ends (step 3)")
     s.add_argument("hypotheses"); s.set_defaults(fn=cmd_screen)
 
-    j = sub.add_parser("judge", help="run the four gates and record an experiment (steps 5-6)")
+    j = sub.add_parser("judge", help="run the five gates over a run group and record it (5-6)")
     j.add_argument("--hyp", required=True)
-    j.add_argument("--baseline", required=True)
-    j.add_argument("--treatment", required=True)
+    j.add_argument("--run-group", required=True,
+                   help="arms are the panels in runs/ carrying this run_group")
+    j.add_argument("--baseline", default="baseline", help="arm= label of the control")
+    j.add_argument("--treatment", default="treatment", help="arm= label of the change")
     j.add_argument("--branch"); j.add_argument("--no-tests", action="store_true")
+    j.add_argument("--no-drift-check", action="store_true",
+                   help="judge panels whose engine sha has since moved (you almost never want this)")
     j.set_defaults(fn=cmd_judge)
 
     i = sub.add_parser("index", help="regenerate DECISIONS.md from knowledge/")

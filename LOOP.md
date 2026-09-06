@@ -100,8 +100,31 @@ Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
 
 - own branch + worktree, one variable changed
 - **arms run simultaneously**, never sequentially, never against a stored number
-- repeat to `n` until `stderr` fits the variance budget
+- every panel tagged `arm=<name>` in its notes; all arms share one `RESEARCH_RUN_GROUP`
+- **>=3 runs per arm, interleaved ABBA** — not one arm's runs then the other's
 - baseline arm re-run in the same session even if a baseline "already exists"
+
+## The interface is the library, not the CLI
+
+The loop's consumer is an agent, not a person at a shell. Marshalling arguments into a subprocess
+and parsing printed text back is friction, and a second surface is a second thing to keep in sync —
+`loop judge` silently kept taking one panel per arm long after single-run arms stopped being able
+to clear the significance gate. So the procedure lives in `research/session.py` and the CLI is a
+shim over it.
+
+```python
+from inference_server.research.session import judge_group
+j, exp = judge_group(hypothesis, "iter11-prefill", branch="perf/x", cost_usd=0.55)
+```
+
+`judge_group` loads the run group, splits the arms, and raises `NotMeasurable` before judging
+anything if: an arm is untagged, there are not exactly 2 arms, an arm has <3 runs, the arms ran in
+blocks rather than alternating, a panel came from a dirty tree, or **engine files changed since the
+panels were measured**. That last one is the rebase rule below, enforced instead of remembered.
+
+The one thing that stays a script is `scripts/premerge_check.py`: it runs at merge time, where
+there is no agent in the loop. Instruments stay scripts too — they run in another process, on
+another machine.
 
 ## Step 5 — JUDGE (all five gates, in order)
 

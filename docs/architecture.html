@@ -223,6 +223,7 @@
   <tr><td>Engine (<code>src/inference_server/</code>)</td><td>Serve tokens. Knows nothing about the loop.</td></tr>
   <tr><td>Instruments (<code>scripts/</code>)</td><td>Know engine internals intimately. Emit a fixed vitals panel to <code>runs/*.json</code> via <code>research.harness</code>.</td></tr>
   <tr><td>Loop (<code>research/</code>)</td><td>Knows only the panel contract: attribute gaps, screen hypotheses cheapest-first, judge five gates, record. Engine-agnostic.</td></tr>
+  <tr><td>Procedure (<code>research/session.py</code>)</td><td>Steps 4-6 as <em>one</em> call, so every iteration runs the same one. Refuses to judge before the gates even see the data if the arms are untagged, unbalanced, block-ordered, measured dirty, or stale. The library is the interface; the CLI is a shim over it, and <code>premerge_check.py</code> stays a script because it runs where no agent does.</td></tr>
   <tr><td>Memory (<code>knowledge/</code>, <code>experiments/</code>)</td><td>One JSON per record, git-tracked. <code>DECISIONS.md</code> is a generated view.</td></tr>
 </table>
 <p class="lead"><strong>Five gates</strong> decide a merge, judged <strong>in this order</strong>:
