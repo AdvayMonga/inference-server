@@ -1,0 +1,25 @@
+{
+  "created_at": 1788653503.175411,
+  "evidence": [
+    {
+      "script": "scripts/sweep_tiled_launch_modal.py"
+    },
+    {
+      "experiment": "exp-20260905-0d85ab30"
+    }
+  ],
+  "id": "kb-20260905-a474d802",
+  "status": "resolved",
+  "summary": "Iteration 4 declared a correct, well-motivated kernel 'noise' end-to-end. It was noise \u2014 at BLOCK_M=32, which I picked by hand. A ~10-minute sweep found BLOCK_M=16/warps=4 is **6x faster** (10.84x vs 1.81x isolated), and the same A/B then gave -31.9% and merged.\n\n**Rule:** a launch-config sweep is a tier-3 step that belongs BEFORE the end-to-end A/B, not after a disappointing one. Hand-picked tile sizes are a guess, and judging a kernel on a guess produces a confident false negative \u2014 the most expensive kind, because the idea gets written off.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "kernel",
+    "benchmark"
+  ],
+  "title": "LOOP: never judge a kernel before sweeping its launch config",
+  "triggers": [
+    "a kernel is judged without a config sweep"
+  ],
+  "updated_at": 1788653503.175413
+}
