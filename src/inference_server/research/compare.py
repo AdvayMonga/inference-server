@@ -15,6 +15,7 @@ and it refuses by default rather than warning.
 from __future__ import annotations
 
 import math
+import statistics
 from dataclasses import dataclass
 from typing import Any
 
@@ -92,6 +93,57 @@ class Significance:
                 "after": self.after, "delta": self.delta, "pct": self.pct, "detail": self.detail}
 
 
+def significance_replicated(
+    baseline_runs: list[Vitals],
+    treatment_runs: list[Vitals],
+    metric: str,
+    *,
+    direction: str,
+    min_runs: int = 3,
+    t_threshold: float = 2.0,
+) -> Significance:
+    """Significance from REPLICATE RUNS — the only honest way to judge a p95 on this harness.
+
+    Variance comes from across runs, not within one. Also discards each arm's first run: three
+    identical back-to-back runs measured 1494 / 401 / 229 ms on ttft_p95, strictly decreasing,
+    so the first is warmup and including it biases whichever arm ran first.
+    """
+    if len(baseline_runs) < min_runs + 1 or len(treatment_runs) < min_runs + 1:
+        return Significance(
+            "insufficient_samples", metric, None, None, None, None,
+            f"need >={min_runs + 1} runs per arm (one is discarded as warmup); got "
+            f"{len(baseline_runs)}/{len(treatment_runs)}")
+
+    cmp_ = comparable(baseline_runs[0], treatment_runs[0])
+    if not cmp_:
+        return Significance("not_comparable", metric, None, None, None, None,
+                            "; ".join(cmp_.reasons))
+
+    def series(runs):
+        vals = [getattr(r, metric, None) for r in runs[1:]]      # drop warmup
+        return [v for v in vals if isinstance(v, (int, float))]
+
+    b, t = series(baseline_runs), series(treatment_runs)
+    if len(b) < min_runs or len(t) < min_runs:
+        return Significance("insufficient_samples", metric, None, None, None, None,
+                            f"{metric} missing from some runs")
+
+    mb, mt = statistics.mean(b), statistics.mean(t)
+    sb = statistics.stdev(b) if len(b) > 1 else 0.0
+    st = statistics.stdev(t) if len(t) > 1 else 0.0
+    delta, pct = mt - mb, ((mt - mb) / mb * 100.0 if mb else None)
+
+    tstat = _welch(mb, sb, len(b), mt, st, len(t))
+    if abs(tstat) < t_threshold:
+        return Significance("noise", metric, mb, mt, delta, pct,
+                            f"|t|={abs(tstat):.2f} < {t_threshold} across "
+                            f"{len(b)}v{len(t)} runs (sd {sb:.1f}/{st:.1f})")
+    right = (direction == "increase" and delta > 0) or (direction == "decrease" and delta < 0)
+    return Significance("significant", metric, mb, mt, delta, pct,
+                        f"|t|={abs(tstat):.2f} across {len(b)}v{len(t)} runs, moved "
+                        f"{'as predicted' if right else 'AGAINST the prediction'}")
+
+
 def _welch(m1: float, s1: float, n1: int, m2: float, s2: float, n2: int) -> float:
     """Welch's t statistic. Unequal variances assumed — arms genuinely differ in spread."""
     se = math.sqrt((s1 ** 2) / max(n1, 1) + (s2 ** 2) / max(n2, 1))
@@ -136,13 +188,15 @@ def significance(
     delta = after - before
     pct = (delta / before * 100.0) if before else None
 
-    n1, n2 = baseline.validity.n_samples, treatment.validity.n_samples
-    s1, s2 = baseline.validity.stderr, treatment.validity.stderr
-    if n1 < min_samples or n2 < min_samples or s1 is None or s2 is None:
-        return Significance(
-            "insufficient_samples", metric, before, after, delta, pct,
-            f"need n>={min_samples} and stderr on both arms (got n={n1}/{n2}, "
-            f"stderr={s1}/{s2}); a single measurement cannot clear this repo's variance")
+    # A single run per arm CANNOT establish significance here, whatever stderr says. The
+    # panel's stderr is request-to-request scatter WITHIN one run; what matters is run-to-run
+    # variance, which was measured at 3.2x on ttft_prefill_p95 and 6.5x on ttft_p95 with
+    # nothing changed. Using the former as the latter authorised a merge on noise once already.
+    return Significance(
+        "insufficient_samples", metric, before, after, delta, pct,
+        "one run per arm cannot establish significance: the panel's stderr is within-run "
+        "request scatter, not run-to-run variance (measured null spread 3.2x on "
+        "ttft_prefill_p95). Use significance_replicated() with >=3 runs per arm.")
 
     t = _welch(before, s1 * math.sqrt(n1), n1, after, s2 * math.sqrt(n2), n2)
     if abs(t) < t_threshold:

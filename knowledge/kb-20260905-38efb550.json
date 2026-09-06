@@ -1,0 +1,17 @@
+{
+  "created_at": 1788656363.93223,
+  "evidence": [],
+  "id": "kb-20260905-38efb550",
+  "status": "resolved",
+  "summary": "Three identical back-to-back runs in one container: ttft_p95 1494 -> 401 -> 229, tpot_p50 152 -> 118 -> 104. Strictly decreasing. Something keeps warming \u2014 allocator, Triton/JIT caches, prefix cache, GPU clocks.\n\nInterleaving arms in one container fixed the MACHINE confound but introduced an ORDER confound, and the order confound favours whichever arm runs second \u2014 the treatment, by convention. **Arms must be replicated AND order-alternated (A,B,B,A,...), with the first run of a container discarded as warmup.**",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark"
+  ],
+  "title": "Sequential A/B arms are warmup-biased; the second arm always wins",
+  "triggers": [
+    "an A/B runs arms in a fixed order"
+  ],
+  "updated_at": 1788656363.932371
+}

@@ -11,7 +11,12 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from inference_server.research.compare import Significance, comparable, significance
+from inference_server.research.compare import (
+    Significance,
+    comparable,
+    significance,
+    significance_replicated,
+)
 from inference_server.research.schemas import REPO_ROOT, GateResult, Hypothesis, Vitals
 
 def _k1_share(wave_sizes: dict[str, int]) -> float:
@@ -108,11 +113,19 @@ def sanity_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
                       f"{len(moved)} untouchable metric(s) held within {tolerance:.0%}", moved)
 
 
-def significance_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
-                      **kw: Any) -> GateResult:
-    """Does the effect clear the variance budget, on the metric predicted beforehand?"""
-    s: Significance = significance(baseline, treatment, hypothesis.predicted_metric,
-                                   direction=hypothesis.predicted_direction, **kw)
+def significance_gate(hypothesis: Hypothesis, baseline, treatment, **kw: Any) -> GateResult:
+    """Does the effect clear the variance budget, on the metric predicted beforehand?
+
+    Accepts a list of runs per arm (the honest path — variance across runs) or a single panel
+    per arm, which can now only ever return insufficient_samples. See compare.py for why.
+    """
+    if isinstance(baseline, list) or isinstance(treatment, list):
+        s: Significance = significance_replicated(
+            list(baseline), list(treatment), hypothesis.predicted_metric,
+            direction=hypothesis.predicted_direction, **kw)
+    else:
+        s = significance(baseline, treatment, hypothesis.predicted_metric,
+                         direction=hypothesis.predicted_direction, **kw)
     if s.verdict != "significant":
         return GateResult("significance", False, f"{s.verdict}: {s.detail}", s.to_dict())
     if "AGAINST the prediction" in s.detail:
@@ -208,15 +221,21 @@ class Judgement:
         return {name: g.to_dict() for name, g in self.gates.items()}
 
 
-def judge(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
+def judge(hypothesis: Hypothesis, baseline, treatment,
           *, run_tests: bool = True) -> Judgement:
     """Run the gates in order. Later gates still run so the record is complete, but the
-    verdict is decided by the earliest failure."""
+    verdict is decided by the earliest failure.
+
+    Each arm is either one panel or a list of replicate runs. Replicates are required for a
+    significant verdict; the other gates read the arm's representative (last) run.
+    """
+    b_rep = baseline[-1] if isinstance(baseline, list) else baseline
+    t_rep = treatment[-1] if isinstance(treatment, list) else treatment
     gates = {
-        "validity": validity_gate(hypothesis, baseline, treatment),
-        "sanity": sanity_gate(hypothesis, baseline, treatment),
+        "validity": validity_gate(hypothesis, b_rep, t_rep),
+        "sanity": sanity_gate(hypothesis, b_rep, t_rep),
         "significance": significance_gate(hypothesis, baseline, treatment),
-        "correctness": correctness_gate(baseline, treatment, run_tests=run_tests),
-        "cost": cost_gate(baseline, treatment),
+        "correctness": correctness_gate(b_rep, t_rep, run_tests=run_tests),
+        "cost": cost_gate(b_rep, t_rep),
     }
     return Judgement(passed=all(g.passed for g in gates.values()), gates=gates)

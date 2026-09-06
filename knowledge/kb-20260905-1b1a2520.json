@@ -1,0 +1,18 @@
+{
+  "created_at": 1788656363.932234,
+  "evidence": [],
+  "id": "kb-20260905-1b1a2520",
+  "status": "resolved",
+  "summary": "Measured with three identical runs, rate 2, 60s, pool 4000, compile off, prefill graph on:\n\n| metric | values | spread | cv |\n|---|---|---|---|\n| ttft_p50 | 179 / 157 / 121 | 1.48x | 19% |\n| ttft_p95 | 1494 / 401 / 229 | **6.52x** | 97% |\n| ttft_prefill_p50 | 69.3 / 47.6 / 40.1 | 1.73x | 29% |\n| ttft_prefill_p95 | 436.6 / 289.9 / 136.9 | **3.19x** | 52% |\n| tpot_p50 | 152.2 / 118.4 / 104.4 | 1.46x | 20% |\n| tpot_p95 | 247.2 / 173.6 / 110.0 | 2.25x | 39% |\n\n**Implications.** p95 metrics are close to unusable as A/B endpoints at this run length \u2014 prefer p50, or replicate heavily. No claim below roughly 2x on a p95 means anything from single runs. Every earlier conclusion of that size on a p95 should be treated as unproven, including this session's merge.\n\nRe-measure this calibration whenever the harness or instance type changes.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark",
+    "roofline"
+  ],
+  "title": "Harness null variance on A100/E4B (calibration)",
+  "triggers": [
+    "harness, run length or instance type changes"
+  ],
+  "updated_at": 1788656363.932468
+}

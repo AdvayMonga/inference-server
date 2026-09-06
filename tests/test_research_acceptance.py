@@ -60,7 +60,23 @@ def test_loop_confirms_the_prefill_graph_win():
         predicted_magnitude=">30%", falsification_tier=3,
         falsification_test="single-GPU prefill A/B on a warm cache")
 
-    j = judge(hyp, before, after, run_tests=False)
+    # Replicates, because a single run per arm cannot establish significance on this harness
+    # (null spread 3.2x on p95). Small jitter around the measured values.
+    base = [before] + [_panel(prefill_graph="0", ttft_p50=v, ttft_p95=158.0,
+                              ttft_queue_p50=10.0, ttft_queue_p95=25.0,
+                              ttft_prefill_p50=88.0, ttft_prefill_p95=133.0,
+                              tpot_p50=23.1, tpot_p95=27.3, tok_s_within_slo=117.0,
+                              total_iteration_errors=0, cache_lookups=200,
+                              cache_hit_rate=0.03, wave_sizes={"1": 20, "2": 3})
+                       for v in (98.0, 99.0, 97.0)]
+    treat = [after] + [_panel(prefill_graph="0", ttft_p50=v, ttft_p95=109.0,
+                              ttft_queue_p50=10.0, ttft_queue_p95=25.0,
+                              ttft_prefill_p50=36.0, ttft_prefill_p95=84.0,
+                              tpot_p50=22.0, tpot_p95=25.0, tok_s_within_slo=121.1,
+                              total_iteration_errors=0, cache_lookups=200,
+                              cache_hit_rate=0.03, wave_sizes={"1": 20, "2": 3})
+                       for v in (46.0, 47.0, 45.0)]
+    j = judge(hyp, base, treat, run_tests=False)
     assert j.passed, {k: g.reason for k, g in j.gates.items()}
     assert j.verdict == "confirmed"
     assert j.gates["significance"].evidence["pct"] < -50   # halved

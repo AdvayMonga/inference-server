@@ -72,25 +72,39 @@ def test_validity_passes_a_well_formed_experiment():
 
 # ---------------------------------------------------------------- significance
 
-def test_noise_does_not_pass():
-    a = _panel(ttft_p95=200.0, validity=_v(stderr=20.0))
-    b = _panel(ttft_p95=192.0, validity=_v(stderr=20.0))
+def test_single_run_per_arm_can_never_be_significant():
+    """The defect that authorised a merge on noise: the panel's stderr is within-run request
+    scatter, but run-to-run p95 varies 3.2x on this harness. One run per arm cannot decide."""
+    a = _panel(ttft_p95=400.0, validity=_v(stderr=1.0))
+    b = _panel(ttft_p95=100.0, validity=_v(stderr=1.0))
     g = significance_gate(_hyp(), a, b)
+    assert not g.passed and "one run per arm" in g.reason
+
+
+def _runs(values, **over):
+    return [_panel(ttft_p95=v, validity=_v(**over)) for v in values]
+
+
+def test_noise_does_not_pass():
+    g = significance_gate(_hyp(), _runs([999, 200, 210, 190]), _runs([999, 192, 205, 198]))
     assert not g.passed and "noise" in g.reason
 
 
 def test_a_regression_is_not_reported_as_a_win():
     """Moving significantly the WRONG way must fail, not pass on magnitude alone."""
-    a = _panel(ttft_p95=200.0, validity=_v(stderr=1.0))
-    b = _panel(ttft_p95=400.0, validity=_v(stderr=1.0))
-    g = significance_gate(_hyp(), a, b)          # predicted decrease
+    g = significance_gate(_hyp(), _runs([999, 200, 202, 198]), _runs([999, 400, 405, 398]))
     assert not g.passed and "against the prediction" in g.reason.lower()
 
 
-def test_a_real_improvement_passes():
-    a = _panel(ttft_p95=200.0, validity=_v(stderr=1.0))
-    b = _panel(ttft_p95=100.0, validity=_v(stderr=1.0))
-    assert significance_gate(_hyp(), a, b).passed
+def test_a_real_improvement_passes_with_replicates():
+    g = significance_gate(_hyp(), _runs([999, 200, 202, 198]), _runs([999, 100, 103, 99]))
+    assert g.passed, g.reason
+
+
+def test_first_run_of_each_arm_is_discarded_as_warmup():
+    """Three identical back-to-back runs measured 1494 / 401 / 229ms — strictly decreasing."""
+    g = significance_gate(_hyp(), _runs([9999, 200, 202, 198]), _runs([9999, 100, 103, 99]))
+    assert g.passed, "a wild warmup value must not dominate the variance"
 
 
 # ---------------------------------------------------------------- correctness
@@ -146,8 +160,8 @@ def test_judge_verdict_noise_when_effect_within_variance():
 
 
 def test_judge_confirms_a_clean_win_and_records_every_gate():
-    a = _panel(ttft_p95=200.0, validity=_v(stderr=1.0))
-    b = _panel(ttft_p95=100.0, validity=_v(stderr=1.0))
+    a = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 200, 202, 198)]
+    b = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 100, 103, 99)]
     j = judge(_hyp(), a, b, run_tests=False)
     assert j.passed and j.verdict == "confirmed"
     assert set(j.to_dict()) == {"validity", "sanity", "significance", "correctness", "cost"}

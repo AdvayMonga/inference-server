@@ -10,7 +10,11 @@ import json
 
 import pytest
 
-from inference_server.research.compare import comparable, significance
+from inference_server.research.compare import (
+    comparable,
+    significance,
+    significance_replicated,
+)
 from inference_server.research.schemas import (
     PANEL_VERSION,
     Experiment,
@@ -118,27 +122,34 @@ def test_single_sample_is_never_significant():
     assert s.verdict == "insufficient_samples"
 
 
+def _runs(values):
+    return [_panel(v) for v in values]
+
+
 def test_effect_inside_variance_is_noise():
-    a = _panel(100.0, validity=_validity(stderr=12.0))
-    b = _panel(104.0, validity=_validity(stderr=12.0))
-    s = significance(a, b, "tok_s_within_slo", direction="increase")
+    s = significance_replicated(_runs([1, 100, 104, 98]), _runs([1, 104, 99, 103]),
+                                "tok_s_within_slo", direction="increase")
     assert s.verdict == "noise", s.detail
 
 
 def test_clear_effect_is_significant():
-    a = _panel(100.0, validity=_validity(stderr=1.0))
-    b = _panel(140.0, validity=_validity(stderr=1.0))
-    s = significance(a, b, "tok_s_within_slo", direction="increase")
+    s = significance_replicated(_runs([1, 100, 101, 99]), _runs([1, 140, 141, 139]),
+                                "tok_s_within_slo", direction="increase")
     assert s.verdict == "significant" and s.improved
-    assert s.pct == pytest.approx(40.0)
+    assert s.pct == pytest.approx(40.0, abs=1.0)
 
 
 def test_regression_against_prediction_is_flagged_not_celebrated():
-    a = _panel(140.0, validity=_validity(stderr=1.0))
-    b = _panel(100.0, validity=_validity(stderr=1.0))
-    s = significance(a, b, "tok_s_within_slo", direction="increase")
+    s = significance_replicated(_runs([1, 140, 141, 139]), _runs([1, 100, 101, 99]),
+                                "tok_s_within_slo", direction="increase")
     assert s.verdict == "significant"
     assert "AGAINST the prediction" in s.detail
+
+
+def test_too_few_replicates_is_refused():
+    s = significance_replicated(_runs([1, 100]), _runs([1, 140]),
+                                "tok_s_within_slo", direction="increase")
+    assert s.verdict == "insufficient_samples"
 
 
 def test_significance_refuses_incomparable_arms():

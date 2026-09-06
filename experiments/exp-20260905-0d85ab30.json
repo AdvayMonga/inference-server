@@ -77,8 +77,8 @@
         "verdict": "significant"
       },
       "name": "significance",
-      "passed": true,
-      "reason": "-31.9% on ttft_prefill_p95 (|t|=2.96 >= 2.0, moved as predicted)"
+      "passed": false,
+      "reason": "RETRACTED: computed from within-run request scatter, not run-to-run variance. A null experiment measured a 3.2x spread on this metric with nothing changed, so the -31.9% is inside the noise floor and the arms were warmup-biased."
     },
     "validity": {
       "evidence": {
@@ -94,5 +94,5 @@
   "id": "exp-20260905-0d85ab30",
   "source": "loop",
   "started_at": 1788653416.05043,
-  "verdict": "confirmed"
+  "verdict": "invalid"
 }

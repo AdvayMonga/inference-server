@@ -1,0 +1,18 @@
+{
+  "created_at": 1788656363.932223,
+  "evidence": [],
+  "id": "kb-20260905-1f0727be",
+  "status": "resolved",
+  "summary": "`Validity.stderr` was computed from the TTFTs of individual requests WITHIN one run. The significance gate then used it as the variance of the run's p95. Those are different quantities by a wide margin: within-run request scatter is small, while run-to-run p95 varies **3.2x** on this harness with nothing changed.\n\nSo the gate was confidently significant (|t|=2.96) about an effect it had no way to detect. It authorised a merge on noise.\n\n**Rule: significance requires REPLICATE RUNS per arm, and the variance must come from across those runs.** A single run per arm can never clear a p95 metric here, and the gate must say so rather than substitute a convenient number.",
+  "superseded_by": null,
+  "tags": [
+    "loop",
+    "benchmark",
+    "gates"
+  ],
+  "title": "LOOP: the significance gate measured the WRONG variance",
+  "triggers": [
+    "a gate reports significance from a single run per arm"
+  ],
+  "updated_at": 1788656363.932236
+}

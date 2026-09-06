@@ -112,7 +112,13 @@ Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
    while TPOT p50 differed 95.3 vs 46.4ms between arms that only differed in a prefill flag.
    Declare `sanity_metrics` on every hypothesis; if one moves, the arms are contaminated and
    the headline number is not evidence, however significant it looks.
-3. **Significance** — effect exceeds the variance budget on the panel's primary metric.
+3. **Significance** — effect exceeds the variance budget on the metric predicted beforehand,
+   measured across **replicate runs** (>=3 per arm after discarding each arm's first run as
+   warmup). Never from a single run per arm: the panel's `stderr` is request-to-request scatter
+   *within* a run, and this harness's *run-to-run* null spread is 3.2x on `ttft_prefill_p95`
+   and 6.5x on `ttft_p95`. Using the former as the latter authorised a merge on noise once.
+   Arms must also be order-alternated — three identical back-to-back runs measured
+   1494 / 401 / 229 ms, so whichever arm runs second wins.
 4. **Correctness** — fast suite green; parity gates **width-matched**, never across batch shapes;
    no new `total_iteration_errors`.
 5. **Cost** — startup, memory and $ regressions declared, not just latency.
