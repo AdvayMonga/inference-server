@@ -130,7 +130,7 @@ def main() -> int:
         return 1
 
     delta = ", ".join(f"{k} {v.get('pct', 0):+.1f}%" for k, v in exp.delta.items()) or "recorded"
-    print(f"\nPASS  {exp.id} verdict={exp.verdict}, all four gates green ({delta})")
+    print(f"\nPASS  {exp.id} verdict={exp.verdict}, all gates green ({delta})")
     return 0
 
 
