@@ -19,20 +19,20 @@
   ],
   "id": "kb-20260906-6000f7f5",
   "status": "open",
-  "summary": "Open-loop sweep at 1a1c141, rates 8-128 req/s. At rate 128 the queue reached 2985 pending requests, and HALF the prefill waves were still K=1 (49%), with only 1% at K>=8. Max wave observed: 115 of a 256 batch. Demand was not the constraint \u2014 thousands of requests were waiting and the scheduler still prefilled one at a time.\n\nThroughput plateaus accordingly: 163.9 tok/s at rate 8, then 612/620/782/665 for rates 16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. Offered load beyond ~16 req/s buys queue depth and latency, not work.\n\nWHY IT MATTERS: decode is memory-bound \u2014 a step streams 9.2GB of dense weights whether it serves 1 sequence or 200. Roofline ceiling at B=256/L=512 is 31,268 tok/s; we measured ~780. Keeping the batch empty forfeits the single largest lever the hardware offers, and no kernel-level optimization can recover it.\n\nThis supersedes the earlier reading that 83-91% K=1 waves meant length-grouping was pointless: that was measured at low offered load where K=1 is CORRECT. At rate 128 it is not correct, and the cause is on the admission/wave path, not in the workload.",
+  "summary": "CORRECTED. This entry first concluded 'the batch never fills, and that is the bottleneck'. That conclusion is NOT supported by the data and has been withdrawn.\n\nWHAT IS MEASURED (open-loop sweep at 1a1c141, rates 8-128 req/s, single replicate): throughput plateaus at 163.9 -> 612 -> 620 -> 782 -> 665 tok/s for rates 8/16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. At rate 128, 2985 requests were queued. Offered load beyond ~16 req/s buys queue depth and latency, not work. The plateau is real.\n\nWHY THE K=1 READING WAS WRONG: 49% of prefill waves being K=1 at rate 128 was read as a starved batch. It is equally consistent with a FULL batch: once max_batch_size is reached, each completing request frees exactly one slot, so the next admission wave is K=1 by construction. At steady state on a full batch, K=1 waves are CORRECT behaviour, not a symptom. wave_sizes measures prefill wave width; it says nothing about batch occupancy.\n\nWHY IT CANNOT BE SETTLED FROM THESE PANELS: the panel has no measure of batch occupancy. `active_size` is len(self._active) sampled when stats() is called \u2014 after the window ends and the queue has drained \u2014 so it reads 0 in every panel. There is a high-water mark for PENDING but none for ACTIVE. Worse, the panel's `concurrency_observed` is populated from `pending_high_water` (bench_serving_modal.py:273), i.e. queue depth, not concurrency \u2014 the exact field LOOP.md lists as catching 'claiming a concurrency the run never reached'.\n\nSo the engine's central question for a batching server \u2014 how full was the batch \u2014 is not answerable from any run recorded so far. Fix the instrument before drawing the conclusion.",
   "superseded_by": null,
   "tags": [
     "scheduler",
-    "prefill",
-    "batching",
-    "backpressure",
     "throughput",
-    "waves"
+    "observability",
+    "batching",
+    "measurement-gap"
   ],
-  "title": "Prefill waves stay K=1 under overload \u2014 the batch never fills, and that is the bottleneck",
+  "title": "Throughput plateaus at ~23 req/s, but batch occupancy was never measured \u2014 cause unresolved",
   "triggers": [
-    "a change that raises K>=8 share above ~20% at rate 128 would close this",
-    "measuring active_size during the window (not at the end) would localise it further"
+    "a mean/high-water active_size in the panel would settle whether the batch fills",
+    "if occupancy is high and throughput is still ~780 tok/s, the gap is per-step overhead",
+    "if occupancy is low with thousands queued, admission or wave planning is the cause"
   ],
   "updated_at": 1788733070.842036
 }
