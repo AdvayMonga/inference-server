@@ -1,0 +1,38 @@
+{
+  "created_at": 1788733070.842022,
+  "evidence": [
+    {
+      "run_id": "run-20260906-a0bde214"
+    },
+    {
+      "run_id": "run-20260906-8c2a0890"
+    },
+    {
+      "run_id": "run-20260906-701dfded"
+    },
+    {
+      "run_id": "run-20260906-1862aada"
+    },
+    {
+      "run_id": "run-20260906-c01ca7c6"
+    }
+  ],
+  "id": "kb-20260906-6000f7f5",
+  "status": "open",
+  "summary": "Open-loop sweep at 1a1c141, rates 8-128 req/s. At rate 128 the queue reached 2985 pending requests, and HALF the prefill waves were still K=1 (49%), with only 1% at K>=8. Max wave observed: 115 of a 256 batch. Demand was not the constraint \u2014 thousands of requests were waiting and the scheduler still prefilled one at a time.\n\nThroughput plateaus accordingly: 163.9 tok/s at rate 8, then 612/620/782/665 for rates 16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. Offered load beyond ~16 req/s buys queue depth and latency, not work.\n\nWHY IT MATTERS: decode is memory-bound \u2014 a step streams 9.2GB of dense weights whether it serves 1 sequence or 200. Roofline ceiling at B=256/L=512 is 31,268 tok/s; we measured ~780. Keeping the batch empty forfeits the single largest lever the hardware offers, and no kernel-level optimization can recover it.\n\nThis supersedes the earlier reading that 83-91% K=1 waves meant length-grouping was pointless: that was measured at low offered load where K=1 is CORRECT. At rate 128 it is not correct, and the cause is on the admission/wave path, not in the workload.",
+  "superseded_by": null,
+  "tags": [
+    "scheduler",
+    "prefill",
+    "batching",
+    "backpressure",
+    "throughput",
+    "waves"
+  ],
+  "title": "Prefill waves stay K=1 under overload \u2014 the batch never fills, and that is the bottleneck",
+  "triggers": [
+    "a change that raises K>=8 share above ~20% at rate 128 would close this",
+    "measuring active_size during the window (not at the end) would localise it further"
+  ],
+  "updated_at": 1788733070.842036
+}
