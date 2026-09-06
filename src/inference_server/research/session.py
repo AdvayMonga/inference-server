@@ -211,3 +211,86 @@ def format_judgement(j: Judgement, hypothesis: Hypothesis, exp: Experiment | Non
         lines += ["", "This is a RESULT, not a failure. Write it to knowledge/ so the loop does "
                   "not re-propose it."]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- derived metrics
+#
+# The headline metrics are properties of a SWEEP, not of a single rate: "how many tokens/s can we
+# serve without breaking the latency budget" only means something once you have several rates and
+# can see where it broke. The instrument records every rate-point and derives nothing; the
+# derivation happens here, at read time.
+#
+# That ordering matters. An instrument that reduces its own data to one summary number has already
+# made a judgement about what mattered, in the place where it is hardest to revisit. Recording
+# everything and deriving late means a new question can be asked of old panels.
+
+TRIAL_TOKEN = "trial="
+
+
+def trial_label(panel: Vitals) -> str:
+    """Which sweep a panel came from. Same encoding as arm=; see arm_label."""
+    notes = panel.validity.notes or ""
+    if TRIAL_TOKEN not in notes:
+        return ""
+    return notes.split(TRIAL_TOKEN, 1)[1].split()[0].strip().rstrip(",;")
+
+
+def _rate_of(panel: Vitals) -> float | None:
+    try:
+        return float(panel.validity.harness_config.get("rates"))
+    except (TypeError, ValueError):
+        return None                    # a multi-rate string means this panel is not one point
+
+
+def sweeps(panels: list[Vitals]) -> dict[str, list[Vitals]]:
+    """Group rate-points by the sweep that produced them, ordered by rate.
+
+    Falls back to one sweep per panel when the instrument did not tag a trial — an untagged panel
+    is a sweep of one, which yields no knee rather than a wrong one.
+    """
+    out: dict[str, list[Vitals]] = {}
+    for p in panels:
+        out.setdefault(trial_label(p) or p.validity.run_id, []).append(p)
+    for k in out:
+        out[k].sort(key=lambda p: (_rate_of(p) is None, _rate_of(p) or 0.0))
+    return out
+
+
+def within_slo(panel: Vitals) -> bool | None:
+    """Did this rate-point meet both latency budgets? None when the panel does not carry them."""
+    if panel.slo_ttft_ms is None or panel.slo_tpot_ms is None:
+        return None
+    if panel.ttft_p95 is None or panel.tpot_p95 is None:
+        return None
+    return panel.ttft_p95 < panel.slo_ttft_ms and panel.tpot_p95 < panel.slo_tpot_ms
+
+
+def sweep_headline(points: list[Vitals]) -> dict[str, float | None]:
+    """The project's definition of success, derived from one sweep's rate-points.
+
+    `max_tok_s_within_slo` is throughput at a fixed tail-latency budget — the primary metric in
+    CLAUDE.md, and until now present only in the instrument's printed table, never in a machine
+    record. `saturation_knee_rate` is the lowest rate that broke the budget: capacity, in the
+    units the scheduler actually feels.
+    """
+    ok, broken = [], []
+    for p in points:
+        verdict, rate = within_slo(p), _rate_of(p)
+        if verdict is None or rate is None:
+            continue
+        (ok if verdict else broken).append((rate, p))
+
+    best = max((p.tok_s_within_slo or 0.0, r) for r, p in ok) if ok else None
+    return {
+        "max_tok_s_within_slo": best[0] if best else None,
+        "best_rate_within_slo": best[1] if best else None,
+        "saturation_knee_rate": min(r for r, _ in broken) if broken else None,
+        "rates_measured": len(points),
+        "rates_within_slo": len(ok),
+    }
+
+
+def headline(panels: list[Vitals]) -> list[dict[str, float | None]]:
+    """One headline per sweep. Replicates stay separate — averaging them here would hide the
+    run-to-run spread that decides significance."""
+    return [{"trial": t, **sweep_headline(pts)} for t, pts in sorted(sweeps(panels).items())]

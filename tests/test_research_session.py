@@ -159,3 +159,91 @@ def test_drift_prefixes_match_the_merge_gate():
 
     assert session.BEHAVIOURAL_PREFIXES == pm.BEHAVIOURAL_PREFIXES
     assert session.EXEMPT_PREFIXES == pm.EXEMPT_PREFIXES
+
+
+# ---------------------------------------------------------------- derived headline metrics
+
+def _point(arm, rate, *, ttft_p95, tpot_p95, tok_s, trial="t1", started_at=1000.0,
+           slo=(200.0, 50.0)):
+    v = Validity(engine_sha="abc", dirty=False, harness="bench_serving",
+                 harness_config={"rates": str(rate)}, workload_regime="cache_miss_heavy",
+                 n_samples=5, run_group="g1", started_at=started_at,
+                 notes=f"open-loop Poisson, rate={rate}, arm={arm}, trial={trial}")
+    return Vitals(validity=v, ttft_p95=ttft_p95, tpot_p95=tpot_p95,
+                  tok_s_within_slo=tok_s, slo_ttft_ms=slo[0], slo_tpot_ms=slo[1])
+
+
+def test_headline_finds_the_knee_and_best_throughput():
+    """The project's primary metric — throughput at a fixed tail-latency budget — existed only in
+    the instrument's printed table. A sweep of rate-points is enough to derive it."""
+    from inference_server.research.session import sweep_headline
+
+    sweep = [_point("baseline", 1, ttft_p95=90, tpot_p95=30, tok_s=50),
+             _point("baseline", 2, ttft_p95=120, tpot_p95=40, tok_s=95),
+             _point("baseline", 4, ttft_p95=180, tpot_p95=48, tok_s=140),
+             _point("baseline", 6, ttft_p95=400, tpot_p95=80, tok_s=150),
+             _point("baseline", 8, ttft_p95=900, tpot_p95=120, tok_s=155)]
+    h = sweep_headline(sweep)
+    assert h["max_tok_s_within_slo"] == 140      # NOT 155: 6 and 8 req/s broke the budget
+    assert h["best_rate_within_slo"] == 4
+    assert h["saturation_knee_rate"] == 6
+    assert (h["rates_measured"], h["rates_within_slo"]) == (5, 3)
+
+
+def test_knee_is_the_lowest_breaking_rate_not_the_first_seen():
+    """Rate-points can arrive in any order; the knee is where capacity ends."""
+    from inference_server.research.session import sweep_headline
+
+    h = sweep_headline([_point("b", 8, ttft_p95=900, tpot_p95=120, tok_s=1),
+                        _point("b", 4, ttft_p95=400, tpot_p95=80, tok_s=1),
+                        _point("b", 1, ttft_p95=90, tpot_p95=30, tok_s=50)])
+    assert h["saturation_knee_rate"] == 4
+
+
+def test_a_sweep_that_never_breaks_has_no_knee():
+    from inference_server.research.session import sweep_headline
+
+    h = sweep_headline([_point("b", 1, ttft_p95=90, tpot_p95=30, tok_s=50),
+                        _point("b", 2, ttft_p95=95, tpot_p95=31, tok_s=99)])
+    assert h["saturation_knee_rate"] is None and h["max_tok_s_within_slo"] == 99
+
+
+def test_a_sweep_that_breaks_everywhere_has_no_throughput():
+    """iter10 measured exactly this: every run failed the budget at rate 2."""
+    from inference_server.research.session import sweep_headline
+
+    h = sweep_headline([_point("b", 2, ttft_p95=400, tpot_p95=120, tok_s=None)])
+    assert h["max_tok_s_within_slo"] is None and h["saturation_knee_rate"] == 2
+
+
+def test_replicate_sweeps_stay_separate():
+    """Averaging replicates here would hide the run-to-run spread that decides significance."""
+    from inference_server.research.session import headline
+
+    ps = [_point("baseline", 1, ttft_p95=90, tpot_p95=30, tok_s=50, trial="t1"),
+          _point("baseline", 2, ttft_p95=400, tpot_p95=90, tok_s=None, trial="t1"),
+          _point("baseline", 1, ttft_p95=95, tpot_p95=31, tok_s=60, trial="t2"),
+          _point("baseline", 2, ttft_p95=410, tpot_p95=95, tok_s=None, trial="t2")]
+    hs = headline(ps)
+    assert len(hs) == 2
+    assert sorted(h["max_tok_s_within_slo"] for h in hs) == [50, 60]
+
+
+def test_untagged_panels_become_sweeps_of_one():
+    """An untagged panel yields no knee rather than a wrong one shared with a stranger."""
+    from inference_server.research.session import sweeps
+
+    a = _point("baseline", 1, ttft_p95=90, tpot_p95=30, tok_s=50)
+    a.validity.notes = "no trial tag here"
+    b = _point("baseline", 2, ttft_p95=95, tpot_p95=31, tok_s=60)
+    b.validity.notes = "nor here"
+    assert len(sweeps([a, b])) == 2
+
+
+def test_within_slo_is_none_when_the_panel_carries_no_budget():
+    """Absent budgets must not read as 'passed'."""
+    from inference_server.research.session import within_slo
+
+    p = _point("b", 1, ttft_p95=90, tpot_p95=30, tok_s=50)
+    p.slo_ttft_ms = None
+    assert within_slo(p) is None

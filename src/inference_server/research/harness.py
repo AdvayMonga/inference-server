@@ -31,8 +31,18 @@ RUNS_DIR = REPO_ROOT / "runs"
 _RUN_GROUP = os.environ.get("RESEARCH_RUN_GROUP") or f"grp-{time.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
 
 
+# One trial per process: the panels of a single rate sweep. The run_group spans every arm and
+# replicate of an experiment, so it is too coarse to say "these points came from one sweep" —
+# and the sweep is the unit that has a saturation knee.
+_TRIAL = f"t-{uuid.uuid4().hex[:8]}"
+
+
 def run_group() -> str:
     return _RUN_GROUP
+
+
+def trial_id() -> str:
+    return _TRIAL
 
 
 def pct(values: Iterable[float], q: float) -> float:

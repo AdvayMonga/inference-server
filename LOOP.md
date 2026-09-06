@@ -32,6 +32,14 @@ is a versioned change that invalidates comparison to prior iterations.
 | field | why it is in the panel |
 |---|---|
 | `tok_s_within_slo`, `slo_ttft_ms`, `slo_tpot_ms` | the project's definition of success |
+
+> **Record every point; derive late.** One panel is one *rate*, but the headline metrics —
+> max throughput inside the latency budget, and the saturation knee — are properties of a whole
+> *sweep*. They are NOT computed by the instrument. `session.sweep_headline()` derives them at read
+> time from the rate-points, which is why a new question can be asked of old panels. An instrument
+> that reduces its own data to one summary number has already decided what mattered, in the place
+> that is hardest to revisit. For ten iterations these two lived only in a printed table and were
+> `None` in every machine record, so the loop judged secondary metrics exclusively.
 | `ttft_p50`, `ttft_p95` | headline latency |
 | `ttft_queue_p50/p95`, `ttft_prefill_p50/p95` | **the split that rules out whole classes of fix** — measured 21ms queue vs 203ms prefill, which killed every scheduling lever at once |
 | `tpot_p50`, `tpot_p95` | decode health |

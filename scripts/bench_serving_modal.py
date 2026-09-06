@@ -268,7 +268,8 @@ def sweep():
                         stderr_value=H.stderr(ttfts),
                         concurrency_observed=st.get("pending_high_water"),
                         notes=f"open-loop Poisson, rate={rate}"
-                              + (f", arm={arm_name}" if arm_name else ""),
+                              + (f", arm={arm_name}" if arm_name else "")
+                              + f", trial={H.trial_id()}",
                     ),
                     scheduler_stats=st, cache_stats=cache_stats,
                     tok_s_within_slo=row["tok_s"] if row["within_slo"] else None,
