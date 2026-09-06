@@ -148,3 +148,11 @@ the move was stale immediately.
 6. Re-measure after every merge.
 7. The loop may conclude *"the thing you asked me to optimise does not matter"* — and that is a
    successful iteration. It happened twice here, each time killing a planned project.
+
+## Workflow rule: never rebase after measuring
+
+An experiment vouches for one commit sha. Rebasing the branch after the A/B run moves
+every engine file to a new sha, and `premerge_check.py` correctly refuses the merge —
+the measurement no longer describes the code being merged. Land any main-side changes
+you need *first*, then measure the final commit. Cost of learning this: one extra A100
+run (iter9 → iter10, ~$0.55).
