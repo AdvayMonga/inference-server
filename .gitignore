@@ -35,14 +35,15 @@ benchmarks/results/
 # Jupyter
 .ipynb_checkpoints/
 
-# Working docs
-CLAUDE.md
+# Working docs (local state; CLAUDE.md and .claude/agents/ are tracked — see below)
 DECISIONS.md
 HANDOFF.md
 PLAN.md
 
 notes/
 
-.claude/
+# Claude Code: local settings stay out, shared agent definitions come in
+.claude/*
+!.claude/agents/
 # Research loop: raw run panels (regenerable, large)
 runs/
