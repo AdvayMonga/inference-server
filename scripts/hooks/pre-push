@@ -1,6 +1,8 @@
 #!/bin/sh
 # Run what CI runs, before the push rather than after it. ~10s.
 # Install:  git config core.hooksPath scripts/hooks
+#           (writes to the SHARED .git/config, so it turns the hook on for every worktree
+#           of this repo at once; each resolves scripts/hooks against its own root)
 # Bypass:   git push --no-verify   (or SKIP_HOOKS=1 git push)
 [ -n "$SKIP_HOOKS" ] && exit 0
 
