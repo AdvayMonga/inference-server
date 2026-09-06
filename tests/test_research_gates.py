@@ -205,9 +205,27 @@ def test_reconstructed_experiments_are_history_not_authorisation():
     ok, why = hist.authorises_merge()
     assert not ok and "not produced by the loop" in why
 
-    live = Experiment(hypothesis_id="h", engine_sha_base="a", arms=[Arm("treatment", "bbb")],
+    live = Experiment(hypothesis_id="h", engine_sha_base="a",
+                      arms=[Arm("treatment", "bbb", ["r1", "r2", "r3"])],
                       gates=green, verdict="confirmed", source="loop")
     assert live.authorises_merge()[0]
+
+
+def test_single_run_arms_cannot_authorise_a_merge():
+    """A one-run-per-arm record measures within-run request scatter, not the run-to-run spread
+    that decides significance. exp-20260905-e5da5d8a was exactly that and read 'confirmed
+    -48.2%'. Green gates are not enough; the arms must have the replicates."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    green = {g: {"passed": True}
+             for g in ("validity", "sanity", "significance", "correctness", "cost")}
+    thin = Experiment(hypothesis_id="h", engine_sha_base="a",
+                      arms=[Arm("baseline", "aaa", ["r1", "r2", "r3"]),
+                            Arm("treatment", "bbb", ["r4"])],
+                      gates=green, verdict="confirmed", source="loop")
+    assert thin.all_gates_green()
+    ok, why = thin.authorises_merge()
+    assert not ok and "treatment" in why and ">=3 runs" in why
 
 
 # ---------------------------------------------------------------- sanity (contamination)

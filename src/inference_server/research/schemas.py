@@ -276,6 +276,7 @@ class Experiment:
     # notes. Reconstructed records are history, NOT authorisation: premerge refuses them, or the
     # gate could be satisfied by prose about a run nobody can reproduce.
     source: str = "loop"
+    notes: str = ""                  # why a record was retracted, or anything the gates can't say
     id: str = field(default_factory=lambda: _new_id("exp"))
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -302,7 +303,14 @@ class Experiment:
         if not self.all_gates_green():
             failed = [n for n, g in self.gates.items() if not g.get("passed")]
             return False, f"gate(s) not green: {', '.join(failed) or 'missing gates'}"
-        return True, f"{self.id} verdict={self.verdict}, four gates green"
+        # Structural check, not a verdict check: single-run arms measure within-run request
+        # scatter, not the run-to-run spread that actually decides significance. Refuse them by
+        # shape, so a record cannot authorise a merge on noise however green its gates look.
+        thin = [a.name for a in self.arms if len(a.run_ids) < 3]
+        if thin:
+            return False, (f"{self.id} has single-run arm(s) ({', '.join(thin)}); "
+                           f"significance needs >=3 runs per arm")
+        return True, f"{self.id} verdict={self.verdict}, all gates green"
 
 
 @dataclass

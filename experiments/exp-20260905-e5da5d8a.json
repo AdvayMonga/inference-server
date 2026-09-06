@@ -75,7 +75,8 @@
   },
   "hypothesis_id": "hyp-iter3-tiled-prefill",
   "id": "exp-20260905-e5da5d8a",
+  "notes": "RETRACTED. Confirmed '-48.2% ttft_prefill_p95' from one run per arm, with the two arms measured on different machines (TPOT p50 95.3 vs 46.4ms) and before the sanity gate existed. The later replicated 4v4 ABBA run showed the effect is noise. This record is the reason the sanity gate and significance_replicated() exist.",
   "source": "loop",
   "started_at": 1788628296.125141,
-  "verdict": "confirmed"
+  "verdict": "invalid"
 }
