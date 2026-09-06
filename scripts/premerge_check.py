@@ -48,6 +48,13 @@ def behavioural(files: list[str]) -> list[str]:
     return hits
 
 
+def is_ancestor(sha: str, ref: str) -> bool:
+    """Is `sha` reachable from `ref`? Cheap guard so a record cannot vouch for unrelated code."""
+    r = subprocess.run(["git", "merge-base", "--is-ancestor", sha, ref],
+                       cwd=REPO_ROOT, capture_output=True)
+    return r.returncode == 0
+
+
 def resolve_sha(ref: str) -> str:
     return subprocess.run(["git", "rev-parse", ref], cwd=REPO_ROOT,
                           capture_output=True, text=True, check=True).stdout.strip()
@@ -73,16 +80,38 @@ def main() -> int:
         print(f"    {f}")
 
     sha = resolve_sha(args.ref)
-    matches = [e for e in load_experiments()
-               if any(sha.startswith(a.sha) or a.sha.startswith(sha[:7]) for a in e.arms)]
 
-    if not matches:
-        print(f"\nFAIL  no experiment record references {sha[:12]}.")
-        print("      An engine change needs an experiments/*.json with four green gates.")
-        print("      Run the loop:  python -m inference_server.research.loop experiment <hyp-id>")
+    # An experiment validates the commit it MEASURED, and committing the experiment record
+    # itself moves HEAD past it. So accept a record whose treatment sha is an ancestor of the
+    # tip — but only if nothing behavioural changed since, or the record would be vouching for
+    # code it never ran.
+    exp = None
+    for candidate in load_experiments():
+        if candidate.source != "loop":
+            continue
+        for arm in candidate.arms:
+            if arm.name != "treatment" or not arm.sha:
+                continue
+            if not is_ancestor(arm.sha, args.ref):
+                continue
+            drifted = behavioural(changed_files(args.ref, arm.sha))
+            if drifted:
+                print(f"\nFAIL  {candidate.id} validated {arm.sha[:12]}, but engine files "
+                      f"changed after it:")
+                for f in drifted:
+                    print(f"          {f}")
+                print("      Re-run the experiment against the current code.")
+                return 1
+            exp = candidate
+            break
+        if exp:
+            break
+
+    if exp is None:
+        print(f"\nFAIL  no loop-produced experiment validates {sha[:12]} or an ancestor of it.")
+        print("      An engine change needs an experiments/*.json with green gates.")
+        print("      Run the loop:  python -m inference_server.research.loop judge ...")
         return 1
-
-    exp = matches[0]
     if args.explain:
         for name, g in exp.gates.items():
             mark = "ok  " if g.get("passed") else "FAIL"
