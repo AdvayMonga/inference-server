@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-03.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-06.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -222,16 +222,35 @@
   <tr><th>Layer</th><th>Job</th></tr>
   <tr><td>Engine (<code>src/inference_server/</code>)</td><td>Serve tokens. Knows nothing about the loop.</td></tr>
   <tr><td>Instruments (<code>scripts/</code>)</td><td>Know engine internals intimately. Emit a fixed vitals panel to <code>runs/*.json</code> via <code>research.harness</code>.</td></tr>
-  <tr><td>Loop (<code>research/</code>)</td><td>Knows only the panel contract: attribute gaps, screen hypotheses cheapest-first, judge four gates, record. Engine-agnostic.</td></tr>
+  <tr><td>Loop (<code>research/</code>)</td><td>Knows only the panel contract: attribute gaps, screen hypotheses cheapest-first, judge five gates, record. Engine-agnostic.</td></tr>
   <tr><td>Memory (<code>knowledge/</code>, <code>experiments/</code>)</td><td>One JSON per record, git-tracked. <code>DECISIONS.md</code> is a generated view.</td></tr>
 </table>
-<p class="lead">Four gates decide a merge, judged <strong>in this order</strong>: <strong>validity</strong>
-(did this harness exercise the change?) → <strong>significance</strong> (does it clear the variance
-budget on the metric predicted beforehand?) → <strong>correctness</strong> (fast suite green, no new
-iteration errors) → <strong>cost</strong> (undeclared startup or memory regressions fail).
-Validity is first because a confident number from a blind harness is worse than no number —
-this project shipped one for about a month. <code>scripts/premerge_check.py</code> enforces that
-an engine change cannot reach main without a green experiment record.</p>
+<p class="lead"><strong>Five gates</strong> decide a merge, judged <strong>in this order</strong>:
+<strong>validity</strong> (did this harness exercise the change?) → <strong>sanity</strong> (did a
+metric this change <em>cannot</em> touch move anyway?) → <strong>significance</strong> (does it clear
+the variance budget on the metric predicted beforehand?) → <strong>correctness</strong> (fast suite
+green, no new iteration errors) → <strong>cost</strong> (undeclared startup or memory regressions
+fail). Validity is first because a confident number from a blind harness is worse than no number —
+this project shipped one for about a month.</p>
+<div class="callout warn">
+  <strong>The two gates that exist because they were missing.</strong>
+  <strong>Sanity</strong> caught a CONFIRMED &minus;48.2% produced by two arms that had run on
+  different machines: they differed only in a <em>prefill</em> flag, yet TPOT p50 read 95.3 vs
+  46.4ms — and decode cannot move when only prefill changed.
+  <strong>Replication</strong> exists because significance was reading the wrong variance: the
+  panel's <code>stderr</code> is request-to-request scatter <em>within</em> one run, but this
+  harness's <em>run-to-run</em> null spread is 3.2&times; on <code>ttft_prefill_p95</code> and
+  6.5&times; on <code>ttft_p95</code>. One run per arm can never be significant, whatever the gap.
+  Arms now need &ge;3 runs each, first discarded as warmup (three identical back-to-back runs
+  measured 1494 / 401 / 229ms — strictly decreasing), ordered ABBA so warmup cannot favour the arm
+  that happens to go second.
+</div>
+<p class="lead"><code>scripts/premerge_check.py</code> enforces that an engine change cannot reach
+main without a green experiment record. Two rules it also carries: an experiment vouches for the
+exact commit it measured, so if engine files changed after that sha the record is refused —
+<strong>never rebase after measuring</strong> — and a record with single-run arms cannot authorise a
+merge however green its gates look. Docs, tests, scripts and <code>research/</code> itself are exempt;
+a gate that fires on documentation only teaches people to bypass it.</p>
 
 <h2 id="pressure">What happens when it runs out of memory</h2>
 <p class="lead">KV blocks are finite and running out is an <strong>expected operating condition</strong>,
@@ -265,7 +284,10 @@ the in-flight work, releases its KV, and keeps serving.</p>
   <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Attention path now exists, but measured a large regression: a mixed step cannot replay the decode CUDA graph and our eager forward is dispatch-bound (3–5× tax)</td><td><span class="badge b-defer">measured, not built</span></td></tr>
   <tr><td>6 — Load simulator</td><td>Built-in weighted multi-user simulator with per-user RNG</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — Open-loop + stress harnesses</td><td>SLO-gated Poisson sweep, plus an overload/KV-pressure stress that drives cache-missing traffic past the knee</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps, capture-time kernel variants</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Tiled prefill attention</td><td>FlashAttention-style tiling of the paged prefill kernel</td><td><span class="badge b-defer">measured, rejected</span></td></tr>
+  <tr><td>— Research loop</td><td>Fixed vitals panel, five gates, replicated A/B judging, JSON knowledge base, merge gate. 10 iterations run: 2 confirmed, 3 noise, 3 invalid</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>— Serving-level performance</td><td>End-to-end throughput and tail latency, replicated</td><td><span class="badge b-todo">unquantified</span></td></tr>
   <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>
   <tr><td>7 — Hardware auto-detect</td><td>CUDA → MPS → CPU fallback, partial</td><td><span class="badge b-prog">partial</span></td></tr>
   <tr><td>8 — Observability</td><td>Rolling p50/p95/p99 + Prometheus /metrics (aggregate) + structured JSON logs + timing middleware; Grafana dashboard in monitoring/</td><td><span class="badge b-prog">mostly</span></td></tr>

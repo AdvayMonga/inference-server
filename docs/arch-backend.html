@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · Backend</div>
 <h1>Inference Backend</h1>
-<p class="lead">Owns the model. The only place in the system that knows what a tensor is. Everything above it talks in token IDs.</p>
+<p class="lead">Owns the model. The only place in the system that knows what a tensor is. Everything above it talks in token IDs. Last updated 2026-09-06.</p>
 
 <div class="nav">
   <a href="#interface">The interface</a>·
@@ -269,6 +269,15 @@ A graph is a <em>fixed shape</em>, so the engine keeps a ladder of them.</p>
   output is <strong>not batch-invariant</strong>. vLLM behaves the same way. Never gate a test on
   bitwise agreement across different batch shapes.
 </div>
+<h3>Capture-time kernel variants</h3>
+<p class="lead">A flag read <em>inside</em> a captured graph is frozen at capture time — flipping the
+env var later changes nothing, because the replay does not re-read it. That made the graph-on path
+(the production one) the one configuration that could not be A/B tested. So prefill graphs are keyed
+by <code>(bucket, variant)</code> rather than by bucket alone: with
+<code>CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS=both</code> each bucket is captured twice, once per
+attention kernel, and <code>_replay_prefill</code> picks the graph matching the flag's current value
+(falling back to whichever variant exists). Costs ~0.5s and one extra graph pool per bucket, so it is
+worth enabling only while an experiment is running.</p>
 <p class="lead">Graphs are captured up front, not lazily: a lazy per-bucket capture puts a
 multi-second stall in the middle of serving, which shows up as a TTFT p95 blow-up rather than as an
 obvious error. With <code>torch.compile</code> on, each decode bucket is also a fresh Inductor
@@ -280,7 +289,18 @@ compile (~21 min for the full ladder), so iterate with compile off and enable it
   <tr><td><code>paged_decode_attention</code></td><td>1 query/row</td><td>Reads K/V straight from block tables, no gather, no padding.</td></tr>
   <tr><td>split-K variant</td><td>N&times;Hq &lt; 128 programs</td><td>Splits the KV dimension across programs so low batch fills the GPU: 7.1&times; at n=1 / L=2048, exact no-op at n&ge;16. Split count comes from batch shape ONLY, never sequence length — the grid is baked into the CUDA graph.</td></tr>
   <tr><td><code>paged_prefill_attention</code></td><td>multi-query</td><td>Right-padded suffixes attend over paged prefix+suffix; padding queries exit in-kernel.</td></tr>
+  <tr><td>tiled prefill variant</td><td><code>CUSTOM_BACKEND_TILED_PREFILL=1</code>, &ge;512 tokens</td><td><strong>Off by default — measured, not a win.</strong> FlashAttention-style tiling: one program handles <code>BLOCK_M</code> queries instead of one. Launch config lives in <code>LAUNCH_BY_HEAD_DIM</code> and only D=256 has an entry; at D=512 nothing beat the untiled kernel.</td></tr>
 </table>
+<div class="callout warn">
+  <strong>Why the tiled kernel uses a finite <code>-1e30</code>, not <code>-inf</code>.</strong>
+  Tiling shares one start block across all <code>BLOCK_M</code> queries in a tile, so some rows can
+  see a block that is fully masked for them. With <code>-inf</code> the running softmax computes
+  <code>exp(-inf - -inf)</code> = NaN and poisons the row. A large finite sentinel underflows to zero
+  instead. This is a general hazard of tiling a masked attention, not a quirk of this kernel.
+</div>
+<p class="lead"><strong>Result:</strong> tiling was rejected on both paths — 24.3% <em>worse</em>
+graph-off, and indistinguishable from noise graph-on across a replicated 4v4 ABBA run. The code stays
+because the variant machinery is what makes the graphed path testable at all; the flag stays off.</p>
 <p class="lead">Prefill also runs <code>lm_head</code> on <strong>one position per row</strong>
 (<code>logits_index</code>) rather than all of them — projecting every position into a 262k vocab to
 read one row per sequence cost up to 2 GB of materialized logits.</p>
