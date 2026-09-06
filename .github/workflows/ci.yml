@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # premerge_check.py diffs against the base branch
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          # CPU wheel: the CUDA build is ~2.5 GB and nothing in this job runs a kernel.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        # Model-heavy tests are deselected by tests/conftest.py — they need ~10 GB of weights.
+        # This job proves the engine still imports and its logic still holds, nothing about GPUs.
+        run: pytest -q
+
+      - name: Engine changes need an experiment record
+        if: github.event_name == 'pull_request'
+        run: python scripts/premerge_check.py HEAD --base "origin/${{ github.base_ref }}" --explain

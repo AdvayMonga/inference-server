@@ -1,0 +1,15 @@
+#!/bin/sh
+# Run what CI runs, before the push rather than after it. ~10s.
+# Install:  git config core.hooksPath scripts/hooks
+# Bypass:   git push --no-verify   (or SKIP_HOOKS=1 git push)
+[ -n "$SKIP_HOOKS" ] && exit 0
+
+for tool in ruff pytest; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "pre-push: $tool not on PATH — activate the venv, or push with SKIP_HOOKS=1."
+    exit 1
+  }
+done
+
+ruff check . || { echo "pre-push: ruff failed. Fix it, or push with --no-verify."; exit 1; }
+pytest -q  || { echo "pre-push: tests failed. Fix them, or push with --no-verify."; exit 1; }
