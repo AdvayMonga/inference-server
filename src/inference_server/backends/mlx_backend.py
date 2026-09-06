@@ -3,7 +3,6 @@
 import logging
 from typing import Generator
 
-import mlx.core as mx
 import mlx_lm
 
 from inference_server.backends.base import InferenceBackend
