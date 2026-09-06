@@ -28,6 +28,7 @@ COMPILE = os.environ.get("CUSTOM_BACKEND_COMPILE", "1")
 # comparable even with a shared run_group label: a tiled-prefill A/B showed TPOT p50
 # 95.3 vs 46.4ms between arms differing only in a PREFILL flag — machine variation.
 AB_TILED = os.environ.get("BENCH_AB_TILED", "0") == "1"
+ARM = os.environ.get("BENCH_ARM", "baseline")   # arm= label when not running an in-process A/B
 
 SLO_TTFT_MS, SLO_TPOT_MS = 200.0, 50.0
 # Distinct prompts drawn from. NOTE: this is a prefix-cache-HIT benchmark at small values —
@@ -56,6 +57,7 @@ _env = {
     "WAVE_WINDOW_MULT": os.environ.get("WAVE_WINDOW_MULT", "4"),
     "CUSTOM_BACKEND_COMPILE": COMPILE,
     "BENCH_AB_TILED": os.environ.get("BENCH_AB_TILED", "0"),
+    "BENCH_ARM": ARM,
     # Capture BOTH kernel variants so the graphed (production) path is A/B-able.
     "CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS": os.environ.get(
         "CUSTOM_BACKEND_PREFILL_GRAPH_VARIANTS", ""),
@@ -192,7 +194,9 @@ def sweep():
                         pair.reverse()
                     plan += [(r, n, t) for n, t in pair]
             else:
-                plan = [(r, "", None) for r in RATES]
+                # Label even a single-arm sweep: an untagged panel cannot be grouped into an arm
+                # later, and a baseline is measured far more often than it is A/B'd.
+                plan = [(r, ARM, None) for r in RATES]
             for rate, arm_name, arm_tiled in plan:
                 if arm_tiled is not None:
                     from inference_server.models import paged_attention_kernel as _K
