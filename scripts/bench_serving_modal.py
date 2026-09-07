@@ -270,7 +270,10 @@ def sweep():
                         n_samples=len(collected),
                         workload_regime=H.infer_regime(cache_stats.get("hit_rate"), POOL_SIZE),
                         stderr_value=H.stderr(ttfts),
-                        concurrency_observed=st.get("pending_high_water"),
+                        # Batch occupancy, NOT queue depth. This field previously carried
+                        # pending_high_water, so it reported how many requests were WAITING
+                        # while claiming to report concurrency reached.
+                        concurrency_observed=st.get("active_high_water"),
                         notes=f"open-loop Poisson, rate={rate}"
                               + (f", arm={arm_name}" if arm_name else "")
                               + f", trial={H.trial_id()}",

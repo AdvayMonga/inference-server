@@ -134,6 +134,12 @@ class Vitals:
     active_size: int | None = None
     pending_depth: int | None = None
     pending_high_water: int | None = None
+    # Batch occupancy per decode step. Optional with a None default, so panels written before
+    # these existed still load and PANEL_VERSION does not move — an added field cannot change a
+    # measurement that was already taken.
+    active_high_water: int | None = None
+    active_mean: float | None = None
+    decode_steps: int | None = None
     kv_admit_blocked: int | None = None
     total_rejected: int | None = None
     total_expired: int | None = None

@@ -182,6 +182,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # WIDE; if the queue never backs up every arrival is its own K=1 wave and there is
         # nothing to group. This is how we tell those regimes apart.
         self._wave_sizes: dict[int, int] = {}
+        # Batch occupancy, sampled per DECODE step. The central number for a batching engine:
+        # a decode step streams the whole weight matrix whether it serves 1 row or 200, so
+        # throughput is set by how full the batch is. Previously unmeasurable — `active_size`
+        # is an instantaneous len() read after the run drains, so it reported 0 everywhere, and
+        # the panel's concurrency came from the PENDING high-water, i.e. queue depth.
+        self._active_samples = 0
+        self._active_sum = 0
+        self._active_high_water = 0
         self._metrics = MetricsTracker()
 
     # --- Public interface ---
@@ -241,6 +249,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_completed": self._total_completed,
             "total_rejected": self._total_rejected,
             "pending_high_water": self._pending_high_water,
+            "active_high_water": self._active_high_water,
+            # Mean rows per decode step. Compare against max_batch_size: a large gap with a deep
+            # pending queue means admission is the constraint, not demand.
+            "active_mean": (round(self._active_sum / self._active_samples, 2)
+                            if self._active_samples else 0.0),
+            "decode_steps": self._active_samples,
             "kv_pressure": kv_pressure,
             "kv_free_blocks": kv_free_blocks,
             "kv_admit_blocked": self._kv_admit_blocked,
@@ -281,6 +295,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._advance_prefill_chunk(device)
                     self._evict_finished()
                     if self._active:
+                        self._active_samples += 1
+                        self._active_sum += len(self._active)
+                        if len(self._active) > self._active_high_water:
+                            self._active_high_water = len(self._active)
                         try:
                             self._decode_step(device)
                         except Exception as e:
