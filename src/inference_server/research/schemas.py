@@ -236,12 +236,18 @@ class Hypothesis:
     # "-48.2%" from two different machines while TPOT p50 differed 95.3 vs 46.4ms between arms
     # that only differed in a PREFILL flag — a sanity metric would have caught that instantly.
     sanity_metrics: list[str] = field(default_factory=list)
+    # What the falsification test needs to run. Tier says how much it costs; this says where it
+    # can run. Empty means any machine — a scheduler change does not need CUDA, and routing it
+    # to an A100 out of habit is how the GPU budget ran out with the cheap tiers untouched.
+    requires: list[str] = field(default_factory=list)
     status: str = "proposed"         # proposed | screened_out | testing | confirmed | rejected
     id: str = field(default_factory=lambda: _new_id("hyp"))
     created_at: float = field(default_factory=time.time)
 
     KINDS = ("engine_change", "instrument_change", "harness_change")
     DIRECTIONS = ("increase", "decrease")
+    CAPABILITIES = frozenset({"gpu", "cuda", "triton", "cuda_graphs", "compile", "vllm",
+                              "linux", "bf16", "large_vram"})
 
     def validate(self) -> None:
         if self.kind not in self.KINDS:
@@ -250,6 +256,9 @@ class Hypothesis:
             raise SchemaError(f"predicted_direction must be one of {self.DIRECTIONS}")
         if not 1 <= self.falsification_tier <= 4:
             raise SchemaError("falsification_tier must be 1..4 (cheapest first)")
+        unknown = set(self.requires) - self.CAPABILITIES
+        if unknown:
+            raise SchemaError(f"requires {sorted(unknown)} not in {sorted(self.CAPABILITIES)}")
         if not self.predicted_magnitude:
             raise SchemaError(
                 "predicted_magnitude is required BEFORE measuring — roughly half the hypotheses "

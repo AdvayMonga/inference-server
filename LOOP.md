@@ -104,6 +104,13 @@ Each candidate MUST carry:
 
 Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
 
+Tier says how much a falsification costs; `requires` on the hypothesis says where it can run.
+`loop screen` routes each one to the least capable venue that satisfies it and prices it at
+that venue, so a tier-3 scheduler probe lands on local MPS for $0 and only kernel, CUDA-graph,
+compile or vLLM work reaches a rented GPU. Cloud venues are opt-in (`RESEARCH_VENUES=vast-4090`
+or `--venues`); with none enabled, a hypothesis that needs CUDA is reported as unroutable rather
+than silently priced at Modal. `loop budget` shows the cap, the ledger and the venue table.
+
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed

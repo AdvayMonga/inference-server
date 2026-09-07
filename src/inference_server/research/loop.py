@@ -1,7 +1,8 @@
 """CLI driver for the research loop. Every step of LOOP.md, deterministic where it can be.
 
     python -m inference_server.research.loop attribute runs/<id>.json
-    python -m inference_server.research.loop screen <hypotheses.json>
+    python -m inference_server.research.loop screen <hypotheses.json> [--venues vast-4090]
+    python -m inference_server.research.loop budget [--limit-usd 5] [--reset]
     python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
     python -m inference_server.research.loop index
     python -m inference_server.research.loop kb --status rejected
@@ -17,14 +18,21 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 from inference_server.research.attribute import attribute
+from inference_server.research.budget import (
+    VENUES,
+    VENUES_ENV,
+    Budget,
+    Unroutable,
+    available_venues,
+    route,
+)
 from inference_server.research.kb import (
-    related,
     load_entries,
     query,
+    related,
     write_index,
 )
 from inference_server.research.schemas import Hypothesis, Vitals
@@ -52,15 +60,29 @@ def cmd_attribute(args) -> int:
 
 
 def cmd_screen(args) -> int:
-    """Order hypotheses cheapest-falsification-first and flag known dead ends."""
+    """Order hypotheses cheapest-falsification-first, place each on a venue, flag dead ends."""
     raw = json.loads(Path(args.hypotheses).read_text())
     hyps = [Hypothesis(**h) for h in (raw if isinstance(raw, list) else [raw])]
     entries = load_entries()
+    venues = available_venues(args.venues)
+    budget = Budget.load(limit_usd=args.limit_usd)
 
     for h in hyps:
         h.validate()
 
-    for h in sorted(hyps, key=lambda x: x.falsification_tier):
+    # Sort by what it actually costs here, not by tier alone: a tier-3 probe on local MPS is
+    # free, a tier-3 probe that needs Triton is not.
+    placed = []
+    for h in hyps:
+        try:
+            placed.append((h, route(h, venues), None))
+        except Unroutable as e:
+            placed.append((h, None, str(e)))
+    placed.sort(key=lambda t: (t[1].est_usd if t[1] else float("inf"), t[0].falsification_tier))
+
+    print(f"venues: {', '.join(v.name for v in venues)}   "
+          f"budget: ${budget.remaining_usd:.2f} of ${budget.limit_usd:.2f} left\n")
+    for h, pl, err in placed:
         hits = related(h.statement, entries, tags=h.tags)
         blocking = [e for _, e in hits if e.status in ("rejected", "resolved")]
         flag = "  <-- READ THE RELATED ENTRIES FIRST" if blocking else ""
@@ -69,6 +91,12 @@ def cmd_screen(args) -> int:
         print(f"  predicts {h.predicted_metric} {h.predicted_direction} by "
               f"{h.predicted_magnitude}")
         print(f"  falsify with: {h.falsification_test}")
+        if pl is None:
+            print(f"    ! NO VENUE: {err}")
+        else:
+            ok, why = budget.can_afford(pl.tier, usd_per_hour=pl.venue.usd_per_hour)
+            print(f"  run on: {pl.venue.name} ({pl.reason})"
+                  + ("" if ok else f"\n    ! OVER BUDGET: {why}"))
         for score, e in hits:
             print(f"    ~{score:5.1f} [{e.status}] {e.id}: {e.title[:66]}")
         if not hits:
@@ -82,6 +110,25 @@ def cmd_screen(args) -> int:
             print(f"    ! settled entries not cited in kb_check: {', '.join(uncited[:3])}")
         print()
     print("Run the cheapest tier first; never enter tier N+1 while tier N could still falsify.")
+    return 0
+
+
+def cmd_budget(args) -> int:
+    """Show the cap, the ledger, and which venues this session can route to."""
+    budget = Budget.load(limit_usd=args.limit_usd)
+    if args.reset:
+        budget.reset(args.limit_usd).save()
+        print("ledger reset")
+    print(f"cap ${budget.limit_usd:.2f}   spent ${budget.spent_usd:.2f}   "
+          f"remaining ${budget.remaining_usd:.2f}")
+    for e in budget.entries:
+        print(f"  tier {e['tier']}  ${e['usd']:.2f}  {e.get('venue') or '-':12} {e['label']}")
+    avail = {v.name for v in available_venues(args.venues)}
+    print(f"\nvenues (cloud is opt-in via {VENUES_ENV} or --venues):")
+    for v in VENUES.values():
+        mark = "on " if v.name in avail else "off"
+        print(f"  [{mark}] {v.name:12} ${v.usd_per_hour:.2f}/h  "
+              f"{', '.join(sorted(v.capabilities)) or 'cpu only'}")
     return 0
 
 
@@ -127,7 +174,17 @@ def main(argv: list[str] | None = None) -> int:
     a.set_defaults(fn=cmd_attribute)
 
     s = sub.add_parser("screen", help="order hypotheses cheapest-first, flag dead ends (step 3)")
-    s.add_argument("hypotheses"); s.set_defaults(fn=cmd_screen)
+    s.add_argument("hypotheses")
+    s.add_argument("--venues",
+                   help=f"cloud venues to allow, e.g. vast-4090 (default: ${VENUES_ENV})")
+    s.add_argument("--limit-usd", type=float, default=5.0)
+    s.set_defaults(fn=cmd_screen)
+
+    b = sub.add_parser("budget", help="show the per-iteration cap, ledger and venues")
+    b.add_argument("--venues")
+    b.add_argument("--limit-usd", type=float, default=5.0)
+    b.add_argument("--reset", action="store_true", help="start a fresh iteration")
+    b.set_defaults(fn=cmd_budget)
 
     j = sub.add_parser("judge", help="run the five gates over a run group and record it (5-6)")
     j.add_argument("--hyp", required=True)

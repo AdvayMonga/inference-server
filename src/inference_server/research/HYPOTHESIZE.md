@@ -26,6 +26,7 @@ matches on keywords: read the entry, do not trust the flag.
 | `predicted_magnitude` | **written before measuring.** Roughly half the hypotheses in this project were wrong; recording the prediction is what makes that visible instead of rationalised afterwards. "lm_head slicing will be a big win" was predicted large and measured 3-8%. |
 | `falsification_test` | the *cheapest* thing that could prove this wrong — not the thing that would prove it right |
 | `falsification_tier` | 1 static · 2 CPU · 3 single-GPU probe · 4 full sweep. The KV block leak was proven on CPU in ~2s; it would have cost a 20-minute GPU run to find the same thing. |
+| `requires` | what the test needs to *run*: any of `cuda` `triton` `cuda_graphs` `compile` `vllm` `linux` `bf16` `large_vram`. Empty means any machine. Tier says how much it costs; this says where `loop screen` sends it. A scheduler change needs nothing and runs on MPS for $0; a Triton kernel needs `cuda` and goes to the cheapest CUDA venue you have enabled. |
 | `gap_id` | which attributed gap this attacks. No gap, no hypothesis. |
 | `predicted_metric` | a real panel field — and the one the gates will judge |
 
