@@ -180,6 +180,20 @@ the move was stale immediately.
 7. The loop may conclude *"the thing you asked me to optimise does not matter"* — and that is a
    successful iteration. It happened twice here, each time killing a planned project.
 
+## What the merge gate does and does not stop
+
+The gate exists to stop unproven **performance** claims. It is not a general change-approval
+process. An engine file whose diff adds only counters, stats keys and comments needs no
+experiment: a counter makes no performance claim, and requiring a GPU A/B to add one means
+observability can never be fixed when there is no GPU budget. That is not hypothetical — the
+panel could not measure batch occupancy at all, which produced a wrong conclusion about the
+scheduler, and the gate blocked the fix.
+
+The exemption is deliberately strict: one added line that does anything else disqualifies the
+file, any deleted or modified line disqualifies it, and it is off entirely unless a diff is
+supplied. When it does not fit your change, make the change conform rather than widening the
+gate — the occupancy counters were rewritten to drop a local temporary for exactly that reason.
+
 ## Workflow rule: never rebase after measuring
 
 An experiment vouches for one commit sha. Rebasing the branch after the A/B run moves
