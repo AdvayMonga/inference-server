@@ -318,3 +318,56 @@ def test_the_exemption_is_off_unless_a_diff_is_supplied():
 
     engine = ["src/inference_server/scheduler.py"]
     assert pm.behavioural(engine) == engine        # no diff_ref -> still counts
+
+
+def test_a_correctness_fix_is_authorised_by_its_test_not_by_gates():
+    """The loop could previously only validate PERFORMANCE. A bug fix has no predicted metric
+    delta, so fixing one meant either a GPU experiment measuring nothing relevant or a one-off
+    exemption — and two of those had accumulated before this existed."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="loop",
+                     arms=[Arm("baseline", "abc123", [])], verdict="confirmed",
+                     regression_test="tests/test_x.py::test_y")
+    assert not fix.all_gates_green(), "it has no panels, so it has no gates"
+    ok, why = fix.authorises_merge()
+    assert ok and "correctness fix" in why
+
+
+def test_a_correctness_fix_without_a_base_sha_is_refused():
+    """'Fails before' is the whole claim. Without a base sha there is nothing it failed at."""
+    from inference_server.research.schemas import Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="", source="loop",
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
+    ok, why = fix.authorises_merge()
+    assert not ok and "base sha" in why
+
+
+def test_a_reconstructed_correctness_fix_still_cannot_authorise():
+    """The regression-test path must not become a way around 'produced by the loop'."""
+    from inference_server.research.schemas import Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="reconstructed",
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
+    ok, why = fix.authorises_merge()
+    assert not ok and "not produced by the loop" in why
+
+
+def test_premerge_reruns_the_named_test_rather_than_trusting_the_record():
+    """A record that merely CLAIMS a test passes is not evidence."""
+    import importlib.util
+    from pathlib import Path
+
+    from inference_server.research.schemas import REPO_ROOT
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+
+    ok, _ = pm.regression_test_passes(
+        "tests/test_research_gates.py::test_a_correctness_fix_without_a_base_sha_is_refused")
+    assert ok
+    missing, _ = pm.regression_test_passes("tests/test_research_gates.py::test_does_not_exist")
+    assert not missing, "a test that does not run must never read as passing"

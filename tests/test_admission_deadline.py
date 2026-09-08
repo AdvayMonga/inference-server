@@ -52,37 +52,93 @@ def test_neither_policy_orders_by_age():
         loop.close()
 
 
-@pytest.mark.asyncio
-async def test_a_starved_request_is_never_checked_against_its_deadline():
-    """The bug, pinned as a CHARACTERIZATION test — it asserts today's WRONG behaviour so the
-    defect is visible and measurable, not so it is preserved.
+def test_a_starved_request_is_shed_even_when_it_is_never_the_head():
+    """The fix, tested deterministically.
 
-    When expiry is fixed to sweep the whole pending set, this test must be INVERTED (the stale
-    request should be shed, and total_expired should count it), not deleted.
-
-    A low-priority request ages past the deadline but never reaches the head, so the only code
-    that could shed it never looks at it.
+    Driving this through a RUNNING scheduler is racy — it can see the stale request as head in
+    the window before the higher-priority ones arrive, and then the old head-of-line check sheds
+    it for the wrong reason and the test passes against buggy code. So the sweep is exercised
+    directly, with the queue arranged so the stale request is provably never the head.
     """
     sched = ContinuousBatchScheduler(FakeChunkBackend(), max_batch_size=1,
-                                     prefill_mode="batched", max_queue_wait_s=1.0)
-    loop = asyncio.get_running_loop()
+                                     prefill_mode="batched", max_queue_wait_s=0.05)
+    loop = asyncio.new_event_loop()
+    try:
+        stale = ScheduledRequest(token_ids=[1, 2, 3], max_tokens=2, session_id="starved",
+                                 future=loop.create_future(), priority=0)
+        sched.enqueue(stale)
+        stale.enqueue_ts = time.perf_counter() - 60.0        # 1200x over the deadline
+        hot = []
+        for i in range(5):
+            h = ScheduledRequest(token_ids=[1, 2, 3], max_tokens=2, session_id=f"hot{i}",
+                                 future=loop.create_future(), priority=9)
+            sched.enqueue(h)
+            hot.append(h)
 
-    stale = _req(loop, priority=0, aged_s=60.0, seq=0)          # 60x over the 1s deadline
-    fresh = [_req(loop, priority=9, aged_s=0.0, seq=i + 1) for i in range(5)]
-    for r in [stale] + fresh:
-        sched.policy.on_request_arrived(r)
+        # Precondition: the only request the old check could ever inspect is a fresh one.
+        assert sched.policy.peek_next() is not stale
+        assert not stale.future.done()
 
-    # Whatever the policy hands back, it is never the stale request — so the deadline check in
-    # _admit_pending, which only inspects peek_next(), cannot see it.
-    seen = {id(sched.policy.peek_next()) for _ in range(10)}
-    assert id(stale) not in seen, (
-        "a request 60x past its deadline is invisible to a head-of-line-only expiry check")
+        sched._shed_expired()
+
+        # Assertions are on scheduler state, not the future: delivering the rejection is
+        # _reject's job and needs a running loop (covered by the head-of-line test below).
+        assert sched.stats()["total_expired"] == 1, "shed from anywhere in the queue, not just head"
+        assert sched.stats()["total_rejected"] == 1
+        assert sched.policy.pending() == hot, "the stale request left; fresh work untouched"
+        assert sched.stats()["pending_depth"] == len(hot)
+    finally:
+        loop.close()
+
+
+def test_the_sweep_is_actually_wired_into_admission():
+    """Separate from whether the sweep works: that it RUNS. Testing _shed_expired() directly
+    passes even if nothing ever calls it, so this drives the real admission path instead."""
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), max_batch_size=1,
+                                     prefill_mode="batched", max_queue_wait_s=0.05)
+    loop = asyncio.new_event_loop()
+    try:
+        stale = ScheduledRequest(token_ids=[1, 2, 3], max_tokens=2, session_id="starved",
+                                 future=loop.create_future(), priority=0)
+        sched.enqueue(stale)
+        stale.enqueue_ts = time.perf_counter() - 60.0
+        for i in range(5):
+            h = ScheduledRequest(token_ids=[1, 2, 3], max_tokens=2, session_id=f"hot{i}",
+                                 future=loop.create_future(), priority=9)
+            sched.enqueue(h)
+
+        assert sched.policy.peek_next() is not stale
+        sched._admit_pending("cpu")
+
+        assert sched.stats()["total_expired"] == 1, (
+            "admission must sweep the whole queue for expiry, not only inspect its head")
+        assert stale not in sched.policy.pending()
+    finally:
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_fresh_requests_survive_the_sweep():
+    """The sweep must shed only what is actually stale — rejecting live work would be far worse
+    than the bug it fixes."""
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), max_batch_size=4,
+                                     prefill_mode="batched", max_queue_wait_s=30.0)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=[1, 2, 3], max_tokens=2, session_id=f"s{i}",
+                                 future=loop.create_future()) for i in range(4)]
+        out = await asyncio.gather(*(sched.submit(r) for r in reqs))
+
+        assert all(len(o) > 0 for o in out)
+        assert sched.stats()["total_expired"] == 0
+    finally:
+        await sched.stop()
 
 
 @pytest.mark.asyncio
 async def test_the_head_of_line_case_does_shed():
-    """The mechanism itself is correct — this is a coverage gap, not a broken implementation.
-    With equal priority and one session, the head IS the oldest and shedding works."""
+    """The case that always worked: equal priority, one session, head is oldest."""
     backend = FakeChunkBackend()
     sched = ContinuousBatchScheduler(backend, max_batch_size=4, prefill_mode="batched",
                                      max_queue_wait_s=0.05)

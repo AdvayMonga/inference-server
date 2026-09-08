@@ -376,6 +376,38 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     # --- Phase 2: admit new requests ---
 
+    def _shed_expired(self) -> None:
+        """Reject every request past the admission deadline, wherever it sits in the queue.
+
+        Expiry used to be checked only against peek_next(). That is equivalent to shedding all
+        stale work only if the head is always the oldest request, and no policy here orders that
+        way — FCFS keys on (-priority, arrival_seq), VTC on (-priority, counter, arrival_seq). A
+        low-priority or heavy-session request could therefore be overtaken indefinitely and never
+        examined: it kept its queue slot, was never counted in total_expired, and was eventually
+        served long after the caller had given up.
+
+        Runs once per admission pass, over the pending set. O(pending) against a decode step that
+        costs milliseconds, so the sweep is free in comparison.
+        """
+        if self.max_queue_wait_s <= 0:
+            return
+        now = time.perf_counter()
+        # Under the same lock enqueue() holds: it mutates the policy's pending set and
+        # _pending_count, so sweeping without it races an arriving request.
+        with self._pending_cv:
+            for req in self.policy.pending():
+                if not req.enqueue_ts or now - req.enqueue_ts <= self.max_queue_wait_s:
+                    continue
+                waited = now - req.enqueue_ts
+                self.policy.pick(req)
+                self._pending_count -= 1
+                self._total_rejected += 1
+                self._total_expired += 1
+                self.policy.on_request_finished(req)
+                self._reject(req, QueueFullError(
+                    f"queued {waited:.1f}s, over the {self.max_queue_wait_s:.0f}s admission "
+                    f"deadline — server overloaded"))
+
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
         to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
@@ -388,6 +420,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 with self._pending_cv:
                     window = self.policy.peek_window(free * self.wave_window_mult)
                 plan = plan_wave(window, free)
+        self._shed_expired()
         while len(self._active) + len(self._prefilling) + len(to_admit) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.

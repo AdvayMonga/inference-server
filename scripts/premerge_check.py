@@ -106,6 +106,19 @@ def observability_only(path: str, ref: str, base: str = "main") -> bool:
     return saw_add
 
 
+def regression_test_passes(node_id: str) -> tuple[bool, str]:
+    """Re-run the named test. A record that merely CLAIMS a test passes is not evidence.
+
+    Only the 'passes now' half is checked here. Verifying 'failed before' would mean checking out
+    the base sha and running there, which is not safe to do to someone's working tree — so the
+    record names the base sha and the fail-before is established when the fix is written.
+    """
+    r = subprocess.run([sys.executable, "-m", "pytest", "-q", node_id, "--no-header", "-x"],
+                       cwd=REPO_ROOT, capture_output=True, text=True)
+    tail = (r.stdout or r.stderr).strip().splitlines()
+    return r.returncode == 0, tail[-1] if tail else "no output"
+
+
 def is_ancestor(sha: str, ref: str) -> bool:
     """Is `sha` reachable from `ref`? Cheap guard so a record cannot vouch for unrelated code."""
     r = subprocess.run(["git", "merge-base", "--is-ancestor", sha, ref],
@@ -138,6 +151,26 @@ def main() -> int:
         print(f"    {f}")
 
     sha = resolve_sha(args.ref)
+
+    # A correctness fix is checked FIRST, and differently. Its evidence is a regression test
+    # re-run against the tree being merged, so "did engine files drift since the measurement" is
+    # meaningless — the measurement IS now. Requiring only that its base sha is an ancestor.
+    for candidate in load_experiments():
+        if candidate.source != "loop" or not candidate.regression_test:
+            continue
+        if not candidate.engine_sha_base or not is_ancestor(candidate.engine_sha_base, args.ref):
+            continue
+        ok, why = candidate.authorises_merge()
+        if not ok:
+            continue
+        passed, tail = regression_test_passes(candidate.regression_test)
+        if passed:
+            print(f"\nPASS  {candidate.id} correctness fix; {candidate.regression_test} passes "
+                  f"(failed at {candidate.engine_sha_base[:12]})")
+            return 0
+        print(f"\nFAIL  {candidate.id} rests on {candidate.regression_test}, which does not "
+              f"pass:\n          {tail}")
+        return 1
 
     # An experiment validates the commit it MEASURED, and committing the experiment record
     # itself moves HEAD past it. So accept a record whose treatment sha is an ancestor of the

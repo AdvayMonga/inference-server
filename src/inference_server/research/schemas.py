@@ -225,7 +225,7 @@ class Hypothesis:
     predicted_magnitude: str         # written down before the run, e.g. ">30%", "2x"
     falsification_tier: int          # 1 static, 2 CPU, 3 single-GPU probe, 4 full sweep
     falsification_test: str          # the cheapest thing that could prove this wrong
-    kind: str = "engine_change"      # engine_change | instrument_change | harness_change
+    kind: str = "engine_change"      # see KINDS
     # Tags are the reliable matching key into the knowledge base. Free-text relevance proved
     # too weak on the first real iteration: it missed that "chunk long prefills across ticks" is
     # ruled out by an entry about TTFT being prefill-bound, because they share almost no words.
@@ -240,7 +240,12 @@ class Hypothesis:
     id: str = field(default_factory=lambda: _new_id("hyp"))
     created_at: float = field(default_factory=time.time)
 
-    KINDS = ("engine_change", "instrument_change", "harness_change")
+    # 'correctness_fix' exists because the loop could previously only validate PERFORMANCE.
+    # A bug fix has no predicted metric delta — its evidence is a regression test that fails
+    # before the change and passes after, which is stronger and cheaper than a noisy GPU A/B.
+    # Without it, fixing a bug required either a GPU experiment that measures nothing relevant
+    # or a one-off exemption, and two of those had already accumulated.
+    KINDS = ("engine_change", "instrument_change", "harness_change", "correctness_fix")
     DIRECTIONS = ("increase", "decrease")
 
     def validate(self) -> None:
@@ -283,6 +288,9 @@ class Experiment:
     # gate could be satisfied by prose about a run nobody can reproduce.
     source: str = "loop"
     notes: str = ""                  # why a record was retracted, or anything the gates can't say
+    # For a correctness_fix: the pytest node id that fails at `engine_sha_base` and passes at the
+    # treatment sha. This is the experiment — the assertion IS the measurement.
+    regression_test: str = ""
     id: str = field(default_factory=lambda: _new_id("exp"))
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -306,6 +314,13 @@ class Experiment:
         if self.source != "loop":
             return False, (f"experiment {self.id} is {self.source}, not produced by the loop — "
                            f"history, not authorisation")
+        # Checked BEFORE the gates: a correctness fix has no panels, so it has no gates to be
+        # green. Its evidence is the regression test, which premerge re-runs.
+        if self.regression_test:
+            if not self.engine_sha_base:
+                return False, (f"{self.id} names a regression test but no base sha — 'fails "
+                               f"before' is unverifiable without one")
+            return True, f"{self.id} correctness fix, gated on {self.regression_test}"
         if not self.all_gates_green():
             failed = [n for n, g in self.gates.items() if not g.get("passed")]
             return False, f"gate(s) not green: {', '.join(failed) or 'missing gates'}"
