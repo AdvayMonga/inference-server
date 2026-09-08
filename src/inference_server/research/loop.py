@@ -25,8 +25,10 @@ from inference_server.research.budget import (
     VENUES,
     VENUES_ENV,
     Budget,
+    Footprint,
     Unroutable,
     available_venues,
+    preflight,
     route,
 )
 from inference_server.research.kb import (
@@ -66,6 +68,7 @@ def cmd_screen(args) -> int:
     entries = load_entries()
     venues = available_venues(args.venues)
     budget = Budget.load(limit_usd=args.limit_usd)
+    footprint = Footprint.from_env()
 
     for h in hyps:
         h.validate()
@@ -75,13 +78,16 @@ def cmd_screen(args) -> int:
     placed = []
     for h in hyps:
         try:
-            placed.append((h, route(h, venues), None))
+            placed.append((h, route(h, venues, footprint), None))
         except Unroutable as e:
             placed.append((h, None, str(e)))
     placed.sort(key=lambda t: (t[1].est_usd if t[1] else float("inf"), t[0].falsification_tier))
 
-    print(f"venues: {', '.join(v.name for v in venues)}   "
-          f"budget: ${budget.remaining_usd:.2f} of ${budget.limit_usd:.2f} left\n")
+    sizes = ", ".join(f"{v.name} {v.mem_gb or '?'}GB" for v in venues)
+    print(f"venues: {sizes}   "
+          f"budget: ${budget.remaining_usd:.2f} of ${budget.limit_usd:.2f} left")
+    print(f"footprint (from MODEL_NAME / CUSTOM_BACKEND_BLOCKS): {footprint.model}, "
+          f"{footprint.blocks}x{footprint.block_size} blocks\n")
     for h, pl, err in placed:
         hits = related(h.statement, entries, tags=h.tags)
         blocking = [e for _, e in hits if e.status in ("rejected", "resolved")]
@@ -97,6 +103,9 @@ def cmd_screen(args) -> int:
             ok, why = budget.can_afford(pl.tier, usd_per_hour=pl.venue.usd_per_hour)
             print(f"  run on: {pl.venue.name} ({pl.reason})"
                   + ("" if ok else f"\n    ! OVER BUDGET: {why}"))
+            if pl.tier >= 3:
+                fit_ok, fit_why = preflight(pl.venue, footprint)
+                print(f"  memory: {fit_why}" if fit_ok else f"    ! MEMORY: {fit_why}")
         for score, e in hits:
             print(f"    ~{score:5.1f} [{e.status}] {e.id}: {e.title[:66]}")
         if not hits:
@@ -123,11 +132,12 @@ def cmd_budget(args) -> int:
           f"remaining ${budget.remaining_usd:.2f}")
     for e in budget.entries:
         print(f"  tier {e['tier']}  ${e['usd']:.2f}  {e.get('venue') or '-':12} {e['label']}")
-    avail = {v.name for v in available_venues(args.venues)}
+    avail = {v.name: v for v in available_venues(args.venues)}
     print(f"\nvenues (cloud is opt-in via {VENUES_ENV} or --venues):")
     for v in VENUES.values():
+        v = avail.get(v.name, v)
         mark = "on " if v.name in avail else "off"
-        print(f"  [{mark}] {v.name:12} ${v.usd_per_hour:.2f}/h  "
+        print(f"  [{mark}] {v.name:12} ${v.usd_per_hour:.2f}/h  {str(v.mem_gb or '?'):>5} GB  "
               f"{', '.join(sorted(v.capabilities)) or 'cpu only'}")
     return 0
 

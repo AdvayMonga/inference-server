@@ -7,10 +7,13 @@ import pytest
 from inference_server.research.budget import (
     VENUES,
     Budget,
+    Footprint,
     Unroutable,
+    Venue,
     estimate_usd,
     guard,
     parse_venues,
+    preflight,
     route,
 )
 from inference_server.research.schemas import Hypothesis, SchemaError
@@ -122,3 +125,50 @@ def test_guard_prices_by_venue_not_by_modal(tmp_path, monkeypatch):
         guard(3, "probe", budget=b, venue=VENUES["modal-a100"])
     guard(3, "probe", budget=b, venue=VENUES["vast-4090"])
     assert b.entries[-1]["venue"] == "vast-4090"
+
+
+# -- memory: a plan that cannot fit is not a plan --------------------------------------
+
+M4_MPS = Venue("local-mps", 0.0, frozenset({"gpu", "bf16"}), local=True, mem_gb=17.2,
+               unified=True)
+
+
+def test_e2b_fits_local_mps_but_e4b_does_not():
+    """Unified memory holds the host copy AND the device copy during load: 2x weights."""
+    assert Footprint("E2B").needed_gb(M4_MPS) < 17.2
+    assert Footprint("E4B").needed_gb(M4_MPS) > 17.2
+    assert Footprint("E4B").needed_gb(VENUES["vast-4090"]) < 24.0
+
+
+def test_e4b_probe_skips_the_mac_and_lands_on_the_4090():
+    pl = route(_hyp(3), [VENUES["local-cpu"], M4_MPS, VENUES["vast-4090"]], Footprint("E4B"))
+    assert pl.venue.name == "vast-4090"
+
+
+def test_e4b_with_no_big_venue_is_unroutable_with_sizes():
+    with pytest.raises(Unroutable, match="does not fit.*17.2 GB, needs"):
+        route(_hyp(3), [M4_MPS], Footprint("E4B"))
+
+
+def test_cheap_tiers_ignore_the_footprint():
+    """Tier 1-2 never load the model, so a mocked CPU repro of an E4B question is still free."""
+    assert route(_hyp(2), [M4_MPS], Footprint("E4B")).venue.name == "local-mps"
+
+
+def test_footprint_reads_the_engine_knobs(monkeypatch):
+    monkeypatch.setenv("MODEL_NAME", "google/gemma-4-E4B-it")
+    monkeypatch.setenv("CUSTOM_BACKEND_BLOCKS", "2048")
+    fp = Footprint.from_env()
+    assert fp.model == "E4B" and fp.blocks == 2048
+    assert fp.pool_gb == pytest.approx(2048 * 16 * 57344 / 1e9)
+
+
+def test_guard_refuses_when_the_host_is_full_right_now(tmp_path, monkeypatch):
+    """The plan fit at screen time; the browser ate the memory since. Refuse, do not swap."""
+    monkeypatch.setattr("inference_server.research.budget.LEDGER", tmp_path / "budget.json")
+    monkeypatch.setattr("inference_server.research.budget.host_available_gb", lambda: 6.5)
+    with pytest.raises(RuntimeError, match="memory refused.*6.5 GB free"):
+        guard(3, "probe", budget=Budget(), venue=M4_MPS, footprint=Footprint("E2B"))
+    monkeypatch.setattr("inference_server.research.budget.host_available_gb", lambda: 20.0)
+    guard(3, "probe", budget=Budget(), venue=M4_MPS, footprint=Footprint("E2B"))
+    assert not preflight(M4_MPS, Footprint("E4B"))[0]

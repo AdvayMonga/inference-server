@@ -111,6 +111,15 @@ compile or vLLM work reaches a rented GPU. Cloud venues are opt-in (`RESEARCH_VE
 or `--venues`); with none enabled, a hypothesis that needs CUDA is reported as unroutable rather
 than silently priced at Modal. `loop budget` shows the cap, the ledger and the venue table.
 
+Placement also checks memory. `Footprint.from_env()` reads the same knobs the engine will
+(`MODEL_NAME`, `CUSTOM_BACKEND_BLOCKS`, `CUSTOM_BACKEND_BLOCK_SIZE`) and sizes weights + KV pool
++ headroom; on unified memory the weights count twice because the host copy and the device copy
+coexist during load. A tier-3/4 hypothesis skips any venue it cannot fit in, and `guard()`
+refuses to launch on a local venue when the host does not have that much free *right now* —
+a plan that fit at screen time still OOMs if a browser took the memory since. Tiers 1-2 never
+load the model and are exempt. On a 24 GB Mac this means E2B fits (about 16 GB with the load
+transient) and E4B does not; E4B work routes to the cheapest 24 GB+ venue enabled.
+
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed

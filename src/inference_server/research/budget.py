@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -47,30 +47,52 @@ class Venue:
     usd_per_hour: float
     capabilities: frozenset[str]
     local: bool = False
+    mem_gb: float | None = None   # device memory; None = unknown, never filtered on
+    unified: bool = False         # Apple silicon: host and device share one pool
 
 
 _CUDA = frozenset({"gpu", "cuda", "triton", "cuda_graphs", "compile", "vllm", "linux", "bf16"})
 
 VENUES: dict[str, Venue] = {v.name: v for v in (
-    Venue("local-cpu", 0.0, frozenset(), local=True),
-    Venue("local-mps", 0.0, frozenset({"gpu", "bf16"}), local=True),
+    Venue("local-cpu", 0.0, frozenset(), local=True, unified=True),
+    Venue("local-mps", 0.0, frozenset({"gpu", "bf16"}), local=True, unified=True),
     Venue("local-cuda", 0.0, _CUDA, local=True),
-    Venue("vast-4090", 0.35, _CUDA),                       # 24 GB; E4B bf16 + KV pool fits
-    Venue("runpod-a100", 1.30, _CUDA | {"large_vram"}),    # 80 GB; comparable to the old CSVs
-    Venue("modal-a100", GPU_USD_PER_HOUR, _CUDA | {"large_vram"}),
+    Venue("vast-4090", 0.35, _CUDA, mem_gb=24.0),
+    Venue("runpod-a100", 1.30, _CUDA | {"large_vram"}, mem_gb=80.0),
+    Venue("modal-a100", GPU_USD_PER_HOUR, _CUDA | {"large_vram"}, mem_gb=80.0),
 )}
 
 VENUES_ENV = "RESEARCH_VENUES"
 
 
+def host_total_gb() -> float | None:
+    try:
+        import psutil
+        return psutil.virtual_memory().total / 1e9
+    except ImportError:
+        return None
+
+
+def host_available_gb() -> float | None:
+    """Memory free RIGHT NOW, other apps included. On unified memory this is what MPS gets."""
+    try:
+        import psutil
+        return psutil.virtual_memory().available / 1e9
+    except ImportError:
+        return None
+
+
 def local_venues() -> list[Venue]:
-    """What this machine can run, by asking torch rather than assuming."""
+    """What this machine can run, by asking torch rather than assuming. Sizes are measured."""
     import torch  # lazy: keeps `loop screen` fast on the no-GPU path
-    out = [VENUES["local-cpu"]]
+    total = host_total_gb()
+    out = [replace(VENUES["local-cpu"], mem_gb=total and round(total * 0.8, 1))]
     if torch.backends.mps.is_available():
-        out.append(VENUES["local-mps"])
+        out.append(replace(VENUES["local-mps"],
+                           mem_gb=round(torch.mps.recommended_max_memory() / 1e9, 1)))
     if torch.cuda.is_available():
-        out.append(VENUES["local-cuda"])
+        out.append(replace(VENUES["local-cuda"],
+                           mem_gb=round(torch.cuda.mem_get_info()[1] / 1e9, 1)))
     return out
 
 
@@ -105,6 +127,58 @@ def estimate_usd(tier: int, minutes: float | None = None,
     return mins / 60.0 * usd_per_hour
 
 
+# -- memory footprint ------------------------------------------------------------------
+
+# Dense + per-layer-embedding params in billions and bf16 KV bytes per token, from
+# scripts/roofline.py (which reads them off the HF configs). Copied, not imported: the loop
+# must not depend on an instrument.
+MODEL_PARAMS_B = {"E2B": 3.67, "E4B": 7.41}
+KV_BYTES_PER_TOKEN = {"E2B": 18432, "E4B": 57344}
+HEADROOM_GB = 1.5   # activations, 262k-vocab logits, allocator slack; a guess on the safe side
+
+
+@dataclass(frozen=True)
+class Footprint:
+    """What a run of the real engine needs in memory, so a venue can refuse it before it OOMs."""
+
+    model: str = "E2B"
+    blocks: int = 512
+    block_size: int = 16
+    weight_bytes: int = 2
+
+    @classmethod
+    def from_env(cls) -> "Footprint":
+        """Same knobs the engine reads, so the plan and the launch describe the same run."""
+        name = os.environ.get("MODEL_NAME", "google/gemma-4-E2B-it").upper()
+        model = "E4B" if "E4B" in name else "E2B"
+        return cls(model=model,
+                   blocks=int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512")),
+                   block_size=int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16")))
+
+    @property
+    def weights_gb(self) -> float:
+        return MODEL_PARAMS_B[self.model] * self.weight_bytes
+
+    @property
+    def pool_gb(self) -> float:
+        return self.blocks * self.block_size * KV_BYTES_PER_TOKEN[self.model] / 1e9
+
+    def needed_gb(self, venue: Venue) -> float:
+        """Weights load on the host and are then moved; on unified memory both copies coexist."""
+        load = 2.0 if venue.unified else 1.0
+        return self.weights_gb * load + self.pool_gb + HEADROOM_GB
+
+    def describe(self, venue: Venue) -> str:
+        load = " x2 load" if venue.unified else ""
+        return (f"{self.model} ~{self.needed_gb(venue):.1f} GB "
+                f"(weights {self.weights_gb:.1f}{load} + pool {self.pool_gb:.2f} + "
+                f"headroom {HEADROOM_GB})")
+
+
+def fits(fp: Footprint, venue: Venue) -> bool:
+    return venue.mem_gb is None or fp.needed_gb(venue) <= venue.mem_gb
+
+
 # -- placement -------------------------------------------------------------------------
 
 class Unroutable(RuntimeError):
@@ -128,12 +202,26 @@ def requirements(h: Hypothesis) -> frozenset[str]:
     return frozenset(need)
 
 
-def route(h: Hypothesis, venues: list[Venue] | None = None) -> Placement:
-    """Cheapest venue that satisfies the hypothesis; ties go to the least capable machine."""
+def route(h: Hypothesis, venues: list[Venue] | None = None,
+          footprint: Footprint | None = None) -> Placement:
+    """Cheapest venue that satisfies the hypothesis; ties go to the least capable machine.
+
+    Tiers 3-4 run the real engine, so with a footprint they also skip venues it cannot fit
+    in. Tiers 1-2 are arithmetic and mocked repros and never load the model.
+    """
     venues = venues if venues is not None else available_venues()
     need = requirements(h)
-    fits = [v for v in venues if need <= v.capabilities]
-    if not fits:
+    capable = [v for v in venues if need <= v.capabilities]
+    if capable and footprint is not None and h.falsification_tier >= 3:
+        too_small = [v for v in capable if not fits(footprint, v)]
+        capable = [v for v in capable if fits(footprint, v)]
+        if not capable:
+            raise Unroutable(
+                f"{h.id}: {footprint.model} does not fit any capable venue: "
+                + "; ".join(f"{v.name} has {v.mem_gb} GB, needs "
+                            f"{footprint.needed_gb(v):.1f}" for v in too_small)
+                + ". Use a smaller model/pool or enable a bigger venue.")
+    if not capable:
         gaps = {v.name: sorted(need - v.capabilities) for v in venues}
         nearest = min(gaps, key=lambda n: len(gaps[n])) if gaps else None
         could = [n for n, v in VENUES.items() if need <= v.capabilities and not v.local]
@@ -141,10 +229,24 @@ def route(h: Hypothesis, venues: list[Venue] | None = None) -> Placement:
             f"{h.id} needs {sorted(need)}; no available venue offers "
             f"{gaps[nearest] if nearest else sorted(need)}. Cloud venues are opt-in: "
             f"{VENUES_ENV}={','.join(could) or '<none in catalogue>'}")
-    v = min(fits, key=lambda v: (v.usd_per_hour, len(v.capabilities)))
+    v = min(capable, key=lambda v: (v.usd_per_hour, len(v.capabilities)))
     cost = estimate_usd(h.falsification_tier, usd_per_hour=v.usd_per_hour)
     why = ("free" if cost == 0.0 else f"~${cost:.2f}") + f", needs {sorted(need) or 'nothing'}"
     return Placement(h.id, v, h.falsification_tier, cost, why)
+
+
+def preflight(venue: Venue, fp: Footprint) -> tuple[bool, str]:
+    """Will this run fit on the venue RIGHT NOW? Local venues share memory with whatever else
+    is open; a plan that fit at screen time can still OOM at launch."""
+    need = fp.needed_gb(venue)
+    if venue.mem_gb is not None and need > venue.mem_gb:
+        return False, f"{fp.describe(venue)} exceeds {venue.name}'s {venue.mem_gb} GB"
+    if venue.local:
+        free = host_available_gb()
+        if free is not None and need > free:
+            return False, (f"{fp.describe(venue)} but only {free:.1f} GB free on the host "
+                           f"right now; close applications before launching")
+    return True, f"{fp.describe(venue)} fits {venue.name}"
 
 
 # -- the cap ---------------------------------------------------------------------------
@@ -210,8 +312,13 @@ class Budget:
 
 
 def guard(tier: int, label: str, *, budget: Budget | None = None,
-          minutes: float | None = None, venue: Venue | None = None) -> Budget:
-    """Raise unless this experiment is affordable. Call BEFORE launching anything on a GPU."""
+          minutes: float | None = None, venue: Venue | None = None,
+          footprint: Footprint | None = None) -> Budget:
+    """Raise unless this experiment is affordable AND fits. Call BEFORE launching anything."""
+    if venue is not None and footprint is not None and tier >= 3:
+        ok, why = preflight(venue, footprint)
+        if not ok:
+            raise RuntimeError(f"memory refused '{label}': {why}")
     b = budget or Budget.load()
     rate = venue.usd_per_hour if venue else GPU_USD_PER_HOUR
     ok, why = b.can_afford(tier, minutes, rate)
