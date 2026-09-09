@@ -1,4 +1,4 @@
-"""Prompt bank for the load simulator. Three buckets: short, medium, long.
+"""Prompt bank for the off-box load generator (load_test.py). Three buckets: short, medium, long.
 
 Bucket sizes are roughly calibrated to Gemma's tokenizer:
   short:  ~10–30 tokens

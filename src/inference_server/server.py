@@ -25,7 +25,6 @@ from inference_server.scheduler import (
 )
 from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.openai_shim import router as openai_router
-from inference_server.simulator import SimulationState, router as simulator_router
 from inference_server.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -97,7 +96,6 @@ async def lifespan(app):
     app.state.model_name = settings.model_name
     app.state.scheduler = scheduler
     app.state.cache_adapter = cache_manager
-    app.state.simulation = SimulationState()
     app.state.ready = True
 
     yield
@@ -107,7 +105,6 @@ async def lifespan(app):
 
 
 app = FastAPI(lifespan=lifespan)
-app.include_router(simulator_router)
 app.include_router(openai_router)
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -266,4 +263,3 @@ async def timing_middleware(request: Request, call_next):
     return response
 
 
-# Load simulator lives in inference_server.simulator (mounted as APIRouter above).

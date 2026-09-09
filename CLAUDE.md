@@ -142,7 +142,7 @@ Project setup, tokenization, autoregressive loop, streaming, request batching, K
 - ✅ **Backpressure** — queue-level (HTTP 429) + KV-pressure-aware admission (active-KV gate + cache-pool gate), metrics on `/scheduler/stats`
 - ✅ **Load-test client** — `scripts/bench/load_test.py` + `scripts/bench/plot_load_test.py`
 - ✅ **Chat page** (`static/index.html`) — streaming chat plus a stat strip for the request you just sent, read from the response body. The metrics sidebar was deleted on 2026-09-09: it recomputed p50/p95/p99 from a 60-second in-process window alongside the Prometheus histograms, and two sources for one number is how you get a benchmark you cannot trust. Aggregates live in Grafana.
-- ✅ **In-server traffic simulator** — `inference_server/simulator.py` mounted at `/simulate/{start,stop,status}`. N async "users" loop streaming `/generate` calls against localhost with `session_id=sim-{i}`, weighted short/medium/long prompt mix from `simulator_prompts.py`, 50–400 ms jittered think-time. `/simulate/start` returns a `warning` field when `num_users >= max_batch_size` (no headroom for the operator's own live requests). Web UI reads `/simulate/status` for the live graph.
+- ✅ **Off-box load generator** — `scripts/bench/load_test.py` with the weighted short/medium/long prompt bank at `scripts/bench/prompt_bank.py` (`--workload realistic`). The in-server simulator at `/simulate/{start,stop,status}` was deleted on 2026-09-09: it ran its virtual users on the server's own event loop, so it competed with the request handling it was measuring, and the interference scaled with the user count it was varying. Note that `short`/`long`/`mixed` tile one seed sentence, so under the `PrefixCache` they measure the hit path almost exclusively; `realistic` is the miss-path workload.
 - ✅ **CUDA-ready backend** — `TorchBackend(device=...)`; factory routes `cuda|mps|cpu`
 - ✅ **bf16 weights**, `compile_model` flag wired (default off)
 - ✅ **Pre-allocated per-layer KV pools** in `BlockManager` (vLLM/PagedAttention layout)
@@ -172,7 +172,7 @@ Project setup, tokenization, autoregressive loop, streaming, request batching, K
 ### Future extensions
 
 - **MLX continuous batching backend** — requires custom MLX forward loop (mlx_lm doesn't expose the primitives we need)
-- **Realistic load simulator** — async, distribution-drawn lengths, remote VM as load source
+- **Remote load generation** — drive `load_test.py` from a separate VM so the client's own cost never lands on the server's box
 
 ### Optional (pick what's interesting)
 

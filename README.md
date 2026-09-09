@@ -52,6 +52,7 @@ was worth nothing end to end. Those are in [`DECISIONS.md`](DECISIONS.md).
 | **`backends/custom_torch_backend.py`** | Drives the above for the scheduler: batched prefill in one forward, bucketed CUDA-graph decode, optional `torch.compile` and int8 weight-only quantization. `BACKEND=custom-{cuda,mps,cpu}`. |
 | **`backends/torch_backend.py`** | HF Transformers baseline backend behind the same `InferenceBackend` interface, with the `kv_cache/` block manager, radix tree and LRU / AttentionSink / H2O eviction policies. |
 | **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` for standard benchmark clients, and a chat page for eyeballing the engine. |
+| **`scripts/bench/load_test.py`** | Out-of-process concurrency sweep; `--workload realistic` draws distinct prompts from `prompt_bank.py` so the run exercises the cache-miss path. |
 | **`metrics.py`**, `prometheus_metrics.py` | Sliding-window p50/p95/p99 TTFT / TPOT / throughput on `/scheduler/stats`; aggregate Prometheus `/metrics` (Grafana dashboard in `monitoring/`). |
 
 Everything is env-configured (`.env.example` lists every knob) and deploys as one container

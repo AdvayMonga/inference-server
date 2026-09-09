@@ -14,17 +14,24 @@ import asyncio
 import csv
 import json
 import random
+import sys
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import httpx
 
-# Workload modes. short/long are uniform; mixed draws from discrete bins per request.
+sys.path.insert(0, str(Path(__file__).parent))
+import prompt_bank  # noqa: E402  sibling module, not an installed package
+
+# Workload modes. short/long are uniform; mixed draws from discrete bins; realistic
+# draws distinct English prompts from prompt_bank.
 WORKLOADS = {
-    "short":  {"prompt_tokens_target": 60,  "max_tokens": 100},
-    "long":   {"prompt_tokens_target": 500, "max_tokens": 500},
-    "mixed":  {"mixed": True},
+    "short":     {"prompt_tokens_target": 60,  "max_tokens": 100},
+    "long":      {"prompt_tokens_target": 500, "max_tokens": 500},
+    "mixed":     {"mixed": True},
+    "realistic": {"realistic": True},
 }
 
 # Discrete bins for "mixed" — chatbot-like distribution. (weight, prompt, max_tokens).
@@ -43,6 +50,9 @@ SEED = (
 
 
 def build_prompt(target_tokens: int) -> str:
+    """Tile SEED to a target size. WARNING: every prompt built this way shares a long
+    common prefix, so with the PrefixCache on, short/long/mixed measure the cache-hit
+    path almost exclusively. Use `realistic` to exercise the miss path."""
     # Roughly 4 chars per token for English — coarse but fine for load shaping.
     target_chars = target_tokens * 4
     n = max(1, (target_chars // len(SEED)) + 1)
@@ -59,6 +69,19 @@ def sample_mixed(rng: random.Random) -> tuple[str, int]:
             return build_prompt(p_toks), mx
     p_toks, mx = MIXED_BINS[-1][1], MIXED_BINS[-1][2]
     return build_prompt(p_toks), mx
+
+
+def sample_realistic(rng: random.Random) -> tuple[str, int]:
+    """Draw a (prompt, max_tokens) sample from the prompt bank's weighted buckets."""
+    r, cum = rng.random(), 0.0
+    name, prompts, _ = prompt_bank.PROMPT_MIX[-1]
+    for bucket, bucket_prompts, weight in prompt_bank.PROMPT_MIX:
+        cum += weight
+        if r <= cum:
+            name, prompts = bucket, bucket_prompts
+            break
+    lo, hi = prompt_bank.MAX_TOKENS_RANGE[name]
+    return rng.choice(prompts), rng.randint(lo, hi)
 
 
 @dataclass
@@ -158,18 +181,15 @@ async def worker(
     client: httpx.AsyncClient, base_url: str, deadline: float,
     samples: list[Sample],
     fixed: tuple[str, int] | None,
-    rng: random.Random | None,
+    draw,
 ) -> None:
     """Loop firing requests serially until the deadline.
 
     If `fixed` is set, every request uses the same (prompt, max_tokens).
-    Otherwise draw from MIXED_BINS via `rng` per request.
+    Otherwise `draw()` returns a fresh one per request.
     """
     while time.perf_counter() < deadline:
-        if fixed is not None:
-            prompt, mx = fixed
-        else:
-            prompt, mx = sample_mixed(rng)
+        prompt, mx = fixed if fixed is not None else draw()
         s = await run_one_request(client, base_url, prompt, mx)
         samples.append(s)
 
@@ -182,14 +202,15 @@ async def run_level(
     result = LevelResult(workload=workload, concurrency=concurrency, duration_s=duration_s)
     limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency * 2)
     async with httpx.AsyncClient(limits=limits) as client:
-        if cfg.get("mixed"):
+        sampler = sample_mixed if cfg.get("mixed") else sample_realistic if cfg.get("realistic") else None
+        if sampler is not None:
             fixed = None
-            rngs = [random.Random(1000 + i) for i in range(concurrency)]
+            draws = [partial(sampler, random.Random(1000 + i)) for i in range(concurrency)]
         else:
             fixed = (build_prompt(cfg["prompt_tokens_target"]), cfg["max_tokens"])
-            rngs = [None] * concurrency
+            draws = [None] * concurrency
         workers = [
-            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, rngs[i]))
+            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, draws[i]))
             for i in range(concurrency)
         ]
         await asyncio.gather(*workers)

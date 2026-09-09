@@ -17,7 +17,6 @@
   <a href="#startup">Startup</a>·
   <a href="#tokenizer">Tokenizer</a>·
   <a href="#sse">Streaming (SSE)</a>·
-  <a href="#sim">Load simulator</a>·
   <a href="#metrics">Metrics</a>·
   <a href="#dashboard">Chat page</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
@@ -60,15 +59,6 @@
   </g>
 
   <g>
-    <rect class="box http" x="20" y="170" width="540" height="120" rx="6"/>
-    <text class="title" x="40" y="198">POST /simulate/start  ·  POST /simulate/stop  ·  GET /simulate/status</text>
-    <text x="40" y="222">control the built-in load simulator</text>
-    <text class="small" x="40" y="242">spins up N virtual users hitting /generate concurrently</text>
-    <text class="small" x="40" y="258">prompts drawn from weighted buckets, per-user RNG seed</text>
-    <text class="small" x="40" y="274">jittered think-time between turns to mimic human pacing</text>
-  </g>
-
-  <g>
     <rect class="box" x="600" y="170" width="520" height="120" rx="6"/>
     <text class="title" x="620" y="198">GET /  (and /static/*)</text>
     <text x="620" y="222">serves the chat page</text>
@@ -97,7 +87,7 @@
     <rect class="box" x="20" y="440" width="1100" height="80" rx="6"/>
     <text class="title" x="40" y="468">All endpoints share one ScheduledRequest path</text>
     <text x="40" y="490">/generate is the only endpoint that creates work. Stats endpoints are read-only snapshots.</text>
-    <text class="small" x="40" y="510">The simulator endpoints internally fire /generate calls — they are not a separate code path.</text>
+    <text class="small" x="40" y="510">Load is generated off-box by scripts/bench/load_test.py, never from inside this process.</text>
   </g>
 </svg>
 
@@ -214,21 +204,16 @@
   </g>
 </svg>
 
-<h2 id="sim">Load simulator</h2>
-<p class="lead">A built-in multi-user traffic generator. Lives in <code>simulator_prompts.py</code>; control endpoints are on the server.</p>
+<h2 id="loadgen">Load generation</h2>
+<p class="lead">Off-box only. <code>scripts/bench/load_test.py</code>, with the prompt bank in <code>scripts/bench/prompt_bank.py</code>.</p>
 
-<table>
-  <tr><th>Knob</th><th>What it does</th></tr>
-  <tr><td>num_users</td><td>How many virtual users to run in parallel.</td></tr>
-  <tr><td>weighted prompt buckets</td><td>Mix of short, medium, long prompts in realistic ratios.</td></tr>
-  <tr><td>per-user RNG seed</td><td>Each user picks prompts from its own deterministic stream so runs are reproducible.</td></tr>
-  <tr><td>jittered think-time</td><td>Random pause between a user's turns, so requests don't all arrive in lockstep.</td></tr>
-  <tr><td>session_id per user</td><td>Each user has a stable session ID so the cache + fairness layers see real session boundaries.</td></tr>
-</table>
+<p>The server used to host its own traffic generator at <code>/simulate/start</code>: N async virtual users looping <code>/generate</code> calls against localhost from inside the server process. It was removed on 2026-09-09.</p>
 
 <div class="callout">
-  <strong>Why this exists:</strong> the engine is built for many concurrent users with mixed prompt lengths. Single-request <code>curl</code> tests don't exercise the scheduler, the backpressure gates, or the fairness policy. The simulator does. External Locust testing comes next.
+  <strong>Why it was removed:</strong> the generator ran on the same event loop as the thing it was measuring. Its own task scheduling, tokenizer calls and SSE parsing competed with request handling, so every number it produced included the cost of producing it, and that cost grew with the user count it was supposed to be varying. LOOP.md records a closed-loop harness as the mistake that cost this project a month. A load generator has to be a separate process, and preferably a separate machine.
 </div>
+
+<p>What survived is the prompt bank: weighted short / medium / long buckets of distinct English prompts, now reachable as <code>--workload realistic</code>. This matters more than it looks. The older <code>short</code> / <code>long</code> / <code>mixed</code> workloads build prompts by tiling one seed sentence, so with the <code>PrefixCache</code> on, every request in the run shares a long common prefix and the sweep measures the cache-hit path almost exclusively. <code>realistic</code> is the one that exercises the miss path.</p>
 
 <h2 id="metrics">Metrics tracker</h2>
 <p class="lead"><code>metrics.py</code>. Pull-based, lives in process memory, surfaced through <code>/scheduler/stats</code>.</p>
