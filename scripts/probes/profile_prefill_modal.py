@@ -111,7 +111,7 @@ def run():
     print(f"graphed decode step:        {decode_ms:6.1f} ms")
     print(f"prefill / decode ratio:     {uncached_ms / decode_ms:5.1f}x")
     print(f"32 back-to-back prefills:   {wave_ms:6.1f} ms  (per={wave_ms/32:.1f})")
-    print(f"  → vs measured TTFT @ N=32: 1841 ms")
+    print("  → vs measured TTFT @ N=32: 1841 ms")
 
 
 def _t(backend, prompt, sync):

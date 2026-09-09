@@ -225,7 +225,7 @@ def test_full_model_matches_hf():
         # Allow tiny noise at deep layers (accumulated bf16 reductions can vary by 1 ULP);
         # require byte-equality at embedding (i=0) and small drift floor elsewhere.
         if i == 0:
-            assert torch.equal(a, b), f"hidden_states[0] (embedding) diverges"
+            assert torch.equal(a, b), "hidden_states[0] (embedding) diverges"
         else:
             assert torch.allclose(a, b, atol=ATOL), f"hidden_states[{i}] diverges (max diff {(a-b).abs().max().item()})"
 

@@ -7,7 +7,7 @@ Ideal step time = max(compute_time, memory_time); tok/s = B / step_time. The gap
 between that ceiling and what we measure is overhead (launches, data-movement).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 # ---------------------------------------------------------------------------
 # Hardware presets. flops = dense bf16 tensor-core FLOP/s; bw = HBM bytes/s.
@@ -222,7 +222,7 @@ def section_breakdown(m: Model, hw: HW, B: int, L: int):
         print(f"  OVERHEAD      {fmt_ms(overhead)}   ({overhead/t_meas*100:.0f}% of the step) <- the target")
         # Attribute the overhead to profiled causes.
         ov_frac = sum(PROFILE[b] for b in OVERHEAD_BUCKETS)
-        print(f"\n  gap attribution (profile fractions of measured step):")
+        print("\n  gap attribution (profile fractions of measured step):")
         for b in OVERHEAD_BUCKETS:
             print(f"    {b:28s} {PROFILE[b]*100:4.0f}%  ({fmt_ms(PROFILE[b]*t_meas)})")
         print(f"    {'= addressable overhead':28s} {ov_frac*100:4.0f}%  "

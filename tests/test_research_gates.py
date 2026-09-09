@@ -4,7 +4,6 @@ loop cannot repeat them unattended.
 
 from __future__ import annotations
 
-import pytest
 
 from inference_server.research.gates import (
     correctness_gate,

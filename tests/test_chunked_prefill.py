@@ -2,11 +2,9 @@
 
 import asyncio
 import threading
-from dataclasses import dataclass, field
-from typing import Generator
+from dataclasses import dataclass
 
 import pytest
-import torch
 
 from inference_server.backends.base import InferenceBackend
 from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest

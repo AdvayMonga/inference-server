@@ -146,12 +146,12 @@ def run_workload(policy: str) -> PolicyResult:
 
 def print_markdown_table(results: list[PolicyResult]) -> None:
     print()
-    print(f"# Eviction Policy Comparison")
+    print("# Eviction Policy Comparison")
     print()
     print(f"- Workload: {results[0].total_requests} requests "
           f"({len(SYSTEM_PROMPTS)} system prompts × {len(SUFFIXES)} suffixes + 8 revisits)")
     print(f"- KV budget: {NUM_BLOCKS} blocks × {BLOCK_SIZE} tokens = {NUM_BLOCKS * BLOCK_SIZE} cacheable tokens")
-    print(f"- Model: gemma (whatever MODEL_NAME is set to)")
+    print("- Model: gemma (whatever MODEL_NAME is set to)")
     print()
     print("| Policy | Cold avg ms | Warm avg ms | Avg revisit hit tokens | Hit rate | Evictions | Util |")
     print("|---|---|---|---|---|---|---|")

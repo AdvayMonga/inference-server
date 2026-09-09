@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import asdict
 from pathlib import Path
 
 from inference_server.research.attribute import attribute
