@@ -4,11 +4,29 @@ The server exposes Prometheus metrics at **`/metrics`** (pull-based, scrapable).
 **aggregate** — no `session_id` label (it's unbounded → cardinality blowup); per-session detail
 lives in `/scheduler/stats` (JSON).
 
-- `prometheus.yml` — scrape config (point `targets` at the server host:port).
-- `grafana_dashboard.json` — import into Grafana (TTFT/TPOT percentiles, throughput, request
-  rate by outcome, batch/queue depth, KV pressure).
+## Running it
 
-The full docker-compose stack (Prometheus + Grafana wired together) lands in Phase 10.
+```bash
+docker compose -f monitoring/docker-compose.yml up -d
+open http://localhost:3000     # Grafana, admin/admin, dashboard already provisioned
+open http://localhost:9090     # Prometheus, check the target reads UP
+```
+
+Start the server first, separately. It is deliberately not part of this stack: the thing being
+measured and the thing doing the measuring stay in different processes.
+
+| file | role |
+|---|---|
+| `docker-compose.yml` | Prometheus + Grafana. Scrapes the host, does not run the server. |
+| `prometheus.yml` | Scrape config. Target is `host.docker.internal:8000`; use `localhost:8000` when running Prometheus straight on the host, or the Modal hostname plus `scheme: https` when deployed. |
+| `grafana_dashboard.json` | TTFT/TPOT percentiles, throughput, request rate by outcome, batch/queue depth, KV pressure. |
+| `grafana/provisioning/` | Wires the Prometheus datasource and auto-loads the dashboard, so there is nothing to import by hand. |
+
+Override the Grafana login with `GRAFANA_USER` / `GRAFANA_PASSWORD` in the environment.
+Both Prometheus and Grafana keep their state in named volumes, so a restart does not lose history.
+
+This is the only place aggregate numbers live. The chat page shows the request you just sent
+and nothing more, on purpose — see `docs/arch-server.html`.
 
 ## Metrics
 

@@ -294,7 +294,7 @@ the in-flight work, releases its KV, and keeps serving.</p>
   <tr><td>— Serving-level performance</td><td>End-to-end throughput and tail latency, replicated</td><td><span class="badge b-todo">unquantified</span></td></tr>
   <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>
   <tr><td>7 — Hardware auto-detect</td><td>CUDA → MPS → CPU fallback, partial</td><td><span class="badge b-prog">partial</span></td></tr>
-  <tr><td>8 — Observability</td><td>Rolling p50/p95/p99 + Prometheus /metrics (aggregate) + structured JSON logs + timing middleware; Grafana dashboard in monitoring/</td><td><span class="badge b-prog">mostly</span></td></tr>
+  <tr><td>8 — Observability</td><td>Rolling p50/p95/p99 + Prometheus /metrics (aggregate) + structured JSON logs + timing middleware; Grafana dashboard + docker-compose stack in monitoring/</td><td><span class="badge b-prog">mostly</span></td></tr>
 </table>
 
 <p class="footnote">Diagram color key — blue = HTTP, purple = scheduler, orange = backend, green = KV cache, pink = queues, yellow dashed = scheduler loop, red dashed = eviction. <strong>Maintenance:</strong> any new feature or component change must update this file and the relevant detail page (see CLAUDE.md → Documentation Maintenance).</p>

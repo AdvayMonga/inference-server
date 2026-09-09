@@ -1,0 +1,43 @@
+# Prometheus + Grafana for the inference server (Phase 10).
+#
+# The server is NOT in this stack. It runs on the host, or on Modal, and this
+# stack only scrapes it — keeping the load path and the observability path in
+# separate processes.
+#
+#   docker compose -f monitoring/docker-compose.yml up -d
+#   open http://localhost:3000        # admin / admin, dashboard already loaded
+#   open http://localhost:9090        # Prometheus, to check the target is UP
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: inference-prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    # Lets the container reach a server running on the host. Docker Desktop
+    # resolves host.docker.internal already; this line is what Linux needs.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: inference-grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana_dashboard.json:/var/lib/grafana/dashboards/inference-server.json:ro
+      - grafana-data:/var/lib/grafana
+
+volumes:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,9 @@
+# Loads every dashboard JSON mounted into /var/lib/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: inference-server
+    type: file
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
