@@ -191,8 +191,10 @@ accumulated before this was named, which is the smell that prompted it.
 `kind="correctness_fix"` makes it first-class. The evidence is a **regression test that fails at
 the base sha and passes at the treatment sha**, recorded as `Experiment.regression_test`, and
 `premerge_check.py` **re-runs that test** rather than trusting the record. A deterministic test is
-stronger evidence than a noisy A/B, not weaker — and drift does not apply, because the
-measurement is taken against the tree being merged.
+stronger evidence than a noisy A/B, not weaker. The record must also name the fix commit as its
+treatment sha: the test proves the fix and nothing else, so the gate refuses the record if any
+engine file changed after that commit — otherwise one fix's record would carry every later
+change on the branch through the gate, which is exactly what happened once.
 
 Two traps worth knowing, both hit while building this:
 - **A test can pass against the buggy code.** The first version of the deadline test drove a
@@ -214,6 +216,14 @@ The exemption is deliberately strict: one added line that does anything else dis
 file, any deleted or modified line disqualifies it, and it is off entirely unless a diff is
 supplied. When it does not fit your change, make the change conform rather than widening the
 gate — the occupancy counters were rewritten to drop a local temporary for exactly that reason.
+
+The other shape the gate must not stop is an engine diff that **claims nothing**: a dead import,
+a rename, a comment, a type hint. Tagging the commit `chore:` proves nothing — a tag is
+self-declared and anyone can put `refactor:` on a change that moves a number. So the claim goes
+in a record instead: `loop no-claim --why "drops an unused import"` writes an
+`experiments/*.json` with `no_behaviour_change` set and the exact sha it vouches for, and
+`premerge_check.py` accepts it only while no engine file has changed after that sha. The
+claim is auditable in git forever, and it cannot drift onto later commits.
 
 ## Workflow rule: never rebase after measuring
 

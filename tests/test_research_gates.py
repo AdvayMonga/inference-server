@@ -326,11 +326,23 @@ def test_a_correctness_fix_is_authorised_by_its_test_not_by_gates():
     from inference_server.research.schemas import Arm, Experiment
 
     fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="loop",
-                     arms=[Arm("baseline", "abc123", [])], verdict="confirmed",
-                     regression_test="tests/test_x.py::test_y")
+                     arms=[Arm("baseline", "abc123", []), Arm("treatment", "def456", [])],
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
     assert not fix.all_gates_green(), "it has no panels, so it has no gates"
     ok, why = fix.authorises_merge()
     assert ok and "correctness fix" in why
+
+
+def test_a_correctness_fix_without_a_treatment_sha_is_refused():
+    """The test proves the fix. It says nothing about other engine changes on the branch, so
+    the record must name the commit it vouches for — or it vouches for the whole branch."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="loop",
+                     arms=[Arm("baseline", "abc123", [])], verdict="confirmed",
+                     regression_test="tests/test_x.py::test_y")
+    ok, why = fix.authorises_merge()
+    assert not ok and "treatment sha" in why
 
 
 def test_a_correctness_fix_without_a_base_sha_is_refused():
@@ -370,3 +382,114 @@ def test_premerge_reruns_the_named_test_rather_than_trusting_the_record():
     assert ok
     missing, _ = pm.regression_test_passes("tests/test_research_gates.py::test_does_not_exist")
     assert not missing, "a test that does not run must never read as passing"
+
+
+# ---- no_behaviour_change: an engine diff that claims nothing needs no A/B, but must say so ----
+
+def test_a_no_behaviour_change_claim_authorises_only_with_a_treatment_sha():
+    """The gate exists to stop unproven PERFORMANCE claims. Dead code, a rename, a comment make
+    none, so demanding a GPU A/B for them only teaches people to bypass the gate. The record
+    still has to name the one commit it vouches for — a claim about no commit is not a claim."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    claim = Experiment(hypothesis_id="no-behaviour-change", engine_sha_base="base1", source="loop",
+                       arms=[Arm("baseline", "base1"), Arm("treatment", "fix1")],
+                       verdict="confirmed", no_behaviour_change="drops an unused import")
+    assert not claim.all_gates_green()
+    ok, why = claim.authorises_merge()
+    assert ok and "fix1" in why and "unused import" in why
+
+    vague = Experiment(hypothesis_id="h", engine_sha_base="base1", source="loop",
+                       arms=[Arm("baseline", "base1")], verdict="confirmed",
+                       no_behaviour_change="trust me")
+    ok, why = vague.authorises_merge()
+    assert not ok and "treatment sha" in why
+
+
+def test_a_reconstructed_no_claim_cannot_authorise():
+    from inference_server.research.schemas import Arm, Experiment
+
+    claim = Experiment(hypothesis_id="h", engine_sha_base="b", source="reconstructed",
+                       arms=[Arm("treatment", "t")], verdict="confirmed",
+                       no_behaviour_change="x")
+    ok, why = claim.authorises_merge()
+    assert not ok and "not produced by the loop" in why
+
+
+def _premerge():
+    import importlib.util
+    from pathlib import Path
+
+    from inference_server.research.schemas import REPO_ROOT
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+    return pm
+
+
+def _engine_only(files, diff_ref=None, base="main"):
+    return [f for f in files if f.startswith("src/inference_server/")
+            and not f.startswith("src/inference_server/research/")]
+
+
+def test_a_no_claim_record_vouches_for_one_commit_not_the_whole_branch():
+    """Without this, a record written for a rename would carry every later engine change on the
+    branch with it — the same hole the correctness-fix path has today."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    claim = Experiment(hypothesis_id="h", engine_sha_base="base1", source="loop",
+                       arms=[Arm("baseline", "base1"), Arm("treatment", "t1")],
+                       verdict="confirmed", no_behaviour_change="removes dead helper")
+
+    # the vouched commit is the tip: nothing changed after it
+    ok, why = pm.no_claim_vouches(claim, "feature", ancestor=lambda sha, ref: True,
+                                  changed=lambda ref, base: ["docs/architecture.html"],
+                                  engine=_engine_only)
+    assert ok and "t1" in why
+
+    # the vouched commit is not even on this branch
+    ok, why = pm.no_claim_vouches(claim, "other", ancestor=lambda sha, ref: False,
+                                  changed=lambda ref, base: [], engine=_engine_only)
+    assert not ok and "not in other" in why
+
+    # an engine file landed after the vouched commit: the claim says nothing about it
+    ok, why = pm.no_claim_vouches(claim, "feature", ancestor=lambda sha, ref: True,
+                                  changed=lambda ref, base: ["src/inference_server/scheduler.py"],
+                                  engine=_engine_only)
+    assert not ok and "scheduler.py" in why
+
+
+def test_correctness_fix_and_experiment_records_are_not_read_as_no_claims():
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    fix = Experiment(hypothesis_id="h", engine_sha_base="b", source="loop",
+                     arms=[Arm("treatment", "t")], verdict="confirmed",
+                     regression_test="tests/test_x.py::test_y")
+    ok, why = pm.no_claim_vouches(fix, "ref", ancestor=lambda *_: True,
+                                  changed=lambda *_: [], engine=_engine_only)
+    assert not ok and "not a no-claim record" in why
+
+
+def test_a_correctness_fix_does_not_carry_later_engine_changes_with_it():
+    """A fake `perf:` commit passed the gate on an unrelated fix's record before this existed:
+    the record's base was an ancestor, its test still passed, and nothing asked what else had
+    landed on the branch since the fix."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    fix = Experiment(hypothesis_id="h", engine_sha_base="base1", source="loop",
+                     arms=[Arm("baseline", "base1"), Arm("treatment", "fix1")],
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
+
+    ok, sha = pm.vouches_for(fix, "branch", ancestor=lambda s, r: True,
+                             changed=lambda r, b: ["experiments/exp-1.json"], engine=_engine_only)
+    assert ok and sha == "fix1"
+
+    ok, why = pm.vouches_for(fix, "branch", ancestor=lambda s, r: True,
+                             changed=lambda r, b: ["src/inference_server/sampling.py"],
+                             engine=_engine_only)
+    assert not ok and "sampling.py" in why

@@ -245,7 +245,12 @@ class Hypothesis:
     # before the change and passes after, which is stronger and cheaper than a noisy GPU A/B.
     # Without it, fixing a bug required either a GPU experiment that measures nothing relevant
     # or a one-off exemption, and two of those had already accumulated.
-    KINDS = ("engine_change", "instrument_change", "harness_change", "correctness_fix")
+    # 'no_behaviour_change' is for engine diffs that make no claim at all — dead code, a
+    # rename, a comment, a type hint. The gate exists to stop unproven PERFORMANCE claims; a
+    # change that claims nothing needs no A/B, but it does need to say so in a record that
+    # names the one commit it vouches for, so the claim is auditable and cannot drift.
+    KINDS = ("engine_change", "instrument_change", "harness_change", "correctness_fix",
+             "no_behaviour_change")
     DIRECTIONS = ("increase", "decrease")
 
     def validate(self) -> None:
@@ -291,6 +296,10 @@ class Experiment:
     # For a correctness_fix: the pytest node id that fails at `engine_sha_base` and passes at the
     # treatment sha. This is the experiment — the assertion IS the measurement.
     regression_test: str = ""
+    # For a no_behaviour_change: one line on why this diff cannot alter what the engine does.
+    # Authorises exactly the treatment sha in `arms`, never a later commit — premerge refuses
+    # the record if any engine file changed after that sha.
+    no_behaviour_change: str = ""
     id: str = field(default_factory=lambda: _new_id("exp"))
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
@@ -320,7 +329,18 @@ class Experiment:
             if not self.engine_sha_base:
                 return False, (f"{self.id} names a regression test but no base sha — 'fails "
                                f"before' is unverifiable without one")
+            if not any(a.name == "treatment" and a.sha for a in self.arms):
+                return False, (f"{self.id} names a regression test but no treatment sha — a fix "
+                               f"vouches for the commit that made the test pass, not for "
+                               f"whatever lands on the branch afterwards")
             return True, f"{self.id} correctness fix, gated on {self.regression_test}"
+        if self.no_behaviour_change:
+            treatment = next((a.sha for a in self.arms if a.name == "treatment" and a.sha), "")
+            if not treatment:
+                return False, (f"{self.id} claims no behaviour change but names no treatment "
+                               f"sha — a claim about no commit in particular vouches for nothing")
+            return True, (f"{self.id} no-behaviour-change claim for {treatment[:12]}: "
+                          f"{self.no_behaviour_change}")
         if not self.all_gates_green():
             failed = [n for n, g in self.gates.items() if not g.get("passed")]
             return False, f"gate(s) not green: {', '.join(failed) or 'missing gates'}"
