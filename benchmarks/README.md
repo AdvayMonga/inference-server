@@ -1,13 +1,36 @@
 # Benchmarks
 
-Client-measured load sweeps via `scripts/load_test.py` (per-request TTFT/TPOT/throughput
-over streaming SSE, sweeping concurrency). Plot with `scripts/plot_load_test.py <csv>...`.
+Every CSV here is one sweep, kept so its numbers can be re-read later. Newer, replicated
+serving numbers live in `runs/` panels (gitignored) and are summarised in `knowledge/`; the
+files here are the closed-loop sweeps that built the engine, June 2026, plus the first
+open-loop serving sweeps from September.
+
+**Never compare a number here against one from another session** — run-to-run spread on the
+same config has measured 2.3x on A100 draws. Only simultaneous arms are comparable.
+
+## File index
+
+| file | hardware / model | produced by | what it shows |
+|---|---|---|---|
+| `short_1_rowbyrow.csv` … `short_4_kernel_depython.csv` | A10G / E2B | `scripts/bench/load_test.py` | decode-path progression: row-by-row → batched gather → Triton kernel → de-Pythoned |
+| `mixed.csv`, `long.csv` | A10G / E2B | `scripts/bench/load_test.py` | realistic mixed lengths; long-context with sliding-window attention |
+| `chunked_prefill_ab.csv` | A10G / E2B | `scripts/bench/bench_chunked_prefill_modal.py` | chunked vs monolithic prefill: head-of-line stall 12x |
+| `sweep_custom_cuda.csv`, `sweep_cuda.csv`, `sweep_vllm.csv` | A10G / E2B | `bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py` | first head-to-head: ours vs HF vs vLLM |
+| `sweep_custom_cuda_batched.csv` | A10G / E2B | `bench_load_sweep_modal.py` | batched prefill: TTFT 1841 → 213 ms |
+| `sweep_*_a100_e2b.csv`, `sweep_*_a100_e4b.csv` | A100-80GB / E2B, E4B | same | the real head-to-head on serving hardware and the headline model |
+| `sweep_custom_cuda_batched_a100_e4b_compile.csv`, `sweep_custom_cuda_bucketed_depython_a100_e4b.csv` | A100-80GB / E4B | same | torch.compile decode; bucketed CUDA graphs |
+| `serving_a100_e4b*.csv` | A100-80GB / E4B | `scripts/bench/bench_serving_modal.py` | open-loop Poisson serving sweeps (rate → throughput, TTFT, TPOT, SLO) |
+| `roofline_e4b_a100.txt` | A100-80GB / E4B | `scripts/bench/roofline.py` | analytical decode ceiling and per-step breakdown |
+| `tuning_log.md` | — | hand-kept | append-only ledger of every optimisation attempt, kept or dropped, pre-loop |
+
+## Closed-loop sweeps (June 2026)
 
 **Setup (all runs):** `BACKEND=custom-cuda` (hand-written Gemma 4 forward + paged KV +
 prefix sharing, scheduler-driven) on Modal **A10G**, model **google/gemma-4-E2B-it**, bf16.
 KV knobs: `CUSTOM_BACKEND_BLOCKS=1536` (~24.5k token-slots/layer), `MAX_ACTIVE_KV_TOKENS=22000`.
 Captured 2026-06-11/12. `tok_per_s` is completed-request token throughput over the level
 window; for decode-scaling read the aggregate `N / TPOT` (TPOT is per-output-token latency).
+Plot any of these with `scripts/bench/plot_load_test.py <csv>...`.
 
 ## `short_*` — decode optimization progression
 
@@ -63,7 +86,7 @@ attention span at 512 keys, so decode cost doesn't blow up with context length.
 
 ## `chunked_prefill_ab.csv` — chunked prefill kills head-of-line blocking
 
-A/B of `PREFILL_MODE` (`scripts/bench_chunked_prefill_modal.py`, A10G/E2B, in-process scheduler).
+A/B of `PREFILL_MODE` (`scripts/bench/bench_chunked_prefill_modal.py`, A10G/E2B, in-process scheduler).
 Workload: 6 short requests (16-token prompt, 48 max-tokens) decoding, then **one long 2048-token
 prompt injected mid-decode**. The headline is the short cohort's **MAX inter-token gap** — the
 stall a decoder sees while the long prompt prefills.
@@ -113,7 +136,7 @@ vs sdpa + DynamicCache). vs vLLM: we trail.
 
 ## `sweep_custom_cuda_batched.csv` — batched prefill closes the TTFT gap (8.6×)
 
-The head-to-head TTFT gap was diagnosed (`scripts/profile_prefill_modal.py`) as **eager, serial
+The head-to-head TTFT gap was diagnosed (`scripts/probes/profile_prefill_modal.py`) as **eager, serial
 prefill**: prefill runs eager at ~92 ms (dispatch-bound — even a 1-token prefill is 73ms; 4.4× a
 21ms graphed decode step), and admission ran N of them serially per wave. `PREFILL_MODE=batched`
 admits the whole wave in ONE forward. Three iterations got it to vLLM's neighborhood:

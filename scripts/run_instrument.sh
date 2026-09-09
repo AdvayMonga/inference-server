@@ -5,9 +5,9 @@
 # run_group must come from here. Arms of one experiment MUST share RESEARCH_RUN_GROUP — that is
 # what makes them comparable; compare.py refuses across groups.
 #
-#   scripts/run_instrument.sh scripts/bench_serving_modal.py
-#   RESEARCH_RUN_GROUP=exp-42 scripts/run_instrument.sh scripts/bench_serving_modal.py   # arm A
-#   RESEARCH_RUN_GROUP=exp-42 scripts/run_instrument.sh scripts/bench_serving_modal.py   # arm B
+#   scripts/run_instrument.sh scripts/bench/bench_serving_modal.py
+#   RESEARCH_RUN_GROUP=exp-42 scripts/run_instrument.sh scripts/bench/bench_serving_modal.py   # arm A
+#   RESEARCH_RUN_GROUP=exp-42 scripts/run_instrument.sh scripts/bench/bench_serving_modal.py   # arm B
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

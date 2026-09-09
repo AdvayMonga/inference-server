@@ -22,7 +22,7 @@ image = (
         "CUSTOM_BACKEND_COMPILE": "1",            # torch.compile decode (1.47×; the 1151 tok/s anchor)
         # Windowed KV storage lets sliding pools be smaller (capped at the 512 window) so the
         # binding full pools can be larger at ~equal memory → more concurrent long-context reqs.
-        # A100-80GB values mirror scripts/bench_load_sweep_modal.py's proven _BIG config.
+        # A100-80GB values mirror scripts/bench/bench_load_sweep_modal.py's proven _BIG config.
         "CUSTOM_BACKEND_BLOCKS": "8192",          # full-attention pools (grow with sequence)
         "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",  # sliding pools (capped at window → sized smaller)
         "KV_CACHE_NUM_BLOCKS": "16384",
