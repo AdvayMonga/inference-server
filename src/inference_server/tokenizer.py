@@ -63,7 +63,16 @@ class Tokenizer:
         if not getattr(self._tokenizer, "chat_template", None):
             return self.encode(text)
 
-        messages = [{"role": "user", "content": text}]
+        return self.encode_messages([{"role": "user", "content": text}], thinking)
+
+    def encode_messages(self, messages: list[dict], thinking: bool = True) -> list[int]:
+        """Apply the chat template to a multi-turn message list. Falls back to a plain join."""
+        if not messages:
+            raise ValueError("No messages provided")
+
+        if not getattr(self._tokenizer, "chat_template", None):
+            return self.encode("\n".join(m["content"] for m in messages))
+
         inputs = self._tokenizer.apply_chat_template(
             messages, return_dict=True, return_tensors=None,
             add_generation_prompt=True, enable_thinking=thinking,

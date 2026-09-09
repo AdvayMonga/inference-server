@@ -17,6 +17,7 @@
   <a href="#startup">Startup</a>·
   <a href="#tokenizer">Tokenizer</a>·
   <a href="#sse">Streaming (SSE)</a>·
+  <a href="#openai">OpenAI shim</a>·
   <a href="#metrics">Metrics</a>·
   <a href="#dashboard">Chat page</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
@@ -225,6 +226,24 @@
   <tr><td><code>short</code> / <code>long</code></td><td>Tiled to a fixed token target</td><td>Length-controlled scaling. Miss path by default.</td></tr>
   <tr><td><code>mixed</code></td><td>Tiled, drawn from three length bins</td><td>Length spread. Miss path by default.</td></tr>
 </table>
+
+<h2 id="openai">OpenAI shim</h2>
+<p class="lead"><code>openai_shim.py</code>. A compatibility surface, not a public API contract.</p>
+
+<table>
+  <tr><th>Route</th><th>Shape</th><th>Who calls it</th></tr>
+  <tr><td><code>POST /v1/completions</code></td><td><code>text_completion</code>, raw prompt, no chat template</td><td>guidellm, vLLM's benchmark_serving, anything OpenAI-shaped that generates load</td></tr>
+  <tr><td><code>POST /v1/chat/completions</code></td><td><code>chat.completion</code>, message list through the model's chat template</td><td>Open WebUI and other chat frontends</td></tr>
+  <tr><td><code>GET /v1/models</code></td><td>One entry, the loaded model</td><td>Harnesses that probe before benchmarking</td></tr>
+</table>
+
+<p>Both POST routes build the same <code>ScheduledRequest</code> and go through the same scheduler as <code>/generate</code>. There is no second engine path, so a benchmark driven through the shim measures the engine and not the shim. Streaming chat emits a role delta first, then one content delta per token, then <code>finish_reason</code>, then a usage chunk, then <code>[DONE]</code>. <code>max_completion_tokens</code> wins over the deprecated <code>max_tokens</code> when both are sent.</p>
+
+<div class="callout">
+  <strong>Why this matters for the vLLM head-to-head.</strong> A comparison needs one load generator hitting both servers. Without the shim ours speaks a bespoke API and vLLM speaks OpenAI, so the two sides run through different clients with different timing paths and the difference between them is not attributable to the engines. The shim collapses that to one client.
+</div>
+
+<p><strong>Deliberately absent:</strong> auth, model registry, tools and function calling, logprobs, multimodal content parts, <code>n</code> &gt; 1, and stop sequences. Those are the platform layer, which CLAUDE.md keeps out of scope. Content must be a string; the list-of-parts form is rejected.</p>
 
 <h2 id="metrics">Metrics tracker</h2>
 <p class="lead"><code>metrics.py</code>. Pull-based, lives in process memory, surfaced through <code>/scheduler/stats</code>.</p>

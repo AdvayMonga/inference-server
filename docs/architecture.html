@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-09.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-10.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -197,6 +197,7 @@
   <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
   <tr><td>Chat page</td><td>Browser UI for streaming chat and last-request timings.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
   <tr><td>Config</td><td>Env-var-driven settings, no hardcoded paths.</td><td>covered on every page</td></tr>
 </table>
 
