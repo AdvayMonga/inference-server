@@ -35,14 +35,23 @@ benchmarks/results/
 # Jupyter
 .ipynb_checkpoints/
 
-# Local working docs (session logs / live plan). DECISIONS.md is tracked: it is generated
-# from knowledge/*.json by `python -m inference_server.research.loop index`.
-CLAUDE.md
+# Local working docs (session logs / live plan). CLAUDE.md is tracked. DECISIONS.md is
+# tracked: it is generated from knowledge/*.json by `python -m inference_server.research.loop index`.
 HANDOFF.md
 PLAN.md
 
 notes/
 
-.claude/
+# Claude Code: local settings stay out, shared agent definitions come in
+.claude/*
+!.claude/agents/
+HANDOFF.md
+PLAN.md
+
+notes/
+
+# Claude Code: local settings stay out, shared agent definitions come in
+.claude/*
+!.claude/agents/
 # Research loop: raw run panels (regenerable, large)
 runs/
