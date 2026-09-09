@@ -35,9 +35,9 @@ benchmarks/results/
 # Jupyter
 .ipynb_checkpoints/
 
-# Working docs
+# Local working docs (session logs / live plan). DECISIONS.md is tracked: it is generated
+# from knowledge/*.json by `python -m inference_server.research.loop index`.
 CLAUDE.md
-DECISIONS.md
 HANDOFF.md
 PLAN.md
 
