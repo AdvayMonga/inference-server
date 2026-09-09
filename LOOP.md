@@ -82,7 +82,7 @@ each with a magnitude and the evidence for it. No hypotheses yet.
 
 ## Step 2 — HYPOTHESIZE
 
-Inputs: the gap list + the knowledge base (`DECISIONS.md`, 48 entries, mostly negative results).
+Inputs: the gap list + the knowledge base (`knowledge/*.json`, rendered as `DECISIONS.md`; the `rejected` entries matter most).
 Each candidate MUST carry:
 - predicted direction **and magnitude**, written before measuring
 - the **cheapest experiment that could falsify it**
