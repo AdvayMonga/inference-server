@@ -1,0 +1,27 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "b61ba6f"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": ""
+    }
+  ],
+  "branch": "fix/paged-decode-neg-regression",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "b61ba6f",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "hyp-paged-decode-kernel-undefined-neg",
+  "id": "exp-20260908-1558b2c5",
+  "notes": "Correctness fix, not a performance change. Commit 5bcac20 introduced the tiled prefill kernel with a local `NEG: tl.constexpr = -1e30` and a stray edit replaced `-float('inf')` with `NEG` inside the unrelated `_paged_decode_kernel` above it. Triton resolves names at first launch, so the non-split decode path (n_seqs * n_qheads >= 128, i.e. ~16+ concurrent sequences on Gemma 4) raises NameError on CUDA; the CPU suite never launches a kernel and could not see it. Review of PR #3 traced that -inf cannot produce a NaN here: the per-sequence start_b/lo bounds guarantee every iterated block has at least one valid slot, matching the sibling prefill and split-K kernels which already use -inf. The regression test is static (AST free-name check over every @triton.jit function, no triton needed): verified failing at b61ba6f with {'_paged_decode_kernel': ['NEG']} and passing at the fix. GPU parity of the non-split decode path against split-K remains the review's outstanding ask; it needs a CUDA box and is recorded as not covered.",
+  "regression_test": "tests/test_kernel_source.py::test_triton_kernels_reference_only_names_they_can_see",
+  "source": "loop",
+  "started_at": 1788920871.697941,
+  "verdict": "confirmed"
+}

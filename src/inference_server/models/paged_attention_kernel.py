@@ -119,7 +119,7 @@ def _paged_decode_kernel(
         kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
         k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)  # [BLOCK_SIZE, D]
         s = tl.sum(q[None, :] * k, axis=1) * scale              # [BLOCK_SIZE]
-        s = tl.where(valid, s, NEG)
+        s = tl.where(valid, s, -float("inf"))
 
         m_new = tl.maximum(m, tl.max(s, axis=0))
         alpha = tl.exp(m - m_new)
