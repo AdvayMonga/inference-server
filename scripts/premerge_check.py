@@ -8,8 +8,9 @@ which change did what.
     python scripts/premerge_check.py <branch-or-sha>        # check
     python scripts/premerge_check.py <branch> --explain     # check and print the record
 
-Docs, tests, benchmarks and the research package itself are exempt: they cannot change engine
-behaviour, so requiring a GPU experiment for them would only teach people to bypass the gate.
+Docs, tests, benchmarks, browser assets and the research package itself are exempt: they cannot
+change engine behaviour, so requiring a GPU experiment for them would only teach people to
+bypass the gate.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from inference_server.research.schemas import REPO_ROOT  # noqa: E402
 BEHAVIOURAL_PREFIXES = ("src/inference_server/",)
 EXEMPT_PREFIXES = (
     "src/inference_server/research/",   # the loop is not the engine
+    "src/inference_server/static/",     # browser assets never execute on the request path
     "docs/", "tests/", "scripts/", "benchmarks/", "knowledge/", "experiments/", "monitoring/",
 )
 

@@ -174,17 +174,18 @@ def test_premerge_classifies_engine_vs_exempt_changes():
     import importlib.util
     from pathlib import Path
 
-    from inference_server.research.schemas import REPO_ROOT
-
+    # Resolve from this file, not REPO_ROOT: the package is installed editable against the
+    # main checkout, so in a worktree REPO_ROOT points at the wrong copy of the gate.
     spec = importlib.util.spec_from_file_location(
-        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+        "premerge", Path(__file__).resolve().parents[1] / "scripts" / "premerge_check.py")
     pm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(pm)
 
     engine = ["src/inference_server/scheduler.py",
               "src/inference_server/backends/custom_torch_backend.py"]
     exempt = ["docs/architecture.html", "tests/test_x.py", "scripts/bench_y.py",
-              "knowledge/kb-1.json", "src/inference_server/research/gates.py"]
+              "knowledge/kb-1.json", "src/inference_server/research/gates.py",
+              "src/inference_server/static/index.html"]
 
     assert pm.behavioural(engine) == engine
     assert pm.behavioural(exempt) == []
@@ -281,10 +282,10 @@ def test_observability_only_changes_do_not_need_an_experiment():
     import importlib.util
     from pathlib import Path
 
-    from inference_server.research.schemas import REPO_ROOT
-
+    # Resolve from this file, not REPO_ROOT: the package is installed editable against the
+    # main checkout, so in a worktree REPO_ROOT points at the wrong copy of the gate.
     spec = importlib.util.spec_from_file_location(
-        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+        "premerge", Path(__file__).resolve().parents[1] / "scripts" / "premerge_check.py")
     pm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(pm)
 
@@ -308,10 +309,10 @@ def test_the_exemption_is_off_unless_a_diff_is_supplied():
     import importlib.util
     from pathlib import Path
 
-    from inference_server.research.schemas import REPO_ROOT
-
+    # Resolve from this file, not REPO_ROOT: the package is installed editable against the
+    # main checkout, so in a worktree REPO_ROOT points at the wrong copy of the gate.
     spec = importlib.util.spec_from_file_location(
-        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+        "premerge", Path(__file__).resolve().parents[1] / "scripts" / "premerge_check.py")
     pm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(pm)
 
@@ -370,10 +371,10 @@ def test_premerge_reruns_the_named_test_rather_than_trusting_the_record():
     import importlib.util
     from pathlib import Path
 
-    from inference_server.research.schemas import REPO_ROOT
-
+    # Resolve from this file, not REPO_ROOT: the package is installed editable against the
+    # main checkout, so in a worktree REPO_ROOT points at the wrong copy of the gate.
     spec = importlib.util.spec_from_file_location(
-        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+        "premerge", Path(__file__).resolve().parents[1] / "scripts" / "premerge_check.py")
     pm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(pm)
 
