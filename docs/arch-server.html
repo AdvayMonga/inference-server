@@ -213,7 +213,18 @@
   <strong>Why it was removed:</strong> the generator ran on the same event loop as the thing it was measuring. Its own task scheduling, tokenizer calls and SSE parsing competed with request handling, so every number it produced included the cost of producing it, and that cost grew with the user count it was supposed to be varying. LOOP.md records a closed-loop harness as the mistake that cost this project a month. A load generator has to be a separate process, and preferably a separate machine.
 </div>
 
-<p>What survived is the prompt bank: weighted short / medium / long buckets of distinct English prompts, now reachable as <code>--workload realistic</code>. This matters more than it looks. The older <code>short</code> / <code>long</code> / <code>mixed</code> workloads build prompts by tiling one seed sentence, so with the <code>PrefixCache</code> on, every request in the run shares a long common prefix and the sweep measures the cache-hit path almost exclusively. <code>realistic</code> is the one that exercises the miss path.</p>
+<p>What survived is the prompt bank: weighted short / medium / long buckets of distinct English prompts, now the default as <code>--workload realistic</code>.</p>
+
+<div class="callout">
+  <strong>Cache regime is now an explicit dial.</strong> The tiled workloads used to build every prompt from one seed sentence, so under the <code>PrefixCache</code> an entire sweep shared a long common prefix and measured the hit path almost exclusively — and nothing in the output said so. Prompts now carry a unique first block by default, which the cache cannot match. Pass <code>--prefix-share full</code> to pin one prompt and measure the hit path deliberately. Either way the choice is written into every CSV row, because a latency number whose cache regime is unknown is not evidence.
+</div>
+
+<table>
+  <tr><th>Workload</th><th>Prompts</th><th>What it measures</th></tr>
+  <tr><td><code>realistic</code> (default)</td><td>Drawn from the finite prompt bank</td><td>Mixed hit and miss, the way real traffic repeats. <code>--prefix-share</code> does not apply.</td></tr>
+  <tr><td><code>short</code> / <code>long</code></td><td>Tiled to a fixed token target</td><td>Length-controlled scaling. Miss path by default.</td></tr>
+  <tr><td><code>mixed</code></td><td>Tiled, drawn from three length bins</td><td>Length spread. Miss path by default.</td></tr>
+</table>
 
 <h2 id="metrics">Metrics tracker</h2>
 <p class="lead"><code>metrics.py</code>. Pull-based, lives in process memory, surfaced through <code>/scheduler/stats</code>.</p>
