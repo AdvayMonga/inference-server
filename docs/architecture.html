@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-06.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-09.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -50,7 +50,7 @@
     <text x="240" y="92">accepts requests</text>
     <text x="240" y="110">tokenizes prompts</text>
     <text x="240" y="128">streams tokens back (SSE)</text>
-    <text x="240" y="146">serves the dashboard</text>
+    <text x="240" y="146">serves the chat page</text>
     <text class="small" x="240" y="164">/health · /ready for Modal probes</text>
     <text class="small" x="240" y="178">click to open →</text>
   </a>
@@ -148,11 +148,11 @@
   <!-- Dashboard -->
   <g>
     <rect class="box" x="20" y="320" width="160" height="120" rx="6"/>
-    <text class="title" x="40" y="348">Dashboard</text>
+    <text class="title" x="40" y="348">Chat page</text>
     <text class="lbl" x="40" y="364">static/index.html</text>
-    <text class="small" x="40" y="384">live metrics,</text>
-    <text class="small" x="40" y="400">cache stats,</text>
-    <text class="small" x="40" y="416">scheduler stats</text>
+    <text class="small" x="40" y="384">streaming chat,</text>
+    <text class="small" x="40" y="400">last-request</text>
+    <text class="small" x="40" y="416">timings only</text>
   </g>
 
   <!-- Config -->
@@ -189,7 +189,7 @@
 <h2>What each subsystem is responsible for</h2>
 <table>
   <tr><th>Subsystem</th><th>One-line job</th><th>Detail page</th></tr>
-  <tr><td>HTTP &amp; Server</td><td>Accept requests, tokenize, stream tokens back, serve dashboard.</td><td><a href="arch-server.html">arch-server.html</a></td></tr>
+  <tr><td>HTTP &amp; Server</td><td>Accept requests, tokenize, stream tokens back, serve the chat page.</td><td><a href="arch-server.html">arch-server.html</a></td></tr>
   <tr><td>Scheduler</td><td>Decide which requests run together, when, and at what speed — fairly.</td><td><a href="arch-scheduler.html">arch-scheduler.html</a></td></tr>
   <tr><td>Backend</td><td>Own the model. Run prefill and decode forward passes.</td><td><a href="arch-backend.html">arch-backend.html</a></td></tr>
   <tr><td>KV Cache</td><td>Remember attention state so we don't recompute prompt prefixes.</td><td><a href="arch-cache.html">arch-cache.html</a></td></tr>

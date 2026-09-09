@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · HTTP &amp; Server</div>
 <h1>HTTP &amp; Server layer</h1>
-<p class="lead">The thin shell that takes traffic, turns it into work for the engine, streams answers back, and exposes the dashboard and stats endpoints.</p>
+<p class="lead">The thin shell that takes traffic, turns it into work for the engine, streams answers back, and exposes the chat page and stats endpoints.</p>
 
 <div class="nav">
   <a href="#endpoints">Endpoints</a>·
@@ -19,7 +19,7 @@
   <a href="#sse">Streaming (SSE)</a>·
   <a href="#sim">Load simulator</a>·
   <a href="#metrics">Metrics</a>·
-  <a href="#dashboard">Dashboard</a>·
+  <a href="#dashboard">Chat page</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
 </div>
 
@@ -71,10 +71,10 @@
   <g>
     <rect class="box" x="600" y="170" width="520" height="120" rx="6"/>
     <text class="title" x="620" y="198">GET /  (and /static/*)</text>
-    <text x="620" y="222">serves the dashboard HTML page</text>
+    <text x="620" y="222">serves the chat page</text>
     <text class="small" x="620" y="242">single-page browser UI for live metrics</text>
     <text class="small" x="620" y="258">polls /scheduler/stats and /cache/stats on a timer</text>
-    <text class="small" x="620" y="274">renders the simulator controls and history charts</text>
+    <text class="small" x="620" y="274">streaming chat; no metrics polling</text>
   </g>
 
   <g>
@@ -249,16 +249,17 @@
   <strong>Structured logs + timing middleware.</strong> <code>LOG_FORMAT=json</code> (default <code>text</code>) switches stdlib logging to one JSON object per line (<code>logging_config.py</code>); <code>logger.info(..., extra={...})</code> fields merge in. A FastAPI middleware times every HTTP request → the <code>inference_http_request_duration_seconds</code> histogram (labeled by the matched route template, not the raw path) + a structured log line.
 </div>
 
-<h2 id="dashboard">Dashboard</h2>
-<p class="lead"><code>src/inference_server/static/index.html</code>. A single-page UI that polls the stats endpoints.</p>
+<h2 id="dashboard">Chat page</h2>
+<p class="lead"><code>src/inference_server/static/index.html</code>. A single self-contained page: streaming chat, nothing else.</p>
 
 <ul>
-  <li>Top: live cache hit rate, used/free blocks, eviction count.</li>
-  <li>Middle: scheduler queue depth, active batch size, KV pressure, admit/reject counters.</li>
-  <li>Latency panel: TTFT and TPOT percentiles refreshed on a timer.</li>
-  <li>Simulator controls: start / stop / configure number of users.</li>
+  <li>Streaming <code>/generate</code> over SSE, with a stop button and per-request controls for max tokens, stream on/off, and thinking on/off.</li>
+  <li>A one-line stat strip for the request you just sent: TTFT, TPOT, total, tokens, tok/s, cached prompt tokens. Every value comes straight out of that response body.</li>
+  <li>No polling, no percentiles, no aggregates. Those are Prometheus histograms read through Grafana; see <a href="#metrics">Metrics</a>.</li>
   <li>Self-contained — no JS bundler, no framework. Just the file.</li>
 </ul>
+
+<p><strong>Why the dashboard was removed (2026-09-09).</strong> The page used to carry a metrics sidebar computing p50/p95/p99 from its own 60-second in-process window, alongside the Prometheus histograms. Two implementations of the same numbers drift, and when they disagree you cannot tell which one is lying. Grafana is now the single source for anything aggregated. Per-request numbers stay on the page because they are read, not computed.</p>
 
 <p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> · <a href="arch-cache.html">KV Cache</a> · <a href="arch-backend.html">Backend</a></p>
 

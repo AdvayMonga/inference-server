@@ -141,6 +141,7 @@ Project setup, tokenization, autoregressive loop, streaming, request batching, K
 - ✅ **Scheduler** — `FairScheduler` behind `SchedulerInterface`; FCFS + Fair/VTC policies (`SCHEDULING_POLICY` env); priority hooks; per-session admission primitives
 - ✅ **Backpressure** — queue-level (HTTP 429) + KV-pressure-aware admission (active-KV gate + cache-pool gate), metrics on `/scheduler/stats`
 - ✅ **Load-test client** — `scripts/bench/load_test.py` + `scripts/bench/plot_load_test.py`
+- ✅ **Chat page** (`static/index.html`) — streaming chat plus a stat strip for the request you just sent, read from the response body. The metrics sidebar was deleted on 2026-09-09: it recomputed p50/p95/p99 from a 60-second in-process window alongside the Prometheus histograms, and two sources for one number is how you get a benchmark you cannot trust. Aggregates live in Grafana.
 - ✅ **In-server traffic simulator** — `inference_server/simulator.py` mounted at `/simulate/{start,stop,status}`. N async "users" loop streaming `/generate` calls against localhost with `session_id=sim-{i}`, weighted short/medium/long prompt mix from `simulator_prompts.py`, 50–400 ms jittered think-time. `/simulate/start` returns a `warning` field when `num_users >= max_batch_size` (no headroom for the operator's own live requests). Web UI reads `/simulate/status` for the live graph.
 - ✅ **CUDA-ready backend** — `TorchBackend(device=...)`; factory routes `cuda|mps|cpu`
 - ✅ **bf16 weights**, `compile_model` flag wired (default off)
