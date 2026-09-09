@@ -13,7 +13,7 @@ import httpx
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "bench"))
 import bench_serving as bs  # noqa: E402
 
 

@@ -297,6 +297,21 @@ rejections — it looked healthy while being useless.</p>
   <tr><td><code>MAX_QUEUE_SIZE</code></td><td>Hard cap on queue depth; rejects at <em>enqueue</em> time.</td></tr>
 </table>
 
+<div class="callout warn">
+  <strong>Expiry is a property of a request, not of its queue position.</strong> The deadline was
+  once checked only against <code>peek_next()</code>, which sheds everything stale only if the head
+  is always the oldest request. Neither policy orders that way — FCFS keys on
+  <code>(-priority, arrival_seq)</code> and VTC on <code>(-priority, counter, arrival_seq)</code> —
+  so a low-priority or heavy-session request could be overtaken indefinitely: it kept its queue
+  slot, never appeared in <code>total_expired</code>, and was eventually served long after the
+  caller had given up. <code>_shed_expired()</code> now sweeps the whole pending set once per
+  admission pass, under the lock <code>enqueue()</code> holds.
+</div>
+<p class="lead"><strong>Still open:</strong> the default deadline is 30s against a 200ms TTFT
+budget — 150&times; apart. Shedding works, but a caller waits half a minute to be refused. A
+deadline should be a small multiple of the latency budget; changing it is a behaviour change and
+needs a measured experiment.</p>
+
 <h2 id="preemption">Preemption &amp; loop resilience</h2>
 <p class="lead">Two things that decide whether a bad moment costs one request or the whole server.</p>
 <ul>
@@ -321,6 +336,34 @@ always included, which is what makes it starvation-free.</p>
 <code>wave_sizes</code> histogram in <code>/scheduler/stats</code> shows 83–91% of waves are K=1 at
 rates 1–6: the queue never backs up, so waves never widen and there is no padding to save. Turn it on
 when the engine is actually driven at its 100–256 concurrency target.</p>
+<div class="callout warn">
+  <strong>Do not read K=1 waves as a starved batch.</strong> At <code>max_batch_size</code> each
+  completing request frees exactly one slot, so the next admission wave is K=1 <em>by
+  construction</em> — a full batch at steady state produces the same histogram as an empty one.
+  A sweep at 128 req/s with 2985 requests queued still showed 49% K=1, and that was read as
+  starvation; the reading was withdrawn. <code>wave_sizes</code> measures prefill wave
+  <em>width</em>, never occupancy. Use <code>active_mean</code> / <code>active_high_water</code>
+  for occupancy.
+</div>
+
+<h2 id="occupancy">Batch occupancy — the number that sets throughput</h2>
+<p class="lead">A decode step streams the entire weight matrix from HBM whether it serves one row
+or two hundred, so tokens/sec is decided by how many rows share that read. Sampled on every decode
+step and surfaced in <code>/scheduler/stats</code>:</p>
+<table>
+  <tr><th>Field</th><th>Meaning</th></tr>
+  <tr><td><code>active_mean</code></td><td>Mean rows per decode step. Compare to <code>max_batch_size</code>: a large gap alongside a deep <code>pending_depth</code> means admission is the constraint, not demand.</td></tr>
+  <tr><td><code>active_high_water</code></td><td>Most rows ever decoded together. Never exceeds <code>max_batch_size</code> — if it does, the admission gate leaked.</td></tr>
+  <tr><td><code>decode_steps</code></td><td>Sample count behind the mean.</td></tr>
+  <tr><td><code>active_size</code></td><td>Instantaneous <code>len()</code>. Fine for a live dashboard, useless for a benchmark: it is read after the run drains and reports 0.</td></tr>
+</table>
+<div class="callout warn">
+  <strong>Why these exist.</strong> Until they did, the engine's central question — how full was
+  the batch — could not be answered from any recorded run. All 42 stored panels report
+  <code>active_size</code> 0, and the research panel's <code>concurrency_observed</code> was being
+  fed <code>pending_high_water</code>: queue depth, labelled as concurrency. It reported the
+  opposite of what it claimed.
+</div>
 
 <h2 id="reservation">Reservation accounting (the load-bearing invariant)</h2>
 <div class="callout warn">

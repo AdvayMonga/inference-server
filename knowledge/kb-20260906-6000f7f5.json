@@ -1,0 +1,38 @@
+{
+  "created_at": 1788733070.842022,
+  "evidence": [
+    {
+      "run_id": "run-20260906-a0bde214"
+    },
+    {
+      "run_id": "run-20260906-8c2a0890"
+    },
+    {
+      "run_id": "run-20260906-701dfded"
+    },
+    {
+      "run_id": "run-20260906-1862aada"
+    },
+    {
+      "run_id": "run-20260906-c01ca7c6"
+    }
+  ],
+  "id": "kb-20260906-6000f7f5",
+  "status": "open",
+  "summary": "CORRECTED. This entry first concluded 'the batch never fills, and that is the bottleneck'. That conclusion is NOT supported by the data and has been withdrawn.\n\nWHAT IS MEASURED (open-loop sweep at 1a1c141, rates 8-128 req/s, single replicate): throughput plateaus at 163.9 -> 612 -> 620 -> 782 -> 665 tok/s for rates 8/16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. At rate 128, 2985 requests were queued. Offered load beyond ~16 req/s buys queue depth and latency, not work. The plateau is real.\n\nWHY THE K=1 READING WAS WRONG: 49% of prefill waves being K=1 at rate 128 was read as a starved batch. It is equally consistent with a FULL batch: once max_batch_size is reached, each completing request frees exactly one slot, so the next admission wave is K=1 by construction. At steady state on a full batch, K=1 waves are CORRECT behaviour, not a symptom. wave_sizes measures prefill wave width; it says nothing about batch occupancy.\n\nWHY IT CANNOT BE SETTLED FROM THESE PANELS: the panel has no measure of batch occupancy. `active_size` is len(self._active) sampled when stats() is called \u2014 after the window ends and the queue has drained \u2014 so it reads 0 in every panel. There is a high-water mark for PENDING but none for ACTIVE. Worse, the panel's `concurrency_observed` is populated from `pending_high_water` (bench_serving_modal.py:273), i.e. queue depth, not concurrency \u2014 the exact field LOOP.md lists as catching 'claiming a concurrency the run never reached'.\n\nSo the engine's central question for a batching server \u2014 how full was the batch \u2014 is not answerable from any run recorded so far. Fix the instrument before drawing the conclusion.",
+  "superseded_by": null,
+  "tags": [
+    "scheduler",
+    "throughput",
+    "observability",
+    "batching",
+    "measurement-gap"
+  ],
+  "title": "Throughput plateaus at ~23 req/s, but batch occupancy was never measured \u2014 cause unresolved",
+  "triggers": [
+    "a mean/high-water active_size in the panel would settle whether the batch fills",
+    "if occupancy is high and throughput is still ~780 tok/s, the gap is per-step overhead",
+    "if occupancy is low with thousands queued, admission or wave planning is the cause"
+  ],
+  "updated_at": 1788733070.842036
+}

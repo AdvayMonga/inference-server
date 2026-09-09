@@ -47,6 +47,16 @@ class SchedulingPolicy(ABC):
         """Remove a SPECIFIC request that peek_window returned. Default: unsupported."""
         raise NotImplementedError(f"{type(self).__name__} does not support pick()")
 
+    def pending(self) -> list["ScheduledRequest"]:
+        """Every waiting request, in no particular order.
+
+        The admission deadline needs this because no policy here orders by age — FCFS keys on
+        (-priority, arrival_seq) and VTC on (-priority, counter, arrival_seq) — so checking only
+        peek_next() leaves an overtaken request ageing forever without ever being examined.
+        Expiry is a property of a request, not of its position in the queue.
+        """
+        return []
+
 
 class FCFSPolicy(SchedulingPolicy):
     """First-come-first-served, with priority as the dominant key.
@@ -78,6 +88,9 @@ class FCFSPolicy(SchedulingPolicy):
 
     def pick(self, request: "ScheduledRequest") -> None:
         self._pending.remove(request)
+
+    def pending(self) -> list["ScheduledRequest"]:
+        return list(self._pending)
 
 
 class FairPolicy(SchedulingPolicy):
@@ -129,6 +142,9 @@ class FairPolicy(SchedulingPolicy):
 
     def pick(self, request: "ScheduledRequest") -> None:
         self._pending.remove(request)
+
+    def pending(self) -> list["ScheduledRequest"]:
+        return list(self._pending)
 
     def on_tokens_processed(self, request: "ScheduledRequest", n_tokens: int) -> None:
         self._counters[request.session_id] = (

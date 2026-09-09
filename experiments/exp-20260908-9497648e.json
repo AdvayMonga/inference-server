@@ -1,0 +1,27 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "935cd47"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": ""
+    }
+  ],
+  "branch": "main",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "935cd47",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "hyp-admission-deadline-head-of-line",
+  "id": "exp-20260908-9497648e",
+  "notes": "Correctness fix, not a performance change. The admission deadline was checked only against peek_next(), which sheds all stale work only if the head is always the oldest request. Neither policy orders that way \u2014 FCFS keys on (-priority, arrival_seq), VTC on (-priority, session_counter, arrival_seq) \u2014 so an overtaken request aged indefinitely without ever being examined, kept its queue slot, was never counted in total_expired, and was eventually served long after the caller had given up. Verified failing at the base sha with the sweep call removed, passing with it. There is no metric delta to be significant about; the assertion is the measurement.",
+  "regression_test": "tests/test_admission_deadline.py::test_the_sweep_is_actually_wired_into_admission",
+  "source": "loop",
+  "started_at": 1788903210.316629,
+  "verdict": "confirmed"
+}

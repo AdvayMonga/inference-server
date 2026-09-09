@@ -4,7 +4,6 @@ loop cannot repeat them unattended.
 
 from __future__ import annotations
 
-import pytest
 
 from inference_server.research.gates import (
     correctness_gate,
@@ -272,3 +271,102 @@ def test_instrument_change_fails_if_it_actually_moved_the_engine():
     runs_b = [_panel(ttft_p95=v, validity=_v(stderr=1.0)) for v in (999, 100, 103, 99)]
     g = significance_gate(h, runs_a, runs_b)
     assert not g.passed and "it also moved" in g.reason
+
+
+def test_observability_only_changes_do_not_need_an_experiment():
+    """A file that only gains counters makes no performance claim, so demanding a GPU A/B for it
+    only means observability can never be fixed without GPU budget. That is not hypothetical: the
+    panel could not measure batch occupancy at all, the gap produced a wrong conclusion about the
+    scheduler, and this gate blocked the fix."""
+    import importlib.util
+    from pathlib import Path
+
+    from inference_server.research.schemas import REPO_ROOT
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+
+    instrumentation = ["+        self._active_samples = 0",
+                       "+        self._active_sum += n",
+                       "+            \"active_mean\": 3.5,",
+                       "+        # why this counter exists",
+                       "+"]
+    behaviour = ["+        self.max_batch_size = 999",
+                 "+        if n > 5: self._evict_newest()",
+                 "+        self._active_sum = recompute(x)",
+                 "+        return early"]
+
+    assert all(pm._is_instrumentation(x) for x in instrumentation)
+    assert not any(pm._is_instrumentation(x) for x in behaviour)
+
+
+def test_the_exemption_is_off_unless_a_diff_is_supplied():
+    """Callers that cannot produce a diff must keep the conservative behaviour — an unknown
+    change is a behavioural change."""
+    import importlib.util
+    from pathlib import Path
+
+    from inference_server.research.schemas import REPO_ROOT
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+
+    engine = ["src/inference_server/scheduler.py"]
+    assert pm.behavioural(engine) == engine        # no diff_ref -> still counts
+
+
+def test_a_correctness_fix_is_authorised_by_its_test_not_by_gates():
+    """The loop could previously only validate PERFORMANCE. A bug fix has no predicted metric
+    delta, so fixing one meant either a GPU experiment measuring nothing relevant or a one-off
+    exemption — and two of those had accumulated before this existed."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="loop",
+                     arms=[Arm("baseline", "abc123", [])], verdict="confirmed",
+                     regression_test="tests/test_x.py::test_y")
+    assert not fix.all_gates_green(), "it has no panels, so it has no gates"
+    ok, why = fix.authorises_merge()
+    assert ok and "correctness fix" in why
+
+
+def test_a_correctness_fix_without_a_base_sha_is_refused():
+    """'Fails before' is the whole claim. Without a base sha there is nothing it failed at."""
+    from inference_server.research.schemas import Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="", source="loop",
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
+    ok, why = fix.authorises_merge()
+    assert not ok and "base sha" in why
+
+
+def test_a_reconstructed_correctness_fix_still_cannot_authorise():
+    """The regression-test path must not become a way around 'produced by the loop'."""
+    from inference_server.research.schemas import Experiment
+
+    fix = Experiment(hypothesis_id="h", engine_sha_base="abc123", source="reconstructed",
+                     verdict="confirmed", regression_test="tests/test_x.py::test_y")
+    ok, why = fix.authorises_merge()
+    assert not ok and "not produced by the loop" in why
+
+
+def test_premerge_reruns_the_named_test_rather_than_trusting_the_record():
+    """A record that merely CLAIMS a test passes is not evidence."""
+    import importlib.util
+    from pathlib import Path
+
+    from inference_server.research.schemas import REPO_ROOT
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(REPO_ROOT) / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+
+    ok, _ = pm.regression_test_passes(
+        "tests/test_research_gates.py::test_a_correctness_fix_without_a_base_sha_is_refused")
+    assert ok
+    missing, _ = pm.regression_test_passes("tests/test_research_gates.py::test_does_not_exist")
+    assert not missing, "a test that does not run must never read as passing"

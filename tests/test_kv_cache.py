@@ -62,7 +62,7 @@ def test_allocate_multiple_blocks():
 
 def test_allocate_all_blocks():
     manager = BlockManager(num_blocks=4, block_size=16)
-    blocks = manager.allocate(4)
+    manager.allocate(4)
     assert manager.free_blocks == 0
     assert manager.utilization == 1.0
 

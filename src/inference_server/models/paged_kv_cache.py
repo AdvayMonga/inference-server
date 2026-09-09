@@ -87,6 +87,24 @@ class BlockPool:
         return len(self._free)
 
 
+def _tightest_pool(pools) -> tuple[int, int]:
+    """(free, total) of the most-consumed pool — the one that will block admission first.
+
+    Both must come from the SAME pool. They used to be two independent min() calls, so with a
+    mixed layout (full-attention pools of N blocks, sliding pools of N/2) the numerator and
+    denominator described different pools and the ratio described neither. It read a constant
+    0.5002 across a 16x load range while kv_admit_blocked climbed 0 -> 1176.
+
+    Max rather than mean: admission blocks when ANY pool cannot fit, so one exhausted pool is the
+    whole story and averaging would hide it behind its idle neighbours.
+    """
+    live = [p for p in pools if p is not None and p.num_blocks]
+    if not live:
+        return 0, 0
+    tightest = max(live, key=lambda p: 1 - p.free_count / p.num_blocks)
+    return tightest.free_count, tightest.num_blocks
+
+
 class PrefixCache:
     """Maps aligned token-prefixes → per-layer block ids. Shares blocks across sessions
     via refcount: storing acquires; eviction releases. Sharing happens only on full-block
@@ -203,8 +221,7 @@ class PrefixCache:
         return released
 
     def stats(self) -> dict:
-        free = min((p.free_count for p in self.pools if p is not None), default=0)
-        total = min((p.num_blocks for p in self.pools if p is not None), default=0)
+        free, total = _tightest_pool(self.pools)
         return {
             "entries": len(self.entries), "max_entries": self.max_entries,
             "lookups": self.lookups, "hits": self.hits,
@@ -367,8 +384,7 @@ class RadixPrefixCache:
         return freed
 
     def stats(self) -> dict:
-        free = min((self.pools[i].free_count for i in self._live), default=0)
-        total = min((self.pools[i].num_blocks for i in self._live), default=0)
+        free, total = _tightest_pool([self.pools[i] for i in self._live])
         return {
             "impl": "radix",
             "entries": self._nodes, "max_entries": self.max_entries,

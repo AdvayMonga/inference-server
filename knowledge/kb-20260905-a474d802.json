@@ -2,7 +2,7 @@
   "created_at": 1788653503.175411,
   "evidence": [
     {
-      "script": "scripts/sweep_tiled_launch_modal.py"
+      "script": "scripts/probes/sweep_tiled_launch_modal.py"
     },
     {
       "experiment": "exp-20260905-0d85ab30"

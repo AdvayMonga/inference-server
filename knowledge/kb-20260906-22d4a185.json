@@ -1,0 +1,37 @@
+{
+  "created_at": 1788733070.8420339,
+  "evidence": [
+    {
+      "run_id": "run-20260906-a0bde214"
+    },
+    {
+      "run_id": "run-20260906-8c2a0890"
+    },
+    {
+      "run_id": "run-20260906-701dfded"
+    },
+    {
+      "run_id": "run-20260906-1862aada"
+    },
+    {
+      "run_id": "run-20260906-c01ca7c6"
+    }
+  ],
+  "id": "kb-20260906-22d4a185",
+  "status": "open",
+  "summary": "Across rates 8, 16, 32, 64 and 128 req/s \u2014 a 16x range in offered load, with kv_admit_blocked climbing 0 -> 1176 over the same span \u2014 pool_utilization reads exactly 0.5002 in all five panels. A KV pool genuinely under increasing pressure should not hold four decimal places constant.\n\nComputed at paged_kv_cache.py:215 and :380 as round(1 - free/total, 4). Either the sampled pool is not the one the scheduler allocates from, or the value is read at a point where it has been reset. Cache hit_rate on the same panels moves sensibly (0.013 -> 0.0034 as load rises), so the cache stats path as a whole is not dead.\n\nIMPACT: pool_utilization is one of the inputs attribute.py uses to decide whether a run is KV-pressure-bound, so a stuck value can misdirect a whole iteration. Treat any KV-pressure conclusion drawn from it as unproven until this is resolved.",
+  "superseded_by": null,
+  "tags": [
+    "metrics",
+    "kv-cache",
+    "observability",
+    "bug",
+    "attribution"
+  ],
+  "title": "pool_utilization reports a constant 0.5002 across every load level \u2014 likely not live",
+  "triggers": [
+    "a run where pool_utilization differs across rates would close this",
+    "check whether BlockPool.stats() is called on the pool the scheduler uses"
+  ],
+  "updated_at": 1788733070.842769
+}

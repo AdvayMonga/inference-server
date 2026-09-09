@@ -82,7 +82,7 @@ each with a magnitude and the evidence for it. No hypotheses yet.
 
 ## Step 2 — HYPOTHESIZE
 
-Inputs: the gap list + the knowledge base (`DECISIONS.md`, 48 entries, mostly negative results).
+Inputs: the gap list + the knowledge base (`knowledge/*.json`, rendered as `DECISIONS.md`; the `rejected` entries matter most).
 Each candidate MUST carry:
 - predicted direction **and magnitude**, written before measuring
 - the **cheapest experiment that could falsify it**
@@ -179,6 +179,41 @@ the move was stale immediately.
 6. Re-measure after every merge.
 7. The loop may conclude *"the thing you asked me to optimise does not matter"* — and that is a
    successful iteration. It happened twice here, each time killing a planned project.
+
+## Correctness fixes are validated by a test, not by an A/B
+
+The loop was built to validate PERFORMANCE, and for a while that was the only thing it could
+validate. A bug fix has no predicted metric delta — asking "did ttft_p95 drop 30%" of a fix for
+requests being shed from the wrong end of a queue is meaningless. Fixing one therefore meant
+either a GPU experiment measuring nothing relevant, or a one-off exemption. Two exemptions had
+accumulated before this was named, which is the smell that prompted it.
+
+`kind="correctness_fix"` makes it first-class. The evidence is a **regression test that fails at
+the base sha and passes at the treatment sha**, recorded as `Experiment.regression_test`, and
+`premerge_check.py` **re-runs that test** rather than trusting the record. A deterministic test is
+stronger evidence than a noisy A/B, not weaker — and drift does not apply, because the
+measurement is taken against the tree being merged.
+
+Two traps worth knowing, both hit while building this:
+- **A test can pass against the buggy code.** The first version of the deadline test drove a
+  running scheduler, which could see the stale request at the head before the higher-priority
+  ones arrived — so it passed either way. Always confirm the test FAILS with the fix reverted.
+- **Testing the helper is not testing the wiring.** Calling `_shed_expired()` directly passes
+  even if nothing ever calls it. One test for the behaviour, one for the call site.
+
+## What the merge gate does and does not stop
+
+The gate exists to stop unproven **performance** claims. It is not a general change-approval
+process. An engine file whose diff adds only counters, stats keys and comments needs no
+experiment: a counter makes no performance claim, and requiring a GPU A/B to add one means
+observability can never be fixed when there is no GPU budget. That is not hypothetical — the
+panel could not measure batch occupancy at all, which produced a wrong conclusion about the
+scheduler, and the gate blocked the fix.
+
+The exemption is deliberately strict: one added line that does anything else disqualifies the
+file, any deleted or modified line disqualifies it, and it is off entirely unless a diff is
+supplied. When it does not fit your change, make the change conform rather than widening the
+gate — the occupancy counters were rewritten to drop a local temporary for exactly that reason.
 
 ## Workflow rule: never rebase after measuring
 

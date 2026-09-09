@@ -1,0 +1,94 @@
+{
+  "created_at": 1788724476.362268,
+  "evidence": [
+    {
+      "run_id": "run-20260906-15a33a53"
+    },
+    {
+      "run_id": "run-20260906-b2d3a54f"
+    },
+    {
+      "run_id": "run-20260906-47218cd4"
+    },
+    {
+      "run_id": "run-20260906-5c565305"
+    },
+    {
+      "run_id": "run-20260906-a494262c"
+    },
+    {
+      "run_id": "run-20260906-eb44c245"
+    },
+    {
+      "run_id": "run-20260906-c0f72f5a"
+    },
+    {
+      "run_id": "run-20260906-52fd6e63"
+    },
+    {
+      "run_id": "run-20260906-3d0d3821"
+    },
+    {
+      "run_id": "run-20260906-46c24518"
+    },
+    {
+      "run_id": "run-20260906-dddc76e3"
+    },
+    {
+      "run_id": "run-20260906-b8d219ff"
+    },
+    {
+      "run_id": "run-20260906-c5d86987"
+    },
+    {
+      "run_id": "run-20260906-af161f76"
+    },
+    {
+      "run_id": "run-20260906-ef337ea0"
+    },
+    {
+      "run_id": "run-20260906-f00be70c"
+    },
+    {
+      "run_id": "run-20260906-23dea7a8"
+    },
+    {
+      "run_id": "run-20260906-274a67a2"
+    },
+    {
+      "run_id": "run-20260906-c7bcd8e0"
+    },
+    {
+      "run_id": "run-20260906-ce942b4d"
+    },
+    {
+      "run_id": "run-20260906-fead7bcd"
+    },
+    {
+      "run_id": "run-20260906-6e3a6297"
+    },
+    {
+      "run_id": "run-20260906-91d88a72"
+    },
+    {
+      "run_id": "run-20260906-f434514f"
+    }
+  ],
+  "id": "kb-20260906-f13d8e3d",
+  "status": "resolved",
+  "summary": "Across all four sweeps, TPOT p50 is FLAT or IMPROVING as request rate rises (113->87, 92->76, 128->84 ms on the slow draws) while throughput rises 1.6-2.2x (54.7->89.3, 60.2->133.2, 52.4->82.5, 97.7->187.6 tok/s). That is continuous batching doing exactly what it should: more concurrent rows amortize the same per-step cost.\n\nCONSEQUENCE: there is no concurrency cliff in the measured range, so scheduling levers (fairness policy, wave shaping, admission tuning, queue depth) cannot move the headline number. The cost is per-decode-step latency at LOW batch \u2014 a kernel/model cost, not a scheduling cost. This is the same shape as the earlier 21ms-queue vs 203ms-prefill split, which killed an entire class of planned fixes.\n\nThe measured range stops at 8 req/s; a knee may exist above it. TTFT p95 at rate 1 (1036-1416ms on slow draws, 142ms on the fast one) is a small-sample artifact \u2014 24 requests means p95 is worst-of-24, dominated by the first request after warmup.",
+  "superseded_by": null,
+  "tags": [
+    "scheduling",
+    "batching",
+    "attribution",
+    "decode",
+    "tpot"
+  ],
+  "title": "No saturation knee exists between 1 and 8 req/s \u2014 batching is working",
+  "triggers": [
+    "sweeping above 8 req/s could still reveal a knee",
+    "a workload with longer prompts would shift cost back toward prefill"
+  ],
+  "updated_at": 1788724476.363106
+}

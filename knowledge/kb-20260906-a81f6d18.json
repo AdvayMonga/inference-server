@@ -1,0 +1,94 @@
+{
+  "created_at": 1788724476.3622558,
+  "evidence": [
+    {
+      "run_id": "run-20260906-15a33a53"
+    },
+    {
+      "run_id": "run-20260906-b2d3a54f"
+    },
+    {
+      "run_id": "run-20260906-47218cd4"
+    },
+    {
+      "run_id": "run-20260906-5c565305"
+    },
+    {
+      "run_id": "run-20260906-a494262c"
+    },
+    {
+      "run_id": "run-20260906-eb44c245"
+    },
+    {
+      "run_id": "run-20260906-c0f72f5a"
+    },
+    {
+      "run_id": "run-20260906-52fd6e63"
+    },
+    {
+      "run_id": "run-20260906-3d0d3821"
+    },
+    {
+      "run_id": "run-20260906-46c24518"
+    },
+    {
+      "run_id": "run-20260906-dddc76e3"
+    },
+    {
+      "run_id": "run-20260906-b8d219ff"
+    },
+    {
+      "run_id": "run-20260906-c5d86987"
+    },
+    {
+      "run_id": "run-20260906-af161f76"
+    },
+    {
+      "run_id": "run-20260906-ef337ea0"
+    },
+    {
+      "run_id": "run-20260906-f00be70c"
+    },
+    {
+      "run_id": "run-20260906-23dea7a8"
+    },
+    {
+      "run_id": "run-20260906-274a67a2"
+    },
+    {
+      "run_id": "run-20260906-c7bcd8e0"
+    },
+    {
+      "run_id": "run-20260906-ce942b4d"
+    },
+    {
+      "run_id": "run-20260906-fead7bcd"
+    },
+    {
+      "run_id": "run-20260906-6e3a6297"
+    },
+    {
+      "run_id": "run-20260906-91d88a72"
+    },
+    {
+      "run_id": "run-20260906-f434514f"
+    }
+  ],
+  "id": "kb-20260906-a81f6d18",
+  "status": "resolved",
+  "summary": "Four replicate sweeps at 5681560, byte-identical harness_config (A100-80GB, E4B, pool_size=4000, batch=256, compile=0, prefill_graph=1), separate Modal containers. TPOT p50 at rate 2: 108.7, 90.2, 110.9, 48.0 ms \u2014 a 2.31x spread, and bimodal rather than a smooth distribution: three slow draws clustered at 90-111ms and one fast draw at 48ms. The same split appeared across earlier sessions (iter9 39-47ms vs iter10 103-119ms on identical config). 'A100-80GB' is not one performance class.\n\nCONSEQUENCE: machine draw is a larger effect than any optimization this project has merged. Cross-container A/B is therefore worthless \u2014 a 2.3x confound swamps the effect being measured. Arms MUST run in one process on one GPU (as BENCH_AB_TILED does). Absolute throughput/latency figures are only meaningful with the draw quoted alongside, and a single-container baseline cannot be compared to anything.\n\nNOT established: the cause. Machine draw is the leading hypothesis; a warm Modal volume is an alternative (the fast sweep ran last in its batch, but the slow sweep in the previous batch also ran last, which argues against ordering).",
+  "superseded_by": null,
+  "tags": [
+    "benchmarking",
+    "modal",
+    "variance",
+    "harness",
+    "validity"
+  ],
+  "title": "A100-80GB draws are bimodal: 2.31x TPOT spread at identical config",
+  "triggers": [
+    "a run whose TPOT p50 falls between 60-85ms would break the bimodal claim",
+    "pinning a GPU by device id or reserving capacity would test the machine-draw cause"
+  ],
+  "updated_at": 1788724476.362269
+}

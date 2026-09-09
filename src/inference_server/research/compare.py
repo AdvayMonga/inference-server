@@ -197,15 +197,3 @@ def significance(
         "one run per arm cannot establish significance: the panel's stderr is within-run "
         "request scatter, not run-to-run variance (measured null spread 3.2x on "
         "ttft_prefill_p95). Use significance_replicated() with >=3 runs per arm.")
-
-    t = _welch(before, s1 * math.sqrt(n1), n1, after, s2 * math.sqrt(n2), n2)
-    if abs(t) < t_threshold:
-        return Significance("noise", metric, before, after, delta, pct,
-                            f"|t|={abs(t):.2f} < {t_threshold}: within the variance budget")
-
-    moved_right_way = (direction == "increase" and delta > 0) or \
-                      (direction == "decrease" and delta < 0)
-    return Significance(
-        "significant", metric, before, after, delta, pct,
-        f"|t|={abs(t):.2f} >= {t_threshold}, moved "
-        f"{'as predicted' if moved_right_way else 'AGAINST the prediction'}")

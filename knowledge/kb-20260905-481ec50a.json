@@ -2,7 +2,7 @@
   "created_at": 1788629508.8592808,
   "evidence": [
     {
-      "script": "scripts/test_tiled_prefill_modal.py"
+      "script": "scripts/gpu_tests/test_tiled_prefill_modal.py"
     },
     {
       "run_group": "iter3-tiled-prefill / iter3-ab / iter3-ab2 / iter3-ab3"

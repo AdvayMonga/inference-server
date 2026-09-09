@@ -12,7 +12,7 @@ import torch
 from inference_server.backends.base import InferenceBackend
 from inference_server.models.paged_kv_cache import KVCacheExhausted
 from inference_server.metrics import MetricsTracker
-from inference_server.sampling import SamplingParams, sample
+from inference_server.sampling import SamplingParams
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 
 logger = logging.getLogger(__name__)
@@ -182,6 +182,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # WIDE; if the queue never backs up every arrival is its own K=1 wave and there is
         # nothing to group. This is how we tell those regimes apart.
         self._wave_sizes: dict[int, int] = {}
+        # Batch occupancy, sampled per DECODE step. The central number for a batching engine:
+        # a decode step streams the whole weight matrix whether it serves 1 row or 200, so
+        # throughput is set by how full the batch is. Previously unmeasurable — `active_size`
+        # is an instantaneous len() read after the run drains, so it reported 0 everywhere, and
+        # the panel's concurrency came from the PENDING high-water, i.e. queue depth.
+        self._active_samples = 0
+        self._active_sum = 0
+        self._active_high_water = 0
         self._metrics = MetricsTracker()
 
     # --- Public interface ---
@@ -241,6 +249,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_completed": self._total_completed,
             "total_rejected": self._total_rejected,
             "pending_high_water": self._pending_high_water,
+            "active_high_water": self._active_high_water,
+            # Mean rows per decode step. Compare against max_batch_size: a large gap with a deep
+            # pending queue means admission is the constraint, not demand.
+            "active_mean": (round(self._active_sum / self._active_samples, 2)
+                            if self._active_samples else 0.0),
+            "decode_steps": self._active_samples,
             "kv_pressure": kv_pressure,
             "kv_free_blocks": kv_free_blocks,
             "kv_admit_blocked": self._kv_admit_blocked,
@@ -281,6 +295,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._advance_prefill_chunk(device)
                     self._evict_finished()
                     if self._active:
+                        self._active_samples += 1
+                        self._active_sum += len(self._active)
+                        if len(self._active) > self._active_high_water:
+                            self._active_high_water = len(self._active)
                         try:
                             self._decode_step(device)
                         except Exception as e:
@@ -358,6 +376,38 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     # --- Phase 2: admit new requests ---
 
+    def _shed_expired(self) -> None:
+        """Reject every request past the admission deadline, wherever it sits in the queue.
+
+        Expiry used to be checked only against peek_next(). That is equivalent to shedding all
+        stale work only if the head is always the oldest request, and no policy here orders that
+        way — FCFS keys on (-priority, arrival_seq), VTC on (-priority, counter, arrival_seq). A
+        low-priority or heavy-session request could therefore be overtaken indefinitely and never
+        examined: it kept its queue slot, was never counted in total_expired, and was eventually
+        served long after the caller had given up.
+
+        Runs once per admission pass, over the pending set. O(pending) against a decode step that
+        costs milliseconds, so the sweep is free in comparison.
+        """
+        if self.max_queue_wait_s <= 0:
+            return
+        now = time.perf_counter()
+        # Under the same lock enqueue() holds: it mutates the policy's pending set and
+        # _pending_count, so sweeping without it races an arriving request.
+        with self._pending_cv:
+            for req in self.policy.pending():
+                if not req.enqueue_ts or now - req.enqueue_ts <= self.max_queue_wait_s:
+                    continue
+                waited = now - req.enqueue_ts
+                self.policy.pick(req)
+                self._pending_count -= 1
+                self._total_rejected += 1
+                self._total_expired += 1
+                self.policy.on_request_finished(req)
+                self._reject(req, QueueFullError(
+                    f"queued {waited:.1f}s, over the {self.max_queue_wait_s:.0f}s admission "
+                    f"deadline — server overloaded"))
+
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
         to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
@@ -370,6 +420,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 with self._pending_cv:
                     window = self.policy.peek_window(free * self.wave_window_mult)
                 plan = plan_wave(window, free)
+        self._shed_expired()
         while len(self._active) + len(self._prefilling) + len(to_admit) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.

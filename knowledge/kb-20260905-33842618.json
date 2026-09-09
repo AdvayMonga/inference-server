@@ -2,7 +2,7 @@
   "created_at": 1788581515.116551,
   "evidence": [
     {
-      "script": "scripts/probe_prefill_ceiling.py"
+      "script": "scripts/probes/probe_prefill_ceiling.py"
     }
   ],
   "id": "kb-20260905-33842618",
