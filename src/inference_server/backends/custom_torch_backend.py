@@ -175,7 +175,6 @@ class _PrefillCtx:
 
     def _table(self, layer_idx):
         """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
-        pool = self.pools[layer_idx]
         rows = [c.block_tables[layer_idx] for c in self.caches]
         maxb = max((len(r) for r in rows), default=1)
         pad = self._scratch[layer_idx] if self._scratch is not None else 0

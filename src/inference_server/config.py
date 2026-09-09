@@ -165,7 +165,7 @@ def print_hardware_summary(settings: Settings) -> None:
         mem_gb = int(result.stdout.strip()) / 1e9
         print(f"  Unified Memory: {mem_gb:.0f} GB (shared CPU/GPU)")
     else:
-        print(f"  CPU only — no GPU acceleration")
+        print("  CPU only — no GPU acceleration")
 
     print(f"  KV Cache:  {settings.kv_cache_memory_fraction * 100:.0f}% of free memory")
     print(f"  Eviction:  {settings.eviction_policy}")

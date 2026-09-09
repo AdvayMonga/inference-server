@@ -12,7 +12,7 @@ import torch
 from inference_server.backends.base import InferenceBackend
 from inference_server.models.paged_kv_cache import KVCacheExhausted
 from inference_server.metrics import MetricsTracker
-from inference_server.sampling import SamplingParams, sample
+from inference_server.sampling import SamplingParams
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 
 logger = logging.getLogger(__name__)
