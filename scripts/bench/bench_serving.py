@@ -101,11 +101,16 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int) -
 class RateResult:
     rate: float
     duration_s: float
+    wall_s: float = 0.0   # first arrival -> last completion, drain included (vLLM convention)
     samples: list[Sample] = field(default_factory=list)
 
     def summary(self) -> dict:
         ok = [s for s in self.samples if s.error is None]
         errs = [s for s in self.samples if s.error is not None]
+        # Arrivals stop at the deadline; completions keep landing through the drain. Past
+        # saturation that drain is long, and dividing by the nominal duration reported an
+        # "achieved" rate that matched the offered rate however far behind the server fell.
+        window = self.wall_s or self.duration_s
         ttfts = sorted(s.ttft_s for s in ok)
         tpots = sorted(s.tpot_s for s in ok if s.tpot_s > 0)
         tokens = sum(s.out_tokens for s in ok)
@@ -114,13 +119,14 @@ class RateResult:
         within = bool(ok) and p95_ttft < SLO_TTFT_MS and p95_tpot < SLO_TPOT_MS
         return {
             "rate": self.rate, "n_ok": len(ok), "n_err": len(errs),
-            "achieved_rps": round(len(ok) / self.duration_s, 2),
-            "tok_per_s": round(tokens / self.duration_s, 1),
+            "achieved_rps": round(len(ok) / window, 2),
+            "tok_per_s": round(tokens / window, 1),
             "ttft_p50": round(_pct(ttfts, 0.50) * 1000, 1),
             "ttft_p95": round(p95_ttft, 1),
             "tpot_p50": round(_pct(tpots, 0.50) * 1000, 2),
             "tpot_p95": round(p95_tpot, 2),
             "within_slo": within,
+            "wall_s": round(window, 2),
         }
 
 
@@ -137,7 +143,8 @@ async def run_rate(client: httpx.AsyncClient, rate: float, duration_s: float,
     """Open-loop: spawn requests on a Poisson schedule for `duration_s`, then drain in-flight."""
     res = RateResult(rate=rate, duration_s=duration_s)
     tasks: list[asyncio.Task] = []
-    deadline = time.perf_counter() + duration_s
+    t_start = time.perf_counter()
+    deadline = t_start + duration_s
 
     async def fire():
         p_toks, o_toks = sample_lengths(rng)
@@ -148,6 +155,7 @@ async def run_rate(client: httpx.AsyncClient, rate: float, duration_s: float,
         await asyncio.sleep(rng.expovariate(rate))   # inter-arrival gap, independent of completions
     if tasks:
         await asyncio.wait(tasks, timeout=150.0)      # drain outstanding requests
+    res.wall_s = time.perf_counter() - t_start
     return res
 
 

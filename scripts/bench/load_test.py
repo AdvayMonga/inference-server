@@ -41,6 +41,9 @@ MIXED_BINS = [
     (0.10, 800, 600),   # long
 ]
 
+ERROR_BACKOFF_S = 0.25   # pause after a failed/rejected request; without it a 429 storm
+                         # becomes a tight loop that counts thousands of errors per second
+
 # A few seed sentences we tile/truncate to hit a target prompt size.
 SEED = (
     "Explain how a computer works in simple terms. Walk through the CPU, memory, "
@@ -98,17 +101,24 @@ class LevelResult:
     workload: str
     concurrency: int
     duration_s: float
+    wall_s: float = 0.0   # start -> last completion; the window rates are measured over
     samples: list[Sample] = field(default_factory=list)
 
     def summary(self) -> dict:
         ok = [s for s in self.samples if s.error is None]
         errs = [s for s in self.samples if s.error is not None]
+        # Workers stop STARTING requests at the deadline but finish the one in flight, so
+        # completions land up to one request-latency after it. Dividing by the nominal
+        # duration counted that tail as if it happened inside the window and overstated
+        # throughput most exactly where it matters — long requests near saturation.
+        window = self.wall_s or self.duration_s
         if not ok:
             return {
                 "workload": self.workload, "N": self.concurrency,
                 "n_ok": 0, "n_err": len(errs), "req_per_s": 0,
                 "tok_per_s": 0, "ttft_p50": 0, "ttft_p95": 0,
                 "tpot_p50": 0, "tpot_p95": 0, "total_p50": 0, "total_p95": 0,
+                "wall_s": round(window, 2),
             }
         ttfts = sorted(s.ttft_s for s in ok)
         tpots = sorted(s.tpot_s for s in ok if s.tpot_s > 0)
@@ -119,14 +129,15 @@ class LevelResult:
             "N": self.concurrency,
             "n_ok": len(ok),
             "n_err": len(errs),
-            "req_per_s": round(len(ok) / self.duration_s, 3),
-            "tok_per_s": round(n_tokens / self.duration_s, 2),
+            "req_per_s": round(len(ok) / window, 3),
+            "tok_per_s": round(n_tokens / window, 2),
             "ttft_p50": round(_pct(ttfts, 0.50) * 1000, 1),
             "ttft_p95": round(_pct(ttfts, 0.95) * 1000, 1),
             "tpot_p50": round(_pct(tpots, 0.50) * 1000, 2) if tpots else 0,
             "tpot_p95": round(_pct(tpots, 0.95) * 1000, 2) if tpots else 0,
             "total_p50": round(_pct(totals, 0.50) * 1000, 1),
             "total_p95": round(_pct(totals, 0.95) * 1000, 1),
+            "wall_s": round(window, 2),
         }
 
 
@@ -140,9 +151,11 @@ def _pct(sorted_vals: list[float], p: float) -> float:
 
 async def run_one_request(
     client: httpx.AsyncClient, base_url: str, prompt: str, max_tokens: int,
+    session_id: str = "default",
 ) -> Sample:
     """One streaming request. Times TTFT from request start to first token."""
-    payload = {"text": prompt, "max_tokens": max_tokens, "stream": True, "thinking": False}
+    payload = {"text": prompt, "max_tokens": max_tokens, "stream": True, "thinking": False,
+               "session_id": session_id}
     t0 = time.perf_counter()
     ttft = None
     tokens = 0
@@ -182,23 +195,28 @@ async def worker(
     samples: list[Sample],
     fixed: tuple[str, int] | None,
     draw,
+    session_id: str = "default",
 ) -> None:
-    """Loop firing requests serially until the deadline.
+    """Loop firing requests serially until the deadline — one closed-loop user.
 
     If `fixed` is set, every request uses the same (prompt, max_tokens).
-    Otherwise `draw()` returns a fresh one per request.
+    Otherwise `draw()` returns a fresh one per request. Each worker is its own
+    session so per-session fairness and admission actually see N users, not one.
     """
     while time.perf_counter() < deadline:
         prompt, mx = fixed if fixed is not None else draw()
-        s = await run_one_request(client, base_url, prompt, mx)
+        s = await run_one_request(client, base_url, prompt, mx, session_id)
         samples.append(s)
+        if s.error is not None:
+            await asyncio.sleep(ERROR_BACKOFF_S)   # a rejected user does not resubmit instantly
 
 
 async def run_level(
     base_url: str, workload: str, concurrency: int, duration_s: float,
 ) -> LevelResult:
     cfg = WORKLOADS[workload]
-    deadline = time.perf_counter() + duration_s
+    t_start = time.perf_counter()
+    deadline = t_start + duration_s
     result = LevelResult(workload=workload, concurrency=concurrency, duration_s=duration_s)
     limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency * 2)
     async with httpx.AsyncClient(limits=limits) as client:
@@ -210,10 +228,12 @@ async def run_level(
             fixed = (build_prompt(cfg["prompt_tokens_target"]), cfg["max_tokens"])
             draws = [None] * concurrency
         workers = [
-            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, draws[i]))
+            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, draws[i],
+                                       session_id=f"load-{i}"))
             for i in range(concurrency)
         ]
         await asyncio.gather(*workers)
+    result.wall_s = time.perf_counter() - t_start
     return result
 
 
