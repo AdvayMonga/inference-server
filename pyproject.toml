@@ -5,7 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inference-server"
 version = "0.1.0"
-description = "Production LLM inference server with async batching, KV cache, and continuous batching"
+description = "LLM inference engine from scratch: continuous batching, paged KV cache, Triton kernels, and a research loop that gates every merge on a measured experiment"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.110",
@@ -25,6 +26,11 @@ dev = [
     "ruff>=0.4",
     "matplotlib>=3.8",
 ]
+modal = ["modal>=1.0"]   # GPU instruments (scripts/**/*_modal.py) and modal_app.py
+
+[project.urls]
+Repository = "https://github.com/AdvayMonga/inference-server"
+"Architecture map" = "https://advaymonga.github.io/inference-server/architecture.html"
 
 [tool.setuptools.packages.find]
 where = ["src"]

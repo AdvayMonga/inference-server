@@ -2,7 +2,7 @@
   "created_at": 1788624301.3097348,
   "evidence": [
     {
-      "script": "scripts/probe_prefill_breakdown_modal.py"
+      "script": "scripts/probes/probe_prefill_breakdown_modal.py"
     },
     {
       "run_group": "iter2-prefill-breakdown"

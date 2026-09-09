@@ -2,7 +2,7 @@
   "created_at": 1788581515.116544,
   "evidence": [
     {
-      "script": "scripts/probe_prefill_ceiling.py"
+      "script": "scripts/probes/probe_prefill_ceiling.py"
     },
     {
       "run_id": "runs/ (rate 2, group=first-real-panel)"

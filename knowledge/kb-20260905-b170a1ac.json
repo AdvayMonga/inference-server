@@ -5,7 +5,7 @@
       "experiment": "exp-20260905-26c0e0f5"
     },
     {
-      "script": "scripts/test_tiled_prefill_modal.py"
+      "script": "scripts/gpu_tests/test_tiled_prefill_modal.py"
     }
   ],
   "id": "kb-20260905-b170a1ac",

@@ -3,7 +3,7 @@
   "evidence": [],
   "id": "kb-20260514-046",
   "status": "resolved",
-  "summary": "Two gates in `_admit_pending` (peek \u2192 fit-check \u2192 pick):\n- **Active-KV gate** (decode-OOM): tracks `(prompt_len + max_tokens)` reservations across `_active`; soft-hold when `reserved + new > MAX_ACTIVE_KV_TOKENS`; hard-reject single requests > budget. Load-bearing \u2014 `_batched_kv` is scheduler-local, separate from CacheManager blocks.\n- **Cache-pool gate** (eviction-thrash): soft-hold when `blocks_needed > free_blocks`; hard-reject when `> total_blocks`.\nMetrics in `/scheduler/stats`: `kv_pressure`, `kv_free_blocks`, `kv_admit_blocked`, `active_kv_reserved`, `active_kv_budget`. Validated by `scripts/kv_pressure_benchmark.py`.",
+  "summary": "Two gates in `_admit_pending` (peek \u2192 fit-check \u2192 pick):\n- **Active-KV gate** (decode-OOM): tracks `(prompt_len + max_tokens)` reservations across `_active`; soft-hold when `reserved + new > MAX_ACTIVE_KV_TOKENS`; hard-reject single requests > budget. Load-bearing \u2014 `_batched_kv` is scheduler-local, separate from CacheManager blocks.\n- **Cache-pool gate** (eviction-thrash): soft-hold when `blocks_needed > free_blocks`; hard-reject when `> total_blocks`.\nMetrics in `/scheduler/stats`: `kv_pressure`, `kv_free_blocks`, `kv_admit_blocked`, `active_kv_reserved`, `active_kv_budget`. Validated by `scripts/bench/kv_pressure_benchmark.py`.",
   "superseded_by": null,
   "tags": [
     "backpressure",

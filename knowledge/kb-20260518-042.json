@@ -3,7 +3,7 @@
   "evidence": [],
   "id": "kb-20260518-042",
   "status": "deferred",
-  "summary": "Final benchmark for the vLLM head-to-head will run through Modal's `stopwatch` (wraps Red Hat's `guidellm`) so numbers slot directly into the LLM Almanac table \u2014 apples-to-apples by construction, no need to defend a homegrown harness. `scripts/load_test.py` stays as the dev-time smoke test; not replaced. Cost: `guidellm` speaks the OpenAI API, so a narrow `/v1/completions` shim on our server (~100 lines, engine-only \u2014 no auth/registry/etc.) will be needed to drive it. Shim is a benchmark-compatibility surface, not a public API contract. **Trigger:** Phase 11 \u2014 after Modal deploy + load-test sweep on CUDA. Revisit shim yes/no then.\n\n---",
+  "summary": "Final benchmark for the vLLM head-to-head will run through Modal's `stopwatch` (wraps Red Hat's `guidellm`) so numbers slot directly into the LLM Almanac table \u2014 apples-to-apples by construction, no need to defend a homegrown harness. `scripts/bench/load_test.py` stays as the dev-time smoke test; not replaced. Cost: `guidellm` speaks the OpenAI API, so a narrow `/v1/completions` shim on our server (~100 lines, engine-only \u2014 no auth/registry/etc.) will be needed to drive it. Shim is a benchmark-compatibility surface, not a public API contract. **Trigger:** Phase 11 \u2014 after Modal deploy + load-test sweep on CUDA. Revisit shim yes/no then.\n\n---",
   "superseded_by": null,
   "tags": [
     "benchmark",
