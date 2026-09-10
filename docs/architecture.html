@@ -39,7 +39,7 @@
     <rect class="box" x="20" y="40" width="160" height="80" rx="6"/>
     <text class="title" x="40" y="68">Client</text>
     <text class="small" x="40" y="88">browser, curl,</text>
-    <text class="small" x="40" y="103">load simulator</text>
+    <text class="small" x="40" y="103">load_test.py</text>
   </g>
 
   <!-- HTTP / Server -->
@@ -50,7 +50,7 @@
     <text x="240" y="92">accepts requests</text>
     <text x="240" y="110">tokenizes prompts</text>
     <text x="240" y="128">streams tokens back (SSE)</text>
-    <text x="240" y="146">serves the dashboard</text>
+    <text x="240" y="146">serves the chat page</text>
     <text class="small" x="240" y="164">/health · /ready for Modal probes</text>
     <text class="small" x="240" y="178">click to open →</text>
   </a>
@@ -135,24 +135,24 @@
     <text class="small" x="240" y="432">surfaces p50/p95/p99</text>
   </g>
 
-  <!-- Simulator -->
+  <!-- Load generator (out of process) -->
   <g>
     <rect class="box" x="20" y="160" width="160" height="120" rx="6"/>
-    <text class="title" x="40" y="188">Load simulator</text>
-    <text class="lbl" x="40" y="204">simulator_prompts.py</text>
-    <text class="small" x="40" y="224">multi-user traffic,</text>
+    <text class="title" x="40" y="188">Load generator</text>
+    <text class="lbl" x="40" y="204">bench/load_test.py</text>
+    <text class="small" x="40" y="224">separate process,</text>
     <text class="small" x="40" y="240">weighted prompts,</text>
-    <text class="small" x="40" y="256">jittered think-time</text>
+    <text class="small" x="40" y="256">open-loop arrivals</text>
   </g>
 
   <!-- Dashboard -->
   <g>
     <rect class="box" x="20" y="320" width="160" height="120" rx="6"/>
-    <text class="title" x="40" y="348">Dashboard</text>
+    <text class="title" x="40" y="348">Chat page</text>
     <text class="lbl" x="40" y="364">static/index.html</text>
-    <text class="small" x="40" y="384">live metrics,</text>
-    <text class="small" x="40" y="400">cache stats,</text>
-    <text class="small" x="40" y="416">scheduler stats</text>
+    <text class="small" x="40" y="384">streaming chat,</text>
+    <text class="small" x="40" y="400">last-request</text>
+    <text class="small" x="40" y="416">timings only</text>
   </g>
 
   <!-- Config -->
@@ -189,14 +189,14 @@
 <h2>What each subsystem is responsible for</h2>
 <table>
   <tr><th>Subsystem</th><th>One-line job</th><th>Detail page</th></tr>
-  <tr><td>HTTP &amp; Server</td><td>Accept requests, tokenize, stream tokens back, serve dashboard.</td><td><a href="arch-server.html">arch-server.html</a></td></tr>
+  <tr><td>HTTP &amp; Server</td><td>Accept requests, tokenize, stream tokens back, serve the chat page.</td><td><a href="arch-server.html">arch-server.html</a></td></tr>
   <tr><td>Scheduler</td><td>Decide which requests run together, when, and at what speed — fairly.</td><td><a href="arch-scheduler.html">arch-scheduler.html</a></td></tr>
   <tr><td>Backend</td><td>Own the model. Run prefill and decode forward passes.</td><td><a href="arch-backend.html">arch-backend.html</a></td></tr>
   <tr><td>KV Cache</td><td>Remember attention state so we don't recompute prompt prefixes.</td><td><a href="arch-cache.html">arch-cache.html</a></td></tr>
   <tr><td>Tokenizer</td><td>Stateless text ↔ tokens with the Gemma chat template.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
-  <tr><td>Load simulator</td><td>Built-in multi-user load generator for stress testing.</td><td>covered in HTTP &amp; Server</td></tr>
-  <tr><td>Dashboard</td><td>Browser UI for live cache and scheduler stats.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
+  <tr><td>Chat page</td><td>Browser UI for streaming chat and last-request timings.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Config</td><td>Env-var-driven settings, no hardcoded paths.</td><td>covered on every page</td></tr>
 </table>
 
@@ -286,7 +286,7 @@ the in-flight work, releases its KV, and keeps serving.</p>
   <tr><td>6 — Backpressure</td><td>Queue gate + active-KV gate + cache-pool gate, soft-hold and hard-reject, plus cache reclaim, KV-pressure preemption and an admission deadline that sheds stale requests</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — Chunked prefill (alternating)</td><td>Long prompts split across ticks so they don't block decode</td><td><span class="badge b-prog">in progress</span></td></tr>
   <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Attention path now exists, but measured a large regression: a mixed step cannot replay the decode CUDA graph and our eager forward is dispatch-bound (3–5× tax)</td><td><span class="badge b-defer">measured, not built</span></td></tr>
-  <tr><td>6 — Load simulator</td><td>Built-in weighted multi-user simulator with per-user RNG</td><td><span class="badge b-done">done</span></td></tr>
+  <tr><td>6 — Load simulator (in-server)</td><td>Removed 2026-09-09: shared the server's event loop, so it perturbed what it measured. Prompt bank moved to scripts/bench/</td><td><span class="badge b-defer">removed</span></td></tr>
   <tr><td>6 — Open-loop + stress harnesses</td><td>SLO-gated Poisson sweep, plus an overload/KV-pressure stress that drives cache-missing traffic past the knee</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps, capture-time kernel variants</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — Tiled prefill attention</td><td>FlashAttention-style tiling of the paged prefill kernel</td><td><span class="badge b-defer">measured, rejected</span></td></tr>

@@ -51,7 +51,8 @@ was worth nothing end to end. Those are in [`DECISIONS.md`](DECISIONS.md).
 | **`models/paged_attention_kernel.py`** | Triton decode and prefill kernels that read K/V through block tables — no gather, no padding. Split-K decode variant. |
 | **`backends/custom_torch_backend.py`** | Drives the above for the scheduler: batched prefill in one forward, bucketed CUDA-graph decode, optional `torch.compile` and int8 weight-only quantization. `BACKEND=custom-{cuda,mps,cpu}`. |
 | **`backends/torch_backend.py`** | HF Transformers baseline backend behind the same `InferenceBackend` interface, with the `kv_cache/` block manager, radix tree and LRU / AttentionSink / H2O eviction policies. |
-| **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` for standard benchmark clients, live dashboard with a built-in load simulator. |
+| **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` for standard benchmark clients, and a chat page for eyeballing the engine. |
+| **`scripts/bench/load_test.py`** | Out-of-process concurrency sweep; `--workload realistic` draws distinct prompts from `prompt_bank.py` so the run exercises the cache-miss path. |
 | **`metrics.py`**, `prometheus_metrics.py` | Sliding-window p50/p95/p99 TTFT / TPOT / throughput on `/scheduler/stats`; aggregate Prometheus `/metrics` (Grafana dashboard in `monitoring/`). |
 
 Everything is env-configured (`.env.example` lists every knob) and deploys as one container
@@ -123,7 +124,7 @@ pip install -e ".[dev]"
 cp .env.example .env                      # set MODEL_NAME; DEVICE auto-detects CUDA → MPS → CPU
 
 uvicorn inference_server.server:app --host 0.0.0.0 --port 8000
-open http://localhost:8000                # chat, live metrics, load simulator
+open http://localhost:8000                # streaming chat page
 
 pytest -q                                 # fast suite
 pytest -m heavy                           # parity + scheduler tests that load the real model

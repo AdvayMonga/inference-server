@@ -14,17 +14,24 @@ import asyncio
 import csv
 import json
 import random
+import sys
 import time
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import httpx
 
-# Workload modes. short/long are uniform; mixed draws from discrete bins per request.
+sys.path.insert(0, str(Path(__file__).parent))
+import prompt_bank  # noqa: E402  sibling module, not an installed package
+
+# Workload modes. short/long are uniform; mixed draws from discrete bins; realistic
+# draws distinct English prompts from prompt_bank.
 WORKLOADS = {
-    "short":  {"prompt_tokens_target": 60,  "max_tokens": 100},
-    "long":   {"prompt_tokens_target": 500, "max_tokens": 500},
-    "mixed":  {"mixed": True},
+    "short":     {"prompt_tokens_target": 60,  "max_tokens": 100},
+    "long":      {"prompt_tokens_target": 500, "max_tokens": 500},
+    "mixed":     {"mixed": True},
+    "realistic": {"realistic": True},
 }
 
 # Discrete bins for "mixed" — chatbot-like distribution. (weight, prompt, max_tokens).
@@ -33,6 +40,9 @@ MIXED_BINS = [
     (0.20, 250, 300),   # medium
     (0.10, 800, 600),   # long
 ]
+
+ERROR_BACKOFF_S = 0.25   # pause after a failed/rejected request; without it a 429 storm
+                         # becomes a tight loop that counts thousands of errors per second
 
 # A few seed sentences we tile/truncate to hit a target prompt size.
 SEED = (
@@ -43,6 +53,9 @@ SEED = (
 
 
 def build_prompt(target_tokens: int) -> str:
+    """Tile SEED to a target size. WARNING: every prompt built this way shares a long
+    common prefix, so with the PrefixCache on, short/long/mixed measure the cache-hit
+    path almost exclusively. Use `realistic` to exercise the miss path."""
     # Roughly 4 chars per token for English — coarse but fine for load shaping.
     target_chars = target_tokens * 4
     n = max(1, (target_chars // len(SEED)) + 1)
@@ -61,6 +74,19 @@ def sample_mixed(rng: random.Random) -> tuple[str, int]:
     return build_prompt(p_toks), mx
 
 
+def sample_realistic(rng: random.Random) -> tuple[str, int]:
+    """Draw a (prompt, max_tokens) sample from the prompt bank's weighted buckets."""
+    r, cum = rng.random(), 0.0
+    name, prompts, _ = prompt_bank.PROMPT_MIX[-1]
+    for bucket, bucket_prompts, weight in prompt_bank.PROMPT_MIX:
+        cum += weight
+        if r <= cum:
+            name, prompts = bucket, bucket_prompts
+            break
+    lo, hi = prompt_bank.MAX_TOKENS_RANGE[name]
+    return rng.choice(prompts), rng.randint(lo, hi)
+
+
 @dataclass
 class Sample:
     ttft_s: float
@@ -75,17 +101,24 @@ class LevelResult:
     workload: str
     concurrency: int
     duration_s: float
+    wall_s: float = 0.0   # start -> last completion; the window rates are measured over
     samples: list[Sample] = field(default_factory=list)
 
     def summary(self) -> dict:
         ok = [s for s in self.samples if s.error is None]
         errs = [s for s in self.samples if s.error is not None]
+        # Workers stop STARTING requests at the deadline but finish the one in flight, so
+        # completions land up to one request-latency after it. Dividing by the nominal
+        # duration counted that tail as if it happened inside the window and overstated
+        # throughput most exactly where it matters — long requests near saturation.
+        window = self.wall_s or self.duration_s
         if not ok:
             return {
                 "workload": self.workload, "N": self.concurrency,
                 "n_ok": 0, "n_err": len(errs), "req_per_s": 0,
                 "tok_per_s": 0, "ttft_p50": 0, "ttft_p95": 0,
                 "tpot_p50": 0, "tpot_p95": 0, "total_p50": 0, "total_p95": 0,
+                "wall_s": round(window, 2),
             }
         ttfts = sorted(s.ttft_s for s in ok)
         tpots = sorted(s.tpot_s for s in ok if s.tpot_s > 0)
@@ -96,14 +129,15 @@ class LevelResult:
             "N": self.concurrency,
             "n_ok": len(ok),
             "n_err": len(errs),
-            "req_per_s": round(len(ok) / self.duration_s, 3),
-            "tok_per_s": round(n_tokens / self.duration_s, 2),
+            "req_per_s": round(len(ok) / window, 3),
+            "tok_per_s": round(n_tokens / window, 2),
             "ttft_p50": round(_pct(ttfts, 0.50) * 1000, 1),
             "ttft_p95": round(_pct(ttfts, 0.95) * 1000, 1),
             "tpot_p50": round(_pct(tpots, 0.50) * 1000, 2) if tpots else 0,
             "tpot_p95": round(_pct(tpots, 0.95) * 1000, 2) if tpots else 0,
             "total_p50": round(_pct(totals, 0.50) * 1000, 1),
             "total_p95": round(_pct(totals, 0.95) * 1000, 1),
+            "wall_s": round(window, 2),
         }
 
 
@@ -117,9 +151,11 @@ def _pct(sorted_vals: list[float], p: float) -> float:
 
 async def run_one_request(
     client: httpx.AsyncClient, base_url: str, prompt: str, max_tokens: int,
+    session_id: str = "default",
 ) -> Sample:
     """One streaming request. Times TTFT from request start to first token."""
-    payload = {"text": prompt, "max_tokens": max_tokens, "stream": True, "thinking": False}
+    payload = {"text": prompt, "max_tokens": max_tokens, "stream": True, "thinking": False,
+               "session_id": session_id}
     t0 = time.perf_counter()
     ttft = None
     tokens = 0
@@ -158,41 +194,46 @@ async def worker(
     client: httpx.AsyncClient, base_url: str, deadline: float,
     samples: list[Sample],
     fixed: tuple[str, int] | None,
-    rng: random.Random | None,
+    draw,
+    session_id: str = "default",
 ) -> None:
-    """Loop firing requests serially until the deadline.
+    """Loop firing requests serially until the deadline — one closed-loop user.
 
     If `fixed` is set, every request uses the same (prompt, max_tokens).
-    Otherwise draw from MIXED_BINS via `rng` per request.
+    Otherwise `draw()` returns a fresh one per request. Each worker is its own
+    session so per-session fairness and admission actually see N users, not one.
     """
     while time.perf_counter() < deadline:
-        if fixed is not None:
-            prompt, mx = fixed
-        else:
-            prompt, mx = sample_mixed(rng)
-        s = await run_one_request(client, base_url, prompt, mx)
+        prompt, mx = fixed if fixed is not None else draw()
+        s = await run_one_request(client, base_url, prompt, mx, session_id)
         samples.append(s)
+        if s.error is not None:
+            await asyncio.sleep(ERROR_BACKOFF_S)   # a rejected user does not resubmit instantly
 
 
 async def run_level(
     base_url: str, workload: str, concurrency: int, duration_s: float,
 ) -> LevelResult:
     cfg = WORKLOADS[workload]
-    deadline = time.perf_counter() + duration_s
+    t_start = time.perf_counter()
+    deadline = t_start + duration_s
     result = LevelResult(workload=workload, concurrency=concurrency, duration_s=duration_s)
     limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency * 2)
     async with httpx.AsyncClient(limits=limits) as client:
-        if cfg.get("mixed"):
+        sampler = sample_mixed if cfg.get("mixed") else sample_realistic if cfg.get("realistic") else None
+        if sampler is not None:
             fixed = None
-            rngs = [random.Random(1000 + i) for i in range(concurrency)]
+            draws = [partial(sampler, random.Random(1000 + i)) for i in range(concurrency)]
         else:
             fixed = (build_prompt(cfg["prompt_tokens_target"]), cfg["max_tokens"])
-            rngs = [None] * concurrency
+            draws = [None] * concurrency
         workers = [
-            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, rngs[i]))
+            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, draws[i],
+                                       session_id=f"load-{i}"))
             for i in range(concurrency)
         ]
         await asyncio.gather(*workers)
+    result.wall_s = time.perf_counter() - t_start
     return result
 
 

@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "18d9cb4a5f901b2b77468bc12be0ef2ee1235839"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "c8fdb512b1a0ba7750463f3b4ad5da62c53ce233"
+    }
+  ],
+  "branch": "test/traffic-simulator",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "18d9cb4a5f901b2b77468bc12be0ef2ee1235839",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260910-653be8d5",
+  "no_behaviour_change": "deletes the /simulate router and its import from server.py and cuts the metrics sidebar from static/index.html (3b9b5da); the /generate path, scheduler and backend are untouched",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789015048.084951,
+  "verdict": "confirmed"
+}

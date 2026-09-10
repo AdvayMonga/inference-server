@@ -10,16 +10,15 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · HTTP &amp; Server</div>
 <h1>HTTP &amp; Server layer</h1>
-<p class="lead">The thin shell that takes traffic, turns it into work for the engine, streams answers back, and exposes the dashboard and stats endpoints.</p>
+<p class="lead">The thin shell that takes traffic, turns it into work for the engine, streams answers back, and exposes the chat page and stats endpoints.</p>
 
 <div class="nav">
   <a href="#endpoints">Endpoints</a>·
   <a href="#startup">Startup</a>·
   <a href="#tokenizer">Tokenizer</a>·
   <a href="#sse">Streaming (SSE)</a>·
-  <a href="#sim">Load simulator</a>·
   <a href="#metrics">Metrics</a>·
-  <a href="#dashboard">Dashboard</a>·
+  <a href="#dashboard">Chat page</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
 </div>
 
@@ -60,21 +59,12 @@
   </g>
 
   <g>
-    <rect class="box http" x="20" y="170" width="540" height="120" rx="6"/>
-    <text class="title" x="40" y="198">POST /simulate/start  ·  POST /simulate/stop  ·  GET /simulate/status</text>
-    <text x="40" y="222">control the built-in load simulator</text>
-    <text class="small" x="40" y="242">spins up N virtual users hitting /generate concurrently</text>
-    <text class="small" x="40" y="258">prompts drawn from weighted buckets, per-user RNG seed</text>
-    <text class="small" x="40" y="274">jittered think-time between turns to mimic human pacing</text>
-  </g>
-
-  <g>
     <rect class="box" x="600" y="170" width="520" height="120" rx="6"/>
     <text class="title" x="620" y="198">GET /  (and /static/*)</text>
-    <text x="620" y="222">serves the dashboard HTML page</text>
+    <text x="620" y="222">serves the chat page</text>
     <text class="small" x="620" y="242">single-page browser UI for live metrics</text>
     <text class="small" x="620" y="258">polls /scheduler/stats and /cache/stats on a timer</text>
-    <text class="small" x="620" y="274">renders the simulator controls and history charts</text>
+    <text class="small" x="620" y="274">streaming chat; no metrics polling</text>
   </g>
 
   <g>
@@ -97,7 +87,7 @@
     <rect class="box" x="20" y="440" width="1100" height="80" rx="6"/>
     <text class="title" x="40" y="468">All endpoints share one ScheduledRequest path</text>
     <text x="40" y="490">/generate is the only endpoint that creates work. Stats endpoints are read-only snapshots.</text>
-    <text class="small" x="40" y="510">The simulator endpoints internally fire /generate calls — they are not a separate code path.</text>
+    <text class="small" x="40" y="510">Load is generated off-box by scripts/bench/load_test.py, never from inside this process.</text>
   </g>
 </svg>
 
@@ -214,21 +204,16 @@
   </g>
 </svg>
 
-<h2 id="sim">Load simulator</h2>
-<p class="lead">A built-in multi-user traffic generator. Lives in <code>simulator_prompts.py</code>; control endpoints are on the server.</p>
+<h2 id="loadgen">Load generation</h2>
+<p class="lead">Off-box only. <code>scripts/bench/load_test.py</code>, with the prompt bank in <code>scripts/bench/prompt_bank.py</code>.</p>
 
-<table>
-  <tr><th>Knob</th><th>What it does</th></tr>
-  <tr><td>num_users</td><td>How many virtual users to run in parallel.</td></tr>
-  <tr><td>weighted prompt buckets</td><td>Mix of short, medium, long prompts in realistic ratios.</td></tr>
-  <tr><td>per-user RNG seed</td><td>Each user picks prompts from its own deterministic stream so runs are reproducible.</td></tr>
-  <tr><td>jittered think-time</td><td>Random pause between a user's turns, so requests don't all arrive in lockstep.</td></tr>
-  <tr><td>session_id per user</td><td>Each user has a stable session ID so the cache + fairness layers see real session boundaries.</td></tr>
-</table>
+<p>The server used to host its own traffic generator at <code>/simulate/start</code>: N async virtual users looping <code>/generate</code> calls against localhost from inside the server process. It was removed on 2026-09-09.</p>
 
 <div class="callout">
-  <strong>Why this exists:</strong> the engine is built for many concurrent users with mixed prompt lengths. Single-request <code>curl</code> tests don't exercise the scheduler, the backpressure gates, or the fairness policy. The simulator does. External Locust testing comes next.
+  <strong>Why it was removed:</strong> the generator ran on the same event loop as the thing it was measuring. Its own task scheduling, tokenizer calls and SSE parsing competed with request handling, so every number it produced included the cost of producing it, and that cost grew with the user count it was supposed to be varying. LOOP.md records a closed-loop harness as the mistake that cost this project a month. A load generator has to be a separate process, and preferably a separate machine.
 </div>
+
+<p>What survived is the prompt bank: weighted short / medium / long buckets of distinct English prompts, now reachable as <code>--workload realistic</code>. This matters more than it looks. The older <code>short</code> / <code>long</code> / <code>mixed</code> workloads build prompts by tiling one seed sentence, so with the <code>PrefixCache</code> on, every request in the run shares a long common prefix and the sweep measures the cache-hit path almost exclusively. <code>realistic</code> is the one that exercises the miss path.</p>
 
 <h2 id="metrics">Metrics tracker</h2>
 <p class="lead"><code>metrics.py</code>. Pull-based, lives in process memory, surfaced through <code>/scheduler/stats</code>.</p>
@@ -249,16 +234,17 @@
   <strong>Structured logs + timing middleware.</strong> <code>LOG_FORMAT=json</code> (default <code>text</code>) switches stdlib logging to one JSON object per line (<code>logging_config.py</code>); <code>logger.info(..., extra={...})</code> fields merge in. A FastAPI middleware times every HTTP request → the <code>inference_http_request_duration_seconds</code> histogram (labeled by the matched route template, not the raw path) + a structured log line.
 </div>
 
-<h2 id="dashboard">Dashboard</h2>
-<p class="lead"><code>src/inference_server/static/index.html</code>. A single-page UI that polls the stats endpoints.</p>
+<h2 id="dashboard">Chat page</h2>
+<p class="lead"><code>src/inference_server/static/index.html</code>. A single self-contained page: streaming chat, nothing else.</p>
 
 <ul>
-  <li>Top: live cache hit rate, used/free blocks, eviction count.</li>
-  <li>Middle: scheduler queue depth, active batch size, KV pressure, admit/reject counters.</li>
-  <li>Latency panel: TTFT and TPOT percentiles refreshed on a timer.</li>
-  <li>Simulator controls: start / stop / configure number of users.</li>
+  <li>Streaming <code>/generate</code> over SSE, with a stop button and per-request controls for max tokens, stream on/off, and thinking on/off.</li>
+  <li>A one-line stat strip for the request you just sent: TTFT, TPOT, total, tokens, tok/s, cached prompt tokens. Every value comes straight out of that response body.</li>
+  <li>No polling, no percentiles, no aggregates. Those are Prometheus histograms read through Grafana; see <a href="#metrics">Metrics</a>.</li>
   <li>Self-contained — no JS bundler, no framework. Just the file.</li>
 </ul>
+
+<p><strong>Why the dashboard was removed (2026-09-09).</strong> The page used to carry a metrics sidebar computing p50/p95/p99 from its own 60-second in-process window, alongside the Prometheus histograms. Two implementations of the same numbers drift, and when they disagree you cannot tell which one is lying. Grafana is now the single source for anything aggregated. Per-request numbers stay on the page because they are read, not computed.</p>
 
 <p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> · <a href="arch-cache.html">KV Cache</a> · <a href="arch-backend.html">Backend</a></p>
 
