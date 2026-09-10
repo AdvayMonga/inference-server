@@ -32,6 +32,7 @@ ARM_TOKEN = "arm="
 BEHAVIOURAL_PREFIXES = ("src/inference_server/",)
 EXEMPT_PREFIXES = (
     "src/inference_server/research/",
+    "src/inference_server/static/",
     "docs/", "tests/", "scripts/", "benchmarks/", "knowledge/", "experiments/", "monitoring/",
 )
 
