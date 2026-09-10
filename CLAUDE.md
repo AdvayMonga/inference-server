@@ -165,7 +165,7 @@ Project setup, tokenization, autoregressive loop, streaming, request batching, K
 - **7. Hardware auto-detection** — CUDA/MPS/CPU, `DEVICE` override, startup summary, auto-size KV cache
 - **8. Observability** — structured JSON logs, Prometheus metrics, Grafana dashboard, timing middleware
 - **9. Resilience** — graceful shutdown, request timeouts, `/health` + `/ready`, error isolation
-- **10. Containerization** — Dockerfile, docker-compose with Prometheus/Grafana, `.env.example`
+- **10. Containerization** — Dockerfile, `.env.example`. ✅ `monitoring/docker-compose.yml` brings up Prometheus + Grafana with the datasource and dashboard provisioned; the server stays outside the stack and is scraped over `host.docker.internal:8000`.
 - **11. Benchmarking** — single `scripts/benchmark.py`, vs vLLM charts, `BENCHMARKS.md`
 - **12. CI** — GitHub Actions, regression gates, ruff + mypy, `DESIGN.md`
 
