@@ -5,6 +5,7 @@
     python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
     python -m inference_server.research.loop index
     python -m inference_server.research.loop kb --status rejected
+    python -m inference_server.research.loop no-claim --why "drops an unused import"
 
 Step 2 (hypothesize) is deliberately NOT automated — it is the one place judgement belongs, and
 it runs against research/HYPOTHESIZE.md with the knowledge base as input. Everything either side
@@ -106,6 +107,31 @@ def cmd_index(args) -> int:
     return 0
 
 
+def cmd_noclaim(args) -> int:
+    """Record that one commit changes no engine behaviour. The record vouches for that sha only."""
+    import subprocess
+
+    from inference_server.research.kb import save_experiment
+    from inference_server.research.schemas import REPO_ROOT, Arm, Experiment
+
+    def git(*a: str) -> str:
+        return subprocess.run(["git", *a], cwd=REPO_ROOT, capture_output=True, text=True,
+                              check=True).stdout.strip()
+
+    sha = git("rev-parse", args.sha)
+    base = git("merge-base", args.base, sha)
+    exp = Experiment(hypothesis_id="no-behaviour-change", engine_sha_base=base,
+                     arms=[Arm("baseline", base), Arm("treatment", sha)],
+                     branch=git("rev-parse", "--abbrev-ref", "HEAD"),
+                     verdict="confirmed", source="loop", no_behaviour_change=args.why)
+    path = save_experiment(exp)
+    print(f"recorded {exp.id}: {sha[:12]} claims no behaviour change — {args.why}")
+    print(f"  {path}")
+    print(f"  commit this file. The claim covers {sha[:12]} only; any engine change after it "
+          f"needs its own record.")
+    return 0
+
+
 def cmd_kb(args) -> int:
     hits = query(status=args.status, tags=args.tags or (), text=args.text)
     for e in hits:
@@ -146,6 +172,14 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--status"); k.add_argument("--tags", nargs="*")
     k.add_argument("--text"); k.add_argument("-v", "--verbose", action="store_true")
     k.set_defaults(fn=cmd_kb)
+
+    n = sub.add_parser("no-claim",
+                       help="record that a commit changes no engine behaviour (dead code, rename, comment)")
+    n.add_argument("--why", required=True,
+                   help="one line: why this diff cannot change what the engine does")
+    n.add_argument("--sha", default="HEAD", help="the commit the claim covers")
+    n.add_argument("--base", default="main")
+    n.set_defaults(fn=cmd_noclaim)
 
     args = ap.parse_args(argv)
     return args.fn(args)
