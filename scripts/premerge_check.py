@@ -119,6 +119,45 @@ def regression_test_passes(node_id: str) -> tuple[bool, str]:
     return r.returncode == 0, tail[-1] if tail else "no output"
 
 
+def vouches_for(candidate, ref: str, *, ancestor=None, changed=None,
+                engine=None) -> tuple[bool, str]:
+    """Is the one commit this record names in `ref`'s history, with no engine change after it?
+
+    A record without panels — a correctness fix or a no-behaviour-change claim — vouches for
+    ONE commit. Accepting it for anything more lets a record written for a rename, or for a
+    fix in the kernel, quietly carry every later engine change on the branch with it. That
+    happened: a fake `perf:` commit passed the gate on an unrelated fix's record. The git
+    helpers are injectable so the rule is testable without a repository.
+    """
+    ancestor = ancestor or is_ancestor
+    changed = changed or changed_files
+    engine = engine or behavioural
+    treatment = next((a.sha for a in candidate.arms if a.name == "treatment" and a.sha), "")
+    if not treatment:
+        return False, f"{candidate.id} names no treatment sha"
+    if not ancestor(treatment, ref):
+        return False, f"{candidate.id} vouches for {treatment[:12]}, which is not in {ref}"
+    drifted = engine(changed(ref, treatment), diff_ref=ref, base=treatment)
+    if drifted:
+        return False, (f"{candidate.id} vouches for {treatment[:12]}, but engine files changed "
+                       f"after it: {', '.join(drifted)}")
+    return True, treatment
+
+
+def no_claim_vouches(candidate, ref: str, *, ancestor=None, changed=None,
+                     engine=None) -> tuple[bool, str]:
+    """Does this no-behaviour-change record vouch for `ref`? One commit, nothing after it."""
+    if candidate.source != "loop" or not candidate.no_behaviour_change:
+        return False, "not a no-claim record"
+    ok, why = candidate.authorises_merge()
+    if not ok:
+        return False, why
+    ok, treatment = vouches_for(candidate, ref, ancestor=ancestor, changed=changed, engine=engine)
+    if not ok:
+        return False, treatment
+    return True, f"{candidate.id} vouches for {treatment[:12]}: {candidate.no_behaviour_change}"
+
+
 def is_ancestor(sha: str, ref: str) -> bool:
     """Is `sha` reachable from `ref`? Cheap guard so a record cannot vouch for unrelated code."""
     r = subprocess.run(["git", "merge-base", "--is-ancestor", sha, ref],
@@ -153,8 +192,10 @@ def main() -> int:
     sha = resolve_sha(args.ref)
 
     # A correctness fix is checked FIRST, and differently. Its evidence is a regression test
-    # re-run against the tree being merged, so "did engine files drift since the measurement" is
-    # meaningless — the measurement IS now. Requiring only that its base sha is an ancestor.
+    # re-run against the tree being merged. The test proves the FIX; it says nothing about any
+    # other engine change on the branch, so the record must also be bound to the fix commit:
+    # in the ref's history, nothing behavioural after it.
+    refused: list[str] = []
     for candidate in load_experiments():
         if candidate.source != "loop" or not candidate.regression_test:
             continue
@@ -162,6 +203,11 @@ def main() -> int:
             continue
         ok, why = candidate.authorises_merge()
         if not ok:
+            refused.append(why)
+            continue
+        ok, why = vouches_for(candidate, args.ref)
+        if not ok:
+            refused.append(why)
             continue
         passed, tail = regression_test_passes(candidate.regression_test)
         if passed:
@@ -171,6 +217,21 @@ def main() -> int:
         print(f"\nFAIL  {candidate.id} rests on {candidate.regression_test}, which does not "
               f"pass:\n          {tail}")
         return 1
+
+    # A no-behaviour-change claim is checked next. It has no test and no panels; what it has is
+    # a named commit and a one-line reason, and it is refused the moment anything behavioural
+    # lands after that commit.
+    for candidate in load_experiments():
+        if not candidate.no_behaviour_change:
+            continue
+        ok, why = no_claim_vouches(candidate, args.ref)
+        if ok:
+            print(f"\nPASS  {why}")
+            return 0
+        refused.append(why)
+    if args.explain:
+        for why in refused:
+            print(f"    [skip] {why}")
 
     # An experiment validates the commit it MEASURED, and committing the experiment record
     # itself moves HEAD past it. So accept a record whose treatment sha is an ancestor of the

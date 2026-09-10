@@ -250,7 +250,10 @@ this project shipped one for about a month.</p>
 main without a green experiment record. Two rules it also carries: an experiment vouches for the
 exact commit it measured, so if engine files changed after that sha the record is refused —
 <strong>never rebase after measuring</strong> — and a record with single-run arms cannot authorise a
-merge however green its gates look. Docs, tests, scripts and <code>research/</code> itself are exempt;
+merge however green its gates look. Two records need no A/B: a <em>correctness fix</em>, whose
+evidence is a regression test the gate re-runs, and a <em>no-behaviour-change</em> claim
+(<code>loop no-claim --why ...</code>) for dead code, renames and comments, which vouches for one
+sha and is refused the moment an engine file changes after it. Docs, tests, scripts and <code>research/</code> itself are exempt;
 a gate that fires on documentation only teaches people to bypass it.</p>
 
 <h2 id="pressure">What happens when it runs out of memory</h2>

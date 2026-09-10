@@ -13,6 +13,7 @@ gate is green. The record type is `Experiment` in
 | `verdict` | `confirmed`, `rejected`, `noise` (effect inside the variance budget), `invalid` (harness never exercised the change) |
 | `delta` | per-metric before / after / pct on the predicted metric |
 | `regression_test` | for `correctness_fix` experiments: the test that fails at the base SHA and passes at the treatment |
+| `no_behaviour_change` | for engine diffs that claim nothing (dead code, rename, comment): one line on why, vouching for the treatment SHA only. Written by `loop no-claim --why "..."` |
 | `source` | `loop` (run through the procedure) or `reconstructed` (back-filled from the tuning log) |
 | `cost_usd` | GPU spend, declared |
 
