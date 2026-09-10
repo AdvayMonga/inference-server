@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "372ebaf3e94d4d7e4d4f09ca16f0693f24b95d59"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "982ba617ebb1b0d760c2fdd6a704d8ef00ee9c0f"
+    }
+  ],
+  "branch": "feat/openai-chat-completions",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "372ebaf3e94d4d7e4d4f09ca16f0693f24b95d59",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260910-2ea82c2b",
+  "no_behaviour_change": "adds the /v1/chat/completions route and Tokenizer.encode_messages; both are new surfaces no existing caller reaches, and encode_chat now delegates to encode_messages with byte-identical behaviour. The /generate path, scheduler, backend and KV cache are untouched",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789054491.6903832,
+  "verdict": "confirmed"
+}
