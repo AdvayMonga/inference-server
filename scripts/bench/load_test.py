@@ -7,6 +7,10 @@ concurrency levels, dumps results to CSV. Run the server separately first:
 
 Then:
   python scripts/bench/load_test.py --base-url http://127.0.0.1:8000
+
+Prompts are unique per request by default, so a sweep exercises the PrefixCache miss
+path. Pass --prefix-share full to measure the hit path instead. Whichever you pick is
+written into the CSV, because a latency number without its cache regime is not evidence.
 """
 
 import argparse
@@ -52,30 +56,41 @@ SEED = (
 )
 
 
-def build_prompt(target_tokens: int) -> str:
-    """Tile SEED to a target size. WARNING: every prompt built this way shares a long
-    common prefix, so with the PrefixCache on, short/long/mixed measure the cache-hit
-    path almost exclusively. Use `realistic` to exercise the miss path."""
+def build_prompt(target_tokens: int, rng: random.Random | None = None) -> str:
+    """Tile SEED to a target size.
+
+    With `rng`, a unique preamble goes first, so no two prompts share even their first
+    block and the PrefixCache cannot match them. Without it every prompt is identical
+    from the front and the whole sweep measures the cache-hit path.
+    """
     # Roughly 4 chars per token for English — coarse but fine for load shaping.
     target_chars = target_tokens * 4
-    n = max(1, (target_chars // len(SEED)) + 1)
-    return (SEED * n)[:target_chars]
+    head = "" if rng is None else f"Case {rng.getrandbits(48):012x}. "
+    body_chars = max(0, target_chars - len(head))
+    n = max(1, (body_chars // len(SEED)) + 1)
+    return head + (SEED * n)[:body_chars]
 
 
-def sample_mixed(rng: random.Random) -> tuple[str, int]:
+def sample_mixed(rng: random.Random, unique: bool = True) -> tuple[str, int]:
     """Draw a (prompt, max_tokens) sample from the mixed-workload bins."""
     r = rng.random()
     cum = 0.0
-    for w, p_toks, mx in MIXED_BINS:
+    p_toks, mx = MIXED_BINS[-1][1], MIXED_BINS[-1][2]
+    for w, bin_toks, bin_mx in MIXED_BINS:
         cum += w
         if r <= cum:
-            return build_prompt(p_toks), mx
-    p_toks, mx = MIXED_BINS[-1][1], MIXED_BINS[-1][2]
-    return build_prompt(p_toks), mx
+            p_toks, mx = bin_toks, bin_mx
+            break
+    return build_prompt(p_toks, rng if unique else None), mx
 
 
 def sample_realistic(rng: random.Random) -> tuple[str, int]:
-    """Draw a (prompt, max_tokens) sample from the prompt bank's weighted buckets."""
+    """Draw a (prompt, max_tokens) sample from the prompt bank's weighted buckets.
+
+    Prompts are distinct English text, but the bank is finite, so repeats do occur and
+    do hit the cache. That is what real traffic looks like; --prefix-share does not
+    apply here.
+    """
     r, cum = rng.random(), 0.0
     name, prompts, _ = prompt_bank.PROMPT_MIX[-1]
     for bucket, bucket_prompts, weight in prompt_bank.PROMPT_MIX:
@@ -102,6 +117,7 @@ class LevelResult:
     concurrency: int
     duration_s: float
     wall_s: float = 0.0   # start -> last completion; the window rates are measured over
+    prefix_share: str = "none"
     samples: list[Sample] = field(default_factory=list)
 
     def summary(self) -> dict:
@@ -114,7 +130,8 @@ class LevelResult:
         window = self.wall_s or self.duration_s
         if not ok:
             return {
-                "workload": self.workload, "N": self.concurrency,
+                "workload": self.workload, "prefix_share": self.prefix_share,
+                "N": self.concurrency,
                 "n_ok": 0, "n_err": len(errs), "req_per_s": 0,
                 "tok_per_s": 0, "ttft_p50": 0, "ttft_p95": 0,
                 "tpot_p50": 0, "tpot_p95": 0, "total_p50": 0, "total_p95": 0,
@@ -126,6 +143,7 @@ class LevelResult:
         n_tokens = sum(s.tokens for s in ok)
         return {
             "workload": self.workload,
+            "prefix_share": self.prefix_share,
             "N": self.concurrency,
             "n_ok": len(ok),
             "n_err": len(errs),
@@ -193,43 +211,55 @@ async def run_one_request(
 async def worker(
     client: httpx.AsyncClient, base_url: str, deadline: float,
     samples: list[Sample],
-    fixed: tuple[str, int] | None,
     draw,
     session_id: str = "default",
 ) -> None:
-    """Loop firing requests serially until the deadline — one closed-loop user.
+    """Loop firing serial requests until the deadline — one closed-loop user.
 
-    If `fixed` is set, every request uses the same (prompt, max_tokens).
-    Otherwise `draw()` returns a fresh one per request. Each worker is its own
-    session so per-session fairness and admission actually see N users, not one.
+    `draw()` yields one (prompt, max_tokens) per request. Each worker is its own session so
+    per-session fairness and admission actually see N users, not one.
     """
     while time.perf_counter() < deadline:
-        prompt, mx = fixed if fixed is not None else draw()
+        prompt, mx = draw()
         s = await run_one_request(client, base_url, prompt, mx, session_id)
         samples.append(s)
         if s.error is not None:
             await asyncio.sleep(ERROR_BACKOFF_S)   # a rejected user does not resubmit instantly
 
 
+def make_draw(cfg: dict, rng: random.Random, prefix_share: str):
+    """Zero-arg sampler for one worker.
+
+    prefix_share="full" pins a single prompt for the whole run, so every request after
+    the first is a PrefixCache hit. "none" gives each request a unique first block.
+    """
+    if cfg.get("realistic"):
+        return partial(sample_realistic, rng)
+    if cfg.get("mixed"):
+        return partial(sample_mixed, rng, prefix_share != "full")
+    target, mx = cfg["prompt_tokens_target"], cfg["max_tokens"]
+    if prefix_share == "full":
+        pinned = (build_prompt(target), mx)
+        return lambda: pinned
+    return lambda: (build_prompt(target, rng), mx)
+
+
 async def run_level(
     base_url: str, workload: str, concurrency: int, duration_s: float,
+    prefix_share: str = "none",
 ) -> LevelResult:
     cfg = WORKLOADS[workload]
     t_start = time.perf_counter()
     deadline = t_start + duration_s
-    result = LevelResult(workload=workload, concurrency=concurrency, duration_s=duration_s)
+    result = LevelResult(workload=workload, concurrency=concurrency, duration_s=duration_s,
+                         prefix_share=prefix_share)
     limits = httpx.Limits(max_connections=concurrency * 2, max_keepalive_connections=concurrency * 2)
     async with httpx.AsyncClient(limits=limits) as client:
-        sampler = sample_mixed if cfg.get("mixed") else sample_realistic if cfg.get("realistic") else None
-        if sampler is not None:
-            fixed = None
-            draws = [partial(sampler, random.Random(1000 + i)) for i in range(concurrency)]
-        else:
-            fixed = (build_prompt(cfg["prompt_tokens_target"]), cfg["max_tokens"])
-            draws = [None] * concurrency
         workers = [
-            asyncio.create_task(worker(client, base_url, deadline, result.samples, fixed, draws[i],
-                                       session_id=f"load-{i}"))
+            asyncio.create_task(worker(
+                client, base_url, deadline, result.samples,
+                make_draw(cfg, random.Random(1000 + i), prefix_share),
+                session_id=f"load-{i}"))
             for i in range(concurrency)
         ]
         await asyncio.gather(*workers)
@@ -248,7 +278,7 @@ async def fetch_server_stats(base_url: str) -> dict:
 
 def print_row(s: dict) -> None:
     print(
-        f"  {s['workload']:5s} N={s['N']:>3d} | "
+        f"  {s['workload']:9s} share={s['prefix_share']:4s} N={s['N']:>3d} | "
         f"ok={s['n_ok']:>4d} err={s['n_err']:>2d} | "
         f"{s['req_per_s']:>6.2f} req/s {s['tok_per_s']:>7.1f} tok/s | "
         f"TTFT p50={s['ttft_p50']:>6.0f} p95={s['ttft_p95']:>6.0f} ms | "
@@ -259,7 +289,11 @@ def print_row(s: dict) -> None:
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
-    ap.add_argument("--workload", default="short", choices=list(WORKLOADS.keys()))
+    ap.add_argument("--workload", default="realistic", choices=list(WORKLOADS.keys()))
+    ap.add_argument("--prefix-share", default="none", choices=["none", "full"],
+                    help="none: unique prompt prefixes, measures the PrefixCache miss path "
+                         "(default). full: one pinned prompt, measures the hit path. Ignored "
+                         "by the realistic workload, which draws from a finite prompt bank.")
     ap.add_argument("--levels", default="1,2,4,8,16",
                     help="Comma-separated concurrency levels")
     ap.add_argument("--duration", type=float, default=30.0,
@@ -272,7 +306,7 @@ async def main():
     out_dir = Path("benchmarks")
     out_dir.mkdir(exist_ok=True)
     out_path = Path(args.output) if args.output else (
-        out_dir / f"load_{args.workload}_{int(time.time())}.csv"
+        out_dir / f"load_{args.workload}_share-{args.prefix_share}_{int(time.time())}.csv"
     )
 
     # Sanity-check server is reachable first.
@@ -282,13 +316,14 @@ async def main():
         return
     print(f"Server OK. policy={s0.get('policy')} batch={s0.get('max_batch_size')} "
           f"kv_blocks={s0.get('kv_free_blocks')}")
-    print(f"Workload: {args.workload}  duration/level: {args.duration}s  levels: {levels}")
+    print(f"Workload: {args.workload}  prefix-share: {args.prefix_share}  "
+          f"duration/level: {args.duration}s  levels: {levels}")
     print()
 
     rows: list[dict] = []
     for N in levels:
         print(f"-- ramping to N={N} --")
-        res = await run_level(args.base_url, args.workload, N, args.duration)
+        res = await run_level(args.base_url, args.workload, N, args.duration, args.prefix_share)
         # Snapshot server-side stats at end of level for cross-validation.
         srv = await fetch_server_stats(args.base_url)
         s = res.summary()
