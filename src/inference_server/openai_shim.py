@@ -1,6 +1,8 @@
-"""Minimal OpenAI /v1/completions shim — benchmark-compatibility surface for guidellm / vLLM
-benchmark_serving. NOT a public API: raw-prompt text completion over the same scheduler as
-/generate. No auth, no chat template, no registry. See PLAN.md P2, DECISIONS [2026-05-18]."""
+"""Minimal OpenAI shim — compatibility surface for guidellm / vLLM benchmark_serving and for
+chat frontends such as Open WebUI. NOT a public API: /v1/completions is raw-prompt text
+completion, /v1/chat/completions applies the model's chat template, and both run over the same
+scheduler as /generate. No auth, no registry, no tools, no multimodal content parts.
+See PLAN.md P2, DECISIONS [2026-05-18]."""
 
 import asyncio
 import itertools
@@ -17,6 +19,28 @@ from inference_server.scheduler import QueueFullError, ScheduledRequest
 
 router = APIRouter()
 _ids = itertools.count(1)  # request-id / session-id counter (no RNG needed)
+
+
+class ChatMessage(BaseModel):
+    """One turn. `content` is text only — OpenAI's list-of-parts form is rejected upstream."""
+    role: str
+    content: str
+
+
+class ChatCompletionRequest(BaseModel):
+    """OpenAI chat body. Unknown fields (tools, response_format, ...) are ignored."""
+    messages: list[ChatMessage]
+    model: str = "inference-server"
+    max_tokens: int = 128
+    max_completion_tokens: int | None = None  # the field that replaced max_tokens
+    stream: bool = False
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = 0
+
+    @property
+    def output_budget(self) -> int:
+        return self.max_completion_tokens or self.max_tokens
 
 
 class CompletionRequest(BaseModel):
@@ -117,6 +141,94 @@ async def completions(body: CompletionRequest, request: Request):
         "id": cid, "object": "text_completion", "created": created, "model": body.model,
         "choices": [{"text": text, "index": 0, "logprobs": None,
                      "finish_reason": "length" if n >= body.max_tokens else "stop"}],
+        "usage": {"prompt_tokens": len(token_ids), "completion_tokens": n,
+                  "total_tokens": len(token_ids) + n},
+    }
+
+
+def _chat_chunk(cid: str, created: int, model: str, delta: dict, finish: str | None) -> str:
+    """One streaming SSE chunk in OpenAI chat.completion.chunk format."""
+    payload = {
+        "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int, model: str,
+                       prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
+    """Role delta first (clients key off it), then one content delta per token, then usage."""
+    n = 0
+    try:
+        yield _chat_chunk(cid, created, model, {"role": "assistant", "content": ""}, None)
+        while True:
+            tok_id = await req.token_queue.get()
+            if tok_id is None:
+                break
+            text = tokenizer.decode_token(tok_id)
+            n += 1
+            if text:
+                yield _chat_chunk(cid, created, model, {"content": text}, None)
+        if req.future.done() and req.future.exception():
+            raise req.future.exception()  # type: ignore[misc]
+    finally:
+        yield _chat_chunk(cid, created, model, {}, "length" if n >= max_tokens else "stop")
+        usage_payload = {
+            "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+            "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
+                                     "total_tokens": prompt_tokens + n},
+        }
+        yield f"data: {json.dumps(usage_payload)}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+@router.post("/v1/chat/completions")
+async def chat_completions(body: ChatCompletionRequest, request: Request):
+    """Chat completion over the continuous-batch scheduler — the frontend-facing surface."""
+    scheduler = request.app.state.scheduler
+    tokenizer = request.app.state.tokenizer
+    loop = asyncio.get_running_loop()
+
+    messages = [m.model_dump() for m in body.messages]
+    try:
+        token_ids = await loop.run_in_executor(None, tokenizer.encode_messages, messages)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    max_tokens = body.output_budget
+    sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
+    cid = f"chatcmpl-{next(_ids)}"
+    session_id = f"chat-{next(_ids)}"
+    created = int(time.time())
+
+    if body.stream:
+        req = ScheduledRequest(
+            token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
+            future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
+        )
+        try:
+            scheduler.enqueue(req)
+        except QueueFullError as e:
+            raise HTTPException(status_code=429, detail=str(e))
+        return StreamingResponse(
+            _chat_stream(req, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
+            media_type="text/event-stream",
+        )
+
+    req = ScheduledRequest(
+        token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
+        future=loop.create_future(), sampling=sampling,
+    )
+    try:
+        generated_ids = await scheduler.submit(req)
+    except QueueFullError as e:
+        raise HTTPException(status_code=429, detail=str(e))
+    text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
+    n = len(generated_ids)
+    return {
+        "id": cid, "object": "chat.completion", "created": created, "model": body.model,
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
+                     "finish_reason": "length" if n >= max_tokens else "stop"}],
         "usage": {"prompt_tokens": len(token_ids), "completion_tokens": n,
                   "total_tokens": len(token_ids) + n},
     }
