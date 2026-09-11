@@ -6,10 +6,9 @@ import logging
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from inference_server import prometheus_metrics
@@ -107,13 +106,17 @@ async def lifespan(app):
 app = FastAPI(lifespan=lifespan)
 app.include_router(openai_router)
 
-STATIC_DIR = Path(__file__).parent / "static"
-
-
 @app.get("/")
 async def root():
-    """Serve the web UI."""
-    return FileResponse(STATIC_DIR / "index.html")
+    """Service index. There is no built-in UI — point a chat frontend at /v1/chat/completions."""
+    return {
+        "service": "inference-server",
+        "model": settings.model_name,
+        "generate": "/generate",
+        "openai": ["/v1/completions", "/v1/chat/completions", "/v1/models"],
+        "metrics": "/metrics",
+        "stats": ["/scheduler/stats", "/cache/stats"],
+    }
 
 
 @app.get("/health")

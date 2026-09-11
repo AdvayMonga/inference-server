@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "8f8192c145e7374463cb68e8472eb4b2abda9cae"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "724cb04e46c0b7e0381f30dd0bcf0acfde6b8e43"
+    }
+  ],
+  "branch": "chore/drop-chat-page",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "8f8192c145e7374463cb68e8472eb4b2abda9cae",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260911-67b17375",
+  "no_behaviour_change": "deletes static/index.html and swaps GET / from a FileResponse to a JSON route list; no other endpoint, the scheduler, the backend and the KV cache are untouched",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789134229.143444,
+  "verdict": "confirmed"
+}
