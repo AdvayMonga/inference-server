@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    - cron: "0 7 * * 1"        # Mondays 07:00 UTC — the GPU lane, which nothing else exercises
   workflow_dispatch:
     inputs:
       gpu_tests:
@@ -14,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -26,6 +28,7 @@ jobs:
     outputs:
       loop: ${{ steps.classify.outputs.loop }}
       engine: ${{ steps.classify.outputs.engine }}
+      cuda: ${{ steps.classify.outputs.cuda }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,10 +42,11 @@ jobs:
         run: |
           set -eu
           range=""
-          if [ "$EVENT" = "workflow_dispatch" ]; then
+          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "schedule" ]; then
             echo "loop=false"   >> "$GITHUB_OUTPUT"
             echo "engine=false" >> "$GITHUB_OUTPUT"
-            echo "dispatch — GPU lane only"
+            echo "cuda=false"   >> "$GITHUB_OUTPUT"
+            echo "$EVENT — GPU lane only"
             exit 0
           fi
           if [ "$EVENT" = "pull_request" ]; then
@@ -55,12 +59,26 @@ jobs:
             # No diffable range (force push, first push). Run everything.
             echo "loop=true"   >> "$GITHUB_OUTPUT"
             echo "engine=true" >> "$GITHUB_OUTPUT"
+            echo "cuda=false"  >> "$GITHUB_OUTPUT"
             echo "no range to diff — running both lanes"
+            exit 0
+          fi
+
+          # Capture before reading: a failure inside process substitution is invisible to
+          # `set -e`, so the loop would read nothing and skip every lane, green. `cat-file -e`
+          # above proves the sha exists, not that it shares history with HEAD.
+          changed=$(mktemp)
+          if ! git diff -z --name-only "$range" > "$changed"; then
+            echo "loop=true"   >> "$GITHUB_OUTPUT"
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+            echo "cuda=true"   >> "$GITHUB_OUTPUT"
+            echo "could not diff $range — running everything"
             exit 0
           fi
 
           loop=false
           engine=false
+          cuda=false
           echo "changed files:"
           # -z: a filename with a space or a glob character must not be split into two.
           while IFS= read -r -d "" f; do
@@ -75,13 +93,18 @@ jobs:
               *)
                 engine=true ;;
             esac
-          done < <(git diff -z --name-only "$range")
+            case "$f" in
+              src/inference_server/models/*) cuda=true ;;   # only a GPU can run this
+            esac
+          done < "$changed"
           echo "loop=$loop"     >> "$GITHUB_OUTPUT"
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
-          echo "lanes: loop=$loop engine=$engine"
+          echo "cuda=$cuda"     >> "$GITHUB_OUTPUT"
+          echo "lanes: loop=$loop engine=$engine cuda=$cuda"
 
-  # Pure stdlib. Installing no torch is the assertion: if research/ ever imports the engine,
-  # this lane goes red on ModuleNotFoundError.
+  # Installing no torch is the assertion, not an optimisation: if research/ ever imports the
+  # engine, this lane goes red on ModuleNotFoundError. README's "the loop knows only the panel
+  # contract" is otherwise enforced by nothing.
   loop:
     needs: changes
     if: needs.changes.result == 'success' && needs.changes.outputs.loop == 'true'
@@ -98,6 +121,16 @@ jobs:
         run: ruff check src/inference_server/research tests/test_research_*.py
       - name: Tests
         run: PYTHONPATH=src pytest -q tests/test_research_*.py
+
+      - name: DECISIONS.md matches knowledge/
+        # DECISIONS.md is generated and tracked. Drift silently re-opens dead ends, because
+        # this is the file everyone greps for prior art.
+        run: |
+          PYTHONPATH=src python -m inference_server.research.loop index
+          git diff --exit-code DECISIONS.md || {
+            echo "DECISIONS.md is stale. Run: python -m inference_server.research.loop index"
+            exit 1
+          }
 
   engine:
     needs: changes
@@ -164,7 +197,7 @@ jobs:
 
   # Triton compiles only on CUDA, so this rents a GPU through Modal. Manual, not per-PR.
   gpu:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -184,12 +217,14 @@ jobs:
         env:
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
-          TESTS: ${{ inputs.gpu_tests }}
+          TESTS: ${{ inputs.gpu_tests || 'scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py' }}
+          EVENT: ${{ github.event_name }}
         run: |
           if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
             echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set in this repo's secrets."
-            echo "Add them (Settings → Secrets → Actions) or run these locally:"
-            echo "    venv/bin/modal run <script>"
+            echo "Add them (Settings → Secrets → Actions), or run locally: venv/bin/modal run <script>"
+            # Asked for by hand: fail. On the weekly tick: say so and stop, do not cry wolf.
+            [ "$EVENT" = "schedule" ] && exit 0
             exit 1
           fi
           for t in $TESTS; do
@@ -218,4 +253,7 @@ jobs:
           case "$RESULTS" in
             *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
           esac
+          if [ "${{ needs.changes.outputs.cuda }}" = "true" ]; then
+            echo "::warning::this PR touches src/inference_server/models/ — CUDA-only code that no lane here can execute. Dispatch the gpu lane before merging."
+          fi
           echo "all lanes green or skipped"
