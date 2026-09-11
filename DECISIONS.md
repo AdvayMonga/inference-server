@@ -312,7 +312,7 @@ NOT established: the cause. Machine draw is the leading hypothesis; a warm Modal
 
 **Evidence:** run-20260906-15a33a53, run-20260906-b2d3a54f, run-20260906-47218cd4, run-20260906-5c565305, run-20260906-a494262c, run-20260906-eb44c245, run-20260906-c0f72f5a, run-20260906-52fd6e63, run-20260906-3d0d3821, run-20260906-46c24518, run-20260906-dddc76e3, run-20260906-b8d219ff, run-20260906-c5d86987, run-20260906-af161f76, run-20260906-ef337ea0, run-20260906-f00be70c, run-20260906-23dea7a8, run-20260906-274a67a2, run-20260906-c7bcd8e0, run-20260906-ce942b4d, run-20260906-fead7bcd, run-20260906-6e3a6297, run-20260906-91d88a72, run-20260906-f434514f
 
-### [2026-09-05] An isolated kernel win of 10x can be worth nothing end to end
+### [2026-09-06] An isolated kernel win of 10x can be worth nothing end to end
 *tags: `kernel`, `benchmark`, `loop`, `prefill`* · `kb-20260905-d2a675d5`
 
 The tiled prefill kernel is **10.84x** faster than the untiled one in a tight microbenchmark, and produced **no measurable end-to-end benefit** — a significant +24.3% regression on prefill p95, everything else noise.
@@ -325,7 +325,7 @@ Why that is not a contradiction: the kernel is routed to sliding layers (D=256) 
 
 **Evidence:** iter8-replicated
 
-### [2026-09-05] Harness null variance on A100/E4B (calibration)
+### [2026-09-06] Harness null variance on A100/E4B (calibration)
 *tags: `loop`, `benchmark`, `roofline`* · `kb-20260905-1b1a2520`
 
 Measured with three identical runs, rate 2, 60s, pool 4000, compile off, prefill graph on:
@@ -345,7 +345,7 @@ Re-measure this calibration whenever the harness or instance type changes.
 
 **Revisit when:** harness, run length or instance type changes
 
-### [2026-09-05] Sequential A/B arms are warmup-biased; the second arm always wins
+### [2026-09-06] Sequential A/B arms are warmup-biased; the second arm always wins
 *tags: `loop`, `benchmark`* · `kb-20260905-38efb550`
 
 Three identical back-to-back runs in one container: ttft_p95 1494 -> 401 -> 229, tpot_p50 152 -> 118 -> 104. Strictly decreasing. Something keeps warming — allocator, Triton/JIT caches, prefix cache, GPU clocks.
@@ -354,7 +354,7 @@ Interleaving arms in one container fixed the MACHINE confound but introduced an 
 
 **Revisit when:** an A/B runs arms in a fixed order
 
-### [2026-09-05] LOOP: the significance gate measured the WRONG variance
+### [2026-09-06] LOOP: the significance gate measured the WRONG variance
 *tags: `loop`, `benchmark`, `gates`* · `kb-20260905-1f0727be`
 
 `Validity.stderr` was computed from the TTFTs of individual requests WITHIN one run. The significance gate then used it as the variance of the run's p95. Those are different quantities by a wide margin: within-run request scatter is small, while run-to-run p95 varies **3.2x** on this harness with nothing changed.
@@ -365,7 +365,7 @@ So the gate was confidently significant (|t|=2.96) about an effect it had no way
 
 **Revisit when:** a gate reports significance from a single run per arm
 
-### [2026-09-05] LOOP: never judge a kernel before sweeping its launch config
+### [2026-09-06] LOOP: never judge a kernel before sweeping its launch config
 *tags: `loop`, `kernel`, `benchmark`* · `kb-20260905-a474d802`
 
 Iteration 4 declared a correct, well-motivated kernel 'noise' end-to-end. It was noise — at BLOCK_M=32, which I picked by hand. A ~10-minute sweep found BLOCK_M=16/warps=4 is **6x faster** (10.84x vs 1.81x isolated), and the same A/B then gave -31.9% and merged.
