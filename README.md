@@ -175,11 +175,15 @@ GPU work runs on rented hardware through Modal: `pip install -e ".[modal]"`, the
 3. Screen. Run the cheapest tier that could kill it — arithmetic, then CPU, then one GPU probe.
 4. Experiment on a branch: two arms, same session, interleaved, ≥3 runs each.
 5. `judge_group(...)` runs the five gates and writes the experiment record.
-6. Open a PR. `scripts/premerge_check.py` refuses it unless the record is green for that SHA.
+6. Open a PR. CI runs `scripts/premerge_check.py`, which refuses it unless the record is green
+   for that SHA.
 7. Merge, then re-measure — the bottleneck moves.
 
 Correctness fixes take a different path: the evidence is a regression test that fails at the base
 SHA and passes at the fix, and the gate re-runs it.
+
+The mechanics — branching, the three CI lanes behind the single `ci-ok` check, the pre-push hook,
+and when to dispatch the GPU lane — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
