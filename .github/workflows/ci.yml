@@ -39,6 +39,12 @@ jobs:
         run: |
           set -eu
           range=""
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            echo "loop=false"   >> "$GITHUB_OUTPUT"
+            echo "engine=false" >> "$GITHUB_OUTPUT"
+            echo "dispatch — GPU lane only"
+            exit 0
+          fi
           if [ "$EVENT" = "pull_request" ]; then
             range="origin/$BASE_REF...HEAD"
           elif [ "$EVENT" = "push" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
@@ -46,7 +52,7 @@ jobs:
           fi
 
           if [ -z "$range" ]; then
-            # No diffable range (dispatch, force push, first push). Run everything.
+            # No diffable range (force push, first push). Run everything.
             echo "loop=true"   >> "$GITHUB_OUTPUT"
             echo "engine=true" >> "$GITHUB_OUTPUT"
             echo "no range to diff — running both lanes"
@@ -55,30 +61,30 @@ jobs:
 
           loop=false
           engine=false
-          files=$(git diff --name-only "$range")
-          echo "changed files:"; echo "$files" | sed 's/^/    /'
-          for f in $files; do
+          echo "changed files:"
+          # -z: a filename with a space or a glob character must not be split into two.
+          while IFS= read -r -d "" f; do
+            echo "    $f"
             case "$f" in
               src/inference_server/research/*|tests/test_research_*|knowledge/*|experiments/*)
                 loop=true ;;
               pyproject.toml|.github/workflows/*)
                 loop=true; engine=true ;;
-              docs/*|*.md|runs/*)
-                ;;                              # documentation and raw panels gate nothing
+              docs/*|runs/*|*.md)
+                ;;                              # never executed, wherever it lives
               *)
                 engine=true ;;
             esac
-          done
+          done < <(git diff -z --name-only "$range")
           echo "loop=$loop"     >> "$GITHUB_OUTPUT"
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
           echo "lanes: loop=$loop engine=$engine"
 
-  # The research loop is pure stdlib — no torch, no transformers, nothing. Installing only
-  # pytest here is not a shortcut, it is the assertion: the day something in research/ imports
-  # the engine, this lane goes red on ModuleNotFoundError and the seam is defended.
+  # Pure stdlib. Installing no torch is the assertion: if research/ ever imports the engine,
+  # this lane goes red on ModuleNotFoundError.
   loop:
     needs: changes
-    if: needs.changes.outputs.loop == 'true'
+    if: needs.changes.result == 'success' && needs.changes.outputs.loop == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -95,7 +101,7 @@ jobs:
 
   engine:
     needs: changes
-    if: needs.changes.outputs.engine == 'true'
+    if: needs.changes.result == 'success' && needs.changes.outputs.engine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -145,9 +151,7 @@ jobs:
         run: python scripts/premerge_check.py HEAD --base "$BASE" --explain
 
       - name: Alarm — engine change pushed straight to main
-        # The gate above only sees PRs. Until main requires one, a direct push bypasses it
-        # entirely — which is how every commit in this repo landed before now. This cannot
-        # prevent that push (the code is already on main); it makes it loud.
+        # The gate above only sees PRs. This cannot prevent a direct push, only make it loud.
         if: github.event_name == 'push'
         env:
           BEFORE: ${{ github.event.before }}
@@ -158,10 +162,7 @@ jobs:
           git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
           python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
 
-  # The lane CI structurally cannot be. Triton kernels compile only on CUDA, GitHub runners
-  # have no GPU, and PR #3 is the proof of what that hides: a decode kernel that could not
-  # compile at all, dead since 5bcac20 and invisible to every check above. So this rents a
-  # GPU through Modal. Manual, not per-PR — it costs money and minutes.
+  # Triton compiles only on CUDA, so this rents a GPU through Modal. Manual, not per-PR.
   gpu:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -192,14 +193,19 @@ jobs:
             exit 1
           fi
           for t in $TESTS; do
+            case "$t" in
+              scripts/gpu_tests/*.py) ;;
+              *) echo "refusing '$t': the input names scripts/gpu_tests/*.py only"; exit 1 ;;
+            esac
+            [ -f "$t" ] || { echo "no such file: $t"; exit 1; }
             echo "::group::$t"
             modal run "$t"
             echo "::endgroup::"
           done
 
-  # The one check branch protection requires. Path-filtered lanes SKIP on unrelated changes,
-  # and a skipped *required* check leaves a PR blocked forever — so this always runs and
-  # reports the aggregate. Skipped is fine; failed and cancelled are not.
+  # The one check branch protection requires: a skipped lane must not leave a PR blocked
+  # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately
+  # not aggregated here — it is manual and costs money.
   ci-ok:
     needs: [changes, loop, engine]
     if: always()
