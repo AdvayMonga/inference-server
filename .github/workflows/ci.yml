@@ -1,0 +1,259 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 7 * * 1"        # Mondays 07:00 UTC — the GPU lane, which nothing else exercises
+  workflow_dispatch:
+    inputs:
+      gpu_tests:
+        description: "Space-separated scripts/gpu_tests/*.py to run on a rented GPU"
+        default: "scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Which lanes does this change need? The engine and the loop share no imports in either
+  # direction, so a change to one cannot break the other — running both every time is just
+  # waiting. Unknown paths default to the engine lane: safe, not fast.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      loop: ${{ steps.classify.outputs.loop }}
+      engine: ${{ steps.classify.outputs.engine }}
+      cuda: ${{ steps.classify.outputs.cuda }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: classify
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          range=""
+          if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "schedule" ]; then
+            echo "loop=false"   >> "$GITHUB_OUTPUT"
+            echo "engine=false" >> "$GITHUB_OUTPUT"
+            echo "cuda=false"   >> "$GITHUB_OUTPUT"
+            echo "$EVENT — GPU lane only"
+            exit 0
+          fi
+          if [ "$EVENT" = "pull_request" ]; then
+            range="origin/$BASE_REF...HEAD"
+          elif [ "$EVENT" = "push" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$BEFORE...HEAD"
+          fi
+
+          if [ -z "$range" ]; then
+            # No diffable range (force push, first push). Run everything.
+            echo "loop=true"   >> "$GITHUB_OUTPUT"
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+            echo "cuda=false"  >> "$GITHUB_OUTPUT"
+            echo "no range to diff — running both lanes"
+            exit 0
+          fi
+
+          # Capture before reading: a failure inside process substitution is invisible to
+          # `set -e`, so the loop would read nothing and skip every lane, green. `cat-file -e`
+          # above proves the sha exists, not that it shares history with HEAD.
+          changed=$(mktemp)
+          if ! git diff -z --name-only "$range" > "$changed"; then
+            echo "loop=true"   >> "$GITHUB_OUTPUT"
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+            echo "cuda=true"   >> "$GITHUB_OUTPUT"
+            echo "could not diff $range — running everything"
+            exit 0
+          fi
+
+          loop=false
+          engine=false
+          cuda=false
+          echo "changed files:"
+          # -z: a filename with a space or a glob character must not be split into two.
+          while IFS= read -r -d "" f; do
+            echo "    $f"
+            case "$f" in
+              src/inference_server/research/*|tests/test_research_*|knowledge/*|experiments/*)
+                loop=true ;;
+              pyproject.toml|.github/workflows/*)
+                loop=true; engine=true ;;
+              docs/*|runs/*|*.md)
+                ;;                              # never executed, wherever it lives
+              *)
+                engine=true ;;
+            esac
+            case "$f" in
+              src/inference_server/models/*) cuda=true ;;   # only a GPU can run this
+            esac
+          done < "$changed"
+          echo "loop=$loop"     >> "$GITHUB_OUTPUT"
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "cuda=$cuda"     >> "$GITHUB_OUTPUT"
+          echo "lanes: loop=$loop engine=$engine cuda=$cuda"
+
+  # Installing no torch is the assertion, not an optimisation: if research/ ever imports the
+  # engine, this lane goes red on ModuleNotFoundError. README's "the loop knows only the panel
+  # contract" is otherwise enforced by nothing.
+  loop:
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.loop == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install pytest pytest-asyncio ruff
+      - name: Lint
+        run: ruff check src/inference_server/research tests/test_research_*.py
+      - name: Tests
+        run: PYTHONPATH=src pytest -q tests/test_research_*.py
+
+      - name: DECISIONS.md matches knowledge/
+        # DECISIONS.md is generated and tracked. Drift silently re-opens dead ends, because
+        # this is the file everyone greps for prior art.
+        run: |
+          PYTHONPATH=src python -m inference_server.research.loop index
+          git diff --exit-code DECISIONS.md || {
+            echo "DECISIONS.md is stale. Run: python -m inference_server.research.loop index"
+            exit 1
+          }
+
+  engine:
+    needs: changes
+    if: needs.changes.result == 'success' && needs.changes.outputs.engine == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # premerge_check.py diffs against the base branch
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Cache HF hub
+        uses: actions/cache@v4
+        with:
+          # test_tokenizer / test_server pull the public gpt2 tokenizer. No auth, but a live
+          # Hub dependency on every run is flake waiting to happen.
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}
+
+      - name: Install deps
+        run: |
+          # CPU wheel: the CUDA build is ~2.5 GB and nothing in this job runs a kernel.
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -e ".[dev]"
+
+      - name: Assert torch stayed on CPU
+        # The editable install re-resolves torch. It keeps the CPU wheel today; a dependency
+        # bump that quietly pulls the CUDA one should fail here, not double the job's runtime.
+        run: |
+          python -c "import torch, sys; v = torch.__version__; \
+            sys.exit(0) if v.endswith('+cpu') or torch.version.cuda is None \
+            else sys.exit(f'expected a CPU torch wheel, got {v}')"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Tests
+        # Model-heavy tests are deselected by tests/conftest.py — they need ~10 GB of weights.
+        # This job proves the engine still imports and its logic still holds, nothing about GPUs.
+        run: pytest -q
+
+      - name: Engine changes need an experiment record
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: python scripts/premerge_check.py HEAD --base "$BASE" --explain
+
+      - name: Alarm — engine change pushed straight to main
+        # The gate above only sees PRs. This cannot prevent a direct push, only make it loud.
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$BEFORE" in
+            0000000000000000000000000000000000000000|"") echo "no previous sha — skipping"; exit 0 ;;
+          esac
+          git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
+          python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
+
+  # Triton compiles only on CUDA, so this rents a GPU through Modal. Manual, not per-PR.
+  gpu:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the launcher only
+        # --no-deps: modal builds the real image remotely from pyproject.toml. Installing torch
+        # here would download 200 MB to launch a job that does not use it.
+        run: |
+          pip install modal
+          pip install -e . --no-deps
+
+      - name: Run the CUDA correctness gate
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          TESTS: ${{ inputs.gpu_tests || 'scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py' }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
+            echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set in this repo's secrets."
+            echo "Add them (Settings → Secrets → Actions), or run locally: venv/bin/modal run <script>"
+            # Asked for by hand: fail. On the weekly tick: say so and stop, do not cry wolf.
+            [ "$EVENT" = "schedule" ] && exit 0
+            exit 1
+          fi
+          for t in $TESTS; do
+            case "$t" in
+              scripts/gpu_tests/*.py) ;;
+              *) echo "refusing '$t': the input names scripts/gpu_tests/*.py only"; exit 1 ;;
+            esac
+            [ -f "$t" ] || { echo "no such file: $t"; exit 1; }
+            echo "::group::$t"
+            modal run "$t"
+            echo "::endgroup::"
+          done
+
+  # The one check branch protection requires: a skipped lane must not leave a PR blocked
+  # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately
+  # not aggregated here — it is manual and costs money.
+  ci-ok:
+    needs: [changes, loop, engine]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ needs.changes.result }} ${{ needs.loop.result }} ${{ needs.engine.result }}
+        run: |
+          echo "changes/loop/engine: $RESULTS"
+          case "$RESULTS" in
+            *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
+          esac
+          if [ "${{ needs.changes.outputs.cuda }}" = "true" ]; then
+            echo "::warning::this PR touches src/inference_server/models/ — CUDA-only code that no lane here can execute. Dispatch the gpu lane before merging."
+          fi
+          echo "all lanes green or skipped"

@@ -118,7 +118,10 @@ def regression_test_passes(node_id: str) -> tuple[bool, str]:
     r = subprocess.run([sys.executable, "-m", "pytest", "-q", node_id, "--no-header", "-x"],
                        cwd=REPO_ROOT, capture_output=True, text=True)
     tail = (r.stdout or r.stderr).strip().splitlines()
-    return r.returncode == 0, tail[-1] if tail else "no output"
+    summary = tail[-1] if tail else "no output"
+    # A skipped test exits 0 too, and conftest deselects the model-heavy modules by default —
+    # so "did not fail" is not "passed", and a record must not rest on a test that never ran.
+    return r.returncode == 0 and "passed" in summary, summary
 
 
 def vouches_for(candidate, ref: str, *, ancestor=None, changed=None,

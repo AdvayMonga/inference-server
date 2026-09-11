@@ -1,0 +1,30 @@
+#!/bin/sh
+# Run what CI runs, before the push rather than after it. ~10s.
+# Install:  git config core.hooksPath scripts/hooks
+#           (writes to the SHARED .git/config, so it turns the hook on for every worktree
+#           of this repo at once; each resolves scripts/hooks against its own root)
+# Bypass:   git push --no-verify   (or SKIP_HOOKS=1 git push)
+[ -n "$SKIP_HOOKS" ] && exit 0
+
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" per ref. An all-zero local
+# sha is a deletion: nothing is uploaded, so there is nothing to check.
+if [ ! -t 0 ]; then
+  only_deletions=1
+  while read -r _ local_sha _ _; do
+    case "$local_sha" in
+      0000000000000000000000000000000000000000) ;;
+      *) only_deletions=0 ;;
+    esac
+  done
+  [ "$only_deletions" = 1 ] && exit 0
+fi
+
+for tool in ruff pytest; do
+  command -v "$tool" >/dev/null 2>&1 || {
+    echo "pre-push: $tool not on PATH — activate the venv, or push with SKIP_HOOKS=1."
+    exit 1
+  }
+done
+
+ruff check . || { echo "pre-push: ruff failed. Fix it, or push with --no-verify."; exit 1; }
+pytest -q  || { echo "pre-push: tests failed. Fix them, or push with --no-verify."; exit 1; }

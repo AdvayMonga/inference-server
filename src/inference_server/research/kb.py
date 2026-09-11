@@ -200,7 +200,9 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
             continue
         lines += [f"## {status.capitalize()} ({len(group)})", "", STATUS_BLURB[status], ""]
         for e in sorted(group, key=lambda x: -x.updated_at):
-            date = time.strftime("%Y-%m-%d", time.localtime(e.created_at))
+            # UTC, not localtime: DECISIONS.md is generated AND tracked, so the same
+            # knowledge/ must render identically on a laptop and on a CI runner.
+            date = time.strftime("%Y-%m-%d", time.gmtime(e.created_at))
             lines.append(f"### [{date}] {e.title}")
             if e.tags:
                 lines.append(f"*tags: {', '.join(f'`{t}`' for t in e.tags)}* · `{e.id}`")

@@ -15,6 +15,7 @@ runs locally.
 | `probes/` | one-question diagnostics: where does the time go, is X even true | 3 (single-GPU probe) |
 | `gpu_tests/` | parity and correctness checks that need CUDA (kernels, graphs, compile) | correctness gate |
 | `tools/` | local smoke runs and one-shot migrations | — |
+| `hooks/` | git hooks: `pre-push` runs CI's lint+tests locally (`git config core.hooksPath scripts/hooks`) | — |
 | `premerge_check.py` | the merge gate: refuses an engine change with no green experiment record | step 7 |
 | `run_instrument.sh` | Modal launcher that stamps provenance (`RESEARCH_ENGINE_SHA`, `RESEARCH_RUN_GROUP`) | step 4 |
 

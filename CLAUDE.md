@@ -33,6 +33,9 @@ After every new feature update ['HANDOFF.md'] which reflects the most recent cha
 
 ---
 
+**How a change lands:** branch → PR → `ci-ok` green → review → merge. Never push to `main`.
+Setup, the three CI lanes and the three evidence paths are in [`CONTRIBUTING.md`](./CONTRIBUTING.md).
+
 ## How we work now — the research loop
 
 **`LOOP.md` is the method. Follow it; do not improvise around it.** Ad-hoc optimisation is what
@@ -58,10 +61,11 @@ python -m inference_server.research.loop judge --hyp H.json --baseline A.json --
   `research.harness`, with a validity block. A number without its harness config and workload
   regime is not evidence.
 - **Merging engine changes requires an experiment.** `scripts/premerge_check.py` refuses a merge
-  that touches `src/inference_server/` without an `experiments/*.json` whose four gates are
-  green. Docs, tests, scripts and `research/` are exempt.
+  that touches `src/inference_server/` without an `experiments/*.json` whose five gates are
+  green — or a correctness-fix or no-claim record (see CONTRIBUTING.md). Docs, tests,
+  scripts, `static/` and `research/` are exempt.
 - **Negative results are output, not failure.** Write them to `knowledge/` with status
-  `rejected`. Seven such entries already exist and they are what stop the loop re-treading
+  `rejected`. Nine such entries already exist and they are what stop the loop re-treading
   dead ends.
 - **Never compare across sessions.** `compare.py` enforces this; do not work around it.
 
@@ -167,7 +171,8 @@ Project setup, tokenization, autoregressive loop, streaming, request batching, K
 - **9. Resilience** — graceful shutdown, request timeouts, `/health` + `/ready`, error isolation
 - **10. Containerization** — Dockerfile, `.env.example`. ✅ `monitoring/docker-compose.yml` brings up Prometheus + Grafana with the datasource and dashboard provisioned; the server stays outside the stack and is scraped over `host.docker.internal:8000`.
 - **11. Benchmarking** — single `scripts/benchmark.py`, vs vLLM charts, `BENCHMARKS.md`
-- **12. CI** — GitHub Actions, regression gates, ruff + mypy, `DESIGN.md`
+- ✅ **12. CI** — GitHub Actions: `loop` / `engine` / `gpu` lanes behind one `ci-ok` check,
+  ruff (`F` rules) and the premerge gate. No mypy. Process in `CONTRIBUTING.md`.
 
 ### Future extensions
 
