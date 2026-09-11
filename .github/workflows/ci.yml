@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      gpu_tests:
+        description: "Space-separated scripts/gpu_tests/*.py to run on a rented GPU"
+        default: "scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py"
 
 permissions:
   contents: read
@@ -13,7 +18,84 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
+  # Which lanes does this change need? The engine and the loop share no imports in either
+  # direction, so a change to one cannot break the other — running both every time is just
+  # waiting. Unknown paths default to the engine lane: safe, not fast.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      loop: ${{ steps.classify.outputs.loop }}
+      engine: ${{ steps.classify.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: classify
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -eu
+          range=""
+          if [ "$EVENT" = "pull_request" ]; then
+            range="origin/$BASE_REF...HEAD"
+          elif [ "$EVENT" = "push" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            range="$BEFORE...HEAD"
+          fi
+
+          if [ -z "$range" ]; then
+            # No diffable range (dispatch, force push, first push). Run everything.
+            echo "loop=true"   >> "$GITHUB_OUTPUT"
+            echo "engine=true" >> "$GITHUB_OUTPUT"
+            echo "no range to diff — running both lanes"
+            exit 0
+          fi
+
+          loop=false
+          engine=false
+          files=$(git diff --name-only "$range")
+          echo "changed files:"; echo "$files" | sed 's/^/    /'
+          for f in $files; do
+            case "$f" in
+              src/inference_server/research/*|tests/test_research_*|knowledge/*|experiments/*)
+                loop=true ;;
+              pyproject.toml|.github/workflows/*)
+                loop=true; engine=true ;;
+              docs/*|*.md|runs/*)
+                ;;                              # documentation and raw panels gate nothing
+              *)
+                engine=true ;;
+            esac
+          done
+          echo "loop=$loop"     >> "$GITHUB_OUTPUT"
+          echo "engine=$engine" >> "$GITHUB_OUTPUT"
+          echo "lanes: loop=$loop engine=$engine"
+
+  # The research loop is pure stdlib — no torch, no transformers, nothing. Installing only
+  # pytest here is not a shortcut, it is the assertion: the day something in research/ imports
+  # the engine, this lane goes red on ModuleNotFoundError and the seam is defended.
+  loop:
+    needs: changes
+    if: needs.changes.outputs.loop == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install pytest pytest-asyncio ruff
+      - name: Lint
+        run: ruff check src/inference_server/research tests/test_research_*.py
+      - name: Tests
+        run: PYTHONPATH=src pytest -q tests/test_research_*.py
+
+  engine:
+    needs: changes
+    if: needs.changes.outputs.engine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -75,3 +157,59 @@ jobs:
           esac
           git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
           python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
+
+  # The lane CI structurally cannot be. Triton kernels compile only on CUDA, GitHub runners
+  # have no GPU, and PR #3 is the proof of what that hides: a decode kernel that could not
+  # compile at all, dead since 5bcac20 and invisible to every check above. So this rents a
+  # GPU through Modal. Manual, not per-PR — it costs money and minutes.
+  gpu:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install the launcher only
+        # --no-deps: modal builds the real image remotely from pyproject.toml. Installing torch
+        # here would download 200 MB to launch a job that does not use it.
+        run: |
+          pip install modal
+          pip install -e . --no-deps
+
+      - name: Run the CUDA correctness gate
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+          TESTS: ${{ inputs.gpu_tests }}
+        run: |
+          if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
+            echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set in this repo's secrets."
+            echo "Add them (Settings → Secrets → Actions) or run these locally:"
+            echo "    venv/bin/modal run <script>"
+            exit 1
+          fi
+          for t in $TESTS; do
+            echo "::group::$t"
+            modal run "$t"
+            echo "::endgroup::"
+          done
+
+  # The one check branch protection requires. Path-filtered lanes SKIP on unrelated changes,
+  # and a skipped *required* check leaves a PR blocked forever — so this always runs and
+  # reports the aggregate. Skipped is fine; failed and cancelled are not.
+  ci-ok:
+    needs: [changes, loop, engine]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ needs.changes.result }} ${{ needs.loop.result }} ${{ needs.engine.result }}
+        run: |
+          echo "changes/loop/engine: $RESULTS"
+          case "$RESULTS" in
+            *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
+          esac
+          echo "all lanes green or skipped"
