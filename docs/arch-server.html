@@ -19,7 +19,7 @@
   <a href="#sse">Streaming (SSE)</a>·
   <a href="#openai">OpenAI shim</a>·
   <a href="#metrics">Metrics</a>·
-  <a href="#dashboard">Chat page</a>·
+  <a href="#clients">Clients</a>·
   <a href="arch-scheduler.html">→ Scheduler</a>
 </div>
 
@@ -61,11 +61,11 @@
 
   <g>
     <rect class="box" x="600" y="170" width="520" height="120" rx="6"/>
-    <text class="title" x="620" y="198">GET /  (and /static/*)</text>
-    <text x="620" y="222">serves the chat page</text>
-    <text class="small" x="620" y="242">single-page browser UI for live metrics</text>
-    <text class="small" x="620" y="258">polls /scheduler/stats and /cache/stats on a timer</text>
-    <text class="small" x="620" y="274">streaming chat; no metrics polling</text>
+    <text class="title" x="620" y="198">GET /</text>
+    <text x="620" y="222">service index — JSON list of every route</text>
+    <text class="small" x="620" y="242">no UI is served; there is no static directory</text>
+    <text class="small" x="620" y="258">chat frontends attach at /v1/chat/completions</text>
+    <text class="small" x="620" y="274">aggregate metrics are Grafana's job, not a page's</text>
   </g>
 
   <g>
@@ -264,17 +264,18 @@
   <strong>Structured logs + timing middleware.</strong> <code>LOG_FORMAT=json</code> (default <code>text</code>) switches stdlib logging to one JSON object per line (<code>logging_config.py</code>); <code>logger.info(..., extra={...})</code> fields merge in. A FastAPI middleware times every HTTP request → the <code>inference_http_request_duration_seconds</code> histogram (labeled by the matched route template, not the raw path) + a structured log line.
 </div>
 
-<h2 id="dashboard">Chat page</h2>
-<p class="lead"><code>src/inference_server/static/index.html</code>. A single self-contained page: streaming chat, nothing else.</p>
+<h2 id="clients">Clients</h2>
+<p class="lead">There is no built-in UI. <code>GET /</code> returns a JSON index of the routes and nothing else.</p>
 
-<ul>
-  <li>Streaming <code>/generate</code> over SSE, with a stop button and per-request controls for max tokens, stream on/off, and thinking on/off.</li>
-  <li>A one-line stat strip for the request you just sent: TTFT, TPOT, total, tokens, tok/s, cached prompt tokens. Every value comes straight out of that response body.</li>
-  <li>No polling, no percentiles, no aggregates. Those are Prometheus histograms read through Grafana; see <a href="#metrics">Metrics</a>.</li>
-  <li>Self-contained — no JS bundler, no framework. Just the file.</li>
-</ul>
+<p>The server shipped a single-page chat and metrics dashboard until 2026-09-11. It went in two steps, for two different reasons, and both are worth keeping in mind before anyone adds a page back.</p>
 
-<p><strong>Why the dashboard was removed (2026-09-09).</strong> The page used to carry a metrics sidebar computing p50/p95/p99 from its own 60-second in-process window, alongside the Prometheus histograms. Two implementations of the same numbers drift, and when they disagree you cannot tell which one is lying. Grafana is now the single source for anything aggregated. Per-request numbers stay on the page because they are read, not computed.</p>
+<table>
+  <tr><th>Removed</th><th>Why</th></tr>
+  <tr><td>Metrics sidebar (2026-09-09)</td><td>It computed p50/p95/p99 from its own 60-second in-process window while Prometheus computed the same figures from histograms. Two implementations of one number drift, and when they disagree you cannot tell which is lying.</td></tr>
+  <tr><td>Chat panel (2026-09-11)</td><td>Once <code>/v1/chat/completions</code> existed, the page was a second implementation of what the API already did. vLLM ships no UI for the same reason and delegates to Open WebUI.</td></tr>
+</table>
+
+<p>So: point Open WebUI or any OpenAI-compatible frontend at <code>/v1/chat/completions</code>, drive load with guidellm or vLLM's <code>benchmark_serving</code> through <code>/v1/completions</code>, and read aggregates in Grafana. <code>/generate</code> stays the native surface and still carries <code>session_id</code>, priority and per-request sampling that the shim does not expose.</p>
 
 <p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> · <a href="arch-cache.html">KV Cache</a> · <a href="arch-backend.html">Backend</a></p>
 

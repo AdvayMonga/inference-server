@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-10.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-11.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -50,7 +50,7 @@
     <text x="240" y="92">accepts requests</text>
     <text x="240" y="110">tokenizes prompts</text>
     <text x="240" y="128">streams tokens back (SSE)</text>
-    <text x="240" y="146">serves the chat page</text>
+    <text x="240" y="146">serves the JSON index</text>
     <text class="small" x="240" y="164">/health · /ready for Modal probes</text>
     <text class="small" x="240" y="178">click to open →</text>
   </a>
@@ -145,14 +145,14 @@
     <text class="small" x="40" y="256">open-loop arrivals</text>
   </g>
 
-  <!-- Dashboard -->
+  <!-- Monitoring -->
   <g>
     <rect class="box" x="20" y="320" width="160" height="120" rx="6"/>
-    <text class="title" x="40" y="348">Chat page</text>
-    <text class="lbl" x="40" y="364">static/index.html</text>
-    <text class="small" x="40" y="384">streaming chat,</text>
-    <text class="small" x="40" y="400">last-request</text>
-    <text class="small" x="40" y="416">timings only</text>
+    <text class="title" x="40" y="348">Monitoring</text>
+    <text class="lbl" x="40" y="364">monitoring/</text>
+    <text class="small" x="40" y="384">Prometheus +</text>
+    <text class="small" x="40" y="400">Grafana; the</text>
+    <text class="small" x="40" y="416">only aggregates</text>
   </g>
 
   <!-- Config -->
@@ -196,7 +196,7 @@
   <tr><td>Tokenizer</td><td>Stateless text ↔ tokens with the Gemma chat template.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
-  <tr><td>Chat page</td><td>Browser UI for streaming chat and last-request timings.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Monitoring</td><td>Prometheus scrape and Grafana dashboard. No UI is served by the engine.</td><td><a href="arch-server.html#clients">arch-server.html</a></td></tr>
   <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
   <tr><td>Config</td><td>Env-var-driven settings, no hardcoded paths.</td><td>covered on every page</td></tr>
 </table>

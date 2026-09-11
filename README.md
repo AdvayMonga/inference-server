@@ -51,7 +51,7 @@ was worth nothing end to end. Those are in [`DECISIONS.md`](DECISIONS.md).
 | **`models/paged_attention_kernel.py`** | Triton decode and prefill kernels that read K/V through block tables — no gather, no padding. Split-K decode variant. |
 | **`backends/custom_torch_backend.py`** | Drives the above for the scheduler: batched prefill in one forward, bucketed CUDA-graph decode, optional `torch.compile` and int8 weight-only quantization. `BACKEND=custom-{cuda,mps,cpu}`. |
 | **`backends/torch_backend.py`** | HF Transformers baseline backend behind the same `InferenceBackend` interface, with the `kv_cache/` block manager, radix tree and LRU / AttentionSink / H2O eviction policies. |
-| **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` and `/v1/chat/completions` so standard benchmark clients and chat frontends such as Open WebUI drive the engine unmodified, and a chat page for eyeballing it. |
+| **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` and `/v1/chat/completions` so standard benchmark clients and chat frontends drive the engine unmodified. No built-in UI. |
 | **`scripts/bench/load_test.py`** | Out-of-process concurrency sweep; `--workload realistic` draws distinct prompts from `prompt_bank.py` so the run exercises the cache-miss path. |
 | **`metrics.py`**, `prometheus_metrics.py` | Sliding-window p50/p95/p99 TTFT / TPOT / throughput on `/scheduler/stats`; aggregate Prometheus `/metrics` (Grafana dashboard in `monitoring/`). |
 
@@ -109,7 +109,7 @@ scripts/                  instruments and tools — bench/, probes/, gpu_tests/,
 benchmarks/               the sweep CSVs behind every number above, with a README
 tests/                    304 tests; 270 run in ~8 s on CPU, 34 model-heavy ones opt in with -m heavy
 docs/                     the GitHub Pages architecture map
-monitoring/               Prometheus scrape config + Grafana dashboard
+monitoring/               Prometheus + Grafana stack; the only aggregate view
 papers/                   reading notes on what this borrows from
 modal_app.py              one-container-per-GPU deployment
 ```
@@ -124,11 +124,39 @@ pip install -e ".[dev]"
 cp .env.example .env                      # set MODEL_NAME; DEVICE auto-detects CUDA → MPS → CPU
 
 uvicorn inference_server.server:app --host 0.0.0.0 --port 8000
-open http://localhost:8000                # streaming chat page
+curl localhost:8000/                      # service index: every route the server exposes
 
 pytest -q                                 # fast suite
 pytest -m heavy                           # parity + scheduler tests that load the real model
 ```
+
+### Talking to it
+
+There is no built-in web UI, for the same reason vLLM ships none: a first-party page is a
+second implementation of everything the API already does, and its metrics panel was a second
+implementation of everything Prometheus already computes. Bring your own frontend.
+
+```bash
+curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "inference-server",
+  "messages": [{"role": "user", "content": "Explain paged attention in two sentences."}],
+  "stream": true
+}'
+```
+
+Anything that speaks the OpenAI API works unmodified — Open WebUI for chat, guidellm or
+vLLM's `benchmark_serving` for load. `/generate` remains the native surface and carries
+`session_id`, priority and per-request sampling that the shim does not expose.
+
+### Watching it
+
+```bash
+docker compose -f monitoring/docker-compose.yml up -d
+open http://localhost:3000                # Grafana, admin/admin, dashboard provisioned
+```
+
+TTFT and TPOT percentiles, throughput, request rate by outcome, batch and queue depth, and KV
+pressure. This is the only place aggregate numbers live; nothing else recomputes them.
 
 Key knobs (all in `.env.example`): `BACKEND=custom-cuda` for the hand-written path,
 `PREFILL_MODE=batched|chunked`, `MAX_BATCH_SIZE`, `MAX_ACTIVE_KV_TOKENS`,
