@@ -18,6 +18,7 @@ runs locally.
 | `hooks/` | git hooks: `pre-push` runs CI's lint+tests locally (`git config core.hooksPath scripts/hooks`) | — |
 | `premerge_check.py` | the merge gate: refuses an engine change with no green experiment record | step 7 |
 | `run_instrument.sh` | Modal launcher that stamps provenance (`RESEARCH_ENGINE_SHA`, `RESEARCH_RUN_GROUP`) | step 4 |
+| `tools/run_on_runpod.py` | RunPod launcher: rent, sync, install, run, parse, terminate. Same provenance stamps | step 4 |
 
 ## bench/
 
@@ -56,3 +57,14 @@ CPU-runnable parity tests live in `tests/`.
 `smoke_custom.py`, `test_scheduler.py`, `test_batch_cache.py` are local end-to-end smoke runs.
 `migrate_decisions_to_kb.py` and `backfill_experiments.py` are the one-shot migrations that
 turned prose notes into `knowledge/` and `experiments/` records; kept for provenance.
+
+`venue_smoke.py` is the first instrument that speaks the venue contract. It checks that the tree
+synced, that provisioning installed what the engine imports, that a GPU is really there and can
+run a kernel, and that provenance survived the hop. It emits **no** Vitals panel on purpose: it
+measures the transport, not the engine, and a panel that looks like a measurement without being
+one is what this repo keeps getting burned by. Run it before any instrument that costs real time:
+
+```bash
+RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py \
+    --gpu 'NVIDIA GeForce RTX 4090'
+```

@@ -104,6 +104,41 @@ Each candidate MUST carry:
 
 Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
 
+### Where a run actually happens
+
+Routing picks a venue; `research/venues.py` runs there. The contract both venues implement is
+the one Modal already gave us, because it is what made the instruments writable:
+
+    ship the tree -> run one python file on a GPU -> get a JSON payload back -> keep no machine
+
+Modal builds an image and pickles the return value. A rented RunPod pod rsyncs the working tree
+and prints the payload between `<<<RESEARCH_PANEL_JSON` markers, which the launcher parses. The
+instrument does not know which venue it got.
+
+Two rules this code exists to enforce:
+
+- **Give the machine back.** A Modal function is billed while it runs. A pod is billed until it
+  is TERMINATED, so teardown sits in a `finally` on every path, including the ones that raise,
+  and a teardown that itself fails logs loudly rather than masking the real error. An orphaned
+  A100 is the only way the loop can lose real money.
+- **No payload is an error, not an empty result.** A run that prints no panel block fails loudly.
+  The alternative is a silent empty result that reads as "no effect measured" and gets believed.
+
+Arms still must share one machine. `RESEARCH_RUN_GROUP` makes them comparable on paper; two pods
+are two machines, and two identical A100-80GB draws differed 2.31x on byte-identical config.
+
+Two things the live API taught us that no amount of reading would have:
+
+- **RunPod's edge refuses urllib's default User-Agent** with `403 error code: 1010` on every
+  path, valid key and all. Every request sends a `User-Agent` now, and a test pins it.
+- **The pod image ships torch and nothing else we import.** Provisioning runs `pip install -e .`
+  between the rsync and the run; `torch>=2.4` is already satisfied so the 2 GB download is
+  skipped. A failed install terminates the pod and never starts the instrument.
+
+Start with `scripts/tools/venue_smoke.py`, which answers "can this venue run our code at all"
+for the price of the cheapest GPU-minute available, and emits no panel because it measures the
+transport rather than the engine.
+
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed
