@@ -15,6 +15,7 @@ differed by 2.31x on byte-identical config. Prefer an instrument that runs both 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -87,6 +88,10 @@ def main() -> int:
         v = Vitals.from_dict(d)
         v.to_json(runs / f"{v.validity.run_id}.json")
     print(f"wrote {len(panels)} panel(s) to runs/ (run_group={env['RESEARCH_RUN_GROUP']})")
+
+    # A smoke run returns no panels on purpose; print what it did return so the run is readable.
+    if "smoke" in payload:
+        print(json.dumps(payload["smoke"], indent=2, sort_keys=True))
     return 0
 
 

@@ -37,6 +37,10 @@ from typing import Any, Callable
 API_BASE = "https://rest.runpod.io/v1"
 API_KEY_ENV = "RUNPOD_API_KEY"
 
+# RunPod sits behind a bot filter that refuses urllib's default User-Agent with 403 "error code:
+# 1010" on EVERY path, valid key included. Found by calling the live API, not by reading docs.
+USER_AGENT = "inference-server-research/1.0"
+
 # An instrument prints its machine record between these markers. stdout is the only channel a
 # rented box gives us for free, and it is shared with torch's warnings, so the payload has to be
 # findable rather than assumed to be the whole stream.
@@ -97,7 +101,8 @@ def _http(method: str, path: str, body: dict | None, key: str) -> tuple[int, dic
     req = urllib.request.Request(
         f"{API_BASE}{path}", method=method,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 "User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             raw = r.read().decode()
@@ -222,6 +227,21 @@ def sync_repo(pod: Pod, repo: str, shell: Shell = _shell) -> None:
         raise VenueError(f"rsync to pod failed: {r.stderr.strip()[:400]}")
 
 
+def provision(pod: Pod, shell: Shell = _shell, timeout_s: int = 900) -> None:
+    """Install the repo's dependencies on the pod.
+
+    The base image carries torch and CUDA; fastapi, transformers, accelerate, httpx and
+    prometheus-client are not there, so an instrument dies on its first import without this.
+    `torch>=2.4` is already satisfied by the image, so pip skips the 2 GB download.
+    """
+    remote = (f"cd /workspace/repo && timeout {timeout_s} "
+              f"pip install --quiet --no-input -e . 2>&1 | tail -20")
+    r = shell(_ssh_base(pod) + [remote])
+    if r.returncode != 0:
+        raise VenueError(f"pip install failed on pod {pod.id}: "
+                         f"{(r.stderr or r.stdout).strip()[-600:]}")
+
+
 def run_remote(pod: Pod, script: str, env: dict[str, str], shell: Shell = _shell,
                timeout_s: int = 3600) -> str:
     """Run one instrument and return its stdout.
@@ -260,6 +280,8 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
         pod = wait_until_ready(client, pod.id, timeout_s=ready_timeout_s, sleep=sleep)
         log(f"[venue] ssh up at {pod.host}:{pod.port}")
         sync_repo(pod, repo, shell=shell)
+        log("[venue] installing dependencies")
+        provision(pod, shell=shell)
         out = run_remote(pod, script, env, shell=shell)
         return extract_payload(out)
     finally:

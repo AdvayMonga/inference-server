@@ -127,6 +127,18 @@ Two rules this code exists to enforce:
 Arms still must share one machine. `RESEARCH_RUN_GROUP` makes them comparable on paper; two pods
 are two machines, and two identical A100-80GB draws differed 2.31x on byte-identical config.
 
+Two things the live API taught us that no amount of reading would have:
+
+- **RunPod's edge refuses urllib's default User-Agent** with `403 error code: 1010` on every
+  path, valid key and all. Every request sends a `User-Agent` now, and a test pins it.
+- **The pod image ships torch and nothing else we import.** Provisioning runs `pip install -e .`
+  between the rsync and the run; `torch>=2.4` is already satisfied so the 2 GB download is
+  skipped. A failed install terminates the pod and never starts the instrument.
+
+Start with `scripts/tools/venue_smoke.py`, which answers "can this venue run our code at all"
+for the price of the cheapest GPU-minute available, and emits no panel because it measures the
+transport rather than the engine.
+
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed

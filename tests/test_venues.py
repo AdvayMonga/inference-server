@@ -225,3 +225,98 @@ def test_provenance_env_reaches_the_remote_command():
     remote = " ".join(seen[-1])
     assert "RESEARCH_ENGINE_SHA=abc123" in remote and "RESEARCH_RUN_GROUP=grp-1" in remote
     assert "PYTHONPATH=/workspace/repo/src" in remote
+
+
+# ---------------------------------------------------------------- the live API's own rules
+
+def test_every_api_call_sends_a_user_agent():
+    """RunPod's edge answers urllib's default User-Agent with 403 "error code: 1010" on every
+    path, valid key included. Found against the live API; without this header nothing works."""
+    seen: list[dict] = []
+
+    class FakeResp:
+        status = 200
+        def read(self): return b"{}"
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    def fake_urlopen(req, timeout=None):
+        seen.append(dict(req.headers))
+        return FakeResp()
+
+    import urllib.request
+
+    from inference_server.research import venues
+    orig = urllib.request.urlopen
+    urllib.request.urlopen = fake_urlopen
+    try:
+        venues._http("GET", "/pods", None, "key-123")
+    finally:
+        urllib.request.urlopen = orig
+
+    # urllib title-cases header names when it stores them.
+    assert seen[0].get("User-agent") == venues.USER_AGENT
+
+
+# ---------------------------------------------------------------- provisioning
+
+def test_dependencies_are_installed_before_the_instrument_runs():
+    """The image ships torch and nothing else the engine imports. Install has to happen after
+    the rsync (there is no pyproject.toml before it) and before the run."""
+    api, seen = FakeAPI(), []
+
+    def spy(cmd):
+        seen.append(" ".join(cmd))
+        return subprocess.CompletedProcess(cmd, 0, emit_payload({"ok": 1}), "")
+
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api), shell=spy,
+                   log=lambda _: None)
+
+    steps = [i for i, c in enumerate(seen) if "rsync" in c or "pip install" in c or "python " in c]
+    kinds = ["rsync" if "rsync" in seen[i] else "pip" if "pip install" in seen[i] else "run"
+             for i in steps]
+    assert kinds == ["rsync", "pip", "run"], kinds
+    assert "-e ." in seen[steps[1]], "must install the synced tree, not a published wheel"
+
+
+def test_a_failed_install_terminates_the_pod_and_never_runs_the_instrument():
+    """Renting a GPU and then failing to install is the cheapest way to waste money slowly."""
+    api, seen = FakeAPI(), []
+
+    def spy(cmd):
+        joined = " ".join(cmd)
+        seen.append(joined)
+        rc = 1 if "pip install" in joined else 0
+        return subprocess.CompletedProcess(cmd, rc, "No matching distribution", "")
+
+    with pytest.raises(VenueError, match="pip install failed"):
+        run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api), shell=spy,
+                       log=lambda _: None)
+
+    assert api.terminated
+    assert not any("python scripts/x.py" in c for c in seen)
+
+
+# ---------------------------------------------------------------- the first real instrument
+
+def test_venue_smoke_emits_a_payload_the_venue_can_parse():
+    """The instrument side of the contract, exercised for real: run the smoke script as a
+    subprocess and parse its stdout exactly as run_instrument would."""
+    import os
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(repo / "src"),
+           "RESEARCH_ENGINE_SHA": "abc123", "RESEARCH_RUN_GROUP": "grp-7"}
+    r = subprocess.run([sys.executable, str(repo / "scripts" / "tools" / "venue_smoke.py")],
+                       capture_output=True, text=True, env=env, timeout=300)
+    assert r.returncode == 0, r.stderr[-500:]
+
+    payload = extract_payload(r.stdout)
+    assert payload["panels"] == [], "a smoke run measures no engine behaviour, so it emits none"
+    smoke = payload["smoke"]
+    assert smoke["provenance"] == {"RESEARCH_ENGINE_SHA": "abc123", "RESEARCH_RUN_GROUP": "grp-7"}
+    for mod, ver in smoke["imports"].items():
+        assert not ver.startswith("MISSING"), f"{mod} is not importable: {ver}"
+    assert "available" in smoke["gpu"]
