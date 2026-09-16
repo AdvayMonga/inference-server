@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-75 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(22), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(5), `triton`(4), `roofline`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `venue`(3), `metrics`(2), `batching`(2), `slo`(2), `benchmarking`(2), `tpot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `validity`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `snapshot`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1)
+76 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(6), `triton`(4), `roofline`(4), `venue`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `benchmarking`(3), `literature`(3), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `validity`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,7 +12,7 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (10): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (40) — no `regime` field yet
+- **unassigned** (41) — no `regime` field yet
 
 ## Open (23)
 
@@ -442,9 +442,28 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (31)
+## Resolved (32)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-16] Modal dropped as a venue: gVisor, alpha snapshots, and a silent GPU substitution
+*tags: `modal`, `venue`, `cold-start`, `snapshot`, `benchmarking`, `validity`* · `kb-20260916-57d2bb4a`
+
+Modal was never chosen on merit — it was chosen because the credits were free. The credits ran out on 2026-09-07, and on inspection three properties make it the wrong platform for this project specifically. The instruments are archived, not deleted (`scripts/archive/modal/`), because 13 entries here cite them by path as the provenance for a measured number.
+
+**1. gVisor puts the strongest cold-start lever structurally out of reach.** Modal runs workloads in a gVisor sandbox, and drives `cuda-checkpoint` from the runtime *outside* it, via `--cuda-checkpoint-path`. A tenant inside the sandbox can never do the same, so the CRIU / cuda-checkpoint family of techniques is not something we could have built on Modal either — we could only have consumed Modal's managed version of it. Full ladder in [[privileged-gpu-snapshotting-criu-cuda-checkpoint-is-out-of-reach-for-a-rented-box]].
+
+**2. That managed version does not do what we need.** Modal's GPU memory snapshots are still documented as **alpha** roughly 14 months after announcement; the docs state they are 'generally incompatible with multi-GPU', and — decisively for us — that 'if the majority of your initialization latency is spent loading weights, GPU Memory Snapshots will generally not improve your cold start times'. Weight loading plus compile is exactly our term. So the one thing only Modal could have given us is alpha, single-GPU-only, and aimed at a phase that is not ours.
+
+**3. A comparability hazard in the GPU selector.** `gpu="H100"` may be served an **H200** unless written `gpu="H100!"` with the trailing bang, which pins the exact type. Under this project's own rule — never compare across hardware, and a number without its hardware is not evidence — a silently substituted device is a validity bug, not a convenience. **No historical panel of ours is affected:** every archived instrument requests `gpu="A10G"` (11 call sites) or `gpu="A100-80GB"` (7), neither of which has a documented substitution, and the bimodal A100 spread in kb-20260906-a81f6d18 is a same-SKU draw effect, not this. Recorded so the hazard is not rediscovered as a mystery if anyone ever reads these scripts as a template.
+
+**What replaced it:** `research/venues.py` (RunPod), which was already the CI gate's venue from PR #25. The Modal CI fallback and the `modal` extra in `pyproject.toml` are removed.
+
+**Revisit when:** a GPU venue is chosen again, or free credits appear on a managed platform; an instrument is written that requests a GPU type with a documented substitution (H100 -> H200); pin it with the trailing '!'
+
+**Evidence:** https://modal.com/docs/guide/memory-snapshot, https://modal.com/docs/guide/gpu, kb-20260916-d12c9170, scripts/archive/modal/README.md
+
+**Mechanism:** A managed sandbox owns the only privilege boundary that makes process-level snapshotting possible, so its snapshot feature is the ceiling, not a floor to build on — and that ceiling does not cover weight loading.
 
 ### [2026-09-06] LOOP: never judge a kernel before sweeping its launch config
 *tags: `loop`, `kernel`, `benchmark`* · `kb-20260905-a474d802`

@@ -7,7 +7,8 @@ way to reach a GPU. The credits ran out on 2026-09-07 and Modal is no longer the
 this project: it runs gVisor, so CRIU / `cuda-checkpoint` is structurally out of a tenant's
 reach, and its GPU memory snapshots are alpha, documented as incompatible with multi-GPU, and
 documented as not helping when weight loading dominates. The reasoning is recorded in
-`knowledge/` under the `modal` + `venue` tags; start at `kb-20260916-d12c9170`.
+`knowledge/` under the `modal` + `venue` tags: `kb-20260916-57d2bb4a` (why we left) and
+`kb-20260916-d12c9170` (the privilege ladder behind it).
 
 **They are kept, not deleted, because 13 `knowledge/*.json` entries cite them by path as the
 provenance for a measured number.** Deleting them would orphan the audit trail that

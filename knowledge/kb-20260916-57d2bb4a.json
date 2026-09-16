@@ -1,0 +1,40 @@
+{
+  "created_at": 1789600611.1435578,
+  "evidence": [
+    {
+      "url": "https://modal.com/docs/guide/memory-snapshot"
+    },
+    {
+      "url": "https://modal.com/docs/guide/gpu"
+    },
+    {
+      "related": "kb-20260916-d12c9170"
+    },
+    {
+      "script": "scripts/archive/modal/README.md"
+    }
+  ],
+  "id": "kb-20260916-57d2bb4a",
+  "mechanism": "A managed sandbox owns the only privilege boundary that makes process-level snapshotting possible, so its snapshot feature is the ceiling, not a floor to build on \u2014 and that ceiling does not cover weight loading.",
+  "regime": null,
+  "status": "resolved",
+  "summary": "Modal was never chosen on merit \u2014 it was chosen because the credits were free. The credits ran out on 2026-09-07, and on inspection three properties make it the wrong platform for this project specifically. The instruments are archived, not deleted (`scripts/archive/modal/`), because 13 entries here cite them by path as the provenance for a measured number.\n\n**1. gVisor puts the strongest cold-start lever structurally out of reach.** Modal runs workloads in a gVisor sandbox, and drives `cuda-checkpoint` from the runtime *outside* it, via `--cuda-checkpoint-path`. A tenant inside the sandbox can never do the same, so the CRIU / cuda-checkpoint family of techniques is not something we could have built on Modal either \u2014 we could only have consumed Modal's managed version of it. Full ladder in [[privileged-gpu-snapshotting-criu-cuda-checkpoint-is-out-of-reach-for-a-rented-box]].\n\n**2. That managed version does not do what we need.** Modal's GPU memory snapshots are still documented as **alpha** roughly 14 months after announcement; the docs state they are 'generally incompatible with multi-GPU', and \u2014 decisively for us \u2014 that 'if the majority of your initialization latency is spent loading weights, GPU Memory Snapshots will generally not improve your cold start times'. Weight loading plus compile is exactly our term. So the one thing only Modal could have given us is alpha, single-GPU-only, and aimed at a phase that is not ours.\n\n**3. A comparability hazard in the GPU selector.** `gpu=\"H100\"` may be served an **H200** unless written `gpu=\"H100!\"` with the trailing bang, which pins the exact type. Under this project's own rule \u2014 never compare across hardware, and a number without its hardware is not evidence \u2014 a silently substituted device is a validity bug, not a convenience. **No historical panel of ours is affected:** every archived instrument requests `gpu=\"A10G\"` (11 call sites) or `gpu=\"A100-80GB\"` (7), neither of which has a documented substitution, and the bimodal A100 spread in kb-20260906-a81f6d18 is a same-SKU draw effect, not this. Recorded so the hazard is not rediscovered as a mystery if anyone ever reads these scripts as a template.\n\n**What replaced it:** `research/venues.py` (RunPod), which was already the CI gate's venue from PR #25. The Modal CI fallback and the `modal` extra in `pyproject.toml` are removed.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "modal",
+    "venue",
+    "cold-start",
+    "snapshot",
+    "benchmarking",
+    "validity"
+  ],
+  "title": "Modal dropped as a venue: gVisor, alpha snapshots, and a silent GPU substitution",
+  "transfer_checked": null,
+  "triggers": [
+    "a GPU venue is chosen again, or free credits appear on a managed platform",
+    "an instrument is written that requests a GPU type with a documented substitution (H100 -> H200); pin it with the trailing '!'"
+  ],
+  "updated_at": 1789600611.143561,
+  "validity_range": {}
+}
