@@ -1,10 +1,52 @@
-"""Scheduling policies — decide which pending request to admit next."""
+"""Scheduling policies — pure ordering functions, wrapped in thin stateful shells.
+
+The decision lives in the module-level functions so the scheduler and a simulator share it.
+"""
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 if TYPE_CHECKING:
     from inference_server.scheduler import ScheduledRequest
+
+
+class Candidate(Protocol):
+    """What ordering reads off a waiting request — a ScheduledRequest or a simulator's record."""
+    session_id: str
+    priority: int
+    arrival_seq: int
+
+
+C = TypeVar("C", bound=Candidate)
+
+
+def fcfs_order(candidates: Iterable[C]) -> list[C]:
+    """Admission order under FCFS: (-priority, arrival_seq). Pure."""
+    return sorted(candidates, key=lambda r: (-r.priority, r.arrival_seq))
+
+
+def fair_order(candidates: Iterable[C], counters: Mapping[str, float]) -> list[C]:
+    """Admission order under VTC: (-priority, counter[session_id], arrival_seq). Pure."""
+    return sorted(
+        candidates,
+        key=lambda r: (-r.priority, counters.get(r.session_id, 0.0), r.arrival_seq),
+    )
+
+
+def fair_initial_counter(
+    session_id: str, counters: Mapping[str, float], pending_sessions: Iterable[str]
+) -> float:
+    """Counter on arrival: own if known, else min over sessions with pending work, else 0. Pure."""
+    if session_id in counters:
+        return counters[session_id]
+    active = [counters[s] for s in set(pending_sessions) if s in counters]
+    return min(active) if active else 0.0
+
+
+def fair_charge(counters: dict[str, float], session_id: str, n_tokens: int) -> None:
+    """Charge n_tokens to a session, in place (runs per row per decode step; copying is waste)."""
+    counters[session_id] = counters.get(session_id, 0.0) + n_tokens
 
 
 class SchedulingPolicy(ABC):
@@ -58,33 +100,32 @@ class SchedulingPolicy(ABC):
         return []
 
 
-class FCFSPolicy(SchedulingPolicy):
-    """First-come-first-served, with priority as the dominant key.
-
-    Sort key: (-priority, arrival_seq). Higher priority drains first;
-    within a priority tier, oldest arrival wins.
-    """
+class _ListPolicy(SchedulingPolicy):
+    """Shell shared by the built-in policies: a pending list, ordered by a pure function."""
 
     def __init__(self) -> None:
         self._pending: list["ScheduledRequest"] = []
 
-    def pick_next(self) -> "ScheduledRequest | None":
-        if not self._pending:
-            return None
-        chosen = min(self._pending, key=lambda r: (-r.priority, r.arrival_seq))
-        self._pending.remove(chosen)
-        return chosen
+    @abstractmethod
+    def _order(self) -> list["ScheduledRequest"]:
+        """Every pending request in admission order."""
+        ...
 
     def peek_next(self) -> "ScheduledRequest | None":
-        if not self._pending:
-            return None
-        return min(self._pending, key=lambda r: (-r.priority, r.arrival_seq))
+        ordered = self._order()
+        return ordered[0] if ordered else None
+
+    def pick_next(self) -> "ScheduledRequest | None":
+        head = self.peek_next()
+        if head is not None:
+            self._pending.remove(head)
+        return head
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         self._pending.append(request)
 
     def peek_window(self, n: int) -> list["ScheduledRequest"]:
-        return sorted(self._pending, key=lambda r: (-r.priority, r.arrival_seq))[:n]
+        return self._order()[:n]
 
     def pick(self, request: "ScheduledRequest") -> None:
         self._pending.remove(request)
@@ -93,63 +134,36 @@ class FCFSPolicy(SchedulingPolicy):
         return list(self._pending)
 
 
-class FairPolicy(SchedulingPolicy):
-    """Virtual Token Counter fairness over session_id, gated by priority.
+class FCFSPolicy(_ListPolicy):
+    """First-come-first-served, with priority as the dominant key (see fcfs_order)."""
 
-    Sort key: (-priority, virtual_counter[session_id], arrival_seq).
-    Priority dominates fairness; within a priority tier, the session that
-    has been served least wins; arrival_seq breaks final ties.
+    def _order(self) -> list["ScheduledRequest"]:
+        return fcfs_order(self._pending)
 
-    New sessions inherit the current min counter across active sessions
-    so they don't starve behind old high-spenders, and can't catch-up-burst.
+
+class FairPolicy(_ListPolicy):
+    """Virtual Token Counter fairness over session_id, gated by priority (see fair_order).
+
+    Priority dominates fairness; within a tier the least-served session wins; arrival_seq
+    breaks final ties. New sessions inherit the min counter across sessions with pending work.
     """
 
     def __init__(self) -> None:
+        super().__init__()
         self._counters: dict[str, float] = {}
-        self._pending: list["ScheduledRequest"] = []
 
-    def pick_next(self) -> "ScheduledRequest | None":
-        if not self._pending:
-            return None
-        chosen = min(
-            self._pending,
-            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
-        )
-        self._pending.remove(chosen)
-        return chosen
-
-    def peek_next(self) -> "ScheduledRequest | None":
-        if not self._pending:
-            return None
-        return min(
-            self._pending,
-            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
-        )
+    def _order(self) -> list["ScheduledRequest"]:
+        return fair_order(self._pending, self._counters)
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         sid = request.session_id
-        if sid not in self._counters:
-            pending_sids = {r.session_id for r in self._pending}
-            active = [c for s, c in self._counters.items() if s in pending_sids]
-            self._counters[sid] = min(active) if active else 0.0
-        self._pending.append(request)
-
-    def peek_window(self, n: int) -> list["ScheduledRequest"]:
-        return sorted(
-            self._pending,
-            key=lambda r: (-r.priority, self._counters.get(r.session_id, 0.0), r.arrival_seq),
-        )[:n]
-
-    def pick(self, request: "ScheduledRequest") -> None:
-        self._pending.remove(request)
-
-    def pending(self) -> list["ScheduledRequest"]:
-        return list(self._pending)
+        self._counters[sid] = fair_initial_counter(
+            sid, self._counters, (r.session_id for r in self._pending)
+        )
+        super().on_request_arrived(request)
 
     def on_tokens_processed(self, request: "ScheduledRequest", n_tokens: int) -> None:
-        self._counters[request.session_id] = (
-            self._counters.get(request.session_id, 0.0) + n_tokens
-        )
+        fair_charge(self._counters, request.session_id, n_tokens)
 
 
 def create_scheduling_policy(policy_name: str) -> SchedulingPolicy:
