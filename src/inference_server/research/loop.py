@@ -2,6 +2,7 @@
 
     python -m inference_server.research.loop attribute runs/<id>.json
     python -m inference_server.research.loop screen <hypotheses.json>
+    python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}'
     python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
     python -m inference_server.research.loop index
     python -m inference_server.research.loop kb --status rejected
@@ -66,6 +67,9 @@ def cmd_screen(args) -> int:
         blocking = [e for _, e in hits if e.status in ("rejected", "resolved")]
         flag = "  <-- READ THE RELATED ENTRIES FIRST" if blocking else ""
         print(f"tier {h.falsification_tier} ({TIER_NAMES[h.falsification_tier]}){flag}")
+        if h.falsification_tier <= 2:
+            print("  policy hypothesis? `loop simulate --class <cls> --config '{...}'` falsifies "
+                  "scheduling / admission / KV-sizing changes without a GPU")
         print(f"  {h.id}  {h.statement}")
         print(f"  predicts {h.predicted_metric} {h.predicted_direction} by "
               f"{h.predicted_magnitude}")
@@ -83,6 +87,37 @@ def cmd_screen(args) -> int:
             print(f"    ! settled entries not cited in kb_check: {', '.join(uncited[:3])}")
         print()
     print("Run the cheapest tier first; never enter tier N+1 while tier N could still falsify.")
+    return 0
+
+
+def cmd_simulate(args) -> int:
+    """Tier-1 falsifier: replay one corpus class through the simulator, one row per config."""
+    from inference_server.research import harness as H
+    from inference_server.research.corpus import load_trace
+    from inference_server.research.simulator import (
+        PLACEHOLDER_A100_E4B,
+        SimConfig,
+        TimingModel,
+        simulate,
+    )
+
+    timing = TimingModel.from_json(args.timing) if args.timing else PLACEHOLDER_A100_E4B
+    manifest, trace = load_trace(args.cls, args.split)
+    cls = manifest.classes[args.cls]
+    print(f"-- simulate {args.cls}/{args.split} ({len(trace)} requests, corpus "
+          f"{manifest.corpus_version[:12]}, timing {timing.model}/{timing.hardware} "
+          f"fitted_from={timing.fitted_from}) --")
+    for raw in args.config or ["{}"]:
+        cfg = SimConfig(**json.loads(raw))
+        res = simulate(trace, cfg, timing, seed=args.seed)
+        s = res.summary(cls)
+        print(json.dumps(cfg.to_dict()))
+        print("  " + " ".join(f"{k}={v}" for k, v in s.items()))
+        if args.emit:
+            panel = res.to_panel(cls, corpus_version=manifest.corpus_version, split=args.split,
+                                 seed=args.seed)
+            H.emit(panel, label=f"simulate {args.cls}/{args.split}",
+                   runs_dir=Path(args.runs_dir) if args.runs_dir else None)
     return 0
 
 
@@ -176,6 +211,18 @@ def main(argv: list[str] | None = None) -> int:
 
     s = sub.add_parser("screen", help="order hypotheses cheapest-first, flag dead ends (step 3)")
     s.add_argument("hypotheses"); s.set_defaults(fn=cmd_screen)
+
+    m = sub.add_parser("simulate", help="tier-1: replay a corpus class through the simulator, "
+                                        "one row per --config (policy hypotheses, no GPU)")
+    m.add_argument("--class", dest="cls", required=True)
+    m.add_argument("--split", default="seen", choices=("seen", "heldout"))
+    m.add_argument("--config", action="append",
+                   help='JSON of SimConfig knobs, e.g. \'{"policy": "fair"}\'; repeatable')
+    m.add_argument("--timing", help="TimingModel JSON; default is the A100/E4B placeholder")
+    m.add_argument("--seed", type=int, default=0)
+    m.add_argument("--emit", action="store_true", help="write a panel per config via harness.emit")
+    m.add_argument("--runs-dir")
+    m.set_defaults(fn=cmd_simulate)
 
     j = sub.add_parser("judge", help="run the five gates over a run group and record it (5-6)")
     j.add_argument("--hyp", required=True)

@@ -98,12 +98,20 @@ Each candidate MUST carry:
 
 | tier | cost | example |
 |---|---|---|
-| 1. static / arithmetic | seconds | padding-waste calc; bucket-ladder simulation |
-| 2. CPU repro | seconds | the KV block leak was proven on CPU in ~2s |
+| 1. static / arithmetic | seconds | padding-waste calc; bucket-ladder simulation; **trace-replay simulator** for any scheduling / admission / KV-sizing policy: `loop simulate --class steady_interactive --config '{"policy":"fair"}' --config '{"policy":"fcfs"}'` |
+| 2. CPU repro | seconds | the KV block leak was proven on CPU in ~2s; `loop simulate` again when the hypothesis is a policy |
 | 3. single-GPU probe | 5–10 min | `probe_*` scripts |
 | 4. full sweep | 15–30 min, real $ | `bench_serving`, `bench_stress` |
 
 Never enter tier N+1 while a tier-N test could still falsify the hypothesis.
+
+The simulator (`research/simulator.py`) replays a corpus trace through the real loop's iteration
+order with attention replaced by a fitted `TimingModel`, and calls the same pure functions in
+`scheduling_policy.py` the engine does. It may **reject** a policy (loses in simulation, no GPU
+spent) and **promote** one to tier 3; it never confirms. Its panels carry `harness="simulator"`
+and cannot be compared to hardware panels. The timing model only has to rank configurations the
+way hardware does; `rank_correlation` is the check, and the hardware validation run is deferred
+until there is GPU budget. v1 does not model preemption or chunked prefill.
 
 ### Where a run actually happens
 

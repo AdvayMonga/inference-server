@@ -47,6 +47,7 @@ python -m inference_server.research.loop attribute runs/<id>.json --out gaps.jso
 python -m inference_server.research.loop kb --status rejected     # what is already disproved
 python -m inference_server.research.loop kb --regime cold_start   # what applies to a regime (--situation k=v narrows by validity_range)
 python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, routed to a venue
+python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}'  # tier 1: policy hypotheses, no GPU
 python -m inference_server.research.loop budget                    # cap, ledger, venues (cloud opt-in: RESEARCH_VENUES)
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
 python scripts/bench/replay_trace.py --class steady_interactive --split seen --base-url URL  # open-loop corpus replay
