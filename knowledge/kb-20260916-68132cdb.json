@@ -1,0 +1,39 @@
+{
+  "created_at": 1789599673.15857,
+  "evidence": [
+    {
+      "url": "https://www.usenix.org/system/files/osdi24-fu.pdf"
+    },
+    {
+      "url": "https://www.usenix.org/system/files/osdi24-sun-biao.pdf"
+    },
+    {
+      "url": "https://github.com/llumnix-project/llumnix"
+    },
+    {
+      "url": "https://github.com/ServerlessLLM/ServerlessLLM"
+    }
+  ],
+  "id": "kb-20260916-68132cdb",
+  "mechanism": "The two designs sit at different points on a network-cost-vs-compute-cost curve; the interconnect decides which wins, so neither is evaluable without stating it.",
+  "regime": "steady_interactive",
+  "status": "open",
+  "summary": "Phase 6 of the plan wants migrate-vs-recompute as a searchable knob. The literature already ran both experiments, and they disagree for a principled reason.\n\n**ServerlessLLM (OSDI '24) moves TOKENS.** Tokens are 10s-100s of KB; the KV cache is 1-10s of GB. The load-bearing asymmetry: prefill-recomputing ~1000 tokens costs about what generating ~100 new tokens costs (~10x). That ratio makes a multi-round loop converge \u2014 each round the destination catches up faster than the source runs away. Measured 1.27-1.95x better P99 than preemption-based scheduling.\n\n**Llumnix (OSDI '24, Alibaba) moves KV BLOCKS.** It gets away with it because **the KV cache is append-only** \u2014 blocks written by past iterations never change, so they can be copied while decoding continues, with no dirty-page tracking. Staged pipeline; each stage copies what the previous stage produced. **Downtime is 20-30 ms and near-constant from 256 to 8k sequence length** \u2014 shorter than one decode step \u2014 versus baselines up to 111x worse, and recompute of an 8k sequence for LLaMA-30B costing 3.5s. Migration always took exactly 2 stages. Source decode slowed <=1%. Correctness via a PRE-ALLOC/COMMIT handshake per stage, which handles the two LLM-specific hazards VM migration lacks: OOM mid-migration, and the request finishing mid-migration.\n\n**What decides it: the interconnect and the distance.** Tokens win when the network is scarce and instances are far apart (serverless, cross-server, model-swap driven). KV blocks win when instances are close and you migrate constantly for load balance. So our Phase 6 crossover plot is real work, but it must state the interconnect or it measures nothing \u2014 which also means the venue's NVLink/InfiniBand story is a prerequisite, not a detail.\n\n**Borrow, do not reinvent:** Llumnix's append-only staged copy and its PRE-ALLOC/COMMIT handshake are the right mechanism. Note Llumnix v1 (2026) now unifies migration with adaptive PD disaggregation in one scheduler.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "migration",
+    "router",
+    "multi-replica",
+    "literature",
+    "phase-6"
+  ],
+  "title": "Migrate tokens or migrate KV \u2014 the two OSDI '24 answers, and what decides between them",
+  "transfer_checked": null,
+  "triggers": [
+    "Starting Phase 6 (session migration)",
+    "Choosing a venue: interconnect decides the answer"
+  ],
+  "updated_at": 1789599673.1591759,
+  "validity_range": {}
+}

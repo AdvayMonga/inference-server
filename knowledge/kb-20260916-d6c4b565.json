@@ -1,0 +1,39 @@
+{
+  "created_at": 1789599623.3943522,
+  "evidence": [
+    {
+      "url": "https://arxiv.org/html/2505.23072v1"
+    },
+    {
+      "url": "https://docs.nvidia.com/gpudirect-storage/best-practices-guide/index.html"
+    },
+    {
+      "url": "https://docs.nvidia.com/gpudirect-storage/overview-guide/index.html"
+    },
+    {
+      "url": "https://github.com/aws-samples/sample-fsx-lustre-gds-sharded-model-loading"
+    }
+  ],
+  "id": "kb-20260916-d6c4b565",
+  "mechanism": "nvidia-fs.ko is a host kernel module and GDS additionally wants IOMMU and PCIe ACS disabled, which are BIOS/host settings a tenant never controls; where it has been measured honestly it was not the bottleneck.",
+  "regime": "cold_start",
+  "status": "rejected",
+  "summary": "Do not spend GPU-hours on GPUDirect Storage.\n\n**Unavailable to us.** nvidia-fs.ko must be installed on the HOST and needs root; containers additionally need privileged:true plus host mounts of /sys, /lib/modules, /run/udev. NVIDIA's best-practices guide further requires **IOMMU disabled and PCIe ACS disabled** \u2014 the exact mechanisms hypervisors use for passthrough isolation. That is why GDS lives on bare metal. No serverless or rented-container GPU platform documents support for it.\n\n**And the upside is small.** The only rigorous GDS-on/GDS-off measurement found is the fastsafetensors paper: **26.4 GB/s with GDS vs 25.8 GB/s without \u2014 a 2.3% delta** \u2014 and on Bloom-176B across 8 GPUs GDS was *slower* (NUMA crossing). What GDS actually bought there was host memory, not bandwidth. The widely-quoted AWS 141x/169x figures are a pipeline result (GDS + pre-sharded TP checkpoints + FP8 replacing quantise-at-load) against a baseline the AWS sample repo itself concedes is stale.\n\n**Silent-failure hazard if anyone does try it:** cuFile compat mode falls back to POSIX pread/pwrite automatically on a missing module, a non-GDS filesystem, or when O_DIRECT cannot apply. Your code runs, results are correct, and GDS is simply not happening \u2014 exactly the class of bug LOOP.md exists to prevent. Assert you are not in compat mode before quoting a number.\n\nThe 4.8-7.5x that IS real lives in batched parallel deserialisation (fastsafetensors measured 6.02 GB/s vs 1.28 GB/s for mmap, GDS uninvolved), which needs no kernel module and works everywhere. See also [[our-cold-start-is-torch-compile-not-weight-loading]]: loader work attacks a term that is seconds for us.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "cold-start",
+    "storage",
+    "gds",
+    "rejected",
+    "venue"
+  ],
+  "title": "GPUDirect Storage is ruled out for rented GPUs, and buys ~2% anyway",
+  "transfer_checked": null,
+  "triggers": [
+    "Moving to bare metal we control, with a parallel filesystem (Lustre/WekaFS/VAST)",
+    "A measurement showing weight-load I/O on our critical path at all"
+  ],
+  "updated_at": 1789599623.394785,
+  "validity_range": {}
+}

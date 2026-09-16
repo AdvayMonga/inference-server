@@ -1,0 +1,41 @@
+{
+  "created_at": 1789599623.3943412,
+  "evidence": [
+    {
+      "url": "https://arxiv.org/abs/2604.06664"
+    },
+    {
+      "url": "https://arxiv.org/abs/2606.07362"
+    },
+    {
+      "url": "https://github.com/upb-cn/vllm-startup-profiler"
+    }
+  ],
+  "id": "kb-20260916-87c69eea",
+  "mechanism": "Dynamo re-specialises per decode-graph bucket, and the Inductor cache only covers codegen, so the dominant term is tracing \u2014 which no cache and no capture-order change can reach.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "The adaptive plan (notes/infserv/11-cold-start.md) asserts 'weight load dominates everything else; target it first, the rest is rounding', with a table putting graph capture at ~3s and weight load at 6-30s. **For this engine that is backwards, and our own measurements already said so.**\n\nOurs, on A100/E4B: the 8-bucket decode ladder at MAX_BATCH_SIZE=256 costs ~1288s descending / ~1348s ascending (kb-20260902-008), i.e. **~21 minutes of startup**, and with compile OFF the same ladder captures in **5.6s** \u2014 so 100% of it is torch.compile. A persistent Inductor cache recovers only **~19%** (705s -> 574s) because most of the cost is Dynamo tracing, not codegen (kb-20260901-010). E4B weights are ~15GB, seconds from local NVMe.\n\nThe 2026 literature agrees and generalises it. Foundry (arXiv 2604.06664, Apr 2026) states 'recent systems have reduced model weight loading to seconds, CUDA graph capture still takes tens of seconds to minutes and often dominates startup', and takes Qwen3-235B-A22B EP8 from ~650s to **3.9s** by persisting graph topology + execution context and materialising graphs from templates instead of recapturing (per-graph: stream capture 59.7-198.6ms vs template build 31.1-69.5ms vs on-demand param update 0.98-2.89ms). 'Breaking the Ice' (MLSys 2026, arXiv 2606.07362) decomposes vLLM startup into six steps and finds it predominantly CPU-bound, with 4x variance across nine vLLM versions in 18 months.\n\n**Consequence for the plan.** Cold-start effort should go at compile/graph-capture elimination, not at weight-load I/O. Loader work (fastsafetensors, Run:ai streamer, InstantTensor) is worth 4-32x on a term that is seconds for us; layer-streaming-with-overlap is measured at only 1.1-1.2x (ZeRO-Inference) on that same non-dominant term. We own models/gemma4.py, so a Foundry-style deterministic-layout + template approach is tractable here in a way it is not for a general engine.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "cold-start",
+    "compile",
+    "graph",
+    "capture",
+    "literature",
+    "plan"
+  ],
+  "title": "Our cold start is torch.compile, not weight loading \u2014 the plan's premise was wrong",
+  "transfer_checked": null,
+  "triggers": [
+    "A model whose weights are large enough that load time rivals compile (>100GB class)",
+    "Dropping torch.compile from the decode path entirely, which would collapse this cost",
+    "A measured component decomposition on our own engine that contradicts the above"
+  ],
+  "updated_at": 1789599623.394366,
+  "validity_range": {
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
+}
