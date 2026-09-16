@@ -185,6 +185,17 @@ async def test_stream_contains_ttft(client):
     assert "ttft_ms" in response.text
 
 
+@pytest.mark.asyncio
+async def test_trace_id_is_echoed(client):
+    """A client-supplied trace_id rides back in the SSE meta chunk and the JSON body."""
+    response = await client.post(
+        "/generate", json={"text": "Hi", "max_tokens": 2, "stream": True, "trace_id": "t-42"}
+    )
+    assert '"trace_id": "t-42"' in response.text
+    response = await client.post("/generate", json={"text": "Hi", "max_tokens": 2})
+    assert len(response.json()["trace_id"]) == 32     # generated when the client sends none
+
+
 # --- Concurrency tests ---
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -14,6 +15,7 @@ from inference_server.models.paged_kv_cache import KVCacheExhausted
 from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
+from inference_server.telemetry import RequestRecord, RowStore
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,13 @@ class ScheduledRequest:
     admit_ts: float = 0.0       # set when the scheduler picks it up — splits TTFT into
                                 # queue-wait (admit - enqueue) and prefill (first_token - admit)
     sampling: SamplingParams = field(default_factory=SamplingParams)
+    trace_id: str = ""          # per-request id, alongside session_id; generated when empty
+    turn_index: int = 0         # position within the session's conversation
+    record: RequestRecord | None = None  # telemetry row, set by scheduler at enqueue
+
+    def __post_init__(self):
+        if not self.trace_id:
+            self.trace_id = uuid.uuid4().hex
 
 
 class SchedulerInterface(ABC):
@@ -124,7 +133,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  prefill_chunk_size: int = 0,
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
-                 max_queue_wait_s: float = 30.0):
+                 max_queue_wait_s: float = 30.0,
+                 telemetry: RowStore | None = None):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -191,6 +201,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._active_sum = 0
         self._active_high_water = 0
         self._metrics = MetricsTracker()
+        # Per-request rows (off when None). Conditions are snapshotted in enqueue(); the row is
+        # completed on whichever terminal path the request takes. _session_load counts requests
+        # per session in pending+active so "concurrent sessions" is O(1) at arrival. It has its
+        # own lock: enqueue() mutates it under _pending_cv but _resolve() runs under the backend
+        # lock only, and an unlocked get+set from both threads loses updates permanently.
+        # Always innermost, so it cannot invert the backend._lock -> _pending_cv order.
+        self._telemetry = telemetry
+        self._start_ts = time.perf_counter()
+        self._session_load: dict[str, int] = {}
+        self._session_lock = threading.Lock()
 
     # --- Public interface ---
 
@@ -210,13 +230,21 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._pending_cv.notify_all()
         await asyncio.get_running_loop().run_in_executor(None, self._worker.join)
         self._worker = None
+        if self._telemetry is not None:
+            self._telemetry.close()
 
     def enqueue(self, request: ScheduledRequest) -> None:
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
         request.enqueue_ts = time.perf_counter()
         with self._pending_cv:
+            if self._telemetry is not None:
+                request.record = self._arrival_record(request)
+                with self._session_lock:
+                    self._session_load[request.session_id] = \
+                        self._session_load.get(request.session_id, 0) + 1
             if self._pending_count >= self.max_queue_size:
                 self._total_rejected += 1
+                self._finish_row(request, "rejected_429")
                 raise QueueFullError(
                     f"pending queue at capacity ({self.max_queue_size})"
                 )
@@ -268,6 +296,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_expired": self._total_expired,
             "max_queue_wait_s": self.max_queue_wait_s,
             "total_iteration_errors": self._total_iteration_errors,
+            "telemetry": (self._telemetry.stats() if self._telemetry is not None
+                          else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
             **self._metrics.snapshot(),
         }
 
@@ -406,7 +436,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self.policy.on_request_finished(req)
                 self._reject(req, QueueFullError(
                     f"queued {waited:.1f}s, over the {self.max_queue_wait_s:.0f}s admission "
-                    f"deadline — server overloaded"))
+                    f"deadline — server overloaded"), state="expired")
 
     def _admit_pending(self, device: str) -> None:
         cache = self.backend.cache_adapter
@@ -439,7 +469,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self.policy.on_request_finished(peeked)
                     self._reject(peeked, QueueFullError(
                         f"queued {waited:.1f}s, over the {self.max_queue_wait_s:.0f}s admission "
-                        f"deadline — server overloaded"))
+                        f"deadline — server overloaded"), state="expired")
                     continue
 
                 reservation = len(peeked.token_ids) + peeked.max_tokens
@@ -668,6 +698,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             return
         result = list(request.generated)
         self._total_completed += 1
+        self._finish_row(request, "ok")
         if request.first_token_ts > 0 and request.enqueue_ts > 0:
             now = time.perf_counter()
             ttft = request.first_token_ts - request.enqueue_ts
@@ -686,9 +717,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 request.future.set_result(result)
         self._loop.call_soon_threadsafe(_set)
 
-    def _reject(self, request: ScheduledRequest, exc: BaseException) -> None:
+    def _reject(self, request: ScheduledRequest, exc: BaseException,
+                state: str | None = None) -> None:
         # QueueFullError = admission/queue reject; anything else = a failure (prefill error, crash).
-        self._metrics.record_rejection(failed=not isinstance(exc, QueueFullError))
+        backpressure = isinstance(exc, QueueFullError)
+        self._metrics.record_rejection(failed=not backpressure)
+        self._finish_row(request, state or ("rejected_429" if backpressure else "error"))
         if self._loop is None:
             return
         if request.token_queue is not None:
@@ -698,6 +732,45 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if not request.future.done():
                 request.future.set_exception(exc)
         self._loop.call_soon_threadsafe(_set)
+
+    # --- Telemetry rows ---
+
+    def _arrival_record(self, request: ScheduledRequest) -> RequestRecord:
+        """Conditions at arrival, read under the pending lock before any work happens."""
+        cache = self.backend.cache_adapter
+        free = cache.free_blocks if cache is not None else None
+        return RequestRecord(
+            trace_id=request.trace_id, session_id=request.session_id,
+            turn_index=request.turn_index, arrival_ts=time.time(),
+            pending_depth=self._pending_count,
+            active_size=len(self._active) + len(self._prefilling),
+            max_batch_size=self.max_batch_size,
+            kv_free_blocks=free,
+            kv_free_frac=(free / cache.total_blocks if free is not None and cache.total_blocks
+                          else None),
+            # Sessions with a request in flight; the arriving request is not counted yet, so a
+            # session's first turn sees only OTHER sessions.
+            concurrent_sessions=len(self._session_load),
+            prompt_tokens=len(request.token_ids),
+            replica_age_s=request.enqueue_ts - self._start_ts,
+        )
+
+    def _finish_row(self, request: ScheduledRequest, state: str) -> None:
+        """Complete the row and hand it to the store. Wall clock is honest at these boundaries:
+        every token is host-resident by the time the scheduler sees it, so nothing is in flight."""
+        rec = request.record
+        if rec is None:
+            return
+        with self._session_lock:
+            left = self._session_load.get(request.session_id, 0) - 1
+            if left > 0:
+                self._session_load[request.session_id] = left
+            else:
+                self._session_load.pop(request.session_id, None)
+        rec.finish(state, enqueue_ts=request.enqueue_ts, admit_ts=request.admit_ts,
+                   first_token_ts=request.first_token_ts, end_ts=time.perf_counter(),
+                   tokens_out=len(request.generated), cache_hit_tokens=request.cache_hit_tokens)
+        self._telemetry.put(rec)
 
     def _preempt_newest(self, exc: BaseException) -> None:
         """Evict the most recently admitted active row to relieve KV pressure."""
@@ -710,7 +783,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self.policy.on_request_finished(row.request)
         self._evict_row(idx, resolve=False)       # releases reservation AND frees paged blocks
         self._reject(row.request, QueueFullError(
-            f"preempted under KV pressure after {len(row.request.generated)} tokens"))
+            f"preempted under KV pressure after {len(row.request.generated)} tokens"),
+            state="preempted")
 
     def _fail_inflight(self, exc: BaseException) -> None:
         """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.

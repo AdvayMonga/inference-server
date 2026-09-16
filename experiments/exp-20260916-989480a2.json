@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "88dd7bb3aa672a275515c3e852c172c3ad79bd43"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "cb9ab5a8ea723c4e1986adaed828505270f2c0a7"
+    }
+  ],
+  "branch": "feat/per-request-telemetry",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "88dd7bb3aa672a275515c3e852c172c3ad79bd43",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260916-989480a2",
+  "no_behaviour_change": "observability only: per-request row emission off the scheduler's critical path; no scheduling, admission or numerics decision changes",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789531455.798121,
+  "verdict": "confirmed"
+}

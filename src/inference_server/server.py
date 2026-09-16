@@ -24,6 +24,7 @@ from inference_server.scheduler import (
 )
 from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.openai_shim import router as openai_router
+from inference_server.telemetry import RowStore
 from inference_server.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -40,6 +41,8 @@ class GenerateRequest(BaseModel):
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+    trace_id: str = ""      # client-supplied correlation id; generated when empty
+    turn_index: int = 0
 
 
 class GenerateResponse(BaseModel):
@@ -50,6 +53,7 @@ class GenerateResponse(BaseModel):
     total_ms: float
     prompt_tokens: int
     cache_hit_tokens: int
+    trace_id: str
 
 
 @asynccontextmanager
@@ -87,6 +91,7 @@ async def lifespan(app):
         wave_window_mult=settings.wave_window_mult,
         max_queue_wait_s=settings.max_queue_wait_s,
         policy=create_scheduling_policy(settings.scheduling_policy),
+        telemetry=RowStore(settings.telemetry_dir) if settings.telemetry_dir else None,
     )
     scheduler.start()
 
@@ -151,6 +156,7 @@ async def event_stream(
                     "ttft_ms": round(ttft, 1),
                     "prompt_tokens": prompt_token_count,
                     "cache_hit_tokens": req.cache_hit_tokens,
+                    "trace_id": req.trace_id,
                 }
                 yield f"data: {json.dumps(meta)}\n\n"
                 first = False
@@ -181,7 +187,7 @@ async def generate(request: GenerateRequest):
             token_ids=token_ids, max_tokens=request.max_tokens,
             session_id=request.session_id, future=loop.create_future(),
             token_queue=token_queue, priority=request.priority,
-            sampling=sampling,
+            sampling=sampling, trace_id=request.trace_id, turn_index=request.turn_index,
         )
         try:
             scheduler.enqueue(req)
@@ -197,6 +203,7 @@ async def generate(request: GenerateRequest):
         token_ids=token_ids, max_tokens=request.max_tokens,
         session_id=request.session_id, future=loop.create_future(),
         priority=request.priority, sampling=sampling,
+        trace_id=request.trace_id, turn_index=request.turn_index,
     )
     start_time = time.perf_counter()
     try:
@@ -214,6 +221,7 @@ async def generate(request: GenerateRequest):
         total_ms=total_time * 1000,
         prompt_tokens=len(token_ids),
         cache_hit_tokens=req.cache_hit_tokens,
+        trace_id=req.trace_id,
     )
 
 
