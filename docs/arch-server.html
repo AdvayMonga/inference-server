@@ -229,7 +229,7 @@
 </table>
 
 <h2 id="openai">OpenAI shim</h2>
-<p class="lead"><code>openai_shim.py</code>. A compatibility surface, not a public API contract.</p>
+<p class="lead"><code>openai_shim.py</code>. A compatibility surface, not a public API contract. Last updated 2026-09-16.</p>
 
 <table>
   <tr><th>Route</th><th>Shape</th><th>Who calls it</th></tr>
@@ -239,6 +239,14 @@
 </table>
 
 <p>Both POST routes build the same <code>ScheduledRequest</code> and go through the same scheduler as <code>/generate</code>. There is no second engine path, so a benchmark driven through the shim measures the engine and not the shim. Streaming chat emits a role delta first, then one content delta per token, then <code>finish_reason</code>, then a usage chunk, then <code>[DONE]</code>. <code>max_completion_tokens</code> wins over the deprecated <code>max_tokens</code> when both are sent.</p>
+
+<p><strong>Correlation headers (2026-09-16).</strong> Both POST routes read three optional request headers; the OpenAI body schema is untouched, so a client that sends none of them (Open WebUI, guidellm) sees exactly the old behaviour.</p>
+<table>
+  <tr><th>Header</th><th>Meaning</th></tr>
+  <tr><td><code>X-Session-Id</code></td><td>The engine session to run this request in; absent, the shim mints a fresh <code>bench-N</code> / <code>chat-N</code> id per call, so a multi-turn trace would never revisit a session.</td></tr>
+  <tr><td><code>X-Turn-Index</code></td><td>Integer position within that session's conversation (default 0); a non-integer is a 400.</td></tr>
+  <tr><td><code>X-Trace-Id</code></td><td>Per-request id carried onto <code>ScheduledRequest.trace_id</code>; absent, the engine mints one. Either way it is echoed back as the <code>X-Trace-Id</code> response header, streaming or not, so <code>replay_trace.py</code> can join its CSV row to the telemetry row.</td></tr>
+</table>
 
 <div class="callout">
   <strong>Why this matters for the vLLM head-to-head.</strong> A comparison needs one load generator hitting both servers. Without the shim ours speaks a bespoke API and vLLM speaks OpenAI, so the two sides run through different clients with different timing paths and the difference between them is not attributable to the engines. The shim collapses that to one client.
@@ -284,7 +292,7 @@
   <tr><td>Chat panel (2026-09-11)</td><td>Once <code>/v1/chat/completions</code> existed, the page was a second implementation of what the API already did. vLLM ships no UI for the same reason and delegates to Open WebUI.</td></tr>
 </table>
 
-<p>So: point Open WebUI or any OpenAI-compatible frontend at <code>/v1/chat/completions</code>, drive load with guidellm or vLLM's <code>benchmark_serving</code> through <code>/v1/completions</code>, and read aggregates in Grafana. <code>/generate</code> stays the native surface and still carries <code>session_id</code>, priority and per-request sampling that the shim does not expose.</p>
+<p>So: point Open WebUI or any OpenAI-compatible frontend at <code>/v1/chat/completions</code>, drive load with guidellm or vLLM's <code>benchmark_serving</code> through <code>/v1/completions</code>, and read aggregates in Grafana. <code>/generate</code> stays the native surface and still carries priority, which the shim does not expose.</p>
 
 <p class="footnote">See also: <a href="arch-scheduler.html">Scheduler</a> · <a href="arch-cache.html">KV Cache</a> · <a href="arch-backend.html">Backend</a></p>
 

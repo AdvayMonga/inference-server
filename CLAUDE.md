@@ -83,7 +83,7 @@ A production-grade, multi-user LLM inference engine built from scratch in Python
 
 **Engine-layer features (all in scope):** continuous batching, chunked prefill, paged KV cache with cross-session prefix sharing, fair scheduling + preemption hooks, backpressure under memory pressure, quantization / attention kernels / KV eviction policies.
 
-**Out of scope:** platform layer — model registry, LoRA hot-swap, multi-tenant auth/quotas, gateway features. Engine first; platform later. **Narrow exception:** `openai_shim.py` serves `/v1/completions`, `/v1/chat/completions` and `/v1/models`. It exists so one load generator can drive both us and vLLM in the head-to-head, and so Open WebUI can be the chat frontend instead of us maintaining one. Compatibility surface, not a public API: no auth, registry, tools, logprobs, or multimodal parts.
+**Out of scope:** platform layer — model registry, LoRA hot-swap, multi-tenant auth/quotas, gateway features. Engine first; platform later. **Narrow exception:** `openai_shim.py` serves `/v1/completions`, `/v1/chat/completions` and `/v1/models`. It exists so one load generator can drive both us and vLLM in the head-to-head, and so Open WebUI can be the chat frontend instead of us maintaining one. Compatibility surface, not a public API: no auth, registry, tools, logprobs, or multimodal parts. Accepts optional `X-Session-Id` / `X-Turn-Index` / `X-Trace-Id` headers for the harness (absent → auto ids) and echoes `X-Trace-Id`.
 
 **Primary metrics:** per-user p95 TTFT/TPOT under concurrent load, and throughput at a fixed tail-latency budget. Single-request latency is one point on the curve, not the goal.
 
