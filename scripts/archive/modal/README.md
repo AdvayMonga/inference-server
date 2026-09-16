@@ -1,6 +1,7 @@
 # Archived Modal instruments
 
-These 36 files are the instruments that produced this project's A100 and A10G evidence between
+These 36 files (35 `*_modal.py` instruments plus `modal_app.py`) produced this project's A100
+and A10G evidence between
 May and September 2026, plus `modal_app.py`, the one-container-per-GPU deployment they were
 written against. They ran on [Modal](https://modal.com) because free credits made it the cheapest
 way to reach a GPU. The credits ran out on 2026-09-07 and Modal is no longer the platform for

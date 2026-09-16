@@ -35,7 +35,7 @@ run. Everything else here runs locally.
 | `eviction_benchmark.py` / `fairness_benchmark.py` / `kv_pressure_benchmark.py` | CPU-runnable policy checks: LRU vs sink vs H2O, FCFS vs fair, backpressure |
 | `baseline_benchmark.py` | the original single-request baseline (kept for the record) |
 
-The ten A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
+The eleven A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
 `bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py`, `bench_chunked_prefill_modal.py`,
 `bench_decode_batch_modal.py`, `bench_decode_buckets_modal.py`, `bench_prefill_graph_modal.py`,
 `bench_prefill_compile_modal.py`, `bench_lm_head_slice_modal.py`, `bench_quant_modal.py`) moved
