@@ -21,6 +21,9 @@ from inference_server.research.venues import extract_payload
 
 REPO = Path(__file__).resolve().parents[1]
 GPU_TESTS = REPO / "scripts" / "gpu_tests"
+# The Modal wrappers were archived on 2026-09-16; checks.py stayed here, so the drift guard
+# below follows them to scripts/archive/modal/ rather than being dropped.
+MODAL_GATE_DIR = REPO / "scripts" / "archive" / "modal" / "gpu_tests"
 MODAL_GATE_SCRIPTS = ("test_paged_kernel_modal.py", "test_paged_prefill_kernel_modal.py")
 
 
@@ -79,7 +82,7 @@ def test_gate_emits_a_failing_verdict_the_venue_can_parse():
 def test_modal_gate_scripts_run_the_shared_checks():
     """AST-level, like test_kernel_source.py: the engine lane has no modal to import."""
     for f in MODAL_GATE_SCRIPTS:
-        tree = ast.parse((GPU_TESTS / f).read_text())
+        tree = ast.parse((MODAL_GATE_DIR / f).read_text())
         assert "checks" in _imported_modules(tree), f"{f} does not import checks"
         mounted = [
             a.value for n in ast.walk(tree)

@@ -77,7 +77,7 @@ policy store; nothing in the data plane ever calls a model for judgment.
 | **`telemetry.py`** | One SQLite row per request — conditions at arrival (queue depth, batch occupancy, free KV, replica age), spans, outcome — keyed by `trace_id` / `session_id` / `turn_index`. Off unless `TELEMETRY_DIR` is set; never on the scheduler thread. An aggregate cannot be re-sliced by the load it was measured under; rows can. |
 
 Everything is env-configured (`.env.example` lists every knob) and deploys as one container
-per GPU (`modal_app.py`).
+per GPU.
 
 ### 2. The improvement plane — `LOOP.md` + `src/inference_server/research/`
 
@@ -105,7 +105,7 @@ measure ──► attribute ──► hypothesize ──► screen ──► exp
 | Knowledge base | `knowledge/*.json` → `DECISIONS.md` | 69 entries tagged by regime and validity range; the `rejected` ones stop dead ends being re-tried |
 | Experiment ledger | `experiments/*.json` | what was measured at which SHA, and what the gates said |
 | Merge gate | `scripts/premerge_check.py` | an engine change with no green experiment record does not merge |
-| Venues | `research/venues.py` + `scripts/tools/run_on_runpod.py` | rent a GPU, run one instrument, bring the panel home, terminate — the same contract the Modal launcher gave us |
+| Venues | `research/venues.py` + `scripts/tools/run_on_runpod.py` | rent a GPU, run one instrument, bring the panel home, terminate — the same contract the archived Modal launcher gave us |
 
 ```bash
 python -m inference_server.research.loop attribute runs/<id>.json --out gaps.json
@@ -147,7 +147,8 @@ tests/                    517 tests; 483 run on CPU, 34 model-heavy ones opt in 
 docs/                     the GitHub Pages architecture map
 monitoring/               Prometheus + Grafana stack; the only aggregate view
 papers/                   reading notes on what this borrows from
-modal_app.py              one-container-per-GPU deployment
+scripts/archive/modal/    the instruments behind the 2026 A100/A10G evidence, and the
+                          one-container-per-GPU modal_app.py — kept as provenance, not run
 ```
 
 ---
@@ -199,11 +200,10 @@ Key knobs (all in `.env.example`): `BACKEND=custom-cuda` for the hand-written pa
 `SCHEDULING_POLICY=fcfs|fair`, `CUSTOM_BACKEND_COMPILE=1`, `TELEMETRY_DIR=runs/telemetry` for
 per-request rows.
 
-GPU work runs on rented hardware. The `*_modal.py` instruments launch through
-`scripts/run_instrument.sh` (`pip install -e ".[modal]"`); since the Modal credits ran out, any
-instrument also runs on a RunPod pod with `RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py
-<instrument>`, which rents, syncs, runs, parses the panel and terminates. Cheap tiers run locally
-first.
+GPU work runs on rented hardware: `RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py
+<instrument>` rents, syncs, runs, parses the panel and terminates. Cheap tiers run locally
+first. The older `*_modal.py` instruments are archived under `scripts/archive/modal/` and are
+not expected to run — see that folder's README.
 
 ---
 
@@ -236,8 +236,8 @@ versioned corpus with open-loop replay, and the trace-replay simulator — lande
 substrate, KV bytes per token, per-class SLOs, loop authority). The first GPU job is the
 simulator's hardware check: replay a corpus class with `TELEMETRY_DIR` set on a rented pod, fit
 the timing model from the rows, and rank-correlate a policy sweep against the same sweep in
-`loop simulate`. Modal credits are exhausted; GPU work goes to rented pods through
-`research/venues.py`.
+`loop simulate`. GPU work goes to rented pods through `research/venues.py`; Modal is gone
+(credits exhausted 2026-09-07, and the wrong platform for a cold-start thesis regardless).
 Out of scope by design: model registry, LoRA, multi-tenant auth, gateway features — the
 `session_id` threading and `InferenceBackend` / `SchedulerInterface` seams are there so a
 platform layer can be added without rewriting the engine.

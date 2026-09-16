@@ -31,7 +31,7 @@ smoke detector, not a door.
 |---|---|---|
 | `loop` | `research/`, `knowledge/`, `experiments/`, `tests/test_research_*` | the research package's own tests, plus a check that `DECISIONS.md` still matches `knowledge/`. Installs pytest and ruff and **nothing else**: if `research/` ever imports the engine, this lane goes red. That is the seam the whole project rests on. One sanctioned exception: `research/simulator.py` imports `inference_server.scheduling_policy`, stdlib-only pure functions the simulator must share with the scheduler or its conclusions drift. |
 | `engine` | everything else | ruff, the full fast suite, and `premerge_check.py`. CPU only — the model-heavy tests are deselected and no kernel runs. |
-| `gpu` | never automatically | the CUDA correctness gate on a rented GPU — RunPod first, Modal as fallback. Weekly, or dispatch it by hand. |
+| `gpu` | never automatically | the CUDA correctness gate on a rented RunPod GPU. Weekly, or dispatch it by hand. |
 
 Anything the classifier does not recognise routes to `engine`: safe, not fast. Markdown,
 `docs/` and `runs/` gate nothing.
@@ -46,15 +46,18 @@ warning when a PR touches it.
 
 The gate is `scripts/gpu_tests/cuda_gate.py`: every check in `scripts/gpu_tests/checks.py`
 (paged decode parity, sliding window, no-recompile, paged prefill parity) on one box, emitting
-a `{"gate": ...}` verdict and exiting by it. The `*_modal.py` scripts call the same checks.
+a `{"gate": ...}` verdict and exiting by it. The archived `*_modal.py` wrappers under
+`scripts/archive/modal/gpu_tests/` call the same checks; nothing runs them any more.
 
-**Venue, by which secret is set** (Settings → Secrets → Actions):
+**Venue** (Settings → Secrets → Actions):
 
 | secret | what happens |
 |---|---|
-| `RUNPOD_API_KEY` | `run_on_runpod.py` rents one pod (default `NVIDIA GeForce RTX 4090` — the gate needs no 80 GB), runs `cuda_gate.py`, terminates it, and exits with the verdict. Preferred. |
-| `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` only | the original path: `modal run` on each script in the `gpu_tests` input. Modal credits ran out on 2026-09-07, so this is a fallback. |
-| neither | on the weekly tick the lane says so and exits 0; dispatched by hand it fails. |
+| `RUNPOD_API_KEY` | `run_on_runpod.py` rents one pod (default `NVIDIA GeForce RTX 4090` — the gate needs no 80 GB), runs `cuda_gate.py`, terminates it, and exits with the verdict. |
+| unset | on the weekly tick the lane says so and exits 0; dispatched by hand it fails. |
+
+There is no second venue. The Modal fallback was removed on 2026-09-16 with the credits long
+gone; see `scripts/archive/modal/README.md`.
 
 A stuck run is bounded by the job's `timeout-minutes`, and because a killed runner never
 reaches `run_instrument`'s `finally`, a last step with `if: always()` runs
@@ -71,7 +74,6 @@ By hand, with a GPU type:
 
 ```bash
 gh workflow run ci.yml --ref main -f runpod_gpu='NVIDIA GeForce RTX 4090'
-gh workflow run ci.yml --ref main -f gpu_tests='scripts/gpu_tests/test_splitk_kernel_modal.py'  # Modal path only
 ```
 
 ## Evidence for an engine change

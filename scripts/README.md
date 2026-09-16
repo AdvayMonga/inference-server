@@ -5,9 +5,10 @@ nothing about these; the research loop (`src/inference_server/research/`) knows 
 contract they emit. Instruments write `runs/<id>.json` via `research.harness` alongside their
 human-readable tables.
 
-`*_modal.py` scripts run on a rented GPU through [Modal](https://modal.com); launch them with
-`run_instrument.sh` so the panel carries the right engine SHA and run group. Everything else
-runs locally.
+GPU work goes to a rented pod through `tools/run_on_runpod.py` (`research/venues.py`). The
+`*_modal.py` instruments that produced the 2026 A100/A10G evidence were archived on 2026-09-16
+under `archive/modal/` — kept as the provenance 13 `knowledge/` entries cite, not expected to
+run. Everything else here runs locally.
 
 | folder | what | LOOP.md tier |
 |---|---|---|
@@ -15,9 +16,10 @@ runs locally.
 | `probes/` | one-question diagnostics: where does the time go, is X even true | 3 (single-GPU probe) |
 | `gpu_tests/` | parity and correctness checks that need CUDA (kernels, graphs, compile) | correctness gate |
 | `tools/` | local smoke runs and one-shot migrations | — |
+| `archive/modal/` | the Modal instruments, kept for provenance (see its README); nothing calls them | — |
 | `hooks/` | git hooks: `pre-push` runs CI's lint+tests locally (`git config core.hooksPath scripts/hooks`) | — |
 | `premerge_check.py` | the merge gate: refuses an engine change with no green experiment record | step 7 |
-| `run_instrument.sh` | Modal launcher that stamps provenance (`RESEARCH_ENGINE_SHA`, `RESEARCH_RUN_GROUP`) | step 4 |
+| `run_instrument.sh` | the archived Modal launcher; stamps provenance (`RESEARCH_ENGINE_SHA`, `RESEARCH_RUN_GROUP`). Only `archive/modal/` targets it | step 4 |
 | `tools/run_on_runpod.py` | RunPod launcher: rent, sync, install, run, parse, terminate. Same provenance stamps | step 4 |
 | `tools/runpod_reap.py` | terminates pods named `inference-server-instrument` (optionally only those started after `--since`) — CI's `if: always()` cleanup for a runner killed mid-run | — |
 
@@ -28,20 +30,16 @@ runs locally.
 | `bench_serving.py` | open-loop client for `/v1/completions`: Poisson arrivals, realistic lengths, SLO-gated |
 | `replay_trace.py` | open-loop replay of one `corpus/` trace (class, split) on the harness's own clock; panel stamped with `corpus_version`, per-request CSV beside it |
 | `replay_corpus_runpod.py` | the first GPU job: serves the engine on the pod with `TELEMETRY_DIR` on, replays `(class, split, rate_scale)` via `replay_trace` in-process, returns panels + per-request rows + telemetry rows in one payload. Speaks the venue contract; see the timing-model recipe under tools/ |
-| `bench_serving_modal.py` | the primary SLO curve — `bench_serving.py` co-located with the engine on an A100 |
-| `bench_stress_modal.py` | overload and KV-pressure stress: does the engine degrade or break |
-| `bench_load_sweep_modal.py` | closed-loop concurrency sweep of our engine (+ an HF baseline arm) |
-| `bench_vllm_sweep_modal.py` | the vLLM arm of the head-to-head, same sweep |
-| `bench_chunked_prefill_modal.py` | chunked vs monolithic prefill: head-of-line stall on decoders |
-| `bench_decode_batch_modal.py` | full-batch decode: bandwidth-bound check + max-batch graph |
-| `bench_decode_buckets_modal.py` | bucketed decode CUDA graphs vs one max-batch graph |
-| `bench_prefill_graph_modal.py` / `bench_prefill_compile_modal.py` | K=1 prefill: graphed / compiled vs eager |
-| `bench_lm_head_slice_modal.py` | lm_head over every prefill position vs the last one only |
-| `bench_quant_modal.py` | int8 weight-only vs bf16 decode throughput |
 | `roofline.py` | analytical decode ceiling and per-step breakdown (attribution input) |
 | `load_test.py` / `plot_load_test.py` | HTTP concurrency sweep against a running server, and its plots |
 | `eviction_benchmark.py` / `fairness_benchmark.py` / `kv_pressure_benchmark.py` | CPU-runnable policy checks: LRU vs sink vs H2O, FCFS vs fair, backpressure |
 | `baseline_benchmark.py` | the original single-request baseline (kept for the record) |
+
+The eleven A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
+`bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py`, `bench_chunked_prefill_modal.py`,
+`bench_decode_batch_modal.py`, `bench_decode_buckets_modal.py`, `bench_prefill_graph_modal.py`,
+`bench_prefill_compile_modal.py`, `bench_lm_head_slice_modal.py`, `bench_quant_modal.py`) moved
+to `archive/modal/bench/`. `benchmarks/README.md` says which CSV each one produced.
 
 ## probes/
 
@@ -57,9 +55,10 @@ CPU-runnable parity tests live in `tests/`.
 
 `checks.py` holds the paged decode/prefill checks as plain functions; `cuda_gate.py` runs all
 of them on one box as a venue instrument (`{"gate": ...}` payload, exit status = verdict, no
-Vitals panel) and is what the CI `gpu` lane runs on RunPod. `test_paged_kernel_modal.py` and
-`test_paged_prefill_kernel_modal.py` call the same functions through Modal. With no CUDA the
-gate reports every check skipped and fails, so it can be dry-run locally:
+Vitals panel) and is what the CI `gpu` lane runs on RunPod. The archived
+`archive/modal/gpu_tests/test_paged_kernel_modal.py` and `..._prefill_kernel_modal.py` call the
+same functions; `tests/test_cuda_gate.py` still asserts they do, so a copy cannot drift in. With
+no CUDA the gate reports every check skipped and fails, so it can be dry-run locally:
 
 ```bash
 PYTHONPATH=src python scripts/gpu_tests/cuda_gate.py                                    # any CUDA box
@@ -71,6 +70,8 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py
 `smoke_custom.py`, `test_scheduler.py`, `test_batch_cache.py` are local end-to-end smoke runs.
 `build_corpus.py` generated the frozen traces in `corpus/` once, from a fixed seed; rerun it only to
 cut a new corpus version (see `corpus/README.md`).
+`migrate_modal_citations.py` re-pointed the 13 `knowledge/` entries that cite a `*_modal.py`
+instrument at `archive/modal/` when those scripts were archived (2026-09-16); it is idempotent.
 `migrate_decisions_to_kb.py` and `backfill_experiments.py` are the one-shot migrations that
 turned prose notes into `knowledge/` and `experiments/` records; `backfill_kb_regime.py` stamped
 `regime` and `validity_range` onto the entries that predate those fields (2026-09-16), and its

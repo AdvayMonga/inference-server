@@ -2,7 +2,7 @@
   "created_at": 1788629508.8592808,
   "evidence": [
     {
-      "script": "scripts/gpu_tests/test_tiled_prefill_modal.py"
+      "script": "scripts/archive/modal/gpu_tests/test_tiled_prefill_modal.py"
     },
     {
       "run_group": "iter3-tiled-prefill / iter3-ab / iter3-ab2 / iter3-ab3"
@@ -28,7 +28,7 @@
     "an A/B that toggles tiling at CAPTURE time, not after, shows an end-to-end win",
     "the D=512 register spill is solved (e.g. splitting D)"
   ],
-  "updated_at": 1789565416.318701,
+  "updated_at": 1789600379.796814,
   "validity_range": {
     "hardware": "A100-80GB",
     "model": "gemma-4-e4b",

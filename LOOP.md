@@ -115,22 +115,23 @@ until there is GPU budget. v1 does not model preemption or chunked prefill.
 
 ### Where a run actually happens
 
-`scripts/tools/run_on_runpod.py` runs one instrument on a rented pod through `research/venues.py`;
-`scripts/run_instrument.sh` is the Modal launcher. The contract both implement is the one Modal
-already gave us, because it is what made the instruments writable:
+`scripts/tools/run_on_runpod.py` runs one instrument on a rented pod through `research/venues.py`.
+That is the only live venue. The contract it implements is the one the Modal launcher gave us,
+because it is what made the instruments writable:
 
     ship the tree -> run one python file on a GPU -> get a JSON payload back -> keep no machine
 
-Modal builds an image and pickles the return value. A rented RunPod pod rsyncs the working tree
-and prints the payload between `<<<RESEARCH_PANEL_JSON` markers, which the launcher parses. The
-instrument does not know which venue it got.
+A rented RunPod pod rsyncs the working tree and prints the payload between
+`<<<RESEARCH_PANEL_JSON` markers, which the launcher parses. The instrument does not know which
+venue it got — which is why the archived Modal instruments (`scripts/archive/modal/`, kept as
+provenance, not expected to run) needed no rewriting when the venue changed.
 
 Two rules this code exists to enforce:
 
-- **Give the machine back.** A Modal function is billed while it runs. A pod is billed until it
-  is TERMINATED, so teardown sits in a `finally` on every path, including the ones that raise,
-  and a teardown that itself fails logs loudly rather than masking the real error. An orphaned
-  A100 is the only way the loop can lose real money.
+- **Give the machine back.** A pod is billed until it is TERMINATED, so teardown sits in a
+  `finally` on every path, including the ones that raise, and a teardown that itself fails logs
+  loudly rather than masking the real error. An orphaned A100 is the only way the loop can lose
+  real money.
 - **No payload is an error, not an empty result.** A run that prints no panel block fails loudly.
   The alternative is a silent empty result that reads as "no effect measured" and gets believed.
 
