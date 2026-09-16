@@ -82,6 +82,10 @@ class Validity:
     stderr: float | None = None       # of the panel's primary metric, when n_samples > 1
     concurrency_observed: int | None = None
     notes: str = ""
+    # Corpus provenance. None-default like Vitals' occupancy fields, so older panels still load
+    # and PANEL_VERSION does not move — an added field cannot change a measurement already taken.
+    corpus_version: str | None = None
+    workload_class: str | None = None
 
     REGIMES = ("cache_hit_heavy", "cache_miss_heavy", "mixed", "synthetic")
 
