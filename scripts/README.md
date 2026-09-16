@@ -19,6 +19,7 @@ runs locally.
 | `premerge_check.py` | the merge gate: refuses an engine change with no green experiment record | step 7 |
 | `run_instrument.sh` | Modal launcher that stamps provenance (`RESEARCH_ENGINE_SHA`, `RESEARCH_RUN_GROUP`) | step 4 |
 | `tools/run_on_runpod.py` | RunPod launcher: rent, sync, install, run, parse, terminate. Same provenance stamps | step 4 |
+| `tools/runpod_reap.py` | terminates pods named `inference-server-instrument` (optionally only those started after `--since`) — CI's `if: always()` cleanup for a runner killed mid-run | — |
 
 ## bench/
 
@@ -52,6 +53,17 @@ divergence. `repro_*` and `sweep_*` are what they say.
 Parity tests that only mean something on CUDA: paged decode/prefill kernels vs SDPA, split-K,
 tiled prefill, CUDA-graph and `torch.compile` output parity, E4B load, vLLM compatibility. The
 CPU-runnable parity tests live in `tests/`.
+
+`checks.py` holds the paged decode/prefill checks as plain functions; `cuda_gate.py` runs all
+of them on one box as a venue instrument (`{"gate": ...}` payload, exit status = verdict, no
+Vitals panel) and is what the CI `gpu` lane runs on RunPod. `test_paged_kernel_modal.py` and
+`test_paged_prefill_kernel_modal.py` call the same functions through Modal. With no CUDA the
+gate reports every check skipped and fails, so it can be dry-run locally:
+
+```bash
+PYTHONPATH=src python scripts/gpu_tests/cuda_gate.py                                    # any CUDA box
+RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py --gpu 'NVIDIA GeForce RTX 4090'
+```
 
 ## tools/
 
