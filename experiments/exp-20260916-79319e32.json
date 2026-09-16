@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "670ab76d92519a42b37fa27164efaa4a953231bf"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "4c1f7a6180aa829bddbdc2107ac58a739bd58ad7"
+    }
+  ],
+  "branch": "refactor/pure-scheduling-policy",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "670ab76d92519a42b37fa27164efaa4a953231bf",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260916-79319e32",
+  "no_behaviour_change": "refactor: scheduling decisions extracted into pure key/order functions; ordering, tie-breaks and VTC accounting unchanged; peek_next stays O(n) via min over the same key, peek_window unchanged O(n log n); verified by property tests against the previous class behaviour",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789534003.698813,
+  "verdict": "confirmed"
+}
