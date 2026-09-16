@@ -203,12 +203,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._metrics = MetricsTracker()
         # Per-request rows (off when None). Conditions are snapshotted in enqueue(); the row is
         # completed on whichever terminal path the request takes. _session_load counts requests
-        # per session in pending+active so "concurrent sessions" is O(1) at arrival; it is
-        # touched from both threads without a lock, so it is exact except for a one-off
-        # miscount under a bytecode-level race — tolerable for a conditions snapshot.
+        # per session in pending+active so "concurrent sessions" is O(1) at arrival. It has its
+        # own lock: enqueue() mutates it under _pending_cv but _resolve() runs under the backend
+        # lock only, and an unlocked get+set from both threads loses updates permanently.
+        # Always innermost, so it cannot invert the backend._lock -> _pending_cv order.
         self._telemetry = telemetry
         self._start_ts = time.perf_counter()
         self._session_load: dict[str, int] = {}
+        self._session_lock = threading.Lock()
 
     # --- Public interface ---
 
@@ -237,8 +239,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         with self._pending_cv:
             if self._telemetry is not None:
                 request.record = self._arrival_record(request)
-                self._session_load[request.session_id] = \
-                    self._session_load.get(request.session_id, 0) + 1
+                with self._session_lock:
+                    self._session_load[request.session_id] = \
+                        self._session_load.get(request.session_id, 0) + 1
             if self._pending_count >= self.max_queue_size:
                 self._total_rejected += 1
                 self._finish_row(request, "rejected_429")
@@ -745,6 +748,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             kv_free_blocks=free,
             kv_free_frac=(free / cache.total_blocks if free is not None and cache.total_blocks
                           else None),
+            # Sessions with a request in flight; the arriving request is not counted yet, so a
+            # session's first turn sees only OTHER sessions.
             concurrent_sessions=len(self._session_load),
             prompt_tokens=len(request.token_ids),
             replica_age_s=request.enqueue_ts - self._start_ts,
@@ -756,11 +761,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
         rec = request.record
         if rec is None:
             return
-        left = self._session_load.get(request.session_id, 0) - 1
-        if left > 0:
-            self._session_load[request.session_id] = left
-        else:
-            self._session_load.pop(request.session_id, None)
+        with self._session_lock:
+            left = self._session_load.get(request.session_id, 0) - 1
+            if left > 0:
+                self._session_load[request.session_id] = left
+            else:
+                self._session_load.pop(request.session_id, None)
         rec.finish(state, enqueue_ts=request.enqueue_ts, admit_ts=request.admit_ts,
                    first_token_ts=request.first_token_ts, end_ts=time.perf_counter(),
                    tokens_out=len(request.generated), cache_hit_tokens=request.cache_hit_tokens)

@@ -197,6 +197,19 @@ def test_full_queue_drops_and_counts_instead_of_blocking(tmp_path):
         store.close()
 
 
+def test_bad_batch_is_dropped_and_the_writer_keeps_going(tmp_path, caplog):
+    store = RowStore(tmp_path)
+    store._q.put_nowait(object())          # not a record: the batch cannot be written
+    for _ in range(200):
+        if store.rows_dropped:
+            break
+        time.sleep(0.005)
+    assert store.rows_dropped == 1 and "telemetry write failed" in caplog.text
+    assert store._thread.is_alive(), "the writer survived the bad batch"
+    store.put(_record(trace_id="after"))
+    assert [r["trace_id"] for r in _rows(store)] == ["after"]
+
+
 def test_off_by_default_writes_nothing(tmp_path, monkeypatch):
     from inference_server.config import Settings, load_settings
     monkeypatch.delenv("TELEMETRY_DIR", raising=False)

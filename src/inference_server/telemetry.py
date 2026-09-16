@@ -7,6 +7,7 @@ it ended. Off unless TELEMETRY_DIR is set; writes never touch the scheduler thre
 
 from __future__ import annotations
 
+import logging
 import queue
 import sqlite3
 import threading
@@ -14,6 +15,8 @@ import time
 import uuid
 from dataclasses import dataclass, fields
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_STATES = ("ok", "rejected_429", "expired", "preempted", "error")
 
@@ -114,6 +117,7 @@ class RowStore:
         conn = sqlite3.connect(self.path)   # sqlite3 connections are thread-bound: open it here
         conn.execute(f"CREATE TABLE IF NOT EXISTS requests ({_SCHEMA})")
         insert = f"INSERT INTO requests VALUES ({', '.join('?' * len(_COLUMNS))})"
+        failed_before = False
         try:
             while True:
                 batch = [self._q.get()]
@@ -122,12 +126,20 @@ class RowStore:
                         batch.append(self._q.get_nowait())
                     except queue.Empty:
                         break
-                rows = [tuple(getattr(r, c) for c in _COLUMNS)
-                        for r in batch if r is not self._STOP]
-                if rows:
-                    conn.executemany(insert, rows)
-                    conn.commit()
-                    self.rows_written += len(rows)
+                items = [r for r in batch if r is not self._STOP]
+                # A bad batch must not kill the writer: log once, count it, keep draining.
+                try:
+                    if items:
+                        conn.executemany(insert, [tuple(getattr(r, c) for c in _COLUMNS)
+                                                  for r in items])
+                        conn.commit()
+                        self.rows_written += len(items)
+                except Exception:
+                    self.rows_dropped += len(items)
+                    if not failed_before:
+                        failed_before = True
+                        logger.exception("telemetry write failed for %s; dropping batches",
+                                         self.path)
                 if any(r is self._STOP for r in batch):
                     return
         finally:
