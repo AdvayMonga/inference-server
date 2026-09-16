@@ -10,7 +10,16 @@ the client's own clock regardless of what the server is doing — open loop, nev
 
 **A class** (`manifest.json` → `classes`) is a name, an SLO (`slo_ttft_ms`, optional
 `slo_tpot_ms`), a nominal arrival rate, and two traces: `seen`, which the loop optimises against,
-and `heldout`, on which a confirmed win must replicate before merge. Their prompts are disjoint.
+and `heldout`, on which a confirmed win must replicate before merge. Every full prompt string and
+session id is disjoint between the splits, but both draw base content from the same small
+`prompt_bank.py` (long_context has two base documents), so what differs today is the unique
+per-request preamble plus the arrival schedule and lengths. Expanding the bank is the real fix,
+and is a new corpus version.
+
+`session_id` / `turn_index` are corpus structure, not wire fields: `replay_trace.py` posts to
+`/v1/completions`, whose shim mints its own session id, so a second turn is simulated by
+concatenating the follow-up onto the first turn's prompt. `sampling` is likewise fixed at
+temperature 0 by the client; `top_p` / `top_k` are recorded but not yet sent.
 
 | class | shape | placeholder SLO |
 |---|---|---|
@@ -22,11 +31,12 @@ SLO numbers are placeholders pending the plan's Phase 0 decision (recorded in `m
 
 ## The rule
 
-`corpus_version` is a sha256 over every trace's hash. `load_manifest()` re-hashes each file and
-refuses the corpus on any mismatch, and `compare.py` refuses two panels whose versions differ.
-So: **never edit a trace in place.** Any change — a prompt, an arrival, a new class — is a rebuild
-that produces a new version, and every panel measured against the old version stops being
-comparable to the new ones. That is the point.
+`corpus_version` is a sha256 over every trace's hash and the class table (SLOs, rates, paths).
+`load_manifest()` re-hashes each file and refuses the corpus on any mismatch, and `compare.py`
+refuses two panels whose versions differ. So: **never edit a trace or an SLO in place.** Any
+change — a prompt, an arrival, a new class, the placeholder SLOs being decided — is a rebuild that
+produces a new version, and every panel measured against the old version stops being comparable
+to the new ones. That is the point.
 
 ## Adding or changing a class
 

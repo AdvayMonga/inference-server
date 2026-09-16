@@ -18,6 +18,7 @@ from inference_server.research.corpus import (
     CorpusError,
     TraceRequest,
     WorkloadClass,
+    corpus_version,
     load_manifest,
     load_trace,
     read_trace,
@@ -98,6 +99,21 @@ def test_manifest_version_must_match_its_hashes(tmp_path):
     mp.write_text(json.dumps(d))
     with pytest.raises(CorpusError, match="corpus_version"):
         load_manifest(tmp_path)
+
+
+def test_changed_class_slo_is_a_new_version(tmp_path):
+    """The placeholder SLOs will be decided later; that decision must move the version, or
+    pre- and post-SLO panels would compare as equals."""
+    m = bc.build_corpus(tmp_path)
+    mp = tmp_path / "manifest.json"
+    d = json.loads(mp.read_text())
+    d["classes"]["steady_interactive"]["slo_ttft_ms"] = 150.0
+    mp.write_text(json.dumps(d))
+    with pytest.raises(CorpusError, match="class table"):
+        load_manifest(tmp_path)
+    tweaked = {k: WorkloadClass(**v) for k, v in d["classes"].items()}
+    assert corpus_version(m.files, tweaked) != m.corpus_version
+    assert corpus_version(m.files, m.classes) == m.corpus_version
 
 
 def test_missing_trace_is_refused(tmp_path):

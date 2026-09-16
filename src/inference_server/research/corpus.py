@@ -93,10 +93,12 @@ def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def corpus_version(files: dict[str, str]) -> str:
-    """One hash over the sorted (path, sha256) pairs; any byte of any trace moves it."""
-    lines = "\n".join(f"{p} {h}" for p, h in sorted(files.items()))
-    return hashlib.sha256(lines.encode()).hexdigest()
+def corpus_version(files: dict[str, str], classes: dict[str, WorkloadClass]) -> str:
+    """One hash over the sorted (path, sha256) pairs AND the class table, so a changed SLO or
+    rate moves the version as surely as a changed trace byte does."""
+    lines = [f"{p} {h}" for p, h in sorted(files.items())]
+    lines += [json.dumps(asdict(c), sort_keys=True) for _, c in sorted(classes.items())]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
 def write_trace(path: Path, requests: list[TraceRequest]) -> None:
@@ -118,7 +120,8 @@ def build_manifest(classes: dict[str, WorkloadClass], corpus_dir: Path, notes: s
         for split in SPLITS:
             rel = c.trace_file(split)
             files[rel] = file_sha256(corpus_dir / rel)
-    return Manifest(schema_version=CORPUS_SCHEMA_VERSION, corpus_version=corpus_version(files),
+    return Manifest(schema_version=CORPUS_SCHEMA_VERSION,
+                    corpus_version=corpus_version(files, classes),
                     classes=classes, files=files, notes=notes)
 
 
@@ -135,8 +138,9 @@ def load_manifest(corpus_dir: Path = CORPUS_DIR) -> Manifest:
         if actual != expected:
             raise CorpusError(f"trace {rel} sha256 {actual[:12]} != manifest {expected[:12]}: a "
                               f"changed trace is a new corpus version, rebuild the manifest")
-    if corpus_version(m.files) != m.corpus_version:
-        raise CorpusError("manifest corpus_version does not match its own file hashes")
+    if corpus_version(m.files, m.classes) != m.corpus_version:
+        raise CorpusError("manifest corpus_version does not match its own file hashes and "
+                          "class table: a changed SLO or rate is a new corpus version too")
     for c in m.classes.values():
         for split in SPLITS:
             if c.trace_file(split) not in m.files:

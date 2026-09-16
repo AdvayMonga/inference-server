@@ -83,11 +83,14 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
                      rate_scale: float = 1.0, drain_timeout_s: float = 300.0) -> ReplayResult:
     """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight."""
     res = ReplayResult()
-    tasks: list[asyncio.Task] = []
+    tasks: list[tuple[asyncio.Task, int, TraceRequest]] = []
+    fired_at: dict[int, float] = {}
     t0 = time.perf_counter()
 
     async def fire(i: int, req: TraceRequest) -> None:
-        fired = time.perf_counter() - t0
+        fired = fired_at[i] = time.perf_counter() - t0
+        # Sampling: one_request posts temperature 0 and the shim's default top_p/top_k, which
+        # is what every trace carries; req.sampling is not yet threaded through.
         s = await one_request(client, req.prompt, req.max_tokens)
         res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s, round(fired, 4),
                             round(s.ttft_s * 1000, 2) if s.error is None else None,
@@ -98,9 +101,18 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
         delay = t0 + req.arrival_s / rate_scale - time.perf_counter()
         if delay > 0:
             await asyncio.sleep(delay)          # the schedule, never a completion, gates this
-        tasks.append(asyncio.create_task(fire(i, req)))
+        tasks.append((asyncio.create_task(fire(i, req)), i, req))
     if tasks:
-        await asyncio.wait(tasks, timeout=drain_timeout_s)
+        await asyncio.wait([t for t, _, _ in tasks], timeout=drain_timeout_s)
+    # A request still open when the drain ends is a failure, not a request that never
+    # happened: dropping it would inflate n_ok exactly under the overload this measures.
+    late = [(t, i, req) for t, i, req in tasks if not t.done()]
+    for t, i, req in late:
+        t.cancel()
+        res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s,
+                            round(fired_at[i], 4), None, None, 0, "drain_timeout"))
+    if late:
+        await asyncio.gather(*(t for t, _, _ in late), return_exceptions=True)
     res.wall_s = time.perf_counter() - t0
     res.rows.sort(key=lambda r: r.index)
     return res
@@ -164,6 +176,9 @@ async def main() -> int:
     ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--rate-scale", type=float, default=1.0,
                     help="divide every arrival offset by this; 2.0 replays twice as fast")
+    ap.add_argument("--drain-timeout-s", type=float, default=300.0,
+                    help="after the last arrival, wait this long; still-open requests count as "
+                         "errors (drain_timeout)")
     ap.add_argument("--runs-dir", default=None)
     args = ap.parse_args()
 
@@ -174,7 +189,8 @@ async def main() -> int:
           f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url} --")
     async with httpx.AsyncClient(base_url=args.base_url,
                                  limits=httpx.Limits(max_connections=1024)) as client:
-        res = await run_replay(client, trace, rate_scale=args.rate_scale)
+        res = await run_replay(client, trace, rate_scale=args.rate_scale,
+                               drain_timeout_s=args.drain_timeout_s)
         sched = await fetch_stats(client, "/scheduler/stats")
         cache = await fetch_stats(client, "/cache/stats")
 

@@ -8,8 +8,11 @@ panel measured against the old one stops being comparable. Do not hand-edit a tr
 
 Arrivals are Poisson; prompts come from scripts/bench/prompt_bank.py with a unique per-request
 preamble so the PrefixCache miss path is exercised (what load_test.py --workload realistic does).
-Some sessions get a second turn whose prompt extends the first, so turn_index > 0 is the one
-place a prefix hit is legitimately available.
+Seen and held-out differ in every full prompt string, but they draw from the same small bank, so
+base content recurs across splits (long_context has two base documents); a larger bank is the
+real fix and is a new corpus version. Some sessions get a second turn whose prompt extends the
+first, so turn_index > 0 is the one place a prefix hit is legitimately available. Multi-turn is
+simulated by prompt concatenation: the replayer does not send session_id, the shim mints its own.
 """
 
 from __future__ import annotations
@@ -110,7 +113,10 @@ def build_trace(spec: ClassSpec, seed: int) -> list[TraceRequest]:
 
 
 def build_corpus(out: Path, seed: int = DEFAULT_SEED) -> Manifest:
-    """Write every (class, split) trace and the manifest. Split k of class c uses its own seed."""
+    """Write every (class, split) trace and the manifest. Split k of class c uses its own seed.
+
+    The per-class seed is seed + 100 * position in _specs(): reordering or inserting a class
+    changes every later class's trace, which is a new corpus version (as it should be)."""
     specs = _specs()
     for ci, spec in enumerate(specs):
         for si, split in enumerate(SPLITS):

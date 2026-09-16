@@ -85,6 +85,43 @@ def test_arrivals_follow_the_trace_clock_not_the_server():
     assert res.wall_s > 0.4                                 # drain is in the window
 
 
+def test_request_still_open_at_drain_timeout_counts_as_an_error():
+    """Dropping it would inflate n_ok exactly under the overload the replay exists to measure."""
+    app = _app(ttft_s=0.01)
+    stuck = asyncio.Event()
+
+    @app.post("/v1/stuck")
+    async def never():
+        await stuck.wait()
+
+    calls = {"n": 0}
+    real = rt.one_request
+
+    async def one_stuck(client, prompt, max_tokens):
+        calls["n"] += 1
+        if calls["n"] == 2:                     # the second arrival never gets a token
+            await client.post("/v1/stuck")
+        return await real(client, prompt, max_tokens)
+
+    async def go():
+        rt.one_request = one_stuck
+        try:
+            async with await _client(app) as client:
+                return await rt.run_replay(client, _trace(3, 0.01), drain_timeout_s=0.3)
+        finally:
+            rt.one_request = real
+            stuck.set()
+
+    res = asyncio.run(go())
+    assert [r.index for r in res.rows] == [0, 1, 2]
+    late = res.rows[1]
+    assert late.error == "drain_timeout" and late.ttft_ms is None and late.out_tokens == 0
+    assert abs(late.fired_s - 0.01) < 0.04
+    s = res.summary(CLS)
+    assert s["n_ok"] == 2 and s["n_err"] == 1
+    assert 0.3 < res.wall_s < 1.0
+
+
 def test_rate_scale_compresses_the_schedule():
     async def go():
         async with await _client(_app()) as client:
