@@ -232,12 +232,14 @@ there a graph processes its whole bucket and padding is pure waste. Do not "unif
 
 Deliberately not doing this yet; each carries the trigger that would change that.
 
-### [2026-09-16] CUDA-event device spans for kernel-level attribution: not implemented
+### [2026-09-16] Telemetry rows v1: CUDA-event device spans and the per-step/per-block detail not implemented
 *tags: `observability`, `attribution`, `kernel`* · `kb-20260915-2c4513a1`
 
 Per-request telemetry (`telemetry.py`, 2026-09-15) times its spans with `perf_counter` at scheduler boundaries only — enqueue, admit, first token, end. That is honest there because every token is host-resident by the time the scheduler reads it (the batched D2H copy in `_decode_step` has already synchronised), so nothing asynchronous is in flight at the boundary. It says nothing about WHERE inside a step the time went (attention vs MLP vs sampling), and a `perf_counter` around a kernel launch would measure the launch, not the work. Device spans need CUDA events with explicit, recorded synchronisation points, and per notes/infserv/02-telemetry.md they belong to a profiler trigger fired by an anomaly or by a hypothesis that names a kernel — never always-on, or the instrument becomes the thing measured. The rows are the always-on layer; the profiler is the escalation.
 
-**Revisit when:** a hypothesis names a specific kernel and the scheduler-boundary spans cannot separate it; the anomaly trigger (baseline band from the noise-floor procedure) exists and needs a profiler to escalate to
+Also deliberately absent from v1, against the same note's full list: prefix-cache state at arrival as a *condition* (hit length in blocks, matched node depth — today only the post-hoc `cache_hit_tokens` after lookup); blocks allocated / freed / evicted per request; KV high-water during the request; CUDA-graph hit or miss by bucket; preemptions *caused* vs suffered (only suffered is recorded); a detokenize span; per-chunk prefill spans. The narrowing is on purpose: every one of those needs either a backend hook or a timestamp per decode step on the hot path, and v1 keeps the per-request cost to one snapshot at enqueue and one fill at the terminal boundary, held under 200us by `tests/test_telemetry.py`.
+
+**Revisit when:** a hypothesis names a specific kernel and the scheduler-boundary spans cannot separate it; the anomaly trigger (baseline band from the noise-floor procedure) exists and needs a profiler to escalate to; an attribution question needs a condition or counter from the absent list above (e.g. was the cache hit *at arrival*, how many blocks did this request churn)
 
 ### [2026-05-18] vLLM head-to-head — use Modal `stopwatch` / `guidellm`
 *tags: `benchmark`, `modal`* · `kb-20260518-042`
