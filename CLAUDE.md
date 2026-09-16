@@ -54,7 +54,7 @@ python scripts/bench/replay_trace.py --class steady_interactive --split seen --b
 RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py --gpu '...'  # rent a GPU, run one instrument, terminate
 ```
 
-- **Workload corpus (2026-09-15):** `corpus/` holds frozen traces for three classes (`cold_start`,
+- **Workload corpus (2026-09-16):** `corpus/` holds frozen traces for three classes (`cold_start`,
   `steady_interactive`, `long_context`), each split `seen` / `heldout`, hashed into a
   `corpus_version` that `replay_trace.py` stamps on every panel and `compare.py` refuses to
   compare across. Optimise against `seen`; a win must replicate on `heldout`. A changed trace
@@ -204,7 +204,7 @@ Cheap, and everything downstream depends on it.
 - **SLO ceiling per workload class.** `corpus/manifest.json` holds placeholders.
 - **Loop authority in the adaptive phase:** policy-only, or code too.
 
-### Phase 1 — per-request telemetry ✅ (PR #18, 2026-09-15)
+### Phase 1 — per-request telemetry ✅ (PR #18, 2026-09-16)
 
 - ✅ `telemetry.py`: one row per request — conditions at arrival snapshotted in `enqueue()` before any work (so a 429 still records the load it saw), spans from the scheduler timestamps, outcome on every terminal path. `trace_id` / `turn_index` on `ScheduledRequest`, echoed by `/generate` and the shim. SQLite, one file per run under `TELEMETRY_DIR`, written off the scheduler thread; `tests/test_telemetry.py` holds per-request cost under 200 µs.
 - ⏸ **Deferred** (`kb-20260915-2c4513a1`): CUDA-event device spans; prefix-cache state *at arrival* (only post-hoc `cache_hit_tokens` today); block alloc/free/evict counters; KV high-water; CUDA-graph hit/miss by bucket; preemptions caused vs suffered; detokenize and per-chunk prefill spans. `config_id` is None until a policy registry exists (Phase 7).
@@ -249,6 +249,6 @@ Blue-green reconfiguration with cross-config migration · disaggregated prefill/
 
 ## Current Status
 
-**Built:** Phases 1–3 (PRs #17–#23, merged 2026-09-15/16). 517 tests; 483 run on CPU, 34 model-heavy ones opt in with `-m heavy`. `knowledge/` holds 69 entries.
+**Built:** Phases 1–3 (PRs #17–#23, merged 2026-09-16). 517 tests; 483 run on CPU, 34 model-heavy ones opt in with `-m heavy`. `knowledge/` holds 69 entries.
 **Next:** Phase 4, gated on the Phase 0 decisions. The first GPU job is the simulator's hardware check: run the engine with `TELEMETRY_DIR` set on a rented pod (`scripts/tools/run_on_runpod.py`, needs `RUNPOD_API_KEY`; smoke the venue first with `scripts/tools/venue_smoke.py`), replay a corpus class with `scripts/bench/replay_trace.py`, `fit_timing_model` on the telemetry rows, then a policy sweep in `loop simulate` vs the same sweep on hardware → `rank_correlation`, filed in `knowledge/`.
 **GPU budget:** Modal credits ran out on 2026-09-07. The `*_modal.py` instruments and `run_instrument.sh` still exist; new GPU work runs cheap tiers locally first and only then on a rented pod through `research/venues.py`.

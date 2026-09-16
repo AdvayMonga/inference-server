@@ -231,7 +231,7 @@ and when to dispatch the GPU lane — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 ## Status
 
 Gemma 4 E2B / E4B, PyTorch, single GPU. Phases 1–3 of the plan — per-request telemetry, the
-versioned corpus with open-loop replay, and the trace-replay simulator — landed 2026-09-15/16
+versioned corpus with open-loop replay, and the trace-replay simulator — landed 2026-09-16
 (PRs #17–#23). Next is Phase 4, cold start, gated on the Phase 0 decisions (model size,
 substrate, KV bytes per token, per-class SLOs, loop authority). The first GPU job is the
 simulator's hardware check: replay a corpus class with `TELEMETRY_DIR` set on a rented pod, fit
