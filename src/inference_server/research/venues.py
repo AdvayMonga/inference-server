@@ -20,6 +20,9 @@ What a rented pod costs that a managed platform did not:
   * A pod bills until it is TERMINATED, so every path out of `run_instrument` terminates,
     including the ones that raise. An orphaned A100 costs about $1.30/hour forever, which is
     the only way this module can lose real money.
+  * A pod is a container, so nothing here can lock the GPU's clocks — the nvidia-smi verbs that
+    do are root-only. `determinism.py` tries anyway, records the refusal, and reads the device
+    state either way; see `run_instrument` and knowledge/kb-20260916-e7ac1f60.
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+
+from inference_server.research import determinism
 
 API_BASE = "https://rest.runpod.io/v1"
 API_KEY_ENV = "RUNPOD_API_KEY"
@@ -113,6 +118,9 @@ class Pod:
     cost_per_hr: float = 0.0
     name: str = ""
     last_started_at: str | None = None          # ISO-8601 from the API; the reaper's clock
+    # The physical host behind the SKU label. Two "A100 80GB PCIe" rentals are two machines, and
+    # they measured 2.31x apart on identical config; without this the difference is unattributable.
+    machine_id: str | None = None
 
     @property
     def reachable(self) -> bool:
@@ -179,8 +187,12 @@ class RunPodClient:
                     ssh_port = int(got)
         if isinstance(d.get("portMappings"), dict):
             ssh_port = ssh_port or int(d["portMappings"].get("22") or 0) or None
+        # RunPod puts the host id at `machineId`; it has also nested it under `machine.id`.
+        machine = d.get("machine") if isinstance(d.get("machine"), dict) else {}
+        host_id = d.get("machineId") or machine.get("id") or machine.get("podHostId")
         return Pod(id=d["id"], host=d.get("publicIp") or None, port=ssh_port,
-                   cost_per_hr=_cost(d.get("costPerHr")))
+                   cost_per_hr=_cost(d.get("costPerHr")),
+                   machine_id=str(host_id) if host_id else None)
 
     def terminate(self, pod_id: str) -> None:
         self._call("DELETE", f"/pods/{pod_id}")
@@ -227,6 +239,11 @@ class PodSpec:
     volume_gb: int = 100
     volume_mount_path: str = "/workspace"
     env: dict[str, str] = field(default_factory=dict)
+    # Try to pin the SM clock before measuring. Default True even though a container venue will
+    # always be refused: the attempt is what produces the recorded `clocks_locked=false`, and the
+    # day we rent a real VM the same code starts succeeding with no diff.
+    lock_clocks: bool = True
+    sm_clock_mhz: int | None = None     # None = the card's maximum supported SM clock
 
     def as_body(self) -> dict[str, Any]:
         return {
@@ -257,6 +274,17 @@ def _ssh_base(pod: Pod) -> list[str]:
     return ["ssh", "-p", str(pod.port), "-o", "StrictHostKeyChecking=no",
             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
             f"root@{pod.host}"]
+
+
+def remote_shell(pod: Pod, shell: Shell = _shell) -> Shell:
+    """A `Shell` that runs its argv on the pod instead of here.
+
+    `determinism.py` speaks plain argv and knows nothing about pods, which is what lets its
+    tests use a fake shell and what would let it run on a local box unchanged.
+    """
+    def run(cmd: list[str]) -> subprocess.CompletedProcess:
+        return shell(_ssh_base(pod) + [" ".join(shlex.quote(c) for c in cmd)])
+    return run
 
 
 def wait_until_ready(client: RunPodClient, pod_id: str, timeout_s: float = 300.0,
@@ -322,12 +350,42 @@ def run_remote(pod: Pod, script: str, env: dict[str, str], shell: Shell = _shell
     return r.stdout
 
 
+def _device_state_json(pod: Pod, spec: PodSpec, shell: Shell,
+                       log: Callable[[str], None]) -> str:
+    """Lock the clocks if we may, read the device either way, and hand it to the instrument.
+
+    Exported rather than re-queried on the instrument side for two reasons: the instrument would
+    otherwise have to know it is on a pod, and the lock attempt happens exactly once, here, so
+    its outcome has one place to be recorded.
+    """
+    dev = remote_shell(pod, shell)
+    if spec.lock_clocks:
+        locked, why = determinism.lock_clocks(dev, spec.sm_clock_mhz)
+    else:
+        locked, why = False, "clock locking not requested for this run"
+    log(f"[venue] clocks {'LOCKED' if locked else 'NOT locked'}: {why}")
+
+    state = determinism.query_device(dev)
+    state.clocks_locked = locked
+    state.lock_error = None if locked else why
+    state.host_id = pod.machine_id
+    log(f"[venue] device {state.gpu_name or 'unknown'} host={state.host_id or 'unknown'} "
+        f"sm={state.sm_clock_mhz}/{state.max_sm_clock_mhz} MHz")
+    return json.dumps(state.to_dict(), separators=(",", ":"), sort_keys=True)
+
+
 def run_instrument(script: str, env: dict[str, str], *, repo: str,
                    spec: PodSpec | None = None, client: RunPodClient | None = None,
                    shell: Shell = _shell, log: Callable[[str], None] = print,
                    ready_timeout_s: float = 300.0, run_timeout_s: int = 3600,
                    sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
-    """Rent -> sync -> run -> parse -> terminate. The whole venue, one call.
+    """Rent -> sync -> lock clocks if we may -> run -> parse -> unlock -> terminate.
+
+    Between provisioning and the run it tries to pin the SM clock and then reads the device,
+    exporting the result as `RESEARCH_DEVICE_STATE` so the instrument stamps it into its panel
+    without querying again. The lock will be refused on any container venue (root-only verbs);
+    the refusal is recorded and the run proceeds, because an unlocked panel is still evidence —
+    it just may not be compared against a locked one.
 
     Terminate is in a `finally` and swallows its own errors: a failure to tear down must not mask
     the real exception, but it must also never be skipped. Nothing else in this repo can leave a
@@ -351,6 +409,7 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
         sync_repo(pod, repo, shell=shell)
         log("[venue] installing dependencies")
         provision(pod, shell=shell)
+        env = {**env, "RESEARCH_DEVICE_STATE": _device_state_json(pod, spec, shell, log)}
         try:
             out = run_remote(pod, script, env, shell=shell, timeout_s=run_timeout_s)
         except InstrumentFailed as e:
@@ -366,6 +425,8 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
             return extract_payload(e.stdout)
         return extract_payload(out)
     finally:
+        if spec.lock_clocks and pod.reachable:
+            determinism.unlock_clocks(remote_shell(pod, shell))
         try:
             client.terminate(pod.id)
             log(f"[venue] pod {pod.id} terminated")
