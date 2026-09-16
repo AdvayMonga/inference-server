@@ -27,6 +27,7 @@ runs locally.
 |---|---|
 | `bench_serving.py` | open-loop client for `/v1/completions`: Poisson arrivals, realistic lengths, SLO-gated |
 | `replay_trace.py` | open-loop replay of one `corpus/` trace (class, split) on the harness's own clock; panel stamped with `corpus_version`, per-request CSV beside it |
+| `replay_corpus_runpod.py` | the first GPU job: serves the engine on the pod with `TELEMETRY_DIR` on, replays `(class, split, rate_scale)` via `replay_trace` in-process, returns panels + per-request rows + telemetry rows in one payload. Speaks the venue contract; see the timing-model recipe under tools/ |
 | `bench_serving_modal.py` | the primary SLO curve — `bench_serving.py` co-located with the engine on an A100 |
 | `bench_stress_modal.py` | overload and KV-pressure stress: does the engine degrade or break |
 | `bench_load_sweep_modal.py` | closed-loop concurrency sweep of our engine (+ an HF baseline arm) |
@@ -74,6 +75,24 @@ cut a new corpus version (see `corpus/README.md`).
 turned prose notes into `knowledge/` and `experiments/` records; `backfill_kb_regime.py` stamped
 `regime` and `validity_range` onto the entries that predate those fields (2026-09-16), and its
 mapping table is the record of why each got what it got. All kept for provenance.
+
+`fit_timing_from_runs.py` turns a `replay_corpus_runpod.py` run group into the simulator's
+`TimingModel` (fit from the telemetry rows; mapping in its docstring) and, with `--validate`,
+reports the Spearman rank correlation of `ttft_p95` / `tpot_p50` between the hardware panels and
+the simulator over the same `(class, split, rate_scale)` configs — the check that makes tier 1
+trustworthy (notes 04-simulator.md). The whole recipe, in order:
+
+```bash
+# 1. rent + replay (~15-20 min on an A100 80GB PCIe incl. provisioning and the model download)
+RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/bench/replay_corpus_runpod.py
+#    -> runs/<run_id>.json per replay, runs/<run_group>/<class>-<split>-x<scale>.{rows,telemetry}.csv
+#    REPLAY_CLASSES / REPLAY_SPLITS / REPLAY_RATE_SCALES (default steady_interactive / seen / 1,2,4)
+# 2. fit, locally
+python scripts/tools/fit_timing_from_runs.py <run_group>
+#    -> knowledge/timing/<model>-<hardware>-<sha>.json
+# 3. validate: same configs through `research.simulator`, rank correlation vs hardware
+python scripts/tools/fit_timing_from_runs.py <run_group> --validate
+```
 
 `venue_smoke.py` is the first instrument that speaks the venue contract. It checks that the tree
 synced, that provisioning installed what the engine imports, that a GPU is really there and can
