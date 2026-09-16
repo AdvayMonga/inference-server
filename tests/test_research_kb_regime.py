@@ -8,6 +8,8 @@ and it must never answer "nearest".
 
 from __future__ import annotations
 
+import argparse
+
 import pytest
 
 from inference_server.research.kb import (
@@ -49,7 +51,20 @@ def test_fields_default_empty_so_old_entries_load():
     e = KnowledgeEntry(title="t", summary="s")
     e.validate()
     assert (e.regime, e.validity_range, e.mechanism, e.supersedes, e.transfer_checked) \
-        == (None, {}, "", None, None)
+        == (None, {}, None, None, None)
+
+
+def test_unknown_regime_rejected():
+    with pytest.raises(SchemaError, match="regime"):
+        _entry(regime="steady_interactve").validate()   # a typo must not make a new bucket
+    _entry(regime=None).validate()
+
+
+@pytest.mark.parametrize("bad", [{"a": {"lo": 1}}, {"a": []}, {"a": [1, [2]]}, {"a": None}])
+def test_malformed_validity_range_rejected(bad):
+    with pytest.raises(SchemaError, match="validity_range"):
+        _entry(validity_range=bad).validate()
+    _entry(validity_range={"hardware": ["A100", "H100"], "compile": True}).validate()
 
 
 def test_every_committed_entry_loads_and_validates_unchanged():
@@ -92,6 +107,14 @@ def test_covers_all_present_keys_must_hold():
 
 def test_covers_uncomparable_value_is_not_covered():
     assert not covers(_entry(), {"concurrency": "eight"})
+    assert not covers(_entry(), {"concurrency": True})    # bool is not a number here
+
+
+def test_covers_string_two_list_is_membership_not_range():
+    e = _entry(validity_range={"hardware": ["A100", "H100"]})
+    assert covers(e, {"hardware": "H100"})
+    assert not covers(e, {"hardware": "B100"})   # lexicographically between, still not measured
+    assert covers(_entry(validity_range={"model": ["E2B", "E4B", "E8B"]}), {"model": "E4B"})
 
 
 # ---------------------------------------------------------------- query + CLI
@@ -107,6 +130,23 @@ def test_parse_situation_types_and_shape():
     assert parse_situation("model=E4B,concurrency=8,ratio=0.5") \
         == {"model": "E4B", "concurrency": 8, "ratio": 0.5}
     assert parse_situation(None) == {} and parse_situation("") == {}
+    with pytest.raises(argparse.ArgumentTypeError):
+        parse_situation("model=E4B,concurrency")
+    with pytest.raises(SystemExit):
+        main(["kb", "--situation", "bare"])
+
+
+def test_cli_tags_unscoped_entries(tmp_path, monkeypatch, capsys):
+    save_entry(_entry(title="scoped"), tmp_path)
+    save_entry(_entry(title="no range", validity_range={}), tmp_path)
+    monkeypatch.setattr("inference_server.research.kb.load_entries",
+                        lambda directory=None: load_entries(tmp_path))
+    main(["kb", "--situation", "model=E4B"])
+    lines = capsys.readouterr().out.splitlines()
+    assert any("no range" in ln and ln.endswith("[unscoped]") for ln in lines)
+    assert any("scoped" in ln and "[unscoped]" not in ln for ln in lines)
+    main(["kb"])
+    assert "[unscoped]" not in capsys.readouterr().out    # only meaningful with --situation
 
 
 def test_cli_regime_and_situation_filter(tmp_path, monkeypatch, capsys):
@@ -126,8 +166,10 @@ def test_cli_regime_and_situation_filter(tmp_path, monkeypatch, capsys):
 
 def test_index_lists_regimes_and_new_fields():
     md = generate_index([_entry(title="Batched decode", id="kb-20260101-aaaaaaaa",
-                                supersedes="kb-20260101-old"),
-                         _entry(title="No regime", regime=None, validity_range={}, mechanism="")])
+                                supersedes="kb-20260101-old",
+                                transfer_checked={"model": "E2B", "held": True}),
+                         _entry(title="No regime", regime=None, validity_range={},
+                                mechanism=None)])
     assert "## By regime" in md
     assert "**steady_interactive** (1): `kb-20260101-aaaaaaaa`" in md
     assert "**unassigned** (1)" in md
@@ -135,3 +177,4 @@ def test_index_lists_regimes_and_new_fields():
     assert '**Valid over:** `{"concurrency": [1, 16]' in md
     assert "**Mechanism:** decode was memory-bound" in md
     assert "**Supersedes:** `kb-20260101-old`" in md
+    assert '**Transfer checked:** `{"held": true, "model": "E2B"}`' in md

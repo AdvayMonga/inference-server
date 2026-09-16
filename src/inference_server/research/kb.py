@@ -94,22 +94,29 @@ def query(
     return items
 
 
+def _num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
 def covers(entry: KnowledgeEntry, situation: dict[str, Any]) -> bool:
     """Does `situation` fall inside every bound the entry's validity_range states?
 
-    Keys the range does not mention are unconstrained. A 2-list bound is `lo <= x <= hi`;
-    anything else is equality. Deliberately no "nearest entry": outside the measured bounds
-    is uncovered, full stop — extrapolating a finding is the failure this field exists to stop.
+    Keys the range does not mention are unconstrained. A 2-list of numbers is an inclusive
+    range `lo <= x <= hi` (a non-numeric x is outside it); any other list is membership
+    ("one of"); a scalar is equality. Deliberately no "nearest entry": outside the measured bounds is uncovered,
+    full stop — extrapolating a finding is the failure this field exists to stop.
     """
     for key, bound in entry.validity_range.items():
         if key not in situation:
             continue
         x = situation[key]
-        try:
-            is_range = isinstance(bound, list) and len(bound) == 2
-            inside = bound[0] <= x <= bound[1] if is_range else bound == x
-        except TypeError:
-            inside = False
+        if isinstance(bound, list):
+            if len(bound) == 2 and all(map(_num, bound)):
+                inside = _num(x) and bound[0] <= x <= bound[1]
+            else:
+                inside = x in bound
+        else:
+            inside = bound == x
         if not inside:
             return False
     return True
@@ -256,6 +263,9 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
                 lines += [f"**Valid over:** `{json.dumps(e.validity_range, sort_keys=True)}`", ""]
             if e.mechanism:
                 lines += [f"**Mechanism:** {e.mechanism}", ""]
+            if e.transfer_checked:
+                lines += [f"**Transfer checked:** "
+                          f"`{json.dumps(e.transfer_checked, sort_keys=True)}`", ""]
             if e.supersedes:
                 lines += [f"**Supersedes:** `{e.supersedes}`", ""]
             if e.superseded_by:

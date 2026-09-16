@@ -387,7 +387,7 @@ class KnowledgeEntry:
     # All None/empty by default: entries written before these existed load unchanged.
     regime: str | None = None        # cold_start | steady_interactive | long_context
     validity_range: dict[str, Any] = field(default_factory=dict)   # bounds; see knowledge/README
-    mechanism: str = ""              # one sentence: why it worked or did not
+    mechanism: str | None = None     # one sentence: why it worked or did not
     supersedes: str | None = None    # partner of superseded_by
     transfer_checked: dict[str, Any] | None = None   # re-run on a 2nd model/hardware, and result
     id: str = field(default_factory=lambda: _new_id("kb"))
@@ -395,13 +395,27 @@ class KnowledgeEntry:
     updated_at: float = field(default_factory=time.time)
 
     STATUSES = ("open", "deferred", "resolved", "rejected", "obsolete")
+    # Must match the workload classes in corpus/manifest.json. A typo here would otherwise
+    # create a regime bucket nobody can query.
+    REGIMES = ("cold_start", "steady_interactive", "long_context")
 
     def validate(self) -> None:
         if self.status not in self.STATUSES:
             raise SchemaError(f"status must be one of {self.STATUSES}")
         if not self.title or not self.summary:
             raise SchemaError("title and summary are required")
+        if self.regime is not None and self.regime not in self.REGIMES:
+            raise SchemaError(f"regime must be one of {self.REGIMES}, got {self.regime!r}")
         for name in ("supersedes", "superseded_by"):
             ref = getattr(self, name)
             if ref is not None and not ref.startswith("kb-"):
                 raise SchemaError(f"{name} must be a knowledge entry id (kb-...), got {ref!r}")
+        # A bound kb.covers() cannot interpret would silently cover nothing or everything.
+        scalar = (str, int, float, bool)
+        for key, bound in self.validity_range.items():
+            ok = (isinstance(bound, scalar)
+                  or (isinstance(bound, list) and bound
+                      and all(isinstance(b, scalar) for b in bound)))
+            if not ok:
+                raise SchemaError(f"validity_range[{key!r}] must be a scalar or a non-empty list "
+                                  f"of scalars, got {bound!r}")
