@@ -52,6 +52,11 @@ def test_table_covers_every_entry_on_disk_and_no_others():
     assert set(backfill.MAPPING) == on_disk
 
 
+def test_committed_knowledge_already_matches_the_table(kb_copy: Path):
+    # The table is the record of what was written; if knowledge/ drifts, this is what says so.
+    assert backfill.apply(kb_copy)["written"] == []
+
+
 def test_backfill_is_idempotent(kb_copy: Path):
     backfill.apply(kb_copy)
     once = _bytes(kb_copy)

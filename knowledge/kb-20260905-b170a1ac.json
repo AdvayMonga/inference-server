@@ -9,9 +9,12 @@
     }
   ],
   "id": "kb-20260905-b170a1ac",
+  "mechanism": "Sliding layers cap attention at the 512-key window so their cost is bounded; full-attention layers (head_dim 512) attend the whole prompt and dominate, and tiling at D=512 spills registers.",
+  "regime": "steady_interactive",
   "status": "open",
   "summary": "Sliding layers cap attention at `window` keys (512), so their attention cost is bounded regardless of prompt length. Full-attention layers (head_dim **512**, no window) attend to the whole prompt, so on an 824-token prompt they dominate the 63% of prefill time that attention takes.\n\nTiling currently wins 1.57x at D=256 and LOSES 0.53x at D=512, because the [BLOCK_M, D] accumulator must shrink to BLOCK_M=16 and spills. So the tiled kernel is fast exactly where the work is bounded, and slow exactly where the work is.\n\n**Next lever:** make tiling work at D=512 \u2014 chunk the head dimension so the accumulator fits (process D in two halves of 256, or keep acc in shared memory), then re-A/B. Until then the isolated 1.57x is not reachable end-to-end.",
   "superseded_by": null,
+  "supersedes": null,
   "tags": [
     "prefill",
     "kernel",
@@ -20,8 +23,13 @@
     "roofline"
   ],
   "title": "The prefill attention lever is head_dim 512 (full-attention layers), not 256",
+  "transfer_checked": null,
   "triggers": [
     "a D=512 tiled variant beats the untiled kernel in isolation"
   ],
-  "updated_at": 1788651807.25516
+  "updated_at": 1789565416.3186219,
+  "validity_range": {
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
 }

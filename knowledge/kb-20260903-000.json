@@ -2,9 +2,12 @@
   "created_at": 1788408000.0,
   "evidence": [],
   "id": "kb-20260903-000",
+  "mechanism": "Dynamo re-specialises on small batch dims whichever order they are seen in; the levers are the number of distinct compiles and, weakly, the persistent Inductor cache.",
+  "regime": "cold_start",
   "status": "rejected",
   "summary": "Hypothesis: capturing decode graphs largest-first introduces the symbolic batch dim at a large\nvalue, and its guards fail to cover the small end \u2014 measured at MAX_BATCH_SIZE=256, buckets\n256/128 compiled, 64/32/16 then reused the dynamic artifact in ~1.8s each, and 8, 4 and 2 EACH\nre-specialized for ~290s (1288s total). Capturing ascending should introduce the dynamic dim at\nthe small end where guards generalize upward.\n\n**It does not.** Ascending measured **1348s** vs descending 1288s at an 8-bucket ladder \u2014 no\nbetter, arguably worse. Dynamo re-specializes on small batch dims regardless of the order they\nare seen in. The one-line change (`sorted(self._graph_buckets)` instead of `reverse=True` in\n`_capture_all_graphs`) was never merged and its worktree is now deleted; this entry is the\nrecord. **Do not re-try capture ordering as a compile-cost lever** \u2014 the levers that actually\nmove it are the number of distinct compiles (~140s each, linear) and, weakly, the persistent\nInductor cache (-19%).",
   "superseded_by": null,
+  "supersedes": null,
   "tags": [
     "benchmark",
     "cache",
@@ -13,6 +16,11 @@
     "graph"
   ],
   "title": "Graph capture ORDER does not fix the compile cost",
+  "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1788551463.8413172
+  "updated_at": 1789565416.319555,
+  "validity_range": {
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
 }

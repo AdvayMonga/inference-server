@@ -75,9 +75,12 @@
     }
   ],
   "id": "kb-20260906-9454d8a1",
+  "mechanism": "50 ms/token is roughly the best a fast A100 draw delivers for E4B at rate 1, so the budget has zero headroom and tok_s_within_slo is None on every run.",
+  "regime": "steady_interactive",
   "status": "open",
   "summary": "All 24 panels across 4 sweeps at 5681560 report tok_s_within_slo=None and saturation_knee_rate=1.0 \u2014 i.e. the budget is broken at the LOWEST rate measured, with essentially one user. The binding constraint is TPOT, not TTFT, and not load: TPOT p50 is 113ms at rate 1 on a slow draw and 45.7ms on the fast draw, against a 50ms budget. Even the fast draw fails at p95 (52.1ms).\n\n50ms/token = 20 tok/s per user, which is roughly the best a fast A100 draw delivers for E4B here. The SLO is therefore set at best-case machine capability with zero headroom, so the project's primary metric \u2014 throughput at a fixed tail-latency budget \u2014 is undefined on every run and cannot discriminate between engine versions.\n\nThis is a MEASUREMENT problem before it is a performance problem. Either the budget is recalibrated to something the hardware can hold, or the headline metric stays None forever and the loop keeps judging secondary metrics as it has for ten iterations.",
   "superseded_by": null,
+  "supersedes": null,
   "tags": [
     "slo",
     "metrics",
@@ -86,9 +89,14 @@
     "loop"
   ],
   "title": "The TPOT SLO (p95 < 50ms) is unreachable, so throughput-within-SLO is always None",
+  "transfer_checked": null,
   "triggers": [
     "decode step latency dropping below ~40ms p95 would make the current budget live",
     "a decision to recalibrate slo_tpot_ms would close this"
   ],
-  "updated_at": 1788724476.362784
+  "updated_at": 1789565416.318182,
+  "validity_range": {
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
 }
