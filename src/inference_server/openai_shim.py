@@ -2,7 +2,9 @@
 chat frontends such as Open WebUI. NOT a public API: /v1/completions is raw-prompt text
 completion, /v1/chat/completions applies the model's chat template, and both run over the same
 scheduler as /generate. No auth, no registry, no tools, no multimodal content parts.
-See PLAN.md P2, DECISIONS [2026-05-18]."""
+Optional X-Session-Id / X-Turn-Index / X-Trace-Id request headers let a harness pin the engine
+session and correlate rows; the trace id is echoed back as X-Trace-Id. See PLAN.md P2,
+DECISIONS [2026-05-18]."""
 
 import asyncio
 import itertools
@@ -10,7 +12,7 @@ import json
 import time
 from collections.abc import AsyncGenerator
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -52,6 +54,17 @@ class CompletionRequest(BaseModel):
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+
+
+def _correlation(request: Request, auto_prefix: str) -> tuple[str, int, str]:
+    """(session_id, turn_index, trace_id) from optional harness headers; absent -> auto ids."""
+    h = request.headers
+    session_id = h.get("x-session-id") or f"{auto_prefix}-{next(_ids)}"
+    try:
+        turn_index = int(h.get("x-turn-index", 0))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="X-Turn-Index must be an integer")
+    return session_id, turn_index, h.get("x-trace-id", "")
 
 
 def _prompt_str(p: str | list[str]) -> str:
@@ -96,7 +109,7 @@ async def _stream(req: ScheduledRequest, tokenizer, cid: str, created: int, mode
 
 
 @router.post("/v1/completions")
-async def completions(body: CompletionRequest, request: Request):
+async def completions(body: CompletionRequest, request: Request, response: Response):
     """Text completion over the continuous-batch scheduler — the open-loop bench surface."""
     scheduler = request.app.state.scheduler
     tokenizer = request.app.state.tokenizer
@@ -110,13 +123,14 @@ async def completions(body: CompletionRequest, request: Request):
 
     sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
     cid = f"cmpl-{next(_ids)}"
-    session_id = f"bench-{next(_ids)}"
+    session_id, turn_index, trace_id = _correlation(request, "bench")
     created = int(time.time())
 
     if body.stream:
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
+            trace_id=trace_id, turn_index=turn_index,
         )
         try:
             scheduler.enqueue(req)
@@ -124,12 +138,13 @@ async def completions(body: CompletionRequest, request: Request):
             raise HTTPException(status_code=429, detail=str(e))
         return StreamingResponse(
             _stream(req, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
-            media_type="text/event-stream",
+            media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
+        trace_id=trace_id, turn_index=turn_index,
     )
     try:
         generated_ids = await scheduler.submit(req)
@@ -137,6 +152,7 @@ async def completions(body: CompletionRequest, request: Request):
         raise HTTPException(status_code=429, detail=str(e))
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
+    response.headers["X-Trace-Id"] = req.trace_id
     return {
         "id": cid, "object": "text_completion", "created": created, "model": body.model,
         "choices": [{"text": text, "index": 0, "logprobs": None,
@@ -183,7 +199,7 @@ async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int,
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(body: ChatCompletionRequest, request: Request):
+async def chat_completions(body: ChatCompletionRequest, request: Request, response: Response):
     """Chat completion over the continuous-batch scheduler — the frontend-facing surface."""
     scheduler = request.app.state.scheduler
     tokenizer = request.app.state.tokenizer
@@ -198,13 +214,14 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
     max_tokens = body.output_budget
     sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
     cid = f"chatcmpl-{next(_ids)}"
-    session_id = f"chat-{next(_ids)}"
+    session_id, turn_index, trace_id = _correlation(request, "chat")
     created = int(time.time())
 
     if body.stream:
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
+            trace_id=trace_id, turn_index=turn_index,
         )
         try:
             scheduler.enqueue(req)
@@ -212,12 +229,13 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
             raise HTTPException(status_code=429, detail=str(e))
         return StreamingResponse(
             _chat_stream(req, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
-            media_type="text/event-stream",
+            media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
+        trace_id=trace_id, turn_index=turn_index,
     )
     try:
         generated_ids = await scheduler.submit(req)
@@ -225,6 +243,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request):
         raise HTTPException(status_code=429, detail=str(e))
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
+    response.headers["X-Trace-Id"] = req.trace_id
     return {
         "id": cid, "object": "chat.completion", "created": created, "model": body.model,
         "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
