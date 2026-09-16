@@ -85,6 +85,8 @@ class Settings:
     log_level: str = "INFO"
     log_format: str = "text"  # "text" (dev) or "json" (structured, for prod/Modal log aggregators)
     metrics_port: int = 9090
+    # Per-request telemetry rows (SQLite, one file per run). Empty = off, no filesystem writes.
+    telemetry_dir: str = ""
 
     # Reserved for multi-user extension (ignored for now)
     max_concurrent_sessions: int = 1
@@ -137,6 +139,7 @@ def load_settings() -> Settings:
         log_level=os.environ.get("LOG_LEVEL", Settings.log_level),
         log_format=os.environ.get("LOG_FORMAT", Settings.log_format),
         metrics_port=int(os.environ.get("METRICS_PORT", Settings.metrics_port)),
+        telemetry_dir=os.environ.get("TELEMETRY_DIR", Settings.telemetry_dir),
         max_concurrent_sessions=int(os.environ.get("MAX_CONCURRENT_SESSIONS", Settings.max_concurrent_sessions)),
         per_session_memory_limit_mb=int(os.environ.get("PER_SESSION_MEMORY_LIMIT_MB", Settings.per_session_memory_limit_mb)),
         scheduling_policy=os.environ.get("SCHEDULING_POLICY", Settings.scheduling_policy),
