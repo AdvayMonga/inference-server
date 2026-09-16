@@ -7,7 +7,7 @@ decision; [`DECISIONS.md`](../DECISIONS.md) at the repo root is a **generated** 
 python -m inference_server.research.loop kb --status rejected     # the dead ends — read first
 python -m inference_server.research.loop kb --tags prefill cache  # what is known about an area
 python -m inference_server.research.loop kb --regime cold_start   # what applies to a workload class
-python -m inference_server.research.loop kb --situation model=E4B,concurrency=8   # what covers my situation
+python -m inference_server.research.loop kb --situation model=gemma-4-e4b,hardware=A100-80GB   # what covers my situation
 python -m inference_server.research.loop index                    # regenerate DECISIONS.md
 ```
 
@@ -39,7 +39,9 @@ failure this field exists to stop.
 
 `regime` is validated against `KnowledgeEntry.REGIMES`, which mirrors the workload classes in
 [`corpus/manifest.json`](../corpus/manifest.json). Adding a workload class means adding it in
-both places.
+both places. Entries written before these fields existed were backfilled on 2026-09-16 by
+`scripts/tools/backfill_kb_regime.py` (its mapping table is the record of why each entry got
+what it got); a new entry sets `regime` at write time, or says why it has none.
 
 Negative results are first-class here. A `rejected` entry is what stops the loop re-trying
 something that has already been measured and found not to matter.

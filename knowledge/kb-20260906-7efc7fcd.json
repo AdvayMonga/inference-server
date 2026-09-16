@@ -18,9 +18,12 @@
     }
   ],
   "id": "kb-20260906-7efc7fcd",
+  "mechanism": "The 30 s admission deadline is 150x the TTFT budget, so under overload every request waits the full deadline before it is shed.",
+  "regime": "steady_interactive",
   "status": "open",
   "summary": "The admission deadline is 30.0s while the TTFT budget is 200ms \u2014 150x apart. Under overload requests therefore sit in the queue for the full deadline before being shed: TTFT p50 measured 9.5s / 20.7s / 29.7s / 29.9s at rates 16/32/64/128, i.e. equal to the test window. Shedding does fire (expired: 0/0/200/1220/3779, exactly equal to rejected, so every rejection is a deadline expiry rather than a full queue) but only after the user has already waited 30 seconds to be told no.\n\nThe mechanism is correct; the threshold defeats its purpose. LOOP.md frames backpressure as turning overload into 'bounded latency plus refusals' \u2014 a 30s bound is not a bound any caller wants. A deadline should be a small multiple of the TTFT SLO.\n\nNOT yet established: whether tightening it improves throughput or only latency. Shedding earlier frees queue memory and scheduler work, but capacity is currently limited by wave size, not queueing \u2014 see the K=1 entry.",
   "superseded_by": null,
+  "supersedes": null,
   "tags": [
     "backpressure",
     "scheduler",
@@ -29,8 +32,17 @@
     "config"
   ],
   "title": "max_queue_wait_s=30s makes admission shedding useless \u2014 overload becomes 30s latency",
+  "transfer_checked": null,
   "triggers": [
     "an A/B of max_queue_wait_s at 1-2s vs 30s under rate>=32 would settle it"
   ],
-  "updated_at": 1788733070.842602
+  "updated_at": 1789565416.317952,
+  "validity_range": {
+    "arrival_rate_rps": [
+      16,
+      128
+    ],
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
 }

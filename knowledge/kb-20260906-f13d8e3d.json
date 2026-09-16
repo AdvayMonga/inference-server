@@ -75,9 +75,12 @@
     }
   ],
   "id": "kb-20260906-f13d8e3d",
+  "mechanism": "More concurrent rows amortise the same per-step decode cost, so TPOT is flat-to-improving with rate and the cost is per-step latency at low batch, not scheduling.",
+  "regime": "steady_interactive",
   "status": "resolved",
   "summary": "Across all four sweeps, TPOT p50 is FLAT or IMPROVING as request rate rises (113->87, 92->76, 128->84 ms on the slow draws) while throughput rises 1.6-2.2x (54.7->89.3, 60.2->133.2, 52.4->82.5, 97.7->187.6 tok/s). That is continuous batching doing exactly what it should: more concurrent rows amortize the same per-step cost.\n\nCONSEQUENCE: there is no concurrency cliff in the measured range, so scheduling levers (fairness policy, wave shaping, admission tuning, queue depth) cannot move the headline number. The cost is per-decode-step latency at LOW batch \u2014 a kernel/model cost, not a scheduling cost. This is the same shape as the earlier 21ms-queue vs 203ms-prefill split, which killed an entire class of planned fixes.\n\nThe measured range stops at 8 req/s; a knee may exist above it. TTFT p95 at rate 1 (1036-1416ms on slow draws, 142ms on the fast one) is a small-sample artifact \u2014 24 requests means p95 is worst-of-24, dominated by the first request after warmup.",
   "superseded_by": null,
+  "supersedes": null,
   "tags": [
     "scheduling",
     "batching",
@@ -86,9 +89,18 @@
     "tpot"
   ],
   "title": "No saturation knee exists between 1 and 8 req/s \u2014 batching is working",
+  "transfer_checked": null,
   "triggers": [
     "sweeping above 8 req/s could still reveal a knee",
     "a workload with longer prompts would shift cost back toward prefill"
   ],
-  "updated_at": 1788724476.363106
+  "updated_at": 1789565416.318054,
+  "validity_range": {
+    "arrival_rate_rps": [
+      1,
+      8
+    ],
+    "hardware": "A100-80GB",
+    "model": "gemma-4-e4b"
+  }
 }
