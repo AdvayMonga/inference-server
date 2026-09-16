@@ -1,0 +1,45 @@
+{
+  "created_at": 1789599673.158562,
+  "evidence": [
+    {
+      "url": "https://www.usenix.org/system/files/fast26-zeng.pdf"
+    },
+    {
+      "url": "https://arxiv.org/abs/2412.17246"
+    },
+    {
+      "url": "https://arxiv.org/abs/2502.15524"
+    },
+    {
+      "url": "https://arxiv.org/abs/2607.18957"
+    },
+    {
+      "url": "https://arxiv.org/abs/2604.06664"
+    },
+    {
+      "url": "https://arxiv.org/abs/2606.07362"
+    }
+  ],
+  "id": "kb-20260916-7cfa895f",
+  "mechanism": "The plan was written against a 2025 picture; five top-venue papers landed between OSDI '25 and July 2026 attacking exactly this.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "notes/infserv/01-thesis-and-metric.md justifies the cold-start vertical partly with 'vLLM also has no cold start story at all, so there is nothing to compare against in the target regime'. **That is no longer true**, and a head-to-head in this regime now has strong baselines:\n\n- **GCR** (FAST '26, Tsinghua) \u2014 hybrid driver/interception C/R. Checkpoint -72.1% vs cuda-checkpoint, restore -54.2%, <1% steady-state overhead. Measures **restore at 95.8% of cold-start latency for llama3-8B on vLLM**, and beats ServerlessLLM restore by 83.3%.\n- **Foundry** (Apr 2026) \u2014 CUDA-graph template materialisation; Qwen3-235B ~650s -> 3.9s.\n- **BlitzScale** (OSDI '25) \u2014 loads params over inter-GPU networks with O(1) host caching, and does **layer-level scaling**: offload layer compute to a scaling-up instance before its parameters finish loading. Up to 94% lower tail latency vs ServerlessLLM.\n- **HydraServe** (NSDI '26) \u2014 proactive model distribution + overlapped cold-start stages. 1.7-4.7x cold-start reduction.\n- **InstantInfer** (Jul 2026) \u2014 cold-start components as communicating finite automata, parallelising init stages. Claims 7.2x TTFT, integrated into vLLM.\n- **lambdaScale**, **PipeBoost**, **Cicada**, **Aegaeon** (SOSP '25) \u2014 more of the same.\n- **Breaking the Ice** (MLSys '26) \u2014 the measurement methodology reference; six-step vLLM startup decomposition, predominantly CPU-bound.\n\n**What this does and does not change.** It does NOT invalidate the vertical: the plan's own posture (13-prior-art.md) is already 'do not force novelty, borrow the mechanisms, spend the originality budget on the policy layer', and Llumnix still lists policy optimisation as future work. It DOES mean (a) any cold-start number we publish needs a per-phase breakdown or it just measures whichever phase was slow on our testbed, (b) 'nobody else does this' must be dropped from the framing, and (c) a credible demo has to beat or at least cite these, not a naive cold-start baseline.\n\nSee [[our-cold-start-is-torch-compile-not-weight-loading]] for which phase is ours.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "cold-start",
+    "literature",
+    "plan",
+    "strategy",
+    "novelty"
+  ],
+  "title": "Cold start is a CROWDED field in 2026 \u2014 the plan's 'vLLM has no cold start story' premise is stale",
+  "transfer_checked": null,
+  "triggers": [
+    "Writing up any cold-start result \u2014 these are the baselines to position against",
+    "Re-deciding the vertical: novelty now has to come from the policy layer, not the mechanism"
+  ],
+  "updated_at": 1789599673.1585732,
+  "validity_range": {}
+}

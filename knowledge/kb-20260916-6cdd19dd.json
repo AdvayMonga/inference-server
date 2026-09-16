@@ -1,0 +1,36 @@
+{
+  "created_at": 1789599623.3943622,
+  "evidence": [
+    {
+      "url": "https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html"
+    },
+    {
+      "url": "https://github.com/pytorch/pytorch/pull/143341"
+    },
+    {
+      "url": "https://github.com/vllm-project/vllm/issues/20402"
+    }
+  ],
+  "id": "kb-20260916-6cdd19dd",
+  "mechanism": "Mega-Cache validates PyTorch version, Triton version and GPU before reusing artifacts, so a mixed fleet silently never gets a cache hit.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "PyTorch 2.7+ ships Mega-Cache (torch.compiler.save_cache_artifacts / load_cache_artifacts), documented as portable across machines and storable in a database. The constraint, quoted from the PyTorch docs: caching 'validates that the cache artifacts are used with the same PyTorch and Triton version, as well as **same GPU** when device is set to be cuda'.\n\n**Consequence for venue choice.** Renting a different GPU model between runs means recompiling from scratch every time \u2014 for us that is the ~21-minute ladder in [[our-cold-start-is-torch-compile-not-weight-loading]]. So hardware consistency now matters twice: once for A/B validity (we already measured a 2.3x spread between supposedly identical A100 draws) and once because an inconsistent fleet never gets a compile-cache hit. This argues for pinning an exact GPU SKU at a named provider and datacenter, and recording it in the panel's validity block, rather than taking whatever a marketplace offers cheapest.\n\nNote also that a persisted cache is not a full fix even when it hits: vLLM RFC #20402 reports 25s of 132s still spent compiling on a 70B warm start, because Dynamo re-runs every warm start and Inductor does a full FakeTensor forward during artifact load. Both are acknowledged bugs.\n\nOperational rule if we adopt it: fail LOUDLY on a cache miss (vLLM's equivalent is VLLM_FORCE_AOT_LOAD=1). A silent recompile is how you end up measuring the wrong thing.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "cold-start",
+    "compile",
+    "cache",
+    "venue",
+    "planning"
+  ],
+  "title": "A portable compile cache is keyed to the exact GPU \u2014 venue consistency is a correctness issue",
+  "transfer_checked": null,
+  "triggers": [
+    "Adopting Mega-Cache or AOTInductor in our backend",
+    "Choosing a venue: this is an argument for a pinned SKU over cheapest-available"
+  ],
+  "updated_at": 1789599623.3951411,
+  "validity_range": {}
+}

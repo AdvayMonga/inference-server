@@ -1,0 +1,48 @@
+{
+  "created_at": 1789599623.394358,
+  "evidence": [
+    {
+      "url": "https://github.com/checkpoint-restore/criu/issues/3089"
+    },
+    {
+      "url": "https://docs.nvidia.com/dynamo/kubernetes/operations/cold-start-optimizations/dynamo-snapshot"
+    },
+    {
+      "url": "https://blog.doubleword.ai/fast-sglang-starts"
+    },
+    {
+      "url": "https://modal.com/docs/guide/memory-snapshots"
+    },
+    {
+      "url": "https://github.com/vllm-project/vllm/issues/34303"
+    },
+    {
+      "url": "https://gvisor.dev/docs/user_guide/checkpoint_restore/"
+    }
+  ],
+  "id": "kb-20260916-d12c9170",
+  "mechanism": "Every working implementation drives the checkpoint from OUTSIDE the sandbox with host privilege; a tenant cannot rebuild a capability the platform owns.",
+  "regime": "cold_start",
+  "status": "rejected",
+  "summary": "The strongest form of cold-start elimination \u2014 snapshot a live CUDA process and restore it warm \u2014 is **not available to us**, and pursuing it would be a systems-plumbing project rather than an inference-engine one.\n\n**Privilege ladder** (the decisive axis):\n- In-process self-suspend via cuCheckpointProcess* : needs only driver 570+. Plausibly unprivileged, BUT the process must stay alive, so it does nothing for a replica starting from nothing \u2014 it does not serve the thesis.\n- cuda-checkpoint against another PID : CAP_SYS_PTRACE, or same-UID with host yama/ptrace_scope=0. ptrace_scope is a HOST sysctl a container cannot lower for itself.\n- CRIU full-process snapshot (the real win) : root, or CAP_CHECKPOINT_RESTORE + CAP_SYS_PTRACE (commonly SYS_ADMIN too), seccomp/apparmor unconfined. CRIU issue #3089 shows a non-root attempt failing on 'Failed to set ptrace options' and succeeding under sudo, still unanswered.\n\n**Evidence from every production implementation:** NVIDIA Dynamo Snapshot requires a **privileged DaemonSet** on every GPU node, driver 580+, and its CRIU optimisations are not upstreamed. Doubleword's 695s->9.6s SGLang result required forking **containerd AND CRIU** plus host sudo to disable io_uring. Modal can do it because Modal IS the host \u2014 it drives cuda-checkpoint from gVisor's runtime via --cuda-checkpoint-path, from outside the sandbox.\n\n**What leaving Modal actually costs: very little.** Modal's own docs state their GPU snapshots are **incompatible with multi-GPU** and **do not speed up weight loading** ('if the majority of your initialization latency is spent loading weights, GPU Memory Snapshots will generally not improve your cold start'). It is alpha, and torch.compile can break snapshot creation.\n\nRestore also requires the **same GPU chip type and count**, so a snapshot is not portable across a marketplace's mixed fleet.\n\nThe unprivileged alternative that attacks OUR dominant term is in [[our-cold-start-is-torch-compile-not-weight-loading]].",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "cold-start",
+    "snapshot",
+    "criu",
+    "cuda-checkpoint",
+    "rejected",
+    "venue",
+    "modal"
+  ],
+  "title": "Privileged GPU snapshotting (CRIU + cuda-checkpoint) is out of reach for a rented box",
+  "transfer_checked": null,
+  "triggers": [
+    "Bare metal we control with host root (then re-evaluate; budget forked system software)",
+    "An open-source, unprivileged snapshot implementation landing in vLLM or SGLang",
+    "vLLM RFC #34303 Tier 1 (in-process suspend) shipping \u2014 useful for VRAM multiplexing, not cold start"
+  ],
+  "updated_at": 1789599623.3950138,
+  "validity_range": {}
+}

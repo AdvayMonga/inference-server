@@ -47,9 +47,15 @@ def test_validity_ranges_are_readable_by_covers():
                     assert bound[0] <= bound[1], (e.id, key)
 
 
-def test_table_covers_every_entry_on_disk_and_no_others():
+def test_table_names_only_entries_that_exist():
+    """The table is a one-shot historical migration, so it must be a SUBSET of what is on disk.
+
+    Not equality: entries written after the backfill set their own regime at write time and are
+    not the migration's business. Requiring equality would mean every new finding breaks the suite.
+    """
     on_disk = {p.stem for p in KNOWLEDGE_DIR.glob("*.json")}
-    assert set(backfill.MAPPING) == on_disk
+    missing = set(backfill.MAPPING) - on_disk
+    assert not missing, f"table names entries that no longer exist: {sorted(missing)}"
 
 
 def test_committed_knowledge_already_matches_the_table(kb_copy: Path):

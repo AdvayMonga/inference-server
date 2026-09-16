@@ -3,20 +3,106 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-69 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(23), `decode`(21), `modal`(21), `graph`(18), `scheduler`(16), `compile`(13), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `triton`(4), `roofline`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `metrics`(2), `batching`(2), `slo`(2), `benchmarking`(2), `tpot`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `validity`(1), `scheduling`(1)
+75 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(22), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(5), `triton`(4), `roofline`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `venue`(3), `metrics`(2), `batching`(2), `slo`(2), `benchmarking`(2), `tpot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `validity`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `snapshot`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (5): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`
+- **cold_start** (10): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
-- **steady_interactive** (20): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`
+- **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (40) — no `regime` field yet
 
-## Open (19)
+## Open (23)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-16] Migrate tokens or migrate KV — the two OSDI '24 answers, and what decides between them
+*tags: `migration`, `router`, `multi-replica`, `literature`, `phase-6`* · `kb-20260916-68132cdb`
+
+Phase 6 of the plan wants migrate-vs-recompute as a searchable knob. The literature already ran both experiments, and they disagree for a principled reason.
+
+**ServerlessLLM (OSDI '24) moves TOKENS.** Tokens are 10s-100s of KB; the KV cache is 1-10s of GB. The load-bearing asymmetry: prefill-recomputing ~1000 tokens costs about what generating ~100 new tokens costs (~10x). That ratio makes a multi-round loop converge — each round the destination catches up faster than the source runs away. Measured 1.27-1.95x better P99 than preemption-based scheduling.
+
+**Llumnix (OSDI '24, Alibaba) moves KV BLOCKS.** It gets away with it because **the KV cache is append-only** — blocks written by past iterations never change, so they can be copied while decoding continues, with no dirty-page tracking. Staged pipeline; each stage copies what the previous stage produced. **Downtime is 20-30 ms and near-constant from 256 to 8k sequence length** — shorter than one decode step — versus baselines up to 111x worse, and recompute of an 8k sequence for LLaMA-30B costing 3.5s. Migration always took exactly 2 stages. Source decode slowed <=1%. Correctness via a PRE-ALLOC/COMMIT handshake per stage, which handles the two LLM-specific hazards VM migration lacks: OOM mid-migration, and the request finishing mid-migration.
+
+**What decides it: the interconnect and the distance.** Tokens win when the network is scarce and instances are far apart (serverless, cross-server, model-swap driven). KV blocks win when instances are close and you migrate constantly for load balance. So our Phase 6 crossover plot is real work, but it must state the interconnect or it measures nothing — which also means the venue's NVLink/InfiniBand story is a prerequisite, not a detail.
+
+**Borrow, do not reinvent:** Llumnix's append-only staged copy and its PRE-ALLOC/COMMIT handshake are the right mechanism. Note Llumnix v1 (2026) now unifies migration with adaptive PD disaggregation in one scheduler.
+
+**Revisit when:** Starting Phase 6 (session migration); Choosing a venue: interconnect decides the answer
+
+**Evidence:** https://www.usenix.org/system/files/osdi24-fu.pdf, https://www.usenix.org/system/files/osdi24-sun-biao.pdf, https://github.com/llumnix-project/llumnix, https://github.com/ServerlessLLM/ServerlessLLM
+
+**Regime:** `steady_interactive`
+
+**Mechanism:** The two designs sit at different points on a network-cost-vs-compute-cost curve; the interconnect decides which wins, so neither is evaluable without stating it.
+
+### [2026-09-16] Cold start is a CROWDED field in 2026 — the plan's 'vLLM has no cold start story' premise is stale
+*tags: `cold-start`, `literature`, `plan`, `strategy`, `novelty`* · `kb-20260916-7cfa895f`
+
+notes/infserv/01-thesis-and-metric.md justifies the cold-start vertical partly with 'vLLM also has no cold start story at all, so there is nothing to compare against in the target regime'. **That is no longer true**, and a head-to-head in this regime now has strong baselines:
+
+- **GCR** (FAST '26, Tsinghua) — hybrid driver/interception C/R. Checkpoint -72.1% vs cuda-checkpoint, restore -54.2%, <1% steady-state overhead. Measures **restore at 95.8% of cold-start latency for llama3-8B on vLLM**, and beats ServerlessLLM restore by 83.3%.
+- **Foundry** (Apr 2026) — CUDA-graph template materialisation; Qwen3-235B ~650s -> 3.9s.
+- **BlitzScale** (OSDI '25) — loads params over inter-GPU networks with O(1) host caching, and does **layer-level scaling**: offload layer compute to a scaling-up instance before its parameters finish loading. Up to 94% lower tail latency vs ServerlessLLM.
+- **HydraServe** (NSDI '26) — proactive model distribution + overlapped cold-start stages. 1.7-4.7x cold-start reduction.
+- **InstantInfer** (Jul 2026) — cold-start components as communicating finite automata, parallelising init stages. Claims 7.2x TTFT, integrated into vLLM.
+- **lambdaScale**, **PipeBoost**, **Cicada**, **Aegaeon** (SOSP '25) — more of the same.
+- **Breaking the Ice** (MLSys '26) — the measurement methodology reference; six-step vLLM startup decomposition, predominantly CPU-bound.
+
+**What this does and does not change.** It does NOT invalidate the vertical: the plan's own posture (13-prior-art.md) is already 'do not force novelty, borrow the mechanisms, spend the originality budget on the policy layer', and Llumnix still lists policy optimisation as future work. It DOES mean (a) any cold-start number we publish needs a per-phase breakdown or it just measures whichever phase was slow on our testbed, (b) 'nobody else does this' must be dropped from the framing, and (c) a credible demo has to beat or at least cite these, not a naive cold-start baseline.
+
+See [[our-cold-start-is-torch-compile-not-weight-loading]] for which phase is ours.
+
+**Revisit when:** Writing up any cold-start result — these are the baselines to position against; Re-deciding the vertical: novelty now has to come from the policy layer, not the mechanism
+
+**Evidence:** https://www.usenix.org/system/files/fast26-zeng.pdf, https://arxiv.org/abs/2412.17246, https://arxiv.org/abs/2502.15524, https://arxiv.org/abs/2607.18957, https://arxiv.org/abs/2604.06664, https://arxiv.org/abs/2606.07362
+
+**Regime:** `cold_start`
+
+**Mechanism:** The plan was written against a 2025 picture; five top-venue papers landed between OSDI '25 and July 2026 attacking exactly this.
+
+### [2026-09-16] A portable compile cache is keyed to the exact GPU — venue consistency is a correctness issue
+*tags: `cold-start`, `compile`, `cache`, `venue`, `planning`* · `kb-20260916-6cdd19dd`
+
+PyTorch 2.7+ ships Mega-Cache (torch.compiler.save_cache_artifacts / load_cache_artifacts), documented as portable across machines and storable in a database. The constraint, quoted from the PyTorch docs: caching 'validates that the cache artifacts are used with the same PyTorch and Triton version, as well as **same GPU** when device is set to be cuda'.
+
+**Consequence for venue choice.** Renting a different GPU model between runs means recompiling from scratch every time — for us that is the ~21-minute ladder in [[our-cold-start-is-torch-compile-not-weight-loading]]. So hardware consistency now matters twice: once for A/B validity (we already measured a 2.3x spread between supposedly identical A100 draws) and once because an inconsistent fleet never gets a compile-cache hit. This argues for pinning an exact GPU SKU at a named provider and datacenter, and recording it in the panel's validity block, rather than taking whatever a marketplace offers cheapest.
+
+Note also that a persisted cache is not a full fix even when it hits: vLLM RFC #20402 reports 25s of 132s still spent compiling on a 70B warm start, because Dynamo re-runs every warm start and Inductor does a full FakeTensor forward during artifact load. Both are acknowledged bugs.
+
+Operational rule if we adopt it: fail LOUDLY on a cache miss (vLLM's equivalent is VLLM_FORCE_AOT_LOAD=1). A silent recompile is how you end up measuring the wrong thing.
+
+**Revisit when:** Adopting Mega-Cache or AOTInductor in our backend; Choosing a venue: this is an argument for a pinned SKU over cheapest-available
+
+**Evidence:** https://docs.pytorch.org/tutorials/recipes/torch_compile_caching_tutorial.html, https://github.com/pytorch/pytorch/pull/143341, https://github.com/vllm-project/vllm/issues/20402
+
+**Regime:** `cold_start`
+
+**Mechanism:** Mega-Cache validates PyTorch version, Triton version and GPU before reusing artifacts, so a mixed fleet silently never gets a cache hit.
+
+### [2026-09-16] Our cold start is torch.compile, not weight loading — the plan's premise was wrong
+*tags: `cold-start`, `compile`, `graph`, `capture`, `literature`, `plan`* · `kb-20260916-87c69eea`
+
+The adaptive plan (notes/infserv/11-cold-start.md) asserts 'weight load dominates everything else; target it first, the rest is rounding', with a table putting graph capture at ~3s and weight load at 6-30s. **For this engine that is backwards, and our own measurements already said so.**
+
+Ours, on A100/E4B: the 8-bucket decode ladder at MAX_BATCH_SIZE=256 costs ~1288s descending / ~1348s ascending (kb-20260902-008), i.e. **~21 minutes of startup**, and with compile OFF the same ladder captures in **5.6s** — so 100% of it is torch.compile. A persistent Inductor cache recovers only **~19%** (705s -> 574s) because most of the cost is Dynamo tracing, not codegen (kb-20260901-010). E4B weights are ~15GB, seconds from local NVMe.
+
+The 2026 literature agrees and generalises it. Foundry (arXiv 2604.06664, Apr 2026) states 'recent systems have reduced model weight loading to seconds, CUDA graph capture still takes tens of seconds to minutes and often dominates startup', and takes Qwen3-235B-A22B EP8 from ~650s to **3.9s** by persisting graph topology + execution context and materialising graphs from templates instead of recapturing (per-graph: stream capture 59.7-198.6ms vs template build 31.1-69.5ms vs on-demand param update 0.98-2.89ms). 'Breaking the Ice' (MLSys 2026, arXiv 2606.07362) decomposes vLLM startup into six steps and finds it predominantly CPU-bound, with 4x variance across nine vLLM versions in 18 months.
+
+**Consequence for the plan.** Cold-start effort should go at compile/graph-capture elimination, not at weight-load I/O. Loader work (fastsafetensors, Run:ai streamer, InstantTensor) is worth 4-32x on a term that is seconds for us; layer-streaming-with-overlap is measured at only 1.1-1.2x (ZeRO-Inference) on that same non-dominant term. We own models/gemma4.py, so a Foundry-style deterministic-layout + template approach is tractable here in a way it is not for a general engine.
+
+**Revisit when:** A model whose weights are large enough that load time rivals compile (>100GB class); Dropping torch.compile from the decode path entirely, which would collapse this cost; A measured component decomposition on our own engine that contradicts the above
+
+**Evidence:** https://arxiv.org/abs/2604.06664, https://arxiv.org/abs/2606.07362, https://github.com/upb-cn/vllm-startup-profiler
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+**Mechanism:** Dynamo re-specialises per decode-graph bucket, and the Inductor cache only covers codegen, so the dominant term is tracing — which no cache and no capture-order change can reach.
 
 ### [2026-09-03] The two graph ladders are tuned in OPPOSITE directions — deliberate
 *tags: `cache`, `compile`, `decode`, `graph`, `modal`, `prefill`* · `kb-20260903-002`
@@ -744,9 +830,56 @@ a worktree silently shipped main's code and the container ran the unchanged back
 `PYTHONPATH=$PWD/src venv/bin/modal run ...` from a worktree (same for pytest). Cost one wasted
 A100 run that failed with `AttributeError: no attribute '_graph_buckets'`.
 
-## Rejected (9)
+## Rejected (11)
 
 **Tried, measured, does not work.** Do not retry blind — these are the entries that stop the loop re-treading dead ends.
+
+### [2026-09-16] Privileged GPU snapshotting (CRIU + cuda-checkpoint) is out of reach for a rented box
+*tags: `cold-start`, `snapshot`, `criu`, `cuda-checkpoint`, `rejected`, `venue`, `modal`* · `kb-20260916-d12c9170`
+
+The strongest form of cold-start elimination — snapshot a live CUDA process and restore it warm — is **not available to us**, and pursuing it would be a systems-plumbing project rather than an inference-engine one.
+
+**Privilege ladder** (the decisive axis):
+- In-process self-suspend via cuCheckpointProcess* : needs only driver 570+. Plausibly unprivileged, BUT the process must stay alive, so it does nothing for a replica starting from nothing — it does not serve the thesis.
+- cuda-checkpoint against another PID : CAP_SYS_PTRACE, or same-UID with host yama/ptrace_scope=0. ptrace_scope is a HOST sysctl a container cannot lower for itself.
+- CRIU full-process snapshot (the real win) : root, or CAP_CHECKPOINT_RESTORE + CAP_SYS_PTRACE (commonly SYS_ADMIN too), seccomp/apparmor unconfined. CRIU issue #3089 shows a non-root attempt failing on 'Failed to set ptrace options' and succeeding under sudo, still unanswered.
+
+**Evidence from every production implementation:** NVIDIA Dynamo Snapshot requires a **privileged DaemonSet** on every GPU node, driver 580+, and its CRIU optimisations are not upstreamed. Doubleword's 695s->9.6s SGLang result required forking **containerd AND CRIU** plus host sudo to disable io_uring. Modal can do it because Modal IS the host — it drives cuda-checkpoint from gVisor's runtime via --cuda-checkpoint-path, from outside the sandbox.
+
+**What leaving Modal actually costs: very little.** Modal's own docs state their GPU snapshots are **incompatible with multi-GPU** and **do not speed up weight loading** ('if the majority of your initialization latency is spent loading weights, GPU Memory Snapshots will generally not improve your cold start'). It is alpha, and torch.compile can break snapshot creation.
+
+Restore also requires the **same GPU chip type and count**, so a snapshot is not portable across a marketplace's mixed fleet.
+
+The unprivileged alternative that attacks OUR dominant term is in [[our-cold-start-is-torch-compile-not-weight-loading]].
+
+**Revisit when:** Bare metal we control with host root (then re-evaluate; budget forked system software); An open-source, unprivileged snapshot implementation landing in vLLM or SGLang; vLLM RFC #34303 Tier 1 (in-process suspend) shipping — useful for VRAM multiplexing, not cold start
+
+**Evidence:** https://github.com/checkpoint-restore/criu/issues/3089, https://docs.nvidia.com/dynamo/kubernetes/operations/cold-start-optimizations/dynamo-snapshot, https://blog.doubleword.ai/fast-sglang-starts, https://modal.com/docs/guide/memory-snapshots, https://github.com/vllm-project/vllm/issues/34303, https://gvisor.dev/docs/user_guide/checkpoint_restore/
+
+**Regime:** `cold_start`
+
+**Mechanism:** Every working implementation drives the checkpoint from OUTSIDE the sandbox with host privilege; a tenant cannot rebuild a capability the platform owns.
+
+### [2026-09-16] GPUDirect Storage is ruled out for rented GPUs, and buys ~2% anyway
+*tags: `cold-start`, `storage`, `gds`, `rejected`, `venue`* · `kb-20260916-d6c4b565`
+
+Do not spend GPU-hours on GPUDirect Storage.
+
+**Unavailable to us.** nvidia-fs.ko must be installed on the HOST and needs root; containers additionally need privileged:true plus host mounts of /sys, /lib/modules, /run/udev. NVIDIA's best-practices guide further requires **IOMMU disabled and PCIe ACS disabled** — the exact mechanisms hypervisors use for passthrough isolation. That is why GDS lives on bare metal. No serverless or rented-container GPU platform documents support for it.
+
+**And the upside is small.** The only rigorous GDS-on/GDS-off measurement found is the fastsafetensors paper: **26.4 GB/s with GDS vs 25.8 GB/s without — a 2.3% delta** — and on Bloom-176B across 8 GPUs GDS was *slower* (NUMA crossing). What GDS actually bought there was host memory, not bandwidth. The widely-quoted AWS 141x/169x figures are a pipeline result (GDS + pre-sharded TP checkpoints + FP8 replacing quantise-at-load) against a baseline the AWS sample repo itself concedes is stale.
+
+**Silent-failure hazard if anyone does try it:** cuFile compat mode falls back to POSIX pread/pwrite automatically on a missing module, a non-GDS filesystem, or when O_DIRECT cannot apply. Your code runs, results are correct, and GDS is simply not happening — exactly the class of bug LOOP.md exists to prevent. Assert you are not in compat mode before quoting a number.
+
+The 4.8-7.5x that IS real lives in batched parallel deserialisation (fastsafetensors measured 6.02 GB/s vs 1.28 GB/s for mmap, GDS uninvolved), which needs no kernel module and works everywhere. See also [[our-cold-start-is-torch-compile-not-weight-loading]]: loader work attacks a term that is seconds for us.
+
+**Revisit when:** Moving to bare metal we control, with a parallel filesystem (Lustre/WekaFS/VAST); A measurement showing weight-load I/O on our critical path at all
+
+**Evidence:** https://arxiv.org/html/2505.23072v1, https://docs.nvidia.com/gpudirect-storage/best-practices-guide/index.html, https://docs.nvidia.com/gpudirect-storage/overview-guide/index.html, https://github.com/aws-samples/sample-fsx-lustre-gds-sharded-model-loading
+
+**Regime:** `cold_start`
+
+**Mechanism:** nvidia-fs.ko is a host kernel module and GDS additionally wants IOMMU and PCIe ACS disabled, which are BIOS/host settings a tenant never controls; where it has been measured honestly it was not the bottleneck.
 
 ### [2026-05-30] `torch.compile` + Gemma 4 forward
 *tags: `benchmark`, `cache`, `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `numerics`, `prefill`, `quantization`, `torch-compile`* · `kb-20260530-014`
