@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from inference_server.research import harness as H
@@ -33,10 +33,13 @@ def _app(ttft_s: float = 0.0, itl_s: float = 0.0, n_tokens: int = 5,
          release: asyncio.Event | None = None):
     app = FastAPI()
     app.state.arrived = 0
+    app.state.requests = []     # (headers, body) of every arrival, like the real shim sees them
 
     @app.post("/v1/completions")
-    async def completions():
+    async def completions(request: Request):
         app.state.arrived += 1
+        app.state.requests.append((dict(request.headers), await request.json()))
+        echo = {"X-Trace-Id": request.headers.get("x-trace-id", "minted")}
 
         async def gen():
             if release is not None:
@@ -46,7 +49,7 @@ def _app(ttft_s: float = 0.0, itl_s: float = 0.0, n_tokens: int = 5,
                 yield f'data: {json.dumps({"choices": [{"text": "x", "finish_reason": None}]})}\n\n'
                 await asyncio.sleep(itl_s)
             yield "data: [DONE]\n\n"
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(gen(), media_type="text/event-stream", headers=echo)
 
     @app.get("/scheduler/stats")
     async def sched():
@@ -97,11 +100,11 @@ def test_request_still_open_at_drain_timeout_counts_as_an_error():
     calls = {"n": 0}
     real = rt.one_request
 
-    async def one_stuck(client, prompt, max_tokens):
+    async def one_stuck(client, prompt, max_tokens, **kw):
         calls["n"] += 1
         if calls["n"] == 2:                     # the second arrival never gets a token
             await client.post("/v1/stuck")
-        return await real(client, prompt, max_tokens)
+        return await real(client, prompt, max_tokens, **kw)
 
     async def go():
         rt.one_request = one_stuck
@@ -116,6 +119,7 @@ def test_request_still_open_at_drain_timeout_counts_as_an_error():
     assert [r.index for r in res.rows] == [0, 1, 2]
     late = res.rows[1]
     assert late.error == "drain_timeout" and late.ttft_ms is None and late.out_tokens == 0
+    assert late.trace_id == "replay-1"                      # a failed row still has its key
     assert abs(late.fired_s - 0.01) < 0.04
     s = res.summary(CLS)
     assert s["n_ok"] == 2 and s["n_err"] == 1
@@ -146,7 +150,7 @@ def test_client_measures_ttft_tpot_and_class_slo_judges():
     assert 15 < s["ttft_p95"] < 150 and s["tpot_p95"] is not None
     assert s["within_slo"] is True
     assert res.summary(WorkloadClass("tight", "", 10.0, 50.0, 1.0, "a", "b"))["within_slo"] is False
-    slow_decode = rt.ReplayResult(rows=[rt.Row(i, "s", 0, 0.0, 0.0, 20.0, 60.0, 5, None)
+    slow_decode = rt.ReplayResult(rows=[rt.Row(i, "s", 0, f"t-{i}", 0.0, 0.0, 20.0, 60.0, 5, None)
                                         for i in range(4)], wall_s=1.0)
     assert slow_decode.summary(CLS)["within_slo"] is False           # TPOT arm: 60 >= 50
     assert slow_decode.summary(WorkloadClass("no_tpot", "", 200.0, None, 1.0, "a", "b"))["within_slo"]
@@ -165,8 +169,9 @@ def test_panel_is_stamped_with_corpus_version_and_written_with_its_rows(tmp_path
     res, sched, cache, missing = asyncio.run(go())
     assert missing == {}
     panel = rt.build_panel(res, CLS, corpus_version="v1" * 8, split="seen", rate_scale=1.0,
-                           scheduler_stats=sched, cache_stats=cache)
+                           scheduler_stats=sched, cache_stats=cache, trace_prefix="x-seen-ab12cd")
     assert panel.validity.harness == "replay_trace"
+    assert panel.validity.harness_config["trace_prefix"] == "x-seen-ab12cd"   # the join key
     assert panel.validity.corpus_version == "v1" * 8
     assert panel.validity.workload_class == "steady_interactive"
     assert panel.validity.harness_config["split"] == "seen"
@@ -184,6 +189,30 @@ def test_panel_is_stamped_with_corpus_version_and_written_with_its_rows(tmp_path
     with open(path.with_suffix(".csv")) as f:
         rows = list(csv.DictReader(f))
     assert len(rows) == 3 and rows[0]["session_id"] == "s-0" and rows[0]["error"] == ""
+    assert [r["trace_id"] for r in rows] == ["replay-0", "replay-1", "replay-2"]
+
+
+def test_replay_sends_the_trace_session_turn_and_trace_id_and_its_sampling():
+    """turn 1 of session s-3 must reach the engine AS session s-3 turn 1, not as a fresh
+    bench-N session; and the request key must be the one the CSV row carries."""
+    app = _app()
+    trace = [TraceRequest(0.0, "s-3", 0, "Case 3. hi", 8),
+             TraceRequest(0.01, "s-3", 1, "Case 3. hi. and then?", 8,
+                          sampling={"temperature": 0.7, "top_p": 0.9, "top_k": 40})]
+
+    async def go():
+        async with await _client(app) as client:
+            return await rt.run_replay(client, trace, trace_prefix="steady_interactive-seen")
+
+    res = asyncio.run(go())
+    (h0, b0), (h1, b1) = app.state.requests
+    assert (h0["x-session-id"], h0["x-turn-index"], h0["x-trace-id"]) == \
+        ("s-3", "0", "steady_interactive-seen-0")
+    assert (h1["x-session-id"], h1["x-turn-index"], h1["x-trace-id"]) == \
+        ("s-3", "1", "steady_interactive-seen-1")
+    assert (b0["temperature"], b0["top_p"], b0["top_k"]) == (0.0, 1.0, 0)      # trace default
+    assert (b1["temperature"], b1["top_p"], b1["top_k"]) == (0.7, 0.9, 40)     # trace sampling
+    assert [r.trace_id for r in res.rows] == ["steady_interactive-seen-0", "steady_interactive-seen-1"]
 
 
 def test_slo_broken_means_no_throughput_within_slo():
@@ -197,3 +226,9 @@ def test_slo_broken_means_no_throughput_within_slo():
                            scheduler_stats={}, cache_stats={})
     assert panel.tok_s_within_slo is None and panel.slo_tpot_ms is None
     assert panel.validity.workload_regime == "synthetic"        # no cache stats: say so
+
+
+def test_trace_prefix_is_unique_per_invocation():
+    """Two replays against one server process share one telemetry file; ids must not collide."""
+    a, b = rt.new_trace_prefix("steady_interactive", "seen"), rt.new_trace_prefix("steady_interactive", "seen")
+    assert a != b and a.startswith("steady_interactive-seen-") and len(a.split("-")[-1]) == 6

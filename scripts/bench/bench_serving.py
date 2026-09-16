@@ -60,20 +60,27 @@ class Sample:
     tpot_s: float = 0.0
     out_tokens: int = 0
     error: str | None = None
+    trace_id: str | None = None   # the X-Trace-Id the server echoed; joins to telemetry rows
 
 
-async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int) -> Sample:
-    """One streaming /v1/completions call. TTFT = first token chunk; TPOT = mean ITL."""
-    body = {"prompt": prompt, "max_tokens": max_tokens, "stream": True, "temperature": 0.0}
+async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *,
+                      headers: dict | None = None, sampling: dict | None = None) -> Sample:
+    """One streaming /v1/completions call. TTFT = first token chunk; TPOT = mean ITL.
+    `headers` (X-Session-Id / X-Turn-Index / X-Trace-Id) and `sampling` (temperature, top_p,
+    top_k) are optional; None keeps the plain temperature-0 request."""
+    body = {"prompt": prompt, "max_tokens": max_tokens, "stream": True, "temperature": 0.0,
+            **(sampling or {})}
     t0 = time.perf_counter()
     ttft = None
     first_tok_t = last_tok_t = None
     n = 0
+    trace_id = None
     try:
-        async with client.stream("POST", "/v1/completions", json=body,
+        async with client.stream("POST", "/v1/completions", json=body, headers=headers,
                                  timeout=httpx.Timeout(120.0)) as r:
+            trace_id = r.headers.get("x-trace-id")
             if r.status_code != 200:
-                return Sample(error=f"http {r.status_code}")
+                return Sample(error=f"http {r.status_code}", trace_id=trace_id)
             async for line in r.aiter_lines():
                 if not line.startswith("data: "):
                     continue
@@ -90,11 +97,11 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int) -
                     last_tok_t = now
                     n += 1
     except Exception as e:
-        return Sample(error=type(e).__name__)
+        return Sample(error=type(e).__name__, trace_id=trace_id)
     if ttft is None:
-        return Sample(error="no_tokens")
+        return Sample(error="no_tokens", trace_id=trace_id)
     tpot = (last_tok_t - first_tok_t) / (n - 1) if n > 1 else 0.0
-    return Sample(ttft_s=ttft, tpot_s=tpot, out_tokens=n)
+    return Sample(ttft_s=ttft, tpot_s=tpot, out_tokens=n, trace_id=trace_id)
 
 
 @dataclass

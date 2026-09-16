@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-15.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-16.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -208,7 +208,7 @@
   <tr><td>Telemetry rows</td><td>One SQLite row per request — conditions at arrival, spans, outcome — for the loop to re-slice. Off unless <code>TELEMETRY_DIR</code> is set.</td><td><a href="arch-scheduler.html#telemetry">arch-scheduler.html</a></td></tr>
   <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
   <tr><td>Monitoring</td><td>Prometheus scrape and Grafana dashboard. No UI is served by the engine.</td><td><a href="arch-server.html#clients">arch-server.html</a></td></tr>
-  <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
+  <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler; optional X-Session-Id / X-Turn-Index / X-Trace-Id headers pin the session for the harness, X-Trace-Id echoed.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
   <tr><td>Config</td><td>Env-var-driven settings, no hardcoded paths.</td><td>covered on every page</td></tr>
 </table>
 

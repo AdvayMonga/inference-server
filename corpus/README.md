@@ -16,10 +16,15 @@ session id is disjoint between the splits, but both draw base content from the s
 per-request preamble plus the arrival schedule and lengths. Expanding the bank is the real fix,
 and is a new corpus version.
 
-`session_id` / `turn_index` are corpus structure, not wire fields: `replay_trace.py` posts to
-`/v1/completions`, whose shim mints its own session id, so a second turn is simulated by
-concatenating the follow-up onto the first turn's prompt. `sampling` is likewise fixed at
-temperature 0 by the client; `top_p` / `top_k` are recorded but not yet sent.
+`replay_trace.py` posts to `/v1/completions` with `session_id` / `turn_index` as the
+`X-Session-Id` / `X-Turn-Index` headers, so a turn 1 reaches the engine on the same session as
+its turn 0, and `X-Trace-Id=<class>-<split>-<nonce>-<index>`, which is the key its per-request
+CSV row shares with the engine's telemetry row; the nonce is minted per invocation (two replays
+against one server process write into one telemetry file) and recorded in the panel's
+`harness_config.trace_prefix`, so a run's rows are joined by prefix. `sampling` is sent as-is
+(temperature, top_p, top_k).
+A turn's prompt still carries the full conversation so far: the engine has no conversation
+store, and prefix sharing is what makes the repeated prefix cheap.
 
 | class | shape | placeholder SLO |
 |---|---|---|

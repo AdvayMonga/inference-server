@@ -37,10 +37,12 @@ class FakeScheduler:
     def __init__(self, full=False):
         self.full = full
         self.out = [ord("a"), ord("b"), ord("c")]
+        self.seen = []          # every ScheduledRequest handed to us, in order
 
     def submit(self, req):
         if self.full:
             raise QueueFullError("queue full")
+        self.seen.append(req)
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(self.out)
         return fut
@@ -48,6 +50,7 @@ class FakeScheduler:
     def enqueue(self, req):
         if self.full:
             raise QueueFullError("queue full")
+        self.seen.append(req)
         for t in self.out:
             req.token_queue.put_nowait(t)
         req.token_queue.put_nowait(None)
@@ -168,3 +171,66 @@ def test_chat_queue_full_429():
     r = client.post("/v1/chat/completions", json={
         "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
     assert r.status_code == 429
+
+
+# ------------------------------------------------------------------ correlation headers
+
+HEADERS = {"X-Session-Id": "sess-7", "X-Turn-Index": "2", "X-Trace-Id": "steady-seen-41"}
+CHAT_BODY = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+
+
+def test_headers_pin_session_turn_and_trace_on_both_routes():
+    """A corpus replay must land turn N on the same engine session as turn N-1."""
+    sched = FakeScheduler()
+    client = TestClient(_app(sched))
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 5}, headers=HEADERS)
+    assert r.status_code == 200 and r.headers["X-Trace-Id"] == "steady-seen-41"
+    r = client.post("/v1/chat/completions", json=CHAT_BODY, headers=HEADERS)
+    assert r.status_code == 200 and r.headers["X-Trace-Id"] == "steady-seen-41"
+    for req in sched.seen:
+        assert (req.session_id, req.turn_index, req.trace_id) == ("sess-7", 2, "steady-seen-41")
+
+
+def test_headers_honoured_on_streaming_routes_and_echoed_before_the_body():
+    sched = FakeScheduler()
+    client = TestClient(_app(sched))
+    for path, body in (("/v1/completions", {"prompt": "hi", "max_tokens": 5}),
+                       ("/v1/chat/completions", CHAT_BODY)):
+        with client.stream("POST", path, json={**body, "stream": True}, headers=HEADERS) as r:
+            assert r.status_code == 200
+            assert r.headers["X-Trace-Id"] == "steady-seen-41"   # before any chunk is read
+            assert r.iter_lines()
+    assert [(q.session_id, q.turn_index) for q in sched.seen] == [("sess-7", 2)] * 2
+
+
+def test_absent_headers_keep_auto_ids_and_still_echo_a_trace_id():
+    """Open WebUI and guidellm send none of these; nothing about their path changes."""
+    sched = FakeScheduler()
+    client = TestClient(_app(sched))
+    r1 = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 5})
+    r2 = client.post("/v1/chat/completions", json=CHAT_BODY)
+    bench, chat = sched.seen
+    assert bench.session_id.startswith("bench-") and chat.session_id.startswith("chat-")
+    assert bench.session_id != chat.session_id
+    assert bench.turn_index == 0 and chat.turn_index == 0
+    assert len(bench.trace_id) == 32 and bench.trace_id != chat.trace_id   # minted uuid4 hex
+    assert r1.headers["X-Trace-Id"] == bench.trace_id
+    assert r2.headers["X-Trace-Id"] == chat.trace_id
+
+
+def test_non_integer_turn_index_is_400():
+    client = TestClient(_app(FakeScheduler()))
+    r = client.post("/v1/completions", json={"prompt": "hi"}, headers={"X-Turn-Index": "two"})
+    assert r.status_code == 400
+
+
+def test_429_carries_the_trace_id_on_both_routes_streaming_and_not():
+    """A rejected request is the one backpressure work most needs to correlate."""
+    client = TestClient(_app(FakeScheduler(full=True)))
+    for path, body in (("/v1/completions", {"prompt": "hi", "max_tokens": 5}),
+                       ("/v1/chat/completions", CHAT_BODY)):
+        for stream in (False, True):
+            r = client.post(path, json={**body, "stream": stream}, headers=HEADERS)
+            assert r.status_code == 429 and r.headers["X-Trace-Id"] == "steady-seen-41"
+            r = client.post(path, json={**body, "stream": stream})
+            assert r.status_code == 429 and len(r.headers["X-Trace-Id"]) == 32   # minted

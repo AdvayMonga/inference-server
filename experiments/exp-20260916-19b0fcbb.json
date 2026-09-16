@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "307fd0e35c702844c0309f85f25c643813873a42"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "a525cd71601057767577b1c96a50df1a6b741519"
+    }
+  ],
+  "branch": "feat/shim-session-headers",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "307fd0e35c702844c0309f85f25c643813873a42",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260916-19b0fcbb",
+  "no_behaviour_change": "observability plumbing: the OpenAI shim honours optional X-Session-Id / X-Turn-Index / X-Trace-Id request headers and threads them onto ScheduledRequest; absent headers keep the auto-id behaviour; the one response-contract widening is that every /v1 response, including 429 rejections, now carries an X-Trace-Id header even when no request header was sent; no scheduling, admission or numerics change",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789565673.3827982,
+  "verdict": "confirmed"
+}

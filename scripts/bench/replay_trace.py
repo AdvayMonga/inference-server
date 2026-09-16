@@ -9,6 +9,13 @@ look better by receiving fewer requests. That is the property the closed-loop ha
 a month. The client measures TTFT/TPOT itself; the engine's own stats are read afterwards for
 the panel's pressure/cache fields only, never as evidence.
 
+Each request carries the trace's `session_id` / `turn_index` as X-Session-Id / X-Turn-Index, so
+a second turn lands on the same engine session as the first, and X-Trace-Id=<prefix>-<i> where
+<prefix> is `<class>-<split>-<nonce>`, the nonce minted once per invocation. That id is the key a
+telemetry SQLite row and a replay CSV row share; the nonce keeps two replays against one server
+process (one telemetry file) from colliding, and the prefix is recorded in the panel's
+harness_config so the two can be joined by prefix.
+
 Emits `runs/<run_id>.json` (a Vitals panel stamped with the corpus version and class) plus
 `runs/<run_id>.csv` with one row per request, which is what the loop re-slices later.
 """
@@ -20,6 +27,7 @@ import asyncio
 import csv
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,6 +55,7 @@ class Row:
     index: int
     session_id: str
     turn_index: int
+    trace_id: str
     arrival_s: float
     fired_s: float
     ttft_ms: float | None
@@ -80,19 +89,26 @@ class ReplayResult:
 
 
 async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
-                     rate_scale: float = 1.0, drain_timeout_s: float = 300.0) -> ReplayResult:
-    """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight."""
+                     rate_scale: float = 1.0, drain_timeout_s: float = 300.0,
+                     trace_prefix: str = "replay") -> ReplayResult:
+    """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight.
+    Request i is sent as X-Trace-Id=<trace_prefix>-<i> on the trace's session/turn."""
     res = ReplayResult()
     tasks: list[tuple[asyncio.Task, int, TraceRequest]] = []
     fired_at: dict[int, float] = {}
     t0 = time.perf_counter()
 
+    def trace_id(i: int) -> str:
+        return f"{trace_prefix}-{i}"
+
     async def fire(i: int, req: TraceRequest) -> None:
         fired = fired_at[i] = time.perf_counter() - t0
-        # Sampling: one_request posts temperature 0 and the shim's default top_p/top_k, which
-        # is what every trace carries; req.sampling is not yet threaded through.
-        s = await one_request(client, req.prompt, req.max_tokens)
-        res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s, round(fired, 4),
+        headers = {"X-Session-Id": req.session_id, "X-Turn-Index": str(req.turn_index),
+                   "X-Trace-Id": trace_id(i)}
+        s = await one_request(client, req.prompt, req.max_tokens, headers=headers,
+                              sampling=req.sampling)
+        res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
+                            round(fired, 4),
                             round(s.ttft_s * 1000, 2) if s.error is None else None,
                             round(s.tpot_s * 1000, 3) if s.error is None else None,
                             s.out_tokens, s.error))
@@ -109,7 +125,7 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
     late = [(t, i, req) for t, i, req in tasks if not t.done()]
     for t, i, req in late:
         t.cancel()
-        res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s,
+        res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
                             round(fired_at[i], 4), None, None, 0, "drain_timeout"))
     if late:
         await asyncio.gather(*(t for t, _, _ in late), return_exceptions=True)
@@ -126,16 +142,21 @@ async def fetch_stats(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
         return {}
 
 
+def new_trace_prefix(cls_name: str, split: str) -> str:
+    """`<class>-<split>-<nonce>`: unique per invocation so two replays never share a trace id."""
+    return f"{cls_name}-{split}-{uuid.uuid4().hex[:6]}"
+
+
 def build_panel(res: ReplayResult, cls: WorkloadClass, *, corpus_version: str, split: str,
                 rate_scale: float, scheduler_stats: dict[str, Any],
-                cache_stats: dict[str, Any]) -> Vitals:
+                cache_stats: dict[str, Any], trace_prefix: str = "replay") -> Vitals:
     s = res.summary(cls)
     ttfts = [r.ttft_ms for r in res.rows if r.error is None]
     validity = H.build_validity(
         "replay_trace",
         {"workload_class": cls.name, "split": split, "corpus_version": corpus_version,
          "rate_scale": rate_scale, "arrival_rate_rps": cls.arrival_rate_rps * rate_scale,
-         "n_requests": len(res.rows)},
+         "n_requests": len(res.rows), "trace_prefix": trace_prefix},
         n_samples=s["n_ok"],
         workload_regime=H.infer_regime(cache_stats.get("hit_rate")),
         stderr_value=H.stderr(ttfts),
@@ -185,12 +206,15 @@ async def main() -> int:
     manifest: Manifest
     manifest, trace = load_trace(args.cls, args.split)
     cls = manifest.classes[args.cls]
+    trace_prefix = new_trace_prefix(args.cls, args.split)
     print(f"-- replay {args.cls}/{args.split} ({len(trace)} requests, corpus "
-          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url} --")
+          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url}, "
+          f"trace ids {trace_prefix}-<i> --")
     async with httpx.AsyncClient(base_url=args.base_url,
                                  limits=httpx.Limits(max_connections=1024)) as client:
         res = await run_replay(client, trace, rate_scale=args.rate_scale,
-                               drain_timeout_s=args.drain_timeout_s)
+                               drain_timeout_s=args.drain_timeout_s,
+                               trace_prefix=trace_prefix)
         sched = await fetch_stats(client, "/scheduler/stats")
         cache = await fetch_stats(client, "/cache/stats")
 
@@ -200,7 +224,8 @@ async def main() -> int:
         print("  no request succeeded; nothing to record")
         return 1
     panel = build_panel(res, cls, corpus_version=manifest.corpus_version, split=args.split,
-                        rate_scale=args.rate_scale, scheduler_stats=sched, cache_stats=cache)
+                        rate_scale=args.rate_scale, scheduler_stats=sched, cache_stats=cache,
+                        trace_prefix=trace_prefix)
     runs_dir = Path(args.runs_dir) if args.runs_dir else None
     path = H.emit(panel, label=f"replay {args.cls}/{args.split}", runs_dir=runs_dir)
     write_rows(path.with_suffix(".csv"), res.rows)
