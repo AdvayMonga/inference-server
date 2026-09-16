@@ -16,7 +16,9 @@ from inference_server.scheduling_policy import (
     FairPolicy,
     fair_charge,
     fair_initial_counter,
+    fair_key,
     fair_order,
+    fcfs_key,
     fcfs_order,
 )
 
@@ -117,3 +119,20 @@ def test_fair_charge_is_in_place_and_starts_at_zero():
     fair_charge(counters, "s", 4)
     fair_charge(counters, "s", 3)
     assert counters == {"s": 7.0}
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_peek_next_is_head_of_order(seed):
+    """peek_next uses O(n) min over the key; it must equal order()[0] (stable sort, same key)."""
+    rng = random.Random(seed)
+    cands = _cands(rng, rng.randint(1, 30))
+    counters = {f"s{i}": float(rng.randint(0, 3)) for i in range(5)}
+    fcfs, fair = FCFSPolicy(), FairPolicy()
+    for c in cands:
+        fcfs.on_request_arrived(_req(c))
+        fair.on_request_arrived(_req(c))
+    fair._counters = counters
+    assert fcfs.peek_next().arrival_seq == fcfs_order(cands)[0].arrival_seq
+    assert fair.peek_next().arrival_seq == fair_order(cands, counters)[0].arrival_seq
+    assert min(cands, key=fcfs_key) == fcfs_order(cands)[0]
+    assert min(cands, key=lambda c: fair_key(c, counters)) == fair_order(cands, counters)[0]

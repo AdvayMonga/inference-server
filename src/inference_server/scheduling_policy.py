@@ -21,17 +21,24 @@ class Candidate(Protocol):
 C = TypeVar("C", bound=Candidate)
 
 
+def fcfs_key(c: Candidate) -> tuple:
+    """FCFS sort key: (-priority, arrival_seq). Pure."""
+    return (-c.priority, c.arrival_seq)
+
+
+def fair_key(c: Candidate, counters: Mapping[str, float]) -> tuple:
+    """VTC sort key: (-priority, counter[session_id], arrival_seq). Pure."""
+    return (-c.priority, counters.get(c.session_id, 0.0), c.arrival_seq)
+
+
 def fcfs_order(candidates: Iterable[C]) -> list[C]:
-    """Admission order under FCFS: (-priority, arrival_seq). Pure."""
-    return sorted(candidates, key=lambda r: (-r.priority, r.arrival_seq))
+    """Admission order under FCFS. Pure."""
+    return sorted(candidates, key=fcfs_key)
 
 
 def fair_order(candidates: Iterable[C], counters: Mapping[str, float]) -> list[C]:
-    """Admission order under VTC: (-priority, counter[session_id], arrival_seq). Pure."""
-    return sorted(
-        candidates,
-        key=lambda r: (-r.priority, counters.get(r.session_id, 0.0), r.arrival_seq),
-    )
+    """Admission order under VTC. Pure."""
+    return sorted(candidates, key=lambda c: fair_key(c, counters))
 
 
 def fair_initial_counter(
@@ -101,19 +108,19 @@ class SchedulingPolicy(ABC):
 
 
 class _ListPolicy(SchedulingPolicy):
-    """Shell shared by the built-in policies: a pending list, ordered by a pure function."""
+    """Shell shared by the built-in policies: a pending list, ordered by a pure key."""
 
     def __init__(self) -> None:
         self._pending: list["ScheduledRequest"] = []
 
     @abstractmethod
-    def _order(self) -> list["ScheduledRequest"]:
-        """Every pending request in admission order."""
+    def _key(self, request: "ScheduledRequest") -> tuple:
+        """The pure sort key for one pending request."""
         ...
 
     def peek_next(self) -> "ScheduledRequest | None":
-        ordered = self._order()
-        return ordered[0] if ordered else None
+        # O(n) min, not sorted()[0]: called per candidate under _pending_cv in _admit_pending.
+        return min(self._pending, key=self._key) if self._pending else None
 
     def pick_next(self) -> "ScheduledRequest | None":
         head = self.peek_next()
@@ -125,7 +132,7 @@ class _ListPolicy(SchedulingPolicy):
         self._pending.append(request)
 
     def peek_window(self, n: int) -> list["ScheduledRequest"]:
-        return self._order()[:n]
+        return sorted(self._pending, key=self._key)[:n]
 
     def pick(self, request: "ScheduledRequest") -> None:
         self._pending.remove(request)
@@ -135,14 +142,14 @@ class _ListPolicy(SchedulingPolicy):
 
 
 class FCFSPolicy(_ListPolicy):
-    """First-come-first-served, with priority as the dominant key (see fcfs_order)."""
+    """First-come-first-served, with priority as the dominant key (see fcfs_key)."""
 
-    def _order(self) -> list["ScheduledRequest"]:
-        return fcfs_order(self._pending)
+    def _key(self, request: "ScheduledRequest") -> tuple:
+        return fcfs_key(request)
 
 
 class FairPolicy(_ListPolicy):
-    """Virtual Token Counter fairness over session_id, gated by priority (see fair_order).
+    """Virtual Token Counter fairness over session_id, gated by priority (see fair_key).
 
     Priority dominates fairness; within a tier the least-served session wins; arrival_seq
     breaks final ties. New sessions inherit the min counter across sessions with pending work.
@@ -152,8 +159,8 @@ class FairPolicy(_ListPolicy):
         super().__init__()
         self._counters: dict[str, float] = {}
 
-    def _order(self) -> list["ScheduledRequest"]:
-        return fair_order(self._pending, self._counters)
+    def _key(self, request: "ScheduledRequest") -> tuple:
+        return fair_key(request, self._counters)
 
     def on_request_arrived(self, request: "ScheduledRequest") -> None:
         sid = request.session_id
