@@ -115,8 +115,9 @@ until there is GPU budget. v1 does not model preemption or chunked prefill.
 
 ### Where a run actually happens
 
-Routing picks a venue; `research/venues.py` runs there. The contract both venues implement is
-the one Modal already gave us, because it is what made the instruments writable:
+`scripts/tools/run_on_runpod.py` runs one instrument on a rented pod through `research/venues.py`;
+`scripts/run_instrument.sh` is the Modal launcher. The contract both implement is the one Modal
+already gave us, because it is what made the instruments writable:
 
     ship the tree -> run one python file on a GPU -> get a JSON payload back -> keep no machine
 
@@ -151,6 +152,7 @@ transport rather than the engine.
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed
+- both arms replay the same `corpus/` trace (`scripts/bench/replay_trace.py --class <cls> --split seen`); the panel's `corpus_version` is what lets `compare.py` accept them
 - **arms run simultaneously**, never sequentially, never against a stored number
 - every panel tagged `arm=<name>` in its notes; all arms share one `RESEARCH_RUN_GROUP`
 - **>=3 runs per arm, interleaved ABBA** — not one arm's runs then the other's

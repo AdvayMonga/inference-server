@@ -1,11 +1,14 @@
 # Inference Server
 
-**A multi-user LLM inference engine written from scratch in Python, and the research loop that
-improves it.** Continuous batching, a block-paged KV cache with cross-session prefix sharing,
-hand-written Gemma 4 forward with Triton paged-attention kernels and CUDA graphs, fair scheduling
-with backpressure. Benchmarked head-to-head against vLLM on the same model and hardware. Since
-September 2026 an engine change merges only with a measured, replicated experiment record behind
-it.
+**A single-GPU LLM inference engine written from scratch in Python, and the research loop that
+improves it — becoming a regime-adaptive, multi-replica serving system whose policies are learned
+offline by the loop and selected at runtime by a controller.** Continuous batching, a block-paged
+KV cache with cross-session prefix sharing, hand-written Gemma 4 forward with Triton
+paged-attention kernels and CUDA graphs, fair scheduling with backpressure. Measured head-to-head
+against vLLM on the same model and hardware; since September 2026 that comparison is a
+*guardrail*, and the metric being optimised is GPU-seconds per session at a fixed p95 TTFT
+ceiling, starting with the cold-start regime. An engine change merges only with a measured,
+replicated experiment record behind it.
 
 [![Architecture overview](docs/architecture.svg)](https://advaymonga.github.io/inference-server/architecture.html)
 
@@ -36,11 +39,28 @@ which ruled out every scheduling lever at once; A100 draws are bimodal (2.3× TP
 identical config), so only simultaneous A/B arms are evidence; and a 10.8× isolated kernel win
 was worth nothing end to end. Those are in [`DECISIONS.md`](DECISIONS.md).
 
+The gap that remains is per-decode-step cost at low batch and long-prompt prefill compute —
+kernel and fusion work on vLLM's home turf — so the numbers above are kept as the **warm-path
+guardrail**, not the objective. The objective is **GPU-seconds per session subject to p95 TTFT
+under a fixed per-class ceiling**, under hard invariants (output equivalence, memory ceiling, no
+crashes) and guardrails (no workload class regresses; warm path stays within its current distance
+of vLLM). Cold start is the first regime, because a replica's age detects it with no classifier.
+
 ---
 
-## Two halves
+## Three planes
 
-### 1. The engine — `src/inference_server/`
+| plane | clock | role | status |
+|---|---|---|---|
+| **Data** — the engine | microseconds | serves tokens; emits one telemetry row per request | built |
+| **Control** — router, prefix index, replica launcher, controller, policy table | seconds | routes, selects a policy, manages replica lifecycle | not built yet |
+| **Improvement** — the research loop | hours | turns telemetry into validated configs; changes the other two | built, being extended |
+
+The data plane emits telemetry, the improvement plane turns it into validated configs, the control
+plane selects among them at runtime. The knowledge base is both research artifact and production
+policy store; nothing in the data plane ever calls a model for judgment.
+
+### 1. The data plane — `src/inference_server/`
 
 | component | what it does |
 |---|---|
@@ -54,11 +74,12 @@ was worth nothing end to end. Those are in [`DECISIONS.md`](DECISIONS.md).
 | **`server.py`** + `openai_shim.py` | FastAPI, SSE streaming, `session_id` threaded end to end, `/v1/completions` and `/v1/chat/completions` so standard benchmark clients and chat frontends drive the engine unmodified. No built-in UI. |
 | **`scripts/bench/load_test.py`** | Out-of-process concurrency sweep; `--workload realistic` draws distinct prompts from `prompt_bank.py` so the run exercises the cache-miss path. |
 | **`metrics.py`**, `prometheus_metrics.py` | Sliding-window p50/p95/p99 TTFT / TPOT / throughput on `/scheduler/stats`; aggregate Prometheus `/metrics` (Grafana dashboard in `monitoring/`). |
+| **`telemetry.py`** | One SQLite row per request — conditions at arrival (queue depth, batch occupancy, free KV, replica age), spans, outcome — keyed by `trace_id` / `session_id` / `turn_index`. Off unless `TELEMETRY_DIR` is set; never on the scheduler thread. An aggregate cannot be re-sliced by the load it was measured under; rows can. |
 
 Everything is env-configured (`.env.example` lists every knob) and deploys as one container
 per GPU (`modal_app.py`).
 
-### 2. The research loop — `LOOP.md` + `src/inference_server/research/`
+### 2. The improvement plane — `LOOP.md` + `src/inference_server/research/`
 
 The loop exists because the expensive mistakes here were never bad code. They were valid-looking
 comparisons between things that were not comparable: a closed-loop harness that measured the
@@ -78,14 +99,20 @@ measure ──► attribute ──► hypothesize ──► screen ──► exp
 | Gates | `research/gates.py` | validity → sanity → significance → correctness → cost, judged in that order |
 | Procedure | `research/session.py` | steps 4–6 as one call; raises before judging if arms are unbalanced, block-ordered, dirty, or stale |
 | Attribution | `research/attribute.py` | panel → ranked gaps, deterministic, no ideas |
-| Knowledge base | `knowledge/*.json` → `DECISIONS.md` | 68 entries; the `rejected` ones stop dead ends being re-tried |
+| Corpus | `corpus/` + `research/corpus.py` | frozen, hashed traces per workload class (`cold_start`, `steady_interactive`, `long_context`), split seen / held-out; the `corpus_version` rides in every panel and `compare.py` refuses to compare across it |
+| Replay | `scripts/bench/replay_trace.py` | open-loop replay of a trace on the client's own clock; its per-request CSV joins the engine's telemetry row on `X-Trace-Id` |
+| Simulator | `research/simulator.py` | tier-1 falsifier: replays a trace through the scheduler's iteration order with a fitted `TimingModel` in place of attention, calling the same pure `scheduling_policy.py` functions the engine does. Rejects and promotes policy hypotheses; never confirms |
+| Knowledge base | `knowledge/*.json` → `DECISIONS.md` | 69 entries tagged by regime and validity range; the `rejected` ones stop dead ends being re-tried |
 | Experiment ledger | `experiments/*.json` | what was measured at which SHA, and what the gates said |
 | Merge gate | `scripts/premerge_check.py` | an engine change with no green experiment record does not merge |
+| Venues | `research/venues.py` + `scripts/tools/run_on_runpod.py` | rent a GPU, run one instrument, bring the panel home, terminate — the same contract the Modal launcher gave us |
 
 ```bash
 python -m inference_server.research.loop attribute runs/<id>.json --out gaps.json
 python -m inference_server.research.loop kb --status rejected      # what is already disproved
 python -m inference_server.research.loop screen hypotheses.json    # cheapest falsification first
+python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}' --config '{"policy":"fcfs"}'
+python scripts/bench/replay_trace.py --class steady_interactive --split seen --base-url http://HOST:8000
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
 python scripts/premerge_check.py <branch> --explain
 ```
@@ -94,20 +121,29 @@ A disproved hypothesis is a successful iteration. Of the nine experiments run th
 procedure so far, three confirmed, three were noise, and three were invalid — the harness never
 exercised the change. The last category is the reason the loop exists.
 
+### 3. The control plane — not built yet
+
+Router, global prefix index, replica launcher, controller and policy table are Phases 5–7 of the
+plan. They arrive after the loop can price a cold start (Phase 4), because the controller selects
+among configs the loop has already validated, and there is nothing to select from until then.
+
 ---
 
 ## Repository layout
 
 ```
 src/inference_server/     the engine (subject of the loop; knows nothing about it)
-  research/               the loop: schemas, compare, gates, session, attribute, kb, CLI
+  telemetry.py            one row per request, off unless TELEMETRY_DIR is set
+  research/               the loop: schemas, compare, gates, session, attribute, kb, corpus,
+                          simulator, venues, CLI
 LOOP.md                   the method — read this before changing the engine
-DECISIONS.md              generated view of knowledge/ (68 decisions, tagged, with evidence)
-knowledge/                knowledge base, one JSON per finding
+DECISIONS.md              generated view of knowledge/ (69 decisions, tagged, with evidence)
+knowledge/                knowledge base, one JSON per finding, with regime + validity range
 experiments/              experiment ledger, one JSON per A/B; what premerge_check.py reads
+corpus/                   frozen workload traces per class, seen / held-out, hashed into corpus_version
 scripts/                  instruments and tools — bench/, probes/, gpu_tests/, tools/
 benchmarks/               the sweep CSVs behind every number above, with a README
-tests/                    304 tests; 270 run in ~8 s on CPU, 34 model-heavy ones opt in with -m heavy
+tests/                    517 tests; 483 run on CPU, 34 model-heavy ones opt in with -m heavy
 docs/                     the GitHub Pages architecture map
 monitoring/               Prometheus + Grafana stack; the only aggregate view
 papers/                   reading notes on what this borrows from
@@ -160,10 +196,14 @@ pressure. This is the only place aggregate numbers live; nothing else recomputes
 
 Key knobs (all in `.env.example`): `BACKEND=custom-cuda` for the hand-written path,
 `PREFILL_MODE=batched|chunked`, `MAX_BATCH_SIZE`, `MAX_ACTIVE_KV_TOKENS`,
-`SCHEDULING_POLICY=fcfs|fair`, `CUSTOM_BACKEND_COMPILE=1`.
+`SCHEDULING_POLICY=fcfs|fair`, `CUSTOM_BACKEND_COMPILE=1`, `TELEMETRY_DIR=runs/telemetry` for
+per-request rows.
 
-GPU work runs on rented hardware through Modal: `pip install -e ".[modal]"`, then
-`scripts/run_instrument.sh scripts/bench/bench_serving_modal.py`.
+GPU work runs on rented hardware. The `*_modal.py` instruments launch through
+`scripts/run_instrument.sh` (`pip install -e ".[modal]"`); since the Modal credits ran out, any
+instrument also runs on a RunPod pod with `RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py
+<instrument>`, which rents, syncs, runs, parses the panel and terminates. Cheap tiers run locally
+first.
 
 ---
 
@@ -172,7 +212,8 @@ GPU work runs on rented hardware through Modal: `pip install -e ".[modal]"`, the
 1. Attribute the current panel; pick a gap. Check `loop kb --status rejected` first.
 2. Write the hypothesis with its predicted metric, magnitude and cheapest falsifier
    (`research/HYPOTHESIZE.md`).
-3. Screen. Run the cheapest tier that could kill it — arithmetic, then CPU, then one GPU probe.
+3. Screen. Run the cheapest tier that could kill it — arithmetic, the simulator for any
+   scheduling / admission / KV-sizing policy, then CPU, then one GPU probe.
 4. Experiment on a branch: two arms, same session, interleaved, ≥3 runs each.
 5. `judge_group(...)` runs the five gates and writes the experiment record.
 6. Open a PR. CI runs `scripts/premerge_check.py`, which refuses it unless the record is green
@@ -189,9 +230,14 @@ and when to dispatch the GPU lane — are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Gemma 4 E2B / E4B, PyTorch, single GPU. The engine is at 2.3× behind vLLM on the headline sweep;
-the loop's current attribution says the remaining gap is per-decode-step cost at low batch
-(kernel and fusion work, not scheduling) and long-prompt prefill compute on the TTFT tail.
+Gemma 4 E2B / E4B, PyTorch, single GPU. Phases 1–3 of the plan — per-request telemetry, the
+versioned corpus with open-loop replay, and the trace-replay simulator — landed 2026-09-16
+(PRs #17–#23). Next is Phase 4, cold start, gated on the Phase 0 decisions (model size,
+substrate, KV bytes per token, per-class SLOs, loop authority). The first GPU job is the
+simulator's hardware check: replay a corpus class with `TELEMETRY_DIR` set on a rented pod, fit
+the timing model from the rows, and rank-correlate a policy sweep against the same sweep in
+`loop simulate`. Modal credits are exhausted; GPU work goes to rented pods through
+`research/venues.py`.
 Out of scope by design: model registry, LoRA, multi-tenant auth, gateway features — the
 `session_id` threading and `InferenceBackend` / `SchedulerInterface` seams are there so a
 platform layer can be added without rewriting the engine.
