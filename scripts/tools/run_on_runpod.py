@@ -92,6 +92,10 @@ def main() -> int:
     # A smoke run returns no panels on purpose; print what it did return so the run is readable.
     if "smoke" in payload:
         print(json.dumps(payload["smoke"], indent=2, sort_keys=True))
+    # A gate returns a verdict, not panels; its verdict is this process's exit status.
+    if "gate" in payload:
+        print(json.dumps(payload["gate"], indent=2, sort_keys=True))
+        return 0 if payload["gate"].get("passed") else 1
     return 0
 
 

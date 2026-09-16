@@ -32,6 +32,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 API_BASE = "https://rest.runpod.io/v1"
@@ -77,6 +78,12 @@ def extract_payload(stdout: str) -> dict[str, Any]:
         raise VenueError(f"panel block is not valid JSON: {e}") from e
 
 
+def has_payload(stdout: str) -> bool:
+    """True when stdout holds a closed marked block, whatever else happened around it."""
+    start = stdout.rfind(PANEL_BEGIN)
+    return start >= 0 and PANEL_END in stdout[start:]
+
+
 def emit_payload(payload: dict[str, Any]) -> str:
     """The instrument side of `extract_payload`. Kept here so the two cannot drift apart."""
     return f"\n{PANEL_BEGIN}\n{json.dumps(payload)}\n{PANEL_END}\n"
@@ -90,6 +97,8 @@ class Pod:
     host: str | None = None
     port: int | None = None
     cost_per_hr: float = 0.0
+    name: str = ""
+    last_started_at: str | None = None          # ISO-8601 from the API; the reaper's clock
 
     @property
     def reachable(self) -> bool:
@@ -153,6 +162,13 @@ class RunPodClient:
 
     def terminate(self, pod_id: str) -> None:
         self._call("DELETE", f"/pods/{pod_id}")
+
+    def list(self) -> list[Pod]:
+        """Every pod on the account. The reaper needs names and start times, nothing else."""
+        d = self._call("GET", "/pods")
+        rows = d if isinstance(d, list) else d.get("pods") or []
+        return [Pod(id=p["id"], name=p.get("name") or "", last_started_at=p.get("lastStartedAt"),
+                    cost_per_hr=float(p.get("costPerHr") or 0.0)) for p in rows]
 
 
 @dataclass
@@ -248,12 +264,15 @@ def run_remote(pod: Pod, script: str, env: dict[str, str], shell: Shell = _shell
 
     Provenance env is exported remotely for the same reason run_instrument.sh exports it locally:
     the box has no git repo, so a panel measured here cannot name its own sha.
+
+    A gate instrument reports, then exits by its verdict so a direct run is usable on its own.
+    A non-zero exit WITH a closed payload block is therefore a verdict, not a broken venue.
     """
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items()))
     remote = (f"cd /workspace/repo && export PYTHONPATH=/workspace/repo/src && "
               f"{exports} timeout {timeout_s} python {script}")
     r = shell(_ssh_base(pod) + [remote])
-    if r.returncode != 0:
+    if r.returncode != 0 and not has_payload(r.stdout):
         raise VenueError(f"instrument exited {r.returncode} on pod {pod.id}: "
                          f"{(r.stderr or r.stdout).strip()[-600:]}")
     return r.stdout
@@ -291,3 +310,37 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
         except Exception as e:                      # noqa: BLE001 — see docstring
             log(f"[venue] WARNING could not terminate {pod.id}: {e} — "
                 f"check runpod.io/console/pods, it is still billing")
+
+
+# ------------------------------------------------------------------ the reaper
+
+def _parse_ts(s: str) -> datetime:
+    dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def reap_pods(client: RunPodClient, name: str = PodSpec.name, since: str | None = None,
+              log: Callable[[str], None] = print) -> list[str]:
+    """Terminate every pod carrying `name`; with `since` (ISO-8601), only those started at or
+    after it. Returns the ids terminated.
+
+    The CI cleanup step. A runner killed by its timeout never reaches `run_instrument`'s
+    finally, and that pod bills until someone finds it in a web console. The name is the proof
+    of ownership — only pods this repo named are candidates; `since` is the guard against a
+    concurrent local run that used the same default name. A pod with no start time is still
+    ours by name, so it is terminated, loudly.
+    """
+    cutoff = _parse_ts(since) if since else None
+    reaped: list[str] = []
+    for pod in client.list():
+        if pod.name != name:
+            continue
+        if cutoff and pod.last_started_at and _parse_ts(pod.last_started_at) < cutoff:
+            log(f"[reap] leaving {pod.id}: started {pod.last_started_at}, before {since}")
+            continue
+        if cutoff and not pod.last_started_at:
+            log(f"[reap] {pod.id} has no start time; it carries our name, so it goes")
+        client.terminate(pod.id)
+        log(f"[reap] terminated {pod.id} ({name}, ${pod.cost_per_hr:.2f}/hr)")
+        reaped.append(pod.id)
+    return reaped
