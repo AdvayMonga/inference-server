@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "bench"))
@@ -73,6 +73,33 @@ def test_open_loop_driver_measures_against_mock():
     assert all(s.out_tokens == 5 for s in ok)              # counted token chunks, not usage chunk
     assert all(0.01 < s.ttft_s < 0.2 for s in ok)          # measured the ~20ms TTFT
     assert all(0.0 < s.tpot_s < 0.05 for s in ok)          # measured the ~5ms ITL
+
+
+def test_one_request_default_sends_no_correlation_headers_and_keeps_the_echoed_trace_id():
+    """The Poisson driver never sets headers; the shim mints ids and we keep what it echoes."""
+    app = FastAPI()
+    seen = {}
+
+    @app.post("/v1/completions")
+    async def completions(request: Request):
+        seen["headers"] = dict(request.headers)
+        seen["body"] = await request.json()
+
+        async def gen():
+            yield f'data: {json.dumps({"choices": [{"text": "x", "finish_reason": None}]})}\n\n'
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"X-Trace-Id": "minted-by-server"})
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await bs.one_request(client, "hi", 4)
+
+    s = asyncio.run(go())
+    assert s.error is None and s.trace_id == "minted-by-server"
+    assert not any(k.startswith("x-") for k in seen["headers"])
+    assert seen["body"] == {"prompt": "hi", "max_tokens": 4, "stream": True, "temperature": 0.0}
 
 
 # ---- what makes it OPEN-loop: arrivals are a Poisson schedule, not a reaction to the server ---

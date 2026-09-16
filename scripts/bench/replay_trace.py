@@ -9,6 +9,10 @@ look better by receiving fewer requests. That is the property the closed-loop ha
 a month. The client measures TTFT/TPOT itself; the engine's own stats are read afterwards for
 the panel's pressure/cache fields only, never as evidence.
 
+Each request carries the trace's `session_id` / `turn_index` as X-Session-Id / X-Turn-Index, so
+a second turn lands on the same engine session as the first, and X-Trace-Id=<class>-<split>-<i>,
+which is the key a telemetry SQLite row and a replay CSV row share.
+
 Emits `runs/<run_id>.json` (a Vitals panel stamped with the corpus version and class) plus
 `runs/<run_id>.csv` with one row per request, which is what the loop re-slices later.
 """
@@ -47,6 +51,7 @@ class Row:
     index: int
     session_id: str
     turn_index: int
+    trace_id: str
     arrival_s: float
     fired_s: float
     ttft_ms: float | None
@@ -80,19 +85,26 @@ class ReplayResult:
 
 
 async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
-                     rate_scale: float = 1.0, drain_timeout_s: float = 300.0) -> ReplayResult:
-    """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight."""
+                     rate_scale: float = 1.0, drain_timeout_s: float = 300.0,
+                     trace_prefix: str = "replay") -> ReplayResult:
+    """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight.
+    Request i is sent as X-Trace-Id=<trace_prefix>-<i> on the trace's session/turn."""
     res = ReplayResult()
     tasks: list[tuple[asyncio.Task, int, TraceRequest]] = []
     fired_at: dict[int, float] = {}
     t0 = time.perf_counter()
 
+    def trace_id(i: int) -> str:
+        return f"{trace_prefix}-{i}"
+
     async def fire(i: int, req: TraceRequest) -> None:
         fired = fired_at[i] = time.perf_counter() - t0
-        # Sampling: one_request posts temperature 0 and the shim's default top_p/top_k, which
-        # is what every trace carries; req.sampling is not yet threaded through.
-        s = await one_request(client, req.prompt, req.max_tokens)
-        res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s, round(fired, 4),
+        headers = {"X-Session-Id": req.session_id, "X-Turn-Index": str(req.turn_index),
+                   "X-Trace-Id": trace_id(i)}
+        s = await one_request(client, req.prompt, req.max_tokens, headers=headers,
+                              sampling=req.sampling)
+        res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
+                            round(fired, 4),
                             round(s.ttft_s * 1000, 2) if s.error is None else None,
                             round(s.tpot_s * 1000, 3) if s.error is None else None,
                             s.out_tokens, s.error))
@@ -109,7 +121,7 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
     late = [(t, i, req) for t, i, req in tasks if not t.done()]
     for t, i, req in late:
         t.cancel()
-        res.rows.append(Row(i, req.session_id, req.turn_index, req.arrival_s,
+        res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
                             round(fired_at[i], 4), None, None, 0, "drain_timeout"))
     if late:
         await asyncio.gather(*(t for t, _, _ in late), return_exceptions=True)
@@ -190,7 +202,8 @@ async def main() -> int:
     async with httpx.AsyncClient(base_url=args.base_url,
                                  limits=httpx.Limits(max_connections=1024)) as client:
         res = await run_replay(client, trace, rate_scale=args.rate_scale,
-                               drain_timeout_s=args.drain_timeout_s)
+                               drain_timeout_s=args.drain_timeout_s,
+                               trace_prefix=f"{args.cls}-{args.split}")
         sched = await fetch_stats(client, "/scheduler/stats")
         cache = await fetch_stats(client, "/cache/stats")
 
