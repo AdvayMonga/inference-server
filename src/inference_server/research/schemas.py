@@ -382,6 +382,14 @@ class KnowledgeEntry:
     evidence: list[dict[str, str]] = field(default_factory=list)   # {experiment_id|run_id|url}
     triggers: list[str] = field(default_factory=list)              # what would reopen this
     superseded_by: str | None = None
+    # Where the finding holds, so the brain can ask "what applies to my situation" instead of
+    # grepping, and so a finding is never extrapolated past the bounds it was measured over.
+    # All None/empty by default: entries written before these existed load unchanged.
+    regime: str | None = None        # cold_start | steady_interactive | long_context
+    validity_range: dict[str, Any] = field(default_factory=dict)   # bounds; see knowledge/README
+    mechanism: str = ""              # one sentence: why it worked or did not
+    supersedes: str | None = None    # partner of superseded_by
+    transfer_checked: dict[str, Any] | None = None   # re-run on a 2nd model/hardware, and result
     id: str = field(default_factory=lambda: _new_id("kb"))
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -393,3 +401,7 @@ class KnowledgeEntry:
             raise SchemaError(f"status must be one of {self.STATUSES}")
         if not self.title or not self.summary:
             raise SchemaError("title and summary are required")
+        for name in ("supersedes", "superseded_by"):
+            ref = getattr(self, name)
+            if ref is not None and not ref.startswith("kb-"):
+                raise SchemaError(f"{name} must be a knowledge entry id (kb-...), got {ref!r}")

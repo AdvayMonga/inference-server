@@ -13,7 +13,7 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from inference_server.research.schemas import (
     REPO_ROOT,
@@ -75,6 +75,7 @@ def query(
     tags: Iterable[str] = (),
     status: str | None = None,
     text: str | None = None,
+    regime: str | None = None,
 ) -> list[KnowledgeEntry]:
     """What the hypothesis step calls before proposing anything: has this been tried?"""
     items = list(entries) if entries is not None else load_entries()
@@ -83,12 +84,35 @@ def query(
         items = [e for e in items if tagset & set(e.tags)]
     if status:
         items = [e for e in items if e.status == status]
+    if regime:
+        items = [e for e in items if e.regime == regime]
     if text:
         t = text.lower()
         items = [e for e in items
                  if t in e.title.lower() or t in e.summary.lower()
                  or any(t in tag for tag in e.tags)]
     return items
+
+
+def covers(entry: KnowledgeEntry, situation: dict[str, Any]) -> bool:
+    """Does `situation` fall inside every bound the entry's validity_range states?
+
+    Keys the range does not mention are unconstrained. A 2-list bound is `lo <= x <= hi`;
+    anything else is equality. Deliberately no "nearest entry": outside the measured bounds
+    is uncovered, full stop — extrapolating a finding is the failure this field exists to stop.
+    """
+    for key, bound in entry.validity_range.items():
+        if key not in situation:
+            continue
+        x = situation[key]
+        try:
+            is_range = isinstance(bound, list) and len(bound) == 2
+            inside = bound[0] <= x <= bound[1] if is_range else bound == x
+        except TypeError:
+            inside = False
+        if not inside:
+            return False
+    return True
 
 
 def related(statement: str, entries: Iterable[KnowledgeEntry] | None = None,
@@ -194,6 +218,20 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
         "Grep by tag or title rather than reading top-to-bottom.",
         "",
     ]
+    # Regime-keyed section: the cheap lookup for "what is known about regime R". Entries with no
+    # regime are counted, not listed — the status sections below already carry them.
+    by_regime: dict[str, list[KnowledgeEntry]] = {}
+    for e in items:
+        by_regime.setdefault(e.regime or "unassigned", []).append(e)
+    lines += ["## By regime", ""]
+    for regime in sorted(by_regime, key=lambda r: (r == "unassigned", r)):
+        group = by_regime[regime]
+        if regime == "unassigned":
+            lines.append(f"- **unassigned** ({len(group)}) — no `regime` field yet")
+        else:
+            refs = ", ".join(f"`{e.id}`" for e in sorted(group, key=lambda x: x.id))
+            lines.append(f"- **{regime}** ({len(group)}): {refs}")
+    lines.append("")
     for status in STATUS_ORDER:
         group = by_status.get(status) or []
         if not group:
@@ -212,6 +250,14 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
             if e.evidence:
                 ev = ", ".join(v for d in e.evidence for v in d.values())
                 lines += [f"**Evidence:** {ev}", ""]
+            if e.regime:
+                lines += [f"**Regime:** `{e.regime}`", ""]
+            if e.validity_range:
+                lines += [f"**Valid over:** `{json.dumps(e.validity_range, sort_keys=True)}`", ""]
+            if e.mechanism:
+                lines += [f"**Mechanism:** {e.mechanism}", ""]
+            if e.supersedes:
+                lines += [f"**Supersedes:** `{e.supersedes}`", ""]
             if e.superseded_by:
                 lines += [f"**Superseded by:** `{e.superseded_by}`", ""]
     return "\n".join(lines).rstrip() + "\n"

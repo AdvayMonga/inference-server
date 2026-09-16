@@ -22,6 +22,7 @@ from pathlib import Path
 
 from inference_server.research.attribute import attribute
 from inference_server.research.kb import (
+    covers,
     related,
     load_entries,
     query,
@@ -132,8 +133,26 @@ def cmd_noclaim(args) -> int:
     return 0
 
 
+def parse_situation(spec: str | None) -> dict:
+    """`--situation model=E4B,concurrency=8` -> dict; numbers become numbers so ranges compare."""
+    out = {}
+    for pair in (spec or "").split(","):
+        if not pair.strip():
+            continue
+        key, _, raw = pair.partition("=")
+        try:
+            val = float(raw) if "." in raw else int(raw)
+        except ValueError:
+            val = raw
+        out[key.strip()] = val
+    return out
+
+
 def cmd_kb(args) -> int:
-    hits = query(status=args.status, tags=args.tags or (), text=args.text)
+    hits = query(status=args.status, tags=args.tags or (), text=args.text, regime=args.regime)
+    situation = parse_situation(args.situation)
+    if situation:
+        hits = [e for e in hits if covers(e, situation)]
     for e in hits:
         print(f"{e.status:9} {e.id}  {e.title}")
         if args.verbose:
@@ -171,6 +190,10 @@ def main(argv: list[str] | None = None) -> int:
     k = sub.add_parser("kb", help="query the knowledge base")
     k.add_argument("--status"); k.add_argument("--tags", nargs="*")
     k.add_argument("--text"); k.add_argument("-v", "--verbose", action="store_true")
+    k.add_argument("--regime",
+                   help="only entries for this regime (cold_start, steady_interactive, long_context)")
+    k.add_argument("--situation",
+                   help="key=value[,key=value]; keep entries whose validity_range covers it")
     k.set_defaults(fn=cmd_kb)
 
     n = sub.add_parser("no-claim",
