@@ -59,7 +59,9 @@ CPU-runnable parity tests live in `tests/`.
 `build_corpus.py` generated the frozen traces in `corpus/` once, from a fixed seed; rerun it only to
 cut a new corpus version (see `corpus/README.md`).
 `migrate_decisions_to_kb.py` and `backfill_experiments.py` are the one-shot migrations that
-turned prose notes into `knowledge/` and `experiments/` records; kept for provenance.
+turned prose notes into `knowledge/` and `experiments/` records; `backfill_kb_regime.py` stamped
+`regime` and `validity_range` onto the entries that predate those fields (2026-09-16), and its
+mapping table is the record of why each got what it got. All kept for provenance.
 
 `venue_smoke.py` is the first instrument that speaks the venue contract. It checks that the tree
 synced, that provisioning installed what the engine imports, that a GPU is really there and can
