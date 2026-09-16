@@ -131,6 +131,7 @@ Do **not** build yet: model registry, LoRA hot-swap, multi-tenant auth/quotas, g
 | `BlockManager` | Session-agnostic block pool — paged KV cache |
 | `RadixTree` | Session-agnostic prefix matching for cross-session sharing |
 | `Scheduler` | `FairScheduler` — per-session fairness, priority, preemption hooks |
+| `SchedulingPolicy` | `scheduling_policy.py` — pure `fcfs_key` / `fair_key` (+ `fcfs_order` / `fair_order`) / `fair_initial_counter` / `fair_charge` over any `(session_id, priority, arrival_seq)` record; `FCFSPolicy` / `FairPolicy` are thin stateful shells. Simulator and scheduler share them. |
 | `Sampler` | `sampling.py::sample()` — temperature, top-k, top-p, greedy. Per-request `SamplingParams` carried on `ScheduledRequest`. |
 | `server.py` | Thin HTTP — session routing only |
 | `config.py` | Engine params first-class; platform params deferred |

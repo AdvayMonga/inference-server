@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · Scheduler</div>
 <h1>Scheduler</h1>
-<p class="lead">The engine's heart. Decides which requests are batched together each tick, how to be fair across users, and how to refuse work cleanly when the system would otherwise melt.</p>
+<p class="lead">The engine's heart. Decides which requests are batched together each tick, how to be fair across users, and how to refuse work cleanly when the system would otherwise melt. Last updated 2026-09-16.</p>
 
 <div class="nav">
   <a href="#queues">Queues</a>·
@@ -151,6 +151,11 @@
 
 <h2 id="policies">Scheduling policies</h2>
 <p class="lead">Both implement the same interface. The policy decides who runs next.</p>
+<p>The decision itself is a pure function in <code>scheduling_policy.py</code> — the sort keys <code>fcfs_key(c)</code> /
+<code>fair_key(c, counters)</code>, the orderings <code>fcfs_order</code> / <code>fair_order</code> built on them, <code>fair_initial_counter(...)</code>, plus the one state update
+<code>fair_charge(counters, sid, n)</code> — over any record with <code>session_id</code>, <code>priority</code>,
+<code>arrival_seq</code>. <code>FCFSPolicy</code> / <code>FairPolicy</code> are thin shells (a pending list, a counters
+dict) that call them, so a trace-replay simulator can run the same ordering code as the live scheduler and cannot drift from it.</p>
 
 <svg viewBox="0 0 1140 320" role="img" aria-label="Policies">
   <g>
