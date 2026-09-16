@@ -18,6 +18,120 @@ Grep by tag or title rather than reading top-to-bottom.
 
 Live — being worked, or waiting on a trigger.
 
+### [2026-09-06] Throughput plateaus at ~23 req/s, but batch occupancy was never measured — cause unresolved
+*tags: `scheduler`, `throughput`, `observability`, `batching`, `measurement-gap`* · `kb-20260906-6000f7f5`
+
+CORRECTED. This entry first concluded 'the batch never fills, and that is the bottleneck'. That conclusion is NOT supported by the data and has been withdrawn.
+
+WHAT IS MEASURED (open-loop sweep at 1a1c141, rates 8-128 req/s, single replicate): throughput plateaus at 163.9 -> 612 -> 620 -> 782 -> 665 tok/s for rates 8/16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. At rate 128, 2985 requests were queued. Offered load beyond ~16 req/s buys queue depth and latency, not work. The plateau is real.
+
+WHY THE K=1 READING WAS WRONG: 49% of prefill waves being K=1 at rate 128 was read as a starved batch. It is equally consistent with a FULL batch: once max_batch_size is reached, each completing request frees exactly one slot, so the next admission wave is K=1 by construction. At steady state on a full batch, K=1 waves are CORRECT behaviour, not a symptom. wave_sizes measures prefill wave width; it says nothing about batch occupancy.
+
+WHY IT CANNOT BE SETTLED FROM THESE PANELS: the panel has no measure of batch occupancy. `active_size` is len(self._active) sampled when stats() is called — after the window ends and the queue has drained — so it reads 0 in every panel. There is a high-water mark for PENDING but none for ACTIVE. Worse, the panel's `concurrency_observed` is populated from `pending_high_water` (scripts/archive/modal/bench/bench_serving_modal.py:273), i.e. queue depth, not concurrency — the exact field LOOP.md lists as catching 'claiming a concurrency the run never reached'.
+
+So the engine's central question for a batching server — how full was the batch — is not answerable from any run recorded so far. Fix the instrument before drawing the conclusion.
+
+**Revisit when:** a mean/high-water active_size in the panel would settle whether the batch fills; if occupancy is high and throughput is still ~780 tok/s, the gap is per-step overhead; if occupancy is low with thousands queued, admission or wave planning is the cause
+
+**Evidence:** run-20260906-a0bde214, run-20260906-8c2a0890, run-20260906-701dfded, run-20260906-1862aada, run-20260906-c01ca7c6
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"arrival_rate_rps": [8, 128], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+### [2026-09-05] The prefill attention kernel has no data reuse — 0.34% of peak, 63% of the time
+*tags: `prefill`, `kernel`, `attention`, `triton`, `roofline`* · `kb-20260905-b9bc66c6`
+
+Measured on A100/E4B, one graphed 824-token prefill: attention takes **112.6 ms of 178 ms (63.5%)** while doing **0.12 of 7.68 TFLOP (1.5%)** of the work. That is **1.07 TFLOPS, or 0.34% of A100 peak** — roughly 100x off what the arithmetic allows.
+
+Time also scales superlinearly while FLOPs barely move: 12.7 -> 51.3 -> 112.6 ms for 240 -> 512 -> 824 tokens.
+
+**Cause (from the kernel's shape, to be confirmed):** `_paged_prefill_kernel` launches one program per (sequence, head, query token) and each program walks its own row's KV blocks serially. Nothing is shared between query tokens, so K/V blocks are re-read from HBM once per query — O(S^2) memory traffic for O(S^2) *arithmetic that is tiny*. This is exactly the problem FlashAttention-style tiling solves: block the queries, load each K/V tile once, reuse it across the whole tile.
+
+**This is now the single biggest lever in the engine.** TTFT p95 is the only thing breaking the SLO, prefill is 81% of that p95, and attention is 63% of prefill. Nothing else measured comes close.
+
+Not to be confused with the DECODE attention kernel, which was already given split-K (7.09x at n=1) — decode has one query per row, so it has no reuse to exploit. Prefill has S queries and currently exploits none of it.
+
+**Revisit when:** a tiled prefill attention kernel is written and A/B'd against the current one
+
+**Evidence:** scripts/archive/modal/probes/probe_prefill_breakdown_modal.py, iter2-prefill-breakdown
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b", "prompt_tokens": [240, 824]}`
+
+**Mechanism:** The prefill kernel launches one program per (sequence, head, query) and re-reads K/V blocks from HBM once per query: O(S^2) memory traffic at 0.34% of peak.
+
+### [2026-09-05] The prefill attention lever is head_dim 512 (full-attention layers), not 256
+*tags: `prefill`, `kernel`, `attention`, `triton`, `roofline`* · `kb-20260905-b170a1ac`
+
+Sliding layers cap attention at `window` keys (512), so their attention cost is bounded regardless of prompt length. Full-attention layers (head_dim **512**, no window) attend to the whole prompt, so on an 824-token prompt they dominate the 63% of prefill time that attention takes.
+
+Tiling currently wins 1.57x at D=256 and LOSES 0.53x at D=512, because the [BLOCK_M, D] accumulator must shrink to BLOCK_M=16 and spills. So the tiled kernel is fast exactly where the work is bounded, and slow exactly where the work is.
+
+**Next lever:** make tiling work at D=512 — chunk the head dimension so the accumulator fits (process D in two halves of 256, or keep acc in shared memory), then re-A/B. Until then the isolated 1.57x is not reachable end-to-end.
+
+**Revisit when:** a D=512 tiled variant beats the untiled kernel in isolation
+
+**Evidence:** exp-20260905-26c0e0f5, scripts/archive/modal/gpu_tests/test_tiled_prefill_modal.py
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+**Mechanism:** Sliding layers cap attention at the 512-key window so their cost is bounded; full-attention layers (head_dim 512) attend the whole prompt and dominate, and tiling at D=512 spills registers.
+
+### [2026-09-02] Batched prefill KV != single-row prefill KV — INVESTIGATED, BENIGN
+*tags: `kv`, `modal`, `numerics`, `prefill`, `scheduler`* · `kb-20260902-007`
+
+**Symptom.** `prefill_batch([p])` and `prefill_batch([p0..pK])` write measurably different KV for
+the same `p`: relative error 0.25-1.4, far beyond bf16 rounding. Alarming because
+`PREFILL_MODE=batched` is what the serving config runs, so a real bug here would invalidate every
+serving number.
+
+**Not a regression.** `scripts/archive/modal/gpu_tests/test_prefill_ctx_scatter_modal.py` produces byte-identical numbers
+on main and on the vectorized-scatter branch.
+
+**Localized** (`scripts/archive/modal/probes/diag_batched_prefill_kv_modal.py`): divergence appears ONLY in deep layers
+(7-14, never 0-6) at 1-7 isolated token positions out of 128-188. A scatter/indexing bug would hit
+layer 0 and contiguous ranges.
+
+**Decisive test** (`scripts/archive/modal/probes/diag_prefill_crossrow_modal.py`): run the same wave twice, same K and
+same Smax, holding the probe row identical and changing only its NEIGHBOURS' content. Probe-row KV
+came back **bit-identical, max abs diff 0.000000, first token unchanged**. No cross-row dependence.
+
+**Conclusion:** batching changes GEMM shapes, which changes rounding below threshold at layer 0;
+RMSNorm / GeGLU / softmax amplify it over 15 layers until isolated positions blow up in relative
+terms. Same family as the batch-invariance entry below. No action; do NOT gate tests on
+"batched KV == single-row KV" (the existing K=3 unit test already hedges this with `matches >= 2`).
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A100-80GB"}`
+
+**Mechanism:** Batching changes GEMM shapes and rounding at layer 0; RMSNorm, GeGLU and softmax amplify it over 15 layers into isolated positions, with no cross-row dependence.
+
+### [2026-09-02] The serving harness is a prefix-cache-HIT benchmark
+*tags: `benchmark`, `cache`, `graph`, `kv`, `modal`, `prefill`* · `kb-20260902-005`
+
+`scripts/archive/modal/bench/bench_serving_modal.py` draws from a pool of 64 prompts (`POOL_SIZE = 64`) against a PrefixCache
+with no eviction. After warmup nearly every request is a cache HIT with a tiny suffix. Consequences
+we measured directly:
+- Extending prefill graph buckets to 1024 for long prompts is **neutral** here (255.5 vs 256.2
+  tok/s at rate 2, TTFT p95 239 vs 238, at 164 requests) — the suffixes are too short to reach
+  the new buckets. It should matter on real traffic, which misses far more often.
+- Conversely the prefix-hit graph work is *over*-rewarded here relative to a realistic miss rate.
+**Before trusting any prefill number as representative, raise POOL_SIZE or add cache eviction.**
+
+### [2026-09-02] Benchmarks must state their cache-hit regime
+*tags: `benchmark`, `cache`, `graph`, `kv`, `modal`, `prefill`* · `kb-20260902-004`
+
+`scripts/archive/modal/bench/bench_serving_modal.py` at the default `POOL_SIZE=64` is a prefix-cache-HIT benchmark: after
+warmup nearly every request hits with a tiny suffix. That flatters prefill work (the prefix-hit
+graph especially) and completely hides miss behaviour, which is where the KV bugs above lived.
+`BENCH_POOL_SIZE` now raises it; `scripts/archive/modal/bench/bench_stress_modal.py` covers misses and overload. **Quote the
+regime alongside any prefill number.**
+
 ### [2026-09-16] Migrate tokens or migrate KV — the two OSDI '24 answers, and what decides between them
 *tags: `migration`, `router`, `multi-replica`, `literature`, `phase-6`* · `kb-20260916-68132cdb`
 
@@ -120,48 +234,6 @@ there a graph processes its whole bucket and padding is pure waste. Do not "unif
 
 **Mechanism:** Decode graphs go through torch.compile (~140 s per bucket, mostly Dynamo tracing) while prefill graphs are plain captures, so the decode ladder must be coarse and the prefill ladder can be fine.
 
-### [2026-09-05] The prefill attention lever is head_dim 512 (full-attention layers), not 256
-*tags: `prefill`, `kernel`, `attention`, `triton`, `roofline`* · `kb-20260905-b170a1ac`
-
-Sliding layers cap attention at `window` keys (512), so their attention cost is bounded regardless of prompt length. Full-attention layers (head_dim **512**, no window) attend to the whole prompt, so on an 824-token prompt they dominate the 63% of prefill time that attention takes.
-
-Tiling currently wins 1.57x at D=256 and LOSES 0.53x at D=512, because the [BLOCK_M, D] accumulator must shrink to BLOCK_M=16 and spills. So the tiled kernel is fast exactly where the work is bounded, and slow exactly where the work is.
-
-**Next lever:** make tiling work at D=512 — chunk the head dimension so the accumulator fits (process D in two halves of 256, or keep acc in shared memory), then re-A/B. Until then the isolated 1.57x is not reachable end-to-end.
-
-**Revisit when:** a D=512 tiled variant beats the untiled kernel in isolation
-
-**Evidence:** exp-20260905-26c0e0f5, scripts/gpu_tests/test_tiled_prefill_modal.py
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
-
-**Mechanism:** Sliding layers cap attention at the 512-key window so their cost is bounded; full-attention layers (head_dim 512) attend the whole prompt and dominate, and tiling at D=512 spills registers.
-
-### [2026-09-05] The prefill attention kernel has no data reuse — 0.34% of peak, 63% of the time
-*tags: `prefill`, `kernel`, `attention`, `triton`, `roofline`* · `kb-20260905-b9bc66c6`
-
-Measured on A100/E4B, one graphed 824-token prefill: attention takes **112.6 ms of 178 ms (63.5%)** while doing **0.12 of 7.68 TFLOP (1.5%)** of the work. That is **1.07 TFLOPS, or 0.34% of A100 peak** — roughly 100x off what the arithmetic allows.
-
-Time also scales superlinearly while FLOPs barely move: 12.7 -> 51.3 -> 112.6 ms for 240 -> 512 -> 824 tokens.
-
-**Cause (from the kernel's shape, to be confirmed):** `_paged_prefill_kernel` launches one program per (sequence, head, query token) and each program walks its own row's KV blocks serially. Nothing is shared between query tokens, so K/V blocks are re-read from HBM once per query — O(S^2) memory traffic for O(S^2) *arithmetic that is tiny*. This is exactly the problem FlashAttention-style tiling solves: block the queries, load each K/V tile once, reuse it across the whole tile.
-
-**This is now the single biggest lever in the engine.** TTFT p95 is the only thing breaking the SLO, prefill is 81% of that p95, and attention is 63% of prefill. Nothing else measured comes close.
-
-Not to be confused with the DECODE attention kernel, which was already given split-K (7.09x at n=1) — decode has one query per row, so it has no reuse to exploit. Prefill has S queries and currently exploits none of it.
-
-**Revisit when:** a tiled prefill attention kernel is written and A/B'd against the current one
-
-**Evidence:** scripts/probes/probe_prefill_breakdown_modal.py, iter2-prefill-breakdown
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b", "prompt_tokens": [240, 824]}`
-
-**Mechanism:** The prefill kernel launches one program per (sequence, head, query) and re-reads K/V blocks from HBM once per query: O(S^2) memory traffic at 0.34% of peak.
-
 ### [2026-09-05] Prefill is 4.4x off its arithmetic ceiling (tier-1 sizing; see refinement for where it goes)
 *tags: `benchmark`, `kernel`, `prefill`, `refined`, `roofline`* · `kb-20260905-dcb78725`
 
@@ -236,57 +308,6 @@ NOT yet established: whether tightening it improves throughput or only latency. 
 
 **Mechanism:** The 30 s admission deadline is 150x the TTFT budget, so under overload every request waits the full deadline before it is shed.
 
-### [2026-09-06] Throughput plateaus at ~23 req/s, but batch occupancy was never measured — cause unresolved
-*tags: `scheduler`, `throughput`, `observability`, `batching`, `measurement-gap`* · `kb-20260906-6000f7f5`
-
-CORRECTED. This entry first concluded 'the batch never fills, and that is the bottleneck'. That conclusion is NOT supported by the data and has been withdrawn.
-
-WHAT IS MEASURED (open-loop sweep at 1a1c141, rates 8-128 req/s, single replicate): throughput plateaus at 163.9 -> 612 -> 620 -> 782 -> 665 tok/s for rates 8/16/32/64/128. Completed requests flatten at ~700-740 per 30s window = ~23-25 req/s capacity regardless of offered load. At rate 128, 2985 requests were queued. Offered load beyond ~16 req/s buys queue depth and latency, not work. The plateau is real.
-
-WHY THE K=1 READING WAS WRONG: 49% of prefill waves being K=1 at rate 128 was read as a starved batch. It is equally consistent with a FULL batch: once max_batch_size is reached, each completing request frees exactly one slot, so the next admission wave is K=1 by construction. At steady state on a full batch, K=1 waves are CORRECT behaviour, not a symptom. wave_sizes measures prefill wave width; it says nothing about batch occupancy.
-
-WHY IT CANNOT BE SETTLED FROM THESE PANELS: the panel has no measure of batch occupancy. `active_size` is len(self._active) sampled when stats() is called — after the window ends and the queue has drained — so it reads 0 in every panel. There is a high-water mark for PENDING but none for ACTIVE. Worse, the panel's `concurrency_observed` is populated from `pending_high_water` (bench_serving_modal.py:273), i.e. queue depth, not concurrency — the exact field LOOP.md lists as catching 'claiming a concurrency the run never reached'.
-
-So the engine's central question for a batching server — how full was the batch — is not answerable from any run recorded so far. Fix the instrument before drawing the conclusion.
-
-**Revisit when:** a mean/high-water active_size in the panel would settle whether the batch fills; if occupancy is high and throughput is still ~780 tok/s, the gap is per-step overhead; if occupancy is low with thousands queued, admission or wave planning is the cause
-
-**Evidence:** run-20260906-a0bde214, run-20260906-8c2a0890, run-20260906-701dfded, run-20260906-1862aada, run-20260906-c01ca7c6
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"arrival_rate_rps": [8, 128], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
-
-### [2026-09-02] Batched prefill KV != single-row prefill KV — INVESTIGATED, BENIGN
-*tags: `kv`, `modal`, `numerics`, `prefill`, `scheduler`* · `kb-20260902-007`
-
-**Symptom.** `prefill_batch([p])` and `prefill_batch([p0..pK])` write measurably different KV for
-the same `p`: relative error 0.25-1.4, far beyond bf16 rounding. Alarming because
-`PREFILL_MODE=batched` is what the serving config runs, so a real bug here would invalidate every
-serving number.
-
-**Not a regression.** `scripts/gpu_tests/test_prefill_ctx_scatter_modal.py` produces byte-identical numbers
-on main and on the vectorized-scatter branch.
-
-**Localized** (`scripts/probes/diag_batched_prefill_kv_modal.py`): divergence appears ONLY in deep layers
-(7-14, never 0-6) at 1-7 isolated token positions out of 128-188. A scatter/indexing bug would hit
-layer 0 and contiguous ranges.
-
-**Decisive test** (`scripts/probes/diag_prefill_crossrow_modal.py`): run the same wave twice, same K and
-same Smax, holding the probe row identical and changing only its NEIGHBOURS' content. Probe-row KV
-came back **bit-identical, max abs diff 0.000000, first token unchanged**. No cross-row dependence.
-
-**Conclusion:** batching changes GEMM shapes, which changes rounding below threshold at layer 0;
-RMSNorm / GeGLU / softmax amplify it over 15 layers until isolated positions blow up in relative
-terms. Same family as the batch-invariance entry below. No action; do NOT gate tests on
-"batched KV == single-row KV" (the existing K=3 unit test already hedges this with `matches >= 2`).
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A100-80GB"}`
-
-**Mechanism:** Batching changes GEMM shapes and rounding at layer 0; RMSNorm, GeGLU and softmax amplify it over 15 layers into isolated positions, with no cross-row dependence.
-
 ### [2026-09-06] pool_utilization reports a constant 0.5002 across every load level — likely not live
 *tags: `metrics`, `kv-cache`, `observability`, `bug`, `attribution`* · `kb-20260906-22d4a185`
 
@@ -346,30 +367,23 @@ Only last row's value survives. Not user-facing (no endpoint routes through `gen
 
 H2OPolicy stores scores but no backend code extracts attention weights → H2O behaves like degenerate-LRU. Fix needs `output_attentions=True` + per-block aggregation through HF forward path. Defer until H2O is load-bearing for a benchmark.
 
-### [2026-09-02] The serving harness is a prefix-cache-HIT benchmark
-*tags: `benchmark`, `cache`, `graph`, `kv`, `modal`, `prefill`* · `kb-20260902-005`
-
-`bench_serving_modal.py` draws from a pool of 64 prompts (`POOL_SIZE = 64`) against a PrefixCache
-with no eviction. After warmup nearly every request is a cache HIT with a tiny suffix. Consequences
-we measured directly:
-- Extending prefill graph buckets to 1024 for long prompts is **neutral** here (255.5 vs 256.2
-  tok/s at rate 2, TTFT p95 239 vs 238, at 164 requests) — the suffixes are too short to reach
-  the new buckets. It should matter on real traffic, which misses far more often.
-- Conversely the prefix-hit graph work is *over*-rewarded here relative to a realistic miss rate.
-**Before trusting any prefill number as representative, raise POOL_SIZE or add cache eviction.**
-
-### [2026-09-02] Benchmarks must state their cache-hit regime
-*tags: `benchmark`, `cache`, `graph`, `kv`, `modal`, `prefill`* · `kb-20260902-004`
-
-`bench_serving_modal.py` at the default `POOL_SIZE=64` is a prefix-cache-HIT benchmark: after
-warmup nearly every request hits with a tiny suffix. That flatters prefill work (the prefix-hit
-graph especially) and completely hides miss behaviour, which is where the KV bugs above lived.
-`BENCH_POOL_SIZE` now raises it; `bench_stress_modal.py` covers misses and overload. **Quote the
-regime alongside any prefill number.**
-
 ## Deferred (10)
 
 Deliberately not doing this yet; each carries the trigger that would change that.
+
+### [2026-06-13] int8 weight-only quantization
+*tags: `benchmark`, `compile`, `decode`, `kernel`, `kv`, `memory`, `modal`, `numerics`, `quantization`* · `kb-20260613-015`
+
+Context: decode is weight-bandwidth-bound (full-batch sweep: flat ms/step, 1481 tok/s @ N=32 A10G/E2B), so int8 weights = ~2× fewer bytes/step = the real lever.
+**Built (`models/quant.py`, committed):** per-output-channel symmetric int8 RTN — `QuantizedLinear` + `quantize_model_int8` (in-place `nn.Linear` swap, `lm_head` excluded — tied to embeddings). Knob `CUSTOM_BACKEND_QUANT=int8`. **Accuracy near-lossless** (Gemma4, vs bf16): 0.93–0.96 top-1, 0.9999 logit cosine, ~0.97 ppl ratio — softcap/QK-norm/per-layer-embedding quirks don't break it.
+**Why deferred:** the CUDA throughput kernel doesn't land on A10G. `torch._weight_int8pack_mm` is CPU/MPS-only (no CUDA kernel). The CUDA win needs the dequant fused into the GEMV via `torch.compile`; on A10G that OOMs during Inductor autotune (24 GB, mostly KV pools), and `dynamic=True` (required to avoid a 276-layer recompile storm) doesn't fuse — it materializes the bf16 weight (no win). Static-shape fusion (gpt-fast) needs a fixed-shape model + memory headroom A10G lacks.
+**Decision (with user):** A10G is validation hardware; defer int8 *throughput* + E4B + vLLM head-to-head to the A100 80 GB / H100 phase, where (a) no OOM wall and (b) the fused paths work (A100: torchao int8 / static compile; H100: fp8 — the better method for that GPU). **Trigger:** the A100/H100 move. **Then:** wire a fusing GEMV into `QuantizedLinear.forward` (torchao / fp8 / custom Triton W8A16), flip `scripts/archive/modal/bench/bench_quant_modal.py` to `gpu="A100"`, measure ~2×. Foundation + accuracy done; only kernel + measurement remain.
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A10G", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Decode is weight-bandwidth-bound so int8 halves bytes per step, but the CUDA win needs the dequant fused into the GEMV and A10G lacks the headroom for Inductor to fuse it.
 
 ### [2026-05-30] Persistent `torch.inductor` cache via Modal Volume
 *tags: `cache`, `compile`, `graph`, `modal`* · `kb-20260530-013`
@@ -386,20 +400,6 @@ Sweep + plot scripts shipped. MPS ~50 tok/s on E2B → saturation knee dominated
 **Regime:** `steady_interactive`
 
 **Valid over:** `{"hardware": "MPS", "model": "gemma-4-e2b"}`
-
-### [2026-06-13] int8 weight-only quantization
-*tags: `benchmark`, `compile`, `decode`, `kernel`, `kv`, `memory`, `modal`, `numerics`, `quantization`* · `kb-20260613-015`
-
-Context: decode is weight-bandwidth-bound (full-batch sweep: flat ms/step, 1481 tok/s @ N=32 A10G/E2B), so int8 weights = ~2× fewer bytes/step = the real lever.
-**Built (`models/quant.py`, committed):** per-output-channel symmetric int8 RTN — `QuantizedLinear` + `quantize_model_int8` (in-place `nn.Linear` swap, `lm_head` excluded — tied to embeddings). Knob `CUSTOM_BACKEND_QUANT=int8`. **Accuracy near-lossless** (Gemma4, vs bf16): 0.93–0.96 top-1, 0.9999 logit cosine, ~0.97 ppl ratio — softcap/QK-norm/per-layer-embedding quirks don't break it.
-**Why deferred:** the CUDA throughput kernel doesn't land on A10G. `torch._weight_int8pack_mm` is CPU/MPS-only (no CUDA kernel). The CUDA win needs the dequant fused into the GEMV via `torch.compile`; on A10G that OOMs during Inductor autotune (24 GB, mostly KV pools), and `dynamic=True` (required to avoid a 276-layer recompile storm) doesn't fuse — it materializes the bf16 weight (no win). Static-shape fusion (gpt-fast) needs a fixed-shape model + memory headroom A10G lacks.
-**Decision (with user):** A10G is validation hardware; defer int8 *throughput* + E4B + vLLM head-to-head to the A100 80 GB / H100 phase, where (a) no OOM wall and (b) the fused paths work (A100: torchao int8 / static compile; H100: fp8 — the better method for that GPU). **Trigger:** the A100/H100 move. **Then:** wire a fusing GEMV into `QuantizedLinear.forward` (torchao / fp8 / custom Triton W8A16), flip `bench_quant_modal.py` to `gpu="A100"`, measure ~2×. Foundation + accuracy done; only kernel + measurement remain.
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Decode is weight-bandwidth-bound so int8 halves bytes per step, but the CUDA win needs the dequant fused into the GEMV and A10G lacks the headroom for Inductor to fuse it.
 
 ### [2026-09-16] Telemetry rows v1: CUDA-event device spans and the per-step/per-block detail not implemented
 *tags: `observability`, `attribution`, `kernel`* · `kb-20260915-2c4513a1`
@@ -446,6 +446,88 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 Settled. Kept because the reasoning still constrains new work.
 
+### [2026-09-06] LOOP: never judge a kernel before sweeping its launch config
+*tags: `loop`, `kernel`, `benchmark`* · `kb-20260905-a474d802`
+
+Iteration 4 declared a correct, well-motivated kernel 'noise' end-to-end. It was noise — at BLOCK_M=32, which I picked by hand. A ~10-minute sweep found BLOCK_M=16/warps=4 is **6x faster** (10.84x vs 1.81x isolated), and the same A/B then gave -31.9% and merged.
+
+**Rule:** a launch-config sweep is a tier-3 step that belongs BEFORE the end-to-end A/B, not after a disappointing one. Hand-picked tile sizes are a guess, and judging a kernel on a guess produces a confident false negative — the most expensive kind, because the idea gets written off.
+
+**Revisit when:** a kernel is judged without a config sweep
+
+**Evidence:** scripts/archive/modal/probes/sweep_tiled_launch_modal.py, exp-20260905-0d85ab30
+
+### [2026-09-02] KV pressure is a first-class operating mode, not an error
+*tags: `backpressure`, `benchmark`, `cache`, `kv`, `memory`, `modal`, `numerics`, `prefill`, `scheduler`* · `kb-20260902-003`
+
+Under sustained distinct-prompt traffic the engine used to break rather than degrade, and no
+existing benchmark could see it (all of them run below saturation against 64 reused prompts and
+a never-evicting cache). `scripts/archive/modal/bench/bench_stress_modal.py` now drives cache-missing traffic past
+the knee into a small pool. Five defects it exposed, all fixed:
+1. PrefixCache never evicted — every distinct prompt leaked blocks permanently until alloc()
+   raised. Now LRU with an entry cap AND a share-of-pool watermark (default 50%), plus
+   reclaim-on-demand from BlockPool.
+2. reclaim() counted release() calls rather than blocks that actually became free, so it
+   reported success having freed nothing.
+3. Partial prefill allocations leaked when alloc() raised mid-loop — the dominant bug: the pool
+   drained to zero and stayed there, serving 0 requests at rate 48.
+4. Any scheduler-iteration exception killed the worker thread AND leaked every active row's
+   blocks. Now the loop survives, releases what it drops, and preempts the newest row under
+   pressure instead of losing the batch.
+5. Overload became unbounded latency (queue 1001 deep, p95 105s) instead of rejection. Added an
+   admission deadline (`max_queue_wait_s`, default 30s).
+
+**The invariant to preserve:** running out of KV blocks is an EXPECTED operating condition. It
+must surface as `KVCacheExhausted` → a 429-style rejection, never as an engine failure, and no
+path may abandon blocks it has already allocated.
+
+**Regime:** `long_context`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+**Mechanism:** Distinct-prompt traffic past the knee exhausts the pool, and every path that allocated without releasing on failure leaked blocks permanently.
+
+### [2026-09-01] Decode output is not batch-invariant (bucketed CUDA graphs)
+*tags: `benchmark`, `decode`, `graph`, `kernel`, `modal`, `numerics`* · `kb-20260901-011`
+
+**Context.** Bucketing decode graphs by row count means the padded batch width now varies with
+concurrency instead of being pinned at `max_batch_size`. A `[B, 1, H] @ [H, H]` GEMM picks a
+different cuBLAS kernel (different accumulation order) per `B`, so logits shift by ~0.5 and a
+near-tie argmax can flip. Consequence: **the same prompt can produce different tokens depending
+on how many other requests are in flight.**
+
+**This is bucketing, not our graphs.** `scripts/archive/modal/probes/diag_pad_numerics_modal.py` reproduces it EAGER
+with no CUDA graph anywhere, purely by changing the pad width: the same 17 rows give one answer
+at widths 17/128/256 and another at 32/64. Meanwhile graph replay is *bit-exact* against
+width-matched eager (`maxdiff=0.000000` at every bucket, `scripts/archive/modal/bench/bench_decode_buckets_modal.py`).
+
+**Decision:** accept it. vLLM has the same property, the win is large (1.80x ms/step at n=1,
+1.47x at n=32), and output is still deterministic at a fixed batch width. Do NOT gate parity
+tests on "graphed tokens == unpadded eager tokens" — that test fails for legitimate numerical
+reasons and will send you chasing a bug that is not there (it did, for an hour). Gate on
+width-matched parity instead.
+
+**Triggers to revisit:** (a) a user-visible reproducibility requirement, (b) an eval whose
+variance is dominated by this, (c) a `deterministic=true` serving mode — that needs
+batch-invariant kernels (fixed split-K reductions), a real project.
+
+**Revisit when:** (a) a user-visible reproducibility requirement, (b) an eval whose
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+**Mechanism:** A [B,1,H]@[H,H] GEMM picks a different cuBLAS kernel per padded batch width, so accumulation order and near-tie argmaxes change with the number of rows in flight.
+
+### [2026-06-12] CUDA-graph decode: single max-batch graph, not bucketing
+*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `modal`* · `kb-20260612-031`
+
+Profiling showed decode was ~95% CPU-bound (~50 ms/step, ~1000 tiny kernel launches across 35 unfused layers; GPU compute a few ms) and **flat across batch size** (49 ms @ N=8 → 57 ms @ N=32). So we're dispatch-bound, not compute-bound. **Decision:** capture ONE CUDA graph at `max_batch_size` and pad smaller batches up to it — NOT vLLM-style per-bucket graphs. Bucketing exists to avoid max-batch *compute* at low concurrency, but since our GPU compute is nearly free (flat curve), padding N=1→32 wastes ~2 ms while still removing ~50 ms of dispatch; one graph is simpler, lighter on memory, no bucket-selection. **Implementation:** persistent `BatchedDecodeState` (block tables/seq_lens as GPU tensors — prerequisite, the old `torch.tensor(python_list)` rebuild was uncapturable) → `_GraphCtx` over FIXED static buffers (tokens/positions/seq_lens/block_tables, block tables pre-sized to `context_window/bs`) → warmup (JITs Triton kernel, stabilizes allocator) → `torch.cuda.graph` capture → per-step: copy inputs into static buffers, `graph.replay()`, read `logits[:n]`. Inactive padding rows point at a scratch block. `prepare_step()` (alloc) + `advance()` (evict) run on the state *outside* the graph. Falls back to eager on capture failure (`CUSTOM_BACKEND_CUDA_GRAPH=0` to disable). **Result:** decode ~50→25 ms/step (~2×), byte-identical to eager (`scripts/archive/modal/gpu_tests/test_paged_kernel_integration_modal.py`: GRAPH vs EAGER OK). **Why not the full ~10×:** the graph removes CPU *launch* overhead, but the GPU still runs ~1000 unfused tiny kernels/step. Closing the rest needs **op fusion** (torch.compile of the custom forward, or hand-fusing the per-layer norm/proj/gate ops) — a separate effort. Earlier `torch.compile` trouble was with the HF model (DECISIONS 2026-05-30); our custom forward is untried under compile. Also still open: `prepare_step`/`advance` keep ~1–2 GPU→CPU syncs/step (alloc/evict bookkeeping) which prevent full CPU/GPU overlap.
+
+**Regime:** `steady_interactive`
+
+**Mechanism:** Decode was ~95% CPU dispatch-bound (~1000 launches/step, flat across batch), so one captured graph removes the launch cost and padding to max batch costs ~2 ms.
+
 ### [2026-06-12] Windowed KV storage (free out-of-window blocks on sliding layers)
 *tags: `cache`, `decode`, `kernel`, `kv`, `memory`, `modal`, `prefill`, `scheduler`* · `kb-20260612-036`
 
@@ -465,15 +547,6 @@ Turns the windowed-storage memory savings into actual long-context concurrency. 
 **Valid over:** `{"concurrency": [1, 32], "context_tokens": 1000, "hardware": "A10G"}`
 
 **Mechanism:** Full-attention pools bind (they grow with sequence, sliding pools cap at the window), so right-sizing pools and gating per pool turns the windowed memory saving into admission headroom.
-
-### [2026-06-12] CUDA-graph decode: single max-batch graph, not bucketing
-*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `modal`* · `kb-20260612-031`
-
-Profiling showed decode was ~95% CPU-bound (~50 ms/step, ~1000 tiny kernel launches across 35 unfused layers; GPU compute a few ms) and **flat across batch size** (49 ms @ N=8 → 57 ms @ N=32). So we're dispatch-bound, not compute-bound. **Decision:** capture ONE CUDA graph at `max_batch_size` and pad smaller batches up to it — NOT vLLM-style per-bucket graphs. Bucketing exists to avoid max-batch *compute* at low concurrency, but since our GPU compute is nearly free (flat curve), padding N=1→32 wastes ~2 ms while still removing ~50 ms of dispatch; one graph is simpler, lighter on memory, no bucket-selection. **Implementation:** persistent `BatchedDecodeState` (block tables/seq_lens as GPU tensors — prerequisite, the old `torch.tensor(python_list)` rebuild was uncapturable) → `_GraphCtx` over FIXED static buffers (tokens/positions/seq_lens/block_tables, block tables pre-sized to `context_window/bs`) → warmup (JITs Triton kernel, stabilizes allocator) → `torch.cuda.graph` capture → per-step: copy inputs into static buffers, `graph.replay()`, read `logits[:n]`. Inactive padding rows point at a scratch block. `prepare_step()` (alloc) + `advance()` (evict) run on the state *outside* the graph. Falls back to eager on capture failure (`CUSTOM_BACKEND_CUDA_GRAPH=0` to disable). **Result:** decode ~50→25 ms/step (~2×), byte-identical to eager (`scripts/gpu_tests/test_paged_kernel_integration_modal.py`: GRAPH vs EAGER OK). **Why not the full ~10×:** the graph removes CPU *launch* overhead, but the GPU still runs ~1000 unfused tiny kernels/step. Closing the rest needs **op fusion** (torch.compile of the custom forward, or hand-fusing the per-layer norm/proj/gate ops) — a separate effort. Earlier `torch.compile` trouble was with the HF model (DECISIONS 2026-05-30); our custom forward is untried under compile. Also still open: `prepare_step`/`advance` keep ~1–2 GPU→CPU syncs/step (alloc/evict bookkeeping) which prevent full CPU/GPU overlap.
-
-**Regime:** `steady_interactive`
-
-**Mechanism:** Decode was ~95% CPU dispatch-bound (~1000 launches/step, flat across batch), so one captured graph removes the launch cost and padding to max batch costs ~2 ms.
 
 ### [2026-06-12] De-Python the decode step (vectorized scatter + one-shot block table)
 *tags: `cache`, `decode`, `graph`, `kernel`, `kv`* · `kb-20260612-032`
@@ -569,36 +642,6 @@ the highest-value startup fix, and it also unblocks any 2D graph ladder (see V-B
 
 **Mechanism:** Every decode-graph bucket costs a fresh Inductor compile; without compile the whole ladder captures in 5.6 s.
 
-### [2026-09-02] KV pressure is a first-class operating mode, not an error
-*tags: `backpressure`, `benchmark`, `cache`, `kv`, `memory`, `modal`, `numerics`, `prefill`, `scheduler`* · `kb-20260902-003`
-
-Under sustained distinct-prompt traffic the engine used to break rather than degrade, and no
-existing benchmark could see it (all of them run below saturation against 64 reused prompts and
-a never-evicting cache). `scripts/bench/bench_stress_modal.py` now drives cache-missing traffic past
-the knee into a small pool. Five defects it exposed, all fixed:
-1. PrefixCache never evicted — every distinct prompt leaked blocks permanently until alloc()
-   raised. Now LRU with an entry cap AND a share-of-pool watermark (default 50%), plus
-   reclaim-on-demand from BlockPool.
-2. reclaim() counted release() calls rather than blocks that actually became free, so it
-   reported success having freed nothing.
-3. Partial prefill allocations leaked when alloc() raised mid-loop — the dominant bug: the pool
-   drained to zero and stayed there, serving 0 requests at rate 48.
-4. Any scheduler-iteration exception killed the worker thread AND leaked every active row's
-   blocks. Now the loop survives, releases what it drops, and preempts the newest row under
-   pressure instead of losing the batch.
-5. Overload became unbounded latency (queue 1001 deep, p95 105s) instead of rejection. Added an
-   admission deadline (`max_queue_wait_s`, default 30s).
-
-**The invariant to preserve:** running out of KV blocks is an EXPECTED operating condition. It
-must surface as `KVCacheExhausted` → a 429-style rejection, never as an engine failure, and no
-path may abandon blocks it has already allocated.
-
-**Regime:** `long_context`
-
-**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
-
-**Mechanism:** Distinct-prompt traffic past the knee exhausts the pool, and every path that allocated without releasing on failure leaked blocks permanently.
-
 ### [2026-06-12] Sliding-window attention
 *tags: `cache`, `decode`, `kernel`, `kv`, `memory`, `modal`, `numerics`, `prefill`, `scheduler`* · `kb-20260612-037`
 
@@ -656,38 +699,6 @@ long-prompt prefill kernel, not more scheduling.**
 
 **Mechanism:** Queue wait is 21 ms of a 213 ms TTFT p95, so the tail is prefill and scheduling cannot move it; the prefill itself is 4.4x off its arithmetic floor, i.e. overhead, not irreducible attention.
 
-### [2026-09-01] Decode output is not batch-invariant (bucketed CUDA graphs)
-*tags: `benchmark`, `decode`, `graph`, `kernel`, `modal`, `numerics`* · `kb-20260901-011`
-
-**Context.** Bucketing decode graphs by row count means the padded batch width now varies with
-concurrency instead of being pinned at `max_batch_size`. A `[B, 1, H] @ [H, H]` GEMM picks a
-different cuBLAS kernel (different accumulation order) per `B`, so logits shift by ~0.5 and a
-near-tie argmax can flip. Consequence: **the same prompt can produce different tokens depending
-on how many other requests are in flight.**
-
-**This is bucketing, not our graphs.** `scripts/probes/diag_pad_numerics_modal.py` reproduces it EAGER
-with no CUDA graph anywhere, purely by changing the pad width: the same 17 rows give one answer
-at widths 17/128/256 and another at 32/64. Meanwhile graph replay is *bit-exact* against
-width-matched eager (`maxdiff=0.000000` at every bucket, `bench_decode_buckets_modal.py`).
-
-**Decision:** accept it. vLLM has the same property, the win is large (1.80x ms/step at n=1,
-1.47x at n=32), and output is still deterministic at a fixed batch width. Do NOT gate parity
-tests on "graphed tokens == unpadded eager tokens" — that test fails for legitimate numerical
-reasons and will send you chasing a bug that is not there (it did, for an hour). Gate on
-width-matched parity instead.
-
-**Triggers to revisit:** (a) a user-visible reproducibility requirement, (b) an eval whose
-variance is dominated by this, (c) a `deterministic=true` serving mode — that needs
-batch-invariant kernels (fixed split-K reductions), a real project.
-
-**Revisit when:** (a) a user-visible reproducibility requirement, (b) an eval whose
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
-
-**Mechanism:** A [B,1,H]@[H,H] GEMM picks a different cuBLAS kernel per padded batch width, so accumulation order and near-tie argmaxes change with the number of rows in flight.
-
 ### [2026-09-06] An isolated kernel win of 10x can be worth nothing end to end
 *tags: `kernel`, `benchmark`, `loop`, `prefill`* · `kb-20260905-d2a675d5`
 
@@ -720,17 +731,6 @@ So the gate was confidently significant (|t|=2.96) about an effect it had no way
 **Rule: significance requires REPLICATE RUNS per arm, and the variance must come from across those runs.** A single run per arm can never clear a p95 metric here, and the gate must say so rather than substitute a convenient number.
 
 **Revisit when:** a gate reports significance from a single run per arm
-
-### [2026-09-06] LOOP: never judge a kernel before sweeping its launch config
-*tags: `loop`, `kernel`, `benchmark`* · `kb-20260905-a474d802`
-
-Iteration 4 declared a correct, well-motivated kernel 'noise' end-to-end. It was noise — at BLOCK_M=32, which I picked by hand. A ~10-minute sweep found BLOCK_M=16/warps=4 is **6x faster** (10.84x vs 1.81x isolated), and the same A/B then gave -31.9% and merged.
-
-**Rule:** a launch-config sweep is a tier-3 step that belongs BEFORE the end-to-end A/B, not after a disappointing one. Hand-picked tile sizes are a guess, and judging a kernel on a guess produces a confident false negative — the most expensive kind, because the idea gets written off.
-
-**Revisit when:** a kernel is judged without a config sweep
-
-**Evidence:** scripts/probes/sweep_tiled_launch_modal.py, exp-20260905-0d85ab30
 
 ### [2026-09-05] LOOP: three A/B attempts, three confounds — the gates earned their keep
 *tags: `loop`, `benchmark`* · `kb-20260905-c6904d17`
@@ -833,6 +833,112 @@ A100 run that failed with `AttributeError: no attribute '_graph_buckets'`.
 ## Rejected (11)
 
 **Tried, measured, does not work.** Do not retry blind — these are the entries that stop the loop re-treading dead ends.
+
+### [2026-09-05] Tiled prefill attention — correct, 10.84x isolated, NO end-to-end benefit (default OFF)
+*tags: `attention`, `kernel`, `prefill`, `resolved-noise`, `triton`* · `kb-20260905-481ec50a`
+
+FlashAttention-style tiling of `_paged_prefill_kernel` (one program per BLOCK_M queries, each K/V block loaded once instead of once per query). Written, correct, **not merged** — see below.
+
+**Correctness: 9/9** vs the untiled kernel, incl. ragged tails, prefix hits, sliding windows, head_dim 512 and a ragged batch (rel <= 3.8e-3).
+
+**Isolated speed (A100):**
+
+| tokens | D | untiled | tiled | speedup |
+|---|---|---|---|---|
+| 240 | 256 | 0.392 | 0.470 | 0.83x |
+| 512 | 256 | 1.545 | 1.222 | 1.26x |
+| 824 | 256 | 3.154 | 2.004 | **1.57x** |
+| 240 | 512 | 0.328 | 0.686 | 0.48x |
+| 512 | 512 | 1.288 | 1.978 | 0.65x |
+| 824 | 512 | 2.618 | 4.967 | **0.53x** |
+
+The win needs enough queries to amortise the K/V load AND a head_dim small enough that the [BLOCK_M, D] accumulator stays in registers. At D=512 the tile must shrink to 16, halving reuse and spilling — consistently worse. Hence routing (D<=256 and S>=512), not blanket enabling.
+
+**Why not merged: no trustworthy end-to-end evidence.** Three A/B attempts, three different confounds (see the loop entry). The only clean run showed prefill p95 *worse* (259 -> 457 ms), and that run was itself invalid because CUDA-graph capture defeats the toggle. Isolated kernel wins do not entitle a merge.
+
+Branch `perf/tiled-prefill-attention` holds the work.
+
+**RESOLVED (iteration 4).** A clean A/B — prefill graph OFF so the toggle actually takes effect, arms interleaved in one container, cold cache per arm, TPOT declared as a sanity metric (held at 84.9 vs 85.9 ms) — gives:
+
+    prefill p50  80.1 -> 82.5 ms  (+3%)
+    prefill p95 214.2 -> 194.0 ms  (-9.4%)
+
+**Verdict: NOISE** (|t|=1.40 < 2.0). Predicted >15%; delivered an effect that does not clear the variance budget. **Not merged.**
+
+The reason is the routing, and it points at the real lever: tiling only fires for D<=256 and S>=512, i.e. SLIDING layers on LONG prompts. But sliding layers cap attention at window=512 keys, so they are not where the attention work is — the FULL-attention layers (head_dim 512, unbounded context) do far more work on a long prompt, and those are exactly the ones where tiling currently LOSES 0.53x to register spill. The kernel is tiled where it matters least.
+
+**MERGED (iteration 5).** The iteration-4 'noise' verdict was correct for the config I had hand-picked, and the config was wrong. A launch sweep found BLOCK_M=16/warps=4 gives **10.84x** isolated at D=256/824 where BLOCK_M=32 gave 1.81x — a 6x difference from one constant. Re-running the same A/B with the swept config: prefill p95 **-31.9%** (|t|=2.96), overall TTFT p95 615 -> 325ms, sanity held (TPOT 138.1 vs 133.1). All five gates green; merged.
+
+**Lesson: sweep launch configs before concluding a kernel does not help.** Bigger tiles are not better — past a point the [BLOCK_M, D] accumulator costs more in occupancy than the reuse is worth.
+
+**RETRACTION (iteration 7).** The -31.9% that authorised this merge is not supported. A null experiment — three IDENTICAL runs, same container, same config, nothing changed — gives `ttft_prefill_p95` = 436.6 / 289.9 / 136.9 ms, a **3.2x null spread**. A 31.9% effect is far inside that. Worse, the values fall monotonically, so it is warmup: the treatment arm always runs second and is systematically favoured.
+
+**What still stands:** the kernel is correct (9/9) and **10.84x faster in isolation** at D=256/824 — a tight 20-rep microbenchmark, which is a far more reliable measurement than an end-to-end p95. Keeping the code on those grounds. **What does not stand:** any claim about end-to-end TTFT.
+
+**SETTLED (iteration 8, properly replicated).** 4 runs per arm, ABBA order, first of each arm discarded as warmup, variance across runs:
+
+    ttft_prefill_p95   +24.3%  SIGNIFICANT, against the prediction (|t|=2.27)
+    ttft_prefill_p50    +4.0%  noise
+    ttft_p95            +1.0%  noise
+    tpot_p50            +2.7%  noise
+
+Baseline after warmup: 73.2 / 88.5 / 75.0 ms. Treatment: 111.3 / 95.0 / 87.9 ms.
+
+**Default flipped to OFF.** A 10.84x isolated kernel win that does not reach the service level is not a win, and the best-powered estimate says it slightly hurts.
+
+**Open:** this A/B necessarily ran with the prefill CUDA graph OFF, since a flag consumed inside a captured graph cannot be toggled at runtime. With the graph ON dispatch is removed and attention is 63% of prefill, so tiling might matter there. Testing that needs capture-time variants, not a runtime flag.
+
+**Revisit when:** an A/B that toggles tiling at CAPTURE time, not after, shows an end-to-end win; the D=512 register spill is solved (e.g. splitting D)
+
+**Evidence:** scripts/archive/modal/gpu_tests/test_tiled_prefill_modal.py, iter3-tiled-prefill / iter3-ab / iter3-ab2 / iter3-ab3
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b", "prompt_tokens": [240, 824]}`
+
+**Mechanism:** Tiling fires only on sliding layers (D<=256, S>=512), which are window-bounded, while the D=512 full-attention layers where the work is lose 0.53x to register spill; the A/B also ran with the prefill graph off, where dispatch dominates.
+
+### [2026-09-01] Mixed-batch chunked prefill (V-B)
+*tags: `benchmark`, `cache`, `compile`, `decode`, `graph`, `kernel`, `kv`, `modal`, `prefill`, `quantization`* · `kb-20260901-009`
+
+**Context.** V-B packs decode tokens and a prefill chunk into one forward so a prefill never
+stalls in-flight decodes. Correct for vLLM, and the earlier blocker (DECISIONS 2026-05-14:
+"needs FlashAttention-varlen or a custom per-layer attention path") is now GONE — our
+`paged_prefill_attention` is that path, and a decode row is just a prefill row with
+`suffix_len=1`, so the ctx shape already supports a mixed batch.
+
+**But it fails on a precondition we don't meet.** A mixed step has a variable `(B, S)` shape,
+so it cannot replay the decode CUDA graph — it must run eager. Our eager forward is
+dispatch-bound and nearly flat in size. Measured A100/E4B
+(`scripts/archive/modal/probes/probe_mixed_step_premise_modal.py`):
+
+| rows | graphed step | eager step | tax |
+|---|---|---|---|
+| 1 | 18.9 ms | 100.3 ms | 5.3x |
+| 8 | 20.6 ms | 75.6 ms | 3.7x |
+| 32 | 24.6 ms | 79.5 ms | 3.2x |
+
+Chunking a 240-token prompt across 4 mixed steps = **302 ms** of step time. Today, with the
+prefill CUDA graph landed, the same prompt is **one 43 ms stall** and every other step stays
+graphed at 20.6 ms. **V-B as scoped is a large net regression here.**
+
+**Decision:** don't build it. Attack prefill-vs-decode interference by keeping everything
+graphed instead — extend the prefill graph to K>1 and prefix-hit cases (currently K=1,
+matched=0, bucket<=512 only). Revisit V-B only if we get a cheap variable-shape forward.
+
+**Triggers to revisit:** (a) piecewise/bucketed graphs over a 2D `(B, S)` ladder — blocked on
+compile cost, see the Inductor-cache entry; (b) an eager path that isn't dispatch-bound;
+(c) workloads with prompts long enough that one prefill can't fit in a single graphed call.
+Note the 2026-06-11 entry already preferred P/D disaggregation over V-B; this is the
+quantitative reason.
+
+**Revisit when:** (a) piecewise/bucketed graphs over a 2D `(B, S)` ladder — blocked on
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"concurrency": [1, 32], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
+
+**Mechanism:** A mixed step has a variable (B, S) shape so it cannot replay the decode CUDA graph, and the eager forward is dispatch-bound at 3-5x the graphed step.
 
 ### [2026-09-16] Privileged GPU snapshotting (CRIU + cuda-checkpoint) is out of reach for a rented box
 *tags: `cold-start`, `snapshot`, `criu`, `cuda-checkpoint`, `rejected`, `venue`, `modal`* · `kb-20260916-d12c9170`
@@ -967,70 +1073,6 @@ cache. Kept descending: it front-loads the two cheap-to-generalize large shapes.
 
 **Mechanism:** Automatic-dynamic compile only generalises over large batch dims; Dynamo re-specialises on each small bucket regardless of capture order, so the number of small buckets sets the cost.
 
-### [2026-09-05] Tiled prefill attention — correct, 10.84x isolated, NO end-to-end benefit (default OFF)
-*tags: `attention`, `kernel`, `prefill`, `resolved-noise`, `triton`* · `kb-20260905-481ec50a`
-
-FlashAttention-style tiling of `_paged_prefill_kernel` (one program per BLOCK_M queries, each K/V block loaded once instead of once per query). Written, correct, **not merged** — see below.
-
-**Correctness: 9/9** vs the untiled kernel, incl. ragged tails, prefix hits, sliding windows, head_dim 512 and a ragged batch (rel <= 3.8e-3).
-
-**Isolated speed (A100):**
-
-| tokens | D | untiled | tiled | speedup |
-|---|---|---|---|---|
-| 240 | 256 | 0.392 | 0.470 | 0.83x |
-| 512 | 256 | 1.545 | 1.222 | 1.26x |
-| 824 | 256 | 3.154 | 2.004 | **1.57x** |
-| 240 | 512 | 0.328 | 0.686 | 0.48x |
-| 512 | 512 | 1.288 | 1.978 | 0.65x |
-| 824 | 512 | 2.618 | 4.967 | **0.53x** |
-
-The win needs enough queries to amortise the K/V load AND a head_dim small enough that the [BLOCK_M, D] accumulator stays in registers. At D=512 the tile must shrink to 16, halving reuse and spilling — consistently worse. Hence routing (D<=256 and S>=512), not blanket enabling.
-
-**Why not merged: no trustworthy end-to-end evidence.** Three A/B attempts, three different confounds (see the loop entry). The only clean run showed prefill p95 *worse* (259 -> 457 ms), and that run was itself invalid because CUDA-graph capture defeats the toggle. Isolated kernel wins do not entitle a merge.
-
-Branch `perf/tiled-prefill-attention` holds the work.
-
-**RESOLVED (iteration 4).** A clean A/B — prefill graph OFF so the toggle actually takes effect, arms interleaved in one container, cold cache per arm, TPOT declared as a sanity metric (held at 84.9 vs 85.9 ms) — gives:
-
-    prefill p50  80.1 -> 82.5 ms  (+3%)
-    prefill p95 214.2 -> 194.0 ms  (-9.4%)
-
-**Verdict: NOISE** (|t|=1.40 < 2.0). Predicted >15%; delivered an effect that does not clear the variance budget. **Not merged.**
-
-The reason is the routing, and it points at the real lever: tiling only fires for D<=256 and S>=512, i.e. SLIDING layers on LONG prompts. But sliding layers cap attention at window=512 keys, so they are not where the attention work is — the FULL-attention layers (head_dim 512, unbounded context) do far more work on a long prompt, and those are exactly the ones where tiling currently LOSES 0.53x to register spill. The kernel is tiled where it matters least.
-
-**MERGED (iteration 5).** The iteration-4 'noise' verdict was correct for the config I had hand-picked, and the config was wrong. A launch sweep found BLOCK_M=16/warps=4 gives **10.84x** isolated at D=256/824 where BLOCK_M=32 gave 1.81x — a 6x difference from one constant. Re-running the same A/B with the swept config: prefill p95 **-31.9%** (|t|=2.96), overall TTFT p95 615 -> 325ms, sanity held (TPOT 138.1 vs 133.1). All five gates green; merged.
-
-**Lesson: sweep launch configs before concluding a kernel does not help.** Bigger tiles are not better — past a point the [BLOCK_M, D] accumulator costs more in occupancy than the reuse is worth.
-
-**RETRACTION (iteration 7).** The -31.9% that authorised this merge is not supported. A null experiment — three IDENTICAL runs, same container, same config, nothing changed — gives `ttft_prefill_p95` = 436.6 / 289.9 / 136.9 ms, a **3.2x null spread**. A 31.9% effect is far inside that. Worse, the values fall monotonically, so it is warmup: the treatment arm always runs second and is systematically favoured.
-
-**What still stands:** the kernel is correct (9/9) and **10.84x faster in isolation** at D=256/824 — a tight 20-rep microbenchmark, which is a far more reliable measurement than an end-to-end p95. Keeping the code on those grounds. **What does not stand:** any claim about end-to-end TTFT.
-
-**SETTLED (iteration 8, properly replicated).** 4 runs per arm, ABBA order, first of each arm discarded as warmup, variance across runs:
-
-    ttft_prefill_p95   +24.3%  SIGNIFICANT, against the prediction (|t|=2.27)
-    ttft_prefill_p50    +4.0%  noise
-    ttft_p95            +1.0%  noise
-    tpot_p50            +2.7%  noise
-
-Baseline after warmup: 73.2 / 88.5 / 75.0 ms. Treatment: 111.3 / 95.0 / 87.9 ms.
-
-**Default flipped to OFF.** A 10.84x isolated kernel win that does not reach the service level is not a win, and the best-powered estimate says it slightly hurts.
-
-**Open:** this A/B necessarily ran with the prefill CUDA graph OFF, since a flag consumed inside a captured graph cannot be toggled at runtime. With the graph ON dispatch is removed and attention is 63% of prefill, so tiling might matter there. Testing that needs capture-time variants, not a runtime flag.
-
-**Revisit when:** an A/B that toggles tiling at CAPTURE time, not after, shows an end-to-end win; the D=512 register spill is solved (e.g. splitting D)
-
-**Evidence:** scripts/gpu_tests/test_tiled_prefill_modal.py, iter3-tiled-prefill / iter3-ab / iter3-ab2 / iter3-ab3
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b", "prompt_tokens": [240, 824]}`
-
-**Mechanism:** Tiling fires only on sliding layers (D<=256, S>=512), which are window-bounded, while the D=512 full-attention layers where the work is lose 0.53x to register spill; the A/B also ran with the prefill graph off, where dispatch dominates.
-
 ### [2026-09-02] Length-grouped prefill waves — BUILT, DEFAULT OFF, inert below saturation
 *tags: `prefill`, `scheduler`, `wave-planning`* · `kb-20260902-006`
 
@@ -1047,45 +1089,3 @@ length-grouping both attack padding waste, and there is none at K=1. Kept behind
 **Valid over:** `{"arrival_rate_rps": [1, 6], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
 
 **Mechanism:** MAX_BATCH_SIZE=256 admits every arrival immediately, so 83-91% of prefill waves are K=1 and there is no padding for grouping to remove.
-
-### [2026-09-01] Mixed-batch chunked prefill (V-B)
-*tags: `benchmark`, `cache`, `compile`, `decode`, `graph`, `kernel`, `kv`, `modal`, `prefill`, `quantization`* · `kb-20260901-009`
-
-**Context.** V-B packs decode tokens and a prefill chunk into one forward so a prefill never
-stalls in-flight decodes. Correct for vLLM, and the earlier blocker (DECISIONS 2026-05-14:
-"needs FlashAttention-varlen or a custom per-layer attention path") is now GONE — our
-`paged_prefill_attention` is that path, and a decode row is just a prefill row with
-`suffix_len=1`, so the ctx shape already supports a mixed batch.
-
-**But it fails on a precondition we don't meet.** A mixed step has a variable `(B, S)` shape,
-so it cannot replay the decode CUDA graph — it must run eager. Our eager forward is
-dispatch-bound and nearly flat in size. Measured A100/E4B
-(`scripts/probes/probe_mixed_step_premise_modal.py`):
-
-| rows | graphed step | eager step | tax |
-|---|---|---|---|
-| 1 | 18.9 ms | 100.3 ms | 5.3x |
-| 8 | 20.6 ms | 75.6 ms | 3.7x |
-| 32 | 24.6 ms | 79.5 ms | 3.2x |
-
-Chunking a 240-token prompt across 4 mixed steps = **302 ms** of step time. Today, with the
-prefill CUDA graph landed, the same prompt is **one 43 ms stall** and every other step stays
-graphed at 20.6 ms. **V-B as scoped is a large net regression here.**
-
-**Decision:** don't build it. Attack prefill-vs-decode interference by keeping everything
-graphed instead — extend the prefill graph to K>1 and prefix-hit cases (currently K=1,
-matched=0, bucket<=512 only). Revisit V-B only if we get a cheap variable-shape forward.
-
-**Triggers to revisit:** (a) piecewise/bucketed graphs over a 2D `(B, S)` ladder — blocked on
-compile cost, see the Inductor-cache entry; (b) an eager path that isn't dispatch-bound;
-(c) workloads with prompts long enough that one prefill can't fit in a single graphed call.
-Note the 2026-06-11 entry already preferred P/D disaggregation over V-B; this is the
-quantitative reason.
-
-**Revisit when:** (a) piecewise/bucketed graphs over a 2D `(B, S)` ladder — blocked on
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"concurrency": [1, 32], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
-
-**Mechanism:** A mixed step has a variable (B, S) shape so it cannot replay the decode CUDA graph, and the eager forward is dispatch-bound at 3-5x the graphed step.
