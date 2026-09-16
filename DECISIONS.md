@@ -7,6 +7,10 @@
 
 Grep by tag or title rather than reading top-to-bottom.
 
+## By regime
+
+- **unassigned** (69) — no `regime` field yet
+
 ## Open (19)
 
 Live — being worked, or waiting on a trigger.

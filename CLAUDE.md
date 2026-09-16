@@ -45,6 +45,7 @@ closed-loop harness, and a cache-hit benchmark that hid every miss-path bug).
 ```bash
 python -m inference_server.research.loop attribute runs/<id>.json --out gaps.json
 python -m inference_server.research.loop kb --status rejected     # what is already disproved
+python -m inference_server.research.loop kb --regime cold_start   # what applies to a regime (--situation k=v narrows by validity_range)
 python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, routed to a venue
 python -m inference_server.research.loop budget                    # cap, ledger, venues (cloud opt-in: RESEARCH_VENUES)
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json

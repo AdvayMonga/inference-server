@@ -22,6 +22,7 @@ from pathlib import Path
 
 from inference_server.research.attribute import attribute
 from inference_server.research.kb import (
+    covers,
     related,
     load_entries,
     query,
@@ -132,10 +133,32 @@ def cmd_noclaim(args) -> int:
     return 0
 
 
+def parse_situation(spec: str | None) -> dict:
+    """`--situation model=E4B,concurrency=8` -> dict; numbers become numbers so ranges compare."""
+    out = {}
+    for pair in (spec or "").split(","):
+        if not pair.strip():
+            continue
+        key, eq, raw = pair.partition("=")
+        if not eq or not key.strip():
+            raise argparse.ArgumentTypeError(f"expected key=value, got {pair!r}")
+        try:
+            val = float(raw) if "." in raw else int(raw)
+        except ValueError:
+            val = raw
+        out[key.strip()] = val
+    return out
+
+
 def cmd_kb(args) -> int:
-    hits = query(status=args.status, tags=args.tags or (), text=args.text)
+    hits = query(status=args.status, tags=args.tags or (), text=args.text, regime=args.regime)
+    if args.situation:
+        hits = [e for e in hits if covers(e, args.situation)]
     for e in hits:
-        print(f"{e.status:9} {e.id}  {e.title}")
+        # An entry with no validity_range is unscoped — it covers() everything by construction,
+        # which is not the same as having been verified for this situation.
+        scope = "" if e.validity_range or not args.situation else "  [unscoped]"
+        print(f"{e.status:9} {e.id}  {e.title}{scope}")
         if args.verbose:
             print(f"           tags: {', '.join(e.tags)}")
     print(f"\n{len(hits)} entr{'y' if len(hits) == 1 else 'ies'}")
@@ -171,6 +194,10 @@ def main(argv: list[str] | None = None) -> int:
     k = sub.add_parser("kb", help="query the knowledge base")
     k.add_argument("--status"); k.add_argument("--tags", nargs="*")
     k.add_argument("--text"); k.add_argument("-v", "--verbose", action="store_true")
+    k.add_argument("--regime",
+                   help="only entries for this regime (cold_start, steady_interactive, long_context)")
+    k.add_argument("--situation", type=parse_situation,
+                   help="key=value[,key=value]; keep entries whose validity_range covers it")
     k.set_defaults(fn=cmd_kb)
 
     n = sub.add_parser("no-claim",
