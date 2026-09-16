@@ -26,7 +26,8 @@ dev = [
     "ruff>=0.4",
     "matplotlib>=3.8",
 ]
-modal = ["modal>=1.0"]   # GPU instruments (scripts/**/*_modal.py) and modal_app.py
+# No `modal` extra: the instruments that needed it are archived under scripts/archive/modal/
+# and are not expected to run. See that folder's README to reproduce a historical number.
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"

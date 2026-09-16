@@ -1,25 +1,25 @@
 """Rent a GPU, run one instrument on it, bring the panel home, give the GPU back.
 
-Modal is not a venue in this codebase, it is the ONLY way to reach a GPU: 34 instruments open
-with `import modal` and end with `sweep.remote()`. `budget.py` can already route a hypothesis to
-`runpod-a100`, but routing only names a price — nothing can execute there. This module is the
-executor half.
+This module is how GPU work reaches a GPU. `budget.py` routes a hypothesis to a named venue,
+but routing only names a price — this is the executor half.
 
-The contract is deliberately the same one Modal already gives us, because that contract is what
-made the instruments writable:
+The contract is the one the archived Modal launcher gave us, kept because it is what made the
+instruments writable in the first place:
 
     ship the repo -> run one python file on a GPU -> get a JSON payload back -> keep no machine
 
-Modal implements it with a built image and a pickled return value. A rented pod implements it
-with rsync and stdout. The instrument does not need to know which it got.
+A rented pod implements it with rsync and stdout. The 35 instruments under
+`scripts/archive/modal/` implemented it with a built image and a pickled return value; they are
+kept only as the provenance for panels already measured (see that folder's README), and nothing
+here calls them.
 
-What differs, and why the shapes are not identical:
+What a rented pod costs that a managed platform did not:
 
-  * Modal images are content-addressed and cached; a pod starts from a public docker image and
-    pip-installs on every boot. Bake a template or accept ~3 minutes of setup per run.
-  * A Modal function that returns is billed to the second. A pod bills until it is TERMINATED,
-    so every path out of `run_instrument` terminates, including the ones that raise. An orphaned
-    A100 costs about $1.30/hour forever, which is the only way this module can lose real money.
+  * A pod starts from a public docker image and pip-installs on every boot, with no
+    content-addressed image cache. Bake a template or accept ~3 minutes of setup per run.
+  * A pod bills until it is TERMINATED, so every path out of `run_instrument` terminates,
+    including the ones that raise. An orphaned A100 costs about $1.30/hour forever, which is
+    the only way this module can lose real money.
 """
 
 from __future__ import annotations
@@ -215,7 +215,8 @@ class RunPodClient:
 
 @dataclass
 class PodSpec:
-    """What to rent. Defaults mirror modal_app.py so a panel measured here is comparable."""
+    """What to rent. Defaults mirror the archived modal_app.py so a panel measured here is
+    comparable with the A100 panels already in runs/."""
 
     name: str = "inference-server-instrument"
     image: str = "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04"
