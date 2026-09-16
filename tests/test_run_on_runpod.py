@@ -86,7 +86,10 @@ def test_dry_run_needs_no_api_key_and_never_prints_the_token(tmp_path):
     f.write_text("hf_supersecret")
     env.update({"HOME": str(tmp_path), "PYTHONPATH": str(REPO / "src"),
                 "REPLAY_CLASSES": "cold_start", "TELEMETRY_DIR": "/tmp/t"})
-    env.pop("HF_TOKEN", None)
+    # Empty, not absent: config.py runs load_dotenv() at import and a developer's .env
+    # may carry HF_TOKEN. load_dotenv never overrides a variable that is already set, so
+    # an empty one keeps the repo's .env out of this test and hf_token() falls to the file.
+    env["HF_TOKEN"] = ""
     env["SCHEDULING_POLICY"] = "fair"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "tools" / "run_on_runpod.py"),
                         "scripts/bench/replay_corpus_runpod.py", "--dry-run",
