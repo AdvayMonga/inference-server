@@ -230,7 +230,17 @@
 
 <h2 id="loop">The research loop</h2>
 <p class="lead">The engine is the <em>subject</em>; the loop is how it changes. Method in
-<code>LOOP.md</code>, code in <code>src/inference_server/research/</code>.</p>
+<code>LOOP.md</code>, code in <code>src/inference_server/research/</code>. The plan of record
+sees the system as three planes on three clocks; the diagram above is the first of them.</p>
+<table>
+  <tr><th>Plane</th><th>Clock</th><th>Role</th><th>Status</th></tr>
+  <tr><td><strong>Data</strong> — the engine (<code>src/inference_server/</code> minus <code>research/</code>)</td><td>microseconds</td><td>Serves tokens; emits one telemetry row per request.</td><td><span class="badge b-done">built</span></td></tr>
+  <tr><td><strong>Control</strong> — router, global prefix index, replica launcher, controller, policy table</td><td>seconds</td><td>Routes, selects a policy from the table, manages replica lifecycle. Never calls a model; judgment is compiled offline.</td><td><span class="badge b-todo">does not exist (Phases 5–7)</span></td></tr>
+  <tr><td><strong>Improvement</strong> — the loop (<code>research/</code>, <code>corpus/</code>, <code>knowledge/</code>, <code>scripts/</code>)</td><td>hours</td><td>Turns telemetry into validated configs. The knowledge base is both research artifact and the future policy store.</td><td><span class="badge b-done">built</span> <span class="badge b-prog">extended by Phases 1–3</span></td></tr>
+</table>
+<p class="lead">Primary metric: <strong>GPU-seconds per session subject to p95 TTFT under a fixed
+per-class ceiling</strong>. Warm-path TTFT/TPOT distance to vLLM is a <em>guardrail</em>, not the
+objective; hard invariants (output equivalence, memory ceiling, no crashes) override both.</p>
 <table>
   <tr><th>Layer</th><th>Job</th></tr>
   <tr><td>Engine (<code>src/inference_server/</code>)</td><td>Serve tokens. Knows nothing about the loop.</td></tr>
@@ -287,31 +297,23 @@ allocated</strong>, and <strong>a failed scheduler tick must not end the worker<
 the in-flight work, releases its KV, and keeps serving.</p>
 
 <h2 id="status">Phase status</h2>
-<p class="lead">What's done, what's in progress, what's deferred.</p>
+<p class="lead">The plan's phases. Everything the engine already has (continuous batching, chunked
+prefill, paged KV + radix prefix cache, Triton paged kernels, CUDA graphs, int8, the custom Gemma 4
+forward, fair scheduling, backpressure, the OpenAI shim, Prometheus) is the data plane and is
+described on the detail pages; it is not re-planned here.</p>
 
 <table>
-  <tr><th>Phase</th><th>What it built</th><th>Status</th></tr>
-  <tr><td>0 — Foundation</td><td>Project structure, env-driven config, backend interface</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>1 — Tokenization</td><td>Chat template + edge-case handling</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>2 — Generation loop</td><td>Token-by-token decode, EOS / max-tokens handling, runs in executor</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>3 — Streaming</td><td>SSE endpoint, TTFT measurement</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>4 — Fixed-window batching</td><td>Replaced by Phase 6 continuous batching</td><td><span class="badge b-done">superseded</span></td></tr>
-  <tr><td>5 — KV cache</td><td>Block pool, radix tree, exact-match index, three eviction policies</td><td><span class="badge b-done">done</span> <span class="badge b-defer">H2O wiring deferred</span></td></tr>
-  <tr><td>6 — Continuous batching</td><td>Iteration-level scheduling, immediate slot fill</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — Fair scheduling</td><td>FCFS + Fair (VTC) + priority hooks; optional starvation-free length-grouped prefill waves (off by default)</td><td><span class="badge b-done">done</span> <span class="badge b-defer">priority preemption deferred</span></td></tr>
-  <tr><td>6 — Backpressure</td><td>Queue gate + active-KV gate + cache-pool gate, soft-hold and hard-reject, plus cache reclaim, KV-pressure preemption and an admission deadline that sheds stale requests</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — Chunked prefill (alternating)</td><td>Long prompts split across ticks so they don't block decode</td><td><span class="badge b-prog">in progress</span></td></tr>
-  <tr><td>6 — Chunked prefill (mixed-batch, vLLM-style)</td><td>Attention path now exists, but measured a large regression: a mixed step cannot replay the decode CUDA graph and our eager forward is dispatch-bound (3–5× tax)</td><td><span class="badge b-defer">measured, not built</span></td></tr>
-  <tr><td>6 — Load simulator (in-server)</td><td>Removed 2026-09-09: shared the server's event loop, so it perturbed what it measured. Prompt bank moved to scripts/bench/</td><td><span class="badge b-defer">removed</span></td></tr>
-  <tr><td>6 — Open-loop + stress harnesses</td><td>SLO-gated Poisson sweep, plus an overload/KV-pressure stress that drives cache-missing traffic past the knee</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps, capture-time kernel variants</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>6 — Tiled prefill attention</td><td>FlashAttention-style tiling of the paged prefill kernel</td><td><span class="badge b-defer">measured, rejected</span></td></tr>
-  <tr><td>— Per-request telemetry</td><td>One row per request with conditions at arrival, spans, counters and outcome; SQLite, one file per run; overhead-budget test. CUDA-event device spans deferred to a profiler trigger</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>— Research loop</td><td>Fixed vitals panel, five gates, replicated A/B judging, JSON knowledge base, merge gate. 10 iterations run: 2 confirmed, 3 noise, 3 invalid</td><td><span class="badge b-done">done</span></td></tr>
-  <tr><td>— Serving-level performance</td><td>End-to-end throughput and tail latency, replicated</td><td><span class="badge b-todo">unquantified</span></td></tr>
-  <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>
-  <tr><td>7 — Hardware auto-detect</td><td>CUDA → MPS → CPU fallback, partial</td><td><span class="badge b-prog">partial</span></td></tr>
-  <tr><td>8 — Observability</td><td>Rolling p50/p95/p99 + Prometheus /metrics (aggregate) + structured JSON logs + timing middleware; Grafana dashboard + docker-compose stack in monitoring/</td><td><span class="badge b-prog">mostly</span></td></tr>
+  <tr><th>Phase</th><th>What it builds</th><th>Status</th></tr>
+  <tr><td>0 — Decide</td><td>Model and size (a ~30 GB class makes cold start dramatic), substrate now that Modal credits are gone, KV bytes per token, per-class SLO ceilings (placeholders in <code>corpus/manifest.json</code>), loop authority in the adaptive phase</td><td><span class="badge b-todo">open</span></td></tr>
+  <tr><td>1 — Per-request telemetry</td><td><code>telemetry.py</code>: one row per request with conditions at arrival, spans and outcome; <code>trace_id</code> / <code>turn_index</code>; SQLite, one file per run; overhead-budget test (PR #18)</td><td><span class="badge b-done">done</span> <span class="badge b-defer">CUDA-event spans, block counters, KV high-water deferred</span></td></tr>
+  <tr><td>2 — Corpus and harness</td><td>Three frozen workload classes, seen / held-out, hashed <code>corpus_version</code> in the validity block; open-loop <code>replay_trace.py</code> joined to telemetry by <code>X-Trace-Id</code> (PRs #17, #21)</td><td><span class="badge b-done">corpus + replay</span> <span class="badge b-prog">total accounting, noise floor, held-out replication gate</span></td></tr>
+  <tr><td>3 — Simulator</td><td>Pure <code>scheduling_policy.py</code> functions shared with the engine; discrete-event trace replay with a <code>TimingModel</code>; <code>loop simulate</code>; knowledge entries carry regime + validity range (PRs #19, #20, #22, #23)</td><td><span class="badge b-done">built</span> <span class="badge b-prog">timing model still the A100/E4B placeholder; hardware rank-correlation pending</span></td></tr>
+  <tr><td>4 — Cold start</td><td>Snapshot/restore baseline, layer-ordered weight streaming with prefill overlap, graph-capture cache, cold TTFT decomposition, GPU-seconds per session: warm pool vs scale-to-zero vs snapshot</td><td><span class="badge b-todo">next, gated on Phase 0</span></td></tr>
+  <tr><td>5 — Router and multi-replica</td><td><code>ReplicaLauncher</code>, global prefix index, prefix-aware session-affine router with a locality-vs-load knob searched in the simulator first</td><td><span class="badge b-todo">needs two GPUs</span></td></tr>
+  <tr><td>6 — Session migration</td><td>Session state manager; pipelined KV copy vs token recompute behind one interface; copy-verify-switch</td><td><span class="badge b-todo">planned</span></td></tr>
+  <tr><td>7 — Controller and policy table</td><td>Policy registry, policy table as a view on the knowledge base, safe default, replica-age regime detection with hysteresis, pinned vs adaptive harness mode</td><td><span class="badge b-todo">planned</span></td></tr>
+  <tr><td>Stretch</td><td>Blue-green reconfiguration, disaggregated prefill/decode, spot eviction, multi-tenant LoRA</td><td><span class="badge b-defer">not this year</span></td></tr>
+  <tr><td>— Warm-path guardrail</td><td>The vLLM head-to-head (A100, E4B: 1151 vs 2628 tok/s) is re-measured to confirm no workload class regresses, not chased</td><td><span class="badge b-done">baseline on file</span></td></tr>
 </table>
 
 <p class="footnote">Diagram color key — blue = HTTP, purple = scheduler, orange = backend, green = KV cache, pink = queues, yellow dashed = scheduler loop, red dashed = eviction. <strong>Maintenance:</strong> any new feature or component change must update this file and the relevant detail page (see CLAUDE.md → Documentation Maintenance).</p>
