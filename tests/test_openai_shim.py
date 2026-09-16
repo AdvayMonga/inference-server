@@ -222,3 +222,15 @@ def test_non_integer_turn_index_is_400():
     client = TestClient(_app(FakeScheduler()))
     r = client.post("/v1/completions", json={"prompt": "hi"}, headers={"X-Turn-Index": "two"})
     assert r.status_code == 400
+
+
+def test_429_carries_the_trace_id_on_both_routes_streaming_and_not():
+    """A rejected request is the one backpressure work most needs to correlate."""
+    client = TestClient(_app(FakeScheduler(full=True)))
+    for path, body in (("/v1/completions", {"prompt": "hi", "max_tokens": 5}),
+                       ("/v1/chat/completions", CHAT_BODY)):
+        for stream in (False, True):
+            r = client.post(path, json={**body, "stream": stream}, headers=HEADERS)
+            assert r.status_code == 429 and r.headers["X-Trace-Id"] == "steady-seen-41"
+            r = client.post(path, json={**body, "stream": stream})
+            assert r.status_code == 429 and len(r.headers["X-Trace-Id"]) == 32   # minted

@@ -135,7 +135,8 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         try:
             scheduler.enqueue(req)
         except QueueFullError as e:
-            raise HTTPException(status_code=429, detail=str(e))
+            raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _stream(req, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -149,7 +150,8 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
     try:
         generated_ids = await scheduler.submit(req)
     except QueueFullError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
     response.headers["X-Trace-Id"] = req.trace_id
@@ -226,7 +228,8 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         try:
             scheduler.enqueue(req)
         except QueueFullError as e:
-            raise HTTPException(status_code=429, detail=str(e))
+            raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _chat_stream(req, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -240,7 +243,8 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
     try:
         generated_ids = await scheduler.submit(req)
     except QueueFullError as e:
-        raise HTTPException(status_code=429, detail=str(e))
+        raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
     response.headers["X-Trace-Id"] = req.trace_id

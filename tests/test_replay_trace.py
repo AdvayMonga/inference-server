@@ -169,8 +169,9 @@ def test_panel_is_stamped_with_corpus_version_and_written_with_its_rows(tmp_path
     res, sched, cache, missing = asyncio.run(go())
     assert missing == {}
     panel = rt.build_panel(res, CLS, corpus_version="v1" * 8, split="seen", rate_scale=1.0,
-                           scheduler_stats=sched, cache_stats=cache)
+                           scheduler_stats=sched, cache_stats=cache, trace_prefix="x-seen-ab12cd")
     assert panel.validity.harness == "replay_trace"
+    assert panel.validity.harness_config["trace_prefix"] == "x-seen-ab12cd"   # the join key
     assert panel.validity.corpus_version == "v1" * 8
     assert panel.validity.workload_class == "steady_interactive"
     assert panel.validity.harness_config["split"] == "seen"
@@ -225,3 +226,9 @@ def test_slo_broken_means_no_throughput_within_slo():
                            scheduler_stats={}, cache_stats={})
     assert panel.tok_s_within_slo is None and panel.slo_tpot_ms is None
     assert panel.validity.workload_regime == "synthetic"        # no cache stats: say so
+
+
+def test_trace_prefix_is_unique_per_invocation():
+    """Two replays against one server process share one telemetry file; ids must not collide."""
+    a, b = rt.new_trace_prefix("steady_interactive", "seen"), rt.new_trace_prefix("steady_interactive", "seen")
+    assert a != b and a.startswith("steady_interactive-seen-") and len(a.split("-")[-1]) == 6

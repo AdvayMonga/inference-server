@@ -18,8 +18,11 @@ and is a new corpus version.
 
 `replay_trace.py` posts to `/v1/completions` with `session_id` / `turn_index` as the
 `X-Session-Id` / `X-Turn-Index` headers, so a turn 1 reaches the engine on the same session as
-its turn 0, and `X-Trace-Id=<class>-<split>-<index>`, which is the key its per-request CSV row
-shares with the engine's telemetry row. `sampling` is sent as-is (temperature, top_p, top_k).
+its turn 0, and `X-Trace-Id=<class>-<split>-<nonce>-<index>`, which is the key its per-request
+CSV row shares with the engine's telemetry row; the nonce is minted per invocation (two replays
+against one server process write into one telemetry file) and recorded in the panel's
+`harness_config.trace_prefix`, so a run's rows are joined by prefix. `sampling` is sent as-is
+(temperature, top_p, top_k).
 A turn's prompt still carries the full conversation so far: the engine has no conversation
 store, and prefix sharing is what makes the repeated prefix cheap.
 

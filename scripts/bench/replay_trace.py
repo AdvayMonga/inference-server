@@ -10,8 +10,11 @@ a month. The client measures TTFT/TPOT itself; the engine's own stats are read a
 the panel's pressure/cache fields only, never as evidence.
 
 Each request carries the trace's `session_id` / `turn_index` as X-Session-Id / X-Turn-Index, so
-a second turn lands on the same engine session as the first, and X-Trace-Id=<class>-<split>-<i>,
-which is the key a telemetry SQLite row and a replay CSV row share.
+a second turn lands on the same engine session as the first, and X-Trace-Id=<prefix>-<i> where
+<prefix> is `<class>-<split>-<nonce>`, the nonce minted once per invocation. That id is the key a
+telemetry SQLite row and a replay CSV row share; the nonce keeps two replays against one server
+process (one telemetry file) from colliding, and the prefix is recorded in the panel's
+harness_config so the two can be joined by prefix.
 
 Emits `runs/<run_id>.json` (a Vitals panel stamped with the corpus version and class) plus
 `runs/<run_id>.csv` with one row per request, which is what the loop re-slices later.
@@ -24,6 +27,7 @@ import asyncio
 import csv
 import sys
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -138,16 +142,21 @@ async def fetch_stats(client: httpx.AsyncClient, path: str) -> dict[str, Any]:
         return {}
 
 
+def new_trace_prefix(cls_name: str, split: str) -> str:
+    """`<class>-<split>-<nonce>`: unique per invocation so two replays never share a trace id."""
+    return f"{cls_name}-{split}-{uuid.uuid4().hex[:6]}"
+
+
 def build_panel(res: ReplayResult, cls: WorkloadClass, *, corpus_version: str, split: str,
                 rate_scale: float, scheduler_stats: dict[str, Any],
-                cache_stats: dict[str, Any]) -> Vitals:
+                cache_stats: dict[str, Any], trace_prefix: str = "replay") -> Vitals:
     s = res.summary(cls)
     ttfts = [r.ttft_ms for r in res.rows if r.error is None]
     validity = H.build_validity(
         "replay_trace",
         {"workload_class": cls.name, "split": split, "corpus_version": corpus_version,
          "rate_scale": rate_scale, "arrival_rate_rps": cls.arrival_rate_rps * rate_scale,
-         "n_requests": len(res.rows)},
+         "n_requests": len(res.rows), "trace_prefix": trace_prefix},
         n_samples=s["n_ok"],
         workload_regime=H.infer_regime(cache_stats.get("hit_rate")),
         stderr_value=H.stderr(ttfts),
@@ -197,13 +206,15 @@ async def main() -> int:
     manifest: Manifest
     manifest, trace = load_trace(args.cls, args.split)
     cls = manifest.classes[args.cls]
+    trace_prefix = new_trace_prefix(args.cls, args.split)
     print(f"-- replay {args.cls}/{args.split} ({len(trace)} requests, corpus "
-          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url} --")
+          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url}, "
+          f"trace ids {trace_prefix}-<i> --")
     async with httpx.AsyncClient(base_url=args.base_url,
                                  limits=httpx.Limits(max_connections=1024)) as client:
         res = await run_replay(client, trace, rate_scale=args.rate_scale,
                                drain_timeout_s=args.drain_timeout_s,
-                               trace_prefix=f"{args.cls}-{args.split}")
+                               trace_prefix=trace_prefix)
         sched = await fetch_stats(client, "/scheduler/stats")
         cache = await fetch_stats(client, "/cache/stats")
 
@@ -213,7 +224,8 @@ async def main() -> int:
         print("  no request succeeded; nothing to record")
         return 1
     panel = build_panel(res, cls, corpus_version=manifest.corpus_version, split=args.split,
-                        rate_scale=args.rate_scale, scheduler_stats=sched, cache_stats=cache)
+                        rate_scale=args.rate_scale, scheduler_stats=sched, cache_stats=cache,
+                        trace_prefix=trace_prefix)
     runs_dir = Path(args.runs_dir) if args.runs_dir else None
     path = H.emit(panel, label=f"replay {args.cls}/{args.split}", runs_dir=runs_dir)
     write_rows(path.with_suffix(".csv"), res.rows)

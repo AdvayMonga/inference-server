@@ -102,6 +102,27 @@ def test_one_request_default_sends_no_correlation_headers_and_keeps_the_echoed_t
     assert seen["body"] == {"prompt": "hi", "max_tokens": 4, "stream": True, "temperature": 0.0}
 
 
+def test_one_request_keeps_the_trace_id_when_the_stream_breaks_midway():
+    """The headers arrived before the body went bad; the failed sample must still be joinable."""
+    app = FastAPI()
+
+    @app.post("/v1/completions")
+    async def completions():
+        async def gen():
+            yield f'data: {json.dumps({"choices": [{"text": "x", "finish_reason": None}]})}\n\n'
+            yield "data: {this is not json\n\n"                 # server broke mid-stream
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"X-Trace-Id": "steady-seen-9"})
+
+    async def go():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await bs.one_request(client, "hi", 4)
+
+    s = asyncio.run(go())
+    assert s.error == "JSONDecodeError" and s.trace_id == "steady-seen-9"
+
+
 # ---- what makes it OPEN-loop: arrivals are a Poisson schedule, not a reaction to the server ---
 
 def test_arrivals_keep_coming_while_nothing_completes():

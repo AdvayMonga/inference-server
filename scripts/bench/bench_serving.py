@@ -97,7 +97,7 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *
                     last_tok_t = now
                     n += 1
     except Exception as e:
-        return Sample(error=type(e).__name__)
+        return Sample(error=type(e).__name__, trace_id=trace_id)
     if ttft is None:
         return Sample(error="no_tokens", trace_id=trace_id)
     tpot = (last_tok_t - first_tok_t) / (n - 1) if n > 1 else 0.0
