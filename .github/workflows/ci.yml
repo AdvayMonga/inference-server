@@ -213,8 +213,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - id: start
-        # The reaper only touches pods started after this, so a concurrent local run that
-        # used the default pod name is left alone.
+        # The reaper only touches ci-cuda-gate pods started after this.
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Install the launcher only
@@ -233,7 +232,8 @@ jobs:
         run: |
           if [ -n "${RUNPOD_API_KEY:-}" ]; then
             # One instrument runs every check on one pod; the launcher exits with the verdict.
-            exec python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py --gpu "$RUNPOD_GPU"
+            exec python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py \
+              --gpu "$RUNPOD_GPU" --name ci-cuda-gate
           fi
           if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
             echo "Neither RUNPOD_API_KEY nor MODAL_TOKEN_ID / MODAL_TOKEN_SECRET is set in this repo's secrets."
@@ -257,13 +257,14 @@ jobs:
           done
 
       - name: Reap any pod this job left behind
-        # A job killed by timeout-minutes skips every finally on the runner. Pods this repo
-        # named and started since the job began are terminated here; nothing else is touched.
-        # No RUNPOD_API_KEY: nothing was rented, the reaper says so and exits 0.
+        # A job killed by timeout-minutes skips every finally on the runner. Pods named
+        # ci-cuda-gate (CI's name; humans keep the launcher's default) and started since the
+        # job began are terminated here; nothing else is touched. No RUNPOD_API_KEY: nothing
+        # was rented, the reaper says so and exits 0.
         if: always()
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-        run: python scripts/tools/runpod_reap.py --since "${{ steps.start.outputs.at }}"
+        run: python scripts/tools/runpod_reap.py --name ci-cuda-gate --since "${{ steps.start.outputs.at }}"
 
   # The one check branch protection requires: a skipped lane must not leave a PR blocked
   # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately

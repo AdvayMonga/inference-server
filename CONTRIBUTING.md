@@ -58,9 +58,14 @@ a `{"gate": ...}` verdict and exiting by it. The `*_modal.py` scripts call the s
 
 A stuck run is bounded by the job's `timeout-minutes`, and because a killed runner never
 reaches `run_instrument`'s `finally`, a last step with `if: always()` runs
-`scripts/tools/runpod_reap.py --since <job start>`: it terminates pods named
-`inference-server-instrument` started after the job began and nothing else, so a local run
-that used the default name earlier is left alone.
+`scripts/tools/runpod_reap.py --name ci-cuda-gate --since <job start>`: it terminates pods
+with that exact name started after the job began, and nothing else.
+
+**Pod-name convention:** CI owns `ci-cuda-gate` (`run_on_runpod.py --name ci-cuda-gate`).
+Humans keep the launcher's default, `inference-server-instrument`, so a pod you started by
+hand during the weekly window is never the reaper's. A row the API returns malformed is
+logged and skipped; a same-named pod whose start time is unreadable is terminated, because
+"cannot tell how old" must not mean "keeps billing".
 
 By hand, with a GPU type:
 

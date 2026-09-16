@@ -90,3 +90,39 @@ def test_modal_gate_scripts_run_the_shared_checks():
         assert "checks" in mounted, f"{f} must ship checks.py to the Modal container"
         defs = {n.name for n in tree.body if isinstance(n, ast.FunctionDef)}
         assert "_reference" not in defs, f"{f} carries its own reference — it will drift"
+
+
+
+def _launcher(monkeypatch, payload):
+    """Load run_on_runpod.py with the venue replaced, so nothing is rented."""
+    spec = importlib.util.spec_from_file_location(
+        "run_on_runpod", REPO / "scripts" / "tools" / "run_on_runpod.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    seen = {}
+
+    def fake_run_instrument(script, env, *, repo, spec):
+        seen["spec"] = spec
+        return payload
+
+    monkeypatch.setattr(mod, "run_instrument", fake_run_instrument)
+    return mod, seen
+
+
+def test_launcher_exits_with_the_gate_verdict_and_names_the_pod(monkeypatch, capsys):
+    mod, seen = _launcher(monkeypatch, {"gate": {"passed": False, "checks": []}})
+    monkeypatch.setattr(sys, "argv", ["x", "scripts/gpu_tests/cuda_gate.py", "--name", "ci-cuda-gate"])
+    assert mod.main() == 1
+    assert seen["spec"].name == "ci-cuda-gate"
+    assert '"passed": false' in capsys.readouterr().out
+
+
+def test_launcher_surfaces_an_instrument_error_and_writes_no_panels(monkeypatch, capsys, tmp_path):
+    mod, _ = _launcher(monkeypatch, {"error": "server not ready", "log_tail": ["OOM at layer 3"],
+                                     "panels": [{"would": "be invalid"}]})
+    monkeypatch.setattr(mod, "REPO", tmp_path)          # runs/ would land here; it must not
+    monkeypatch.setattr(sys, "argv", ["x", "scripts/bench/replay.py"])
+    assert mod.main() == 1
+    err = capsys.readouterr().err
+    assert "server not ready" in err and "OOM at layer 3" in err
+    assert not (tmp_path / "runs").exists()
