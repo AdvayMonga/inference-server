@@ -20,14 +20,13 @@
   "title": "Window-aware per-pool KV admission",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.319052,
+  "updated_at": 1789567195.43188,
   "validity_range": {
     "concurrency": [
       1,
       32
     ],
     "context_tokens": 1000,
-    "hardware": "A10G",
-    "model": "gemma-4-e2b"
+    "hardware": "A10G"
   }
 }

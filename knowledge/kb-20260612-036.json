@@ -21,9 +21,6 @@
   "title": "Windowed KV storage (free out-of-window blocks on sliding layers)",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.319137,
-  "validity_range": {
-    "hardware": "A10G",
-    "model": "gemma-4-e2b"
-  }
+  "updated_at": 1789567195.431953,
+  "validity_range": {}
 }

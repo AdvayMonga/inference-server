@@ -1,6 +1,10 @@
 {
   "created_at": 1781236800.0,
-  "evidence": [],
+  "evidence": [
+    {
+      "csv": "benchmarks/short_4_kernel_depython.csv"
+    }
+  ],
   "id": "kb-20260612-032",
   "mechanism": "Per-row Python tensor writes and block-table rebuilds cost ~N x layers tiny launches per step; one vectorised indexed write removes them.",
   "regime": "steady_interactive",
@@ -18,7 +22,7 @@
   "title": "De-Python the decode step (vectorized scatter + one-shot block table)",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.316864,
+  "updated_at": 1789567195.4315462,
   "validity_range": {
     "concurrency": [
       1,

@@ -7,13 +7,18 @@ the reason next to it, so a reviewer reads the table rather than the 69-file dif
 Rules the table follows (do not invent):
 - `regime` is the workload class the finding was MEASURED under. Loop/harness/gate/process,
   instrumentation and pure code-structure entries have no workload regime and stay None.
-- `validity_range` holds only what the entry or its cited harness states. A10G runs were all
-  E2B and the September Modal harnesses default to A100-80GB/E4B (benchmarks/README.md,
-  benchmarks/tuning_log.md, scripts/bench/bench_*_modal.py). Absent key = unconstrained.
+- `validity_range` holds only what the entry states, or what a cited file pins. `hardware` is
+  bound when the entry names it inline; `model` only when the entry states it or the cited
+  script's BENCH_MODEL default was verified (several *_modal.py probes default to E2B, not
+  E4B, so era is not evidence). Where a benchmarks/*.csv reproduces the entry's own numbers
+  and benchmarks/README.md indexes that file's hardware/model, the row cites the CSV in
+  `evidence` and keeps the bound. Absent key = unconstrained.
 - `mechanism` only where the entry already states the cause.
 
 Idempotent: an entry already carrying its row is not rewritten, so a second run changes no
-bytes. Writing goes through `kb.save_entry`, which bumps `updated_at` like every other write.
+bytes. Writing goes through `kb.save_entry`, which bumps `updated_at` like every other write;
+`generate_index` sorts each status section by it, so rewritten entries cluster at the top of
+their sections in MAPPING order — an artefact of the backfill, not a recency signal.
 """
 
 from __future__ import annotations
@@ -33,29 +38,41 @@ A10G_E2B = {"model": "gemma-4-e2b", "hardware": "A10G"}
 
 
 def _row(regime: str | None = None, validity: dict | None = None,
-         mechanism: str | None = None) -> dict[str, Any]:
-    return {"regime": regime, "validity_range": dict(validity or {}), "mechanism": mechanism}
+         mechanism: str | None = None, evidence: list[dict] | None = None) -> dict[str, Any]:
+    return {"regime": regime, "validity_range": dict(validity or {}), "mechanism": mechanism,
+            "evidence": list(evidence or [])}
+
+
+def _csv(name: str) -> dict[str, str]:
+    """A benchmarks/*.csv whose rows are the entry's own numbers (see benchmarks/README.md)."""
+    return {"csv": f"benchmarks/{name}"}
 
 
 MAPPING: dict[str, dict[str, Any]] = {
     # ------------------------------------------------------------ steady_interactive
-    # why: A10G/E2B decode benchmarks under concurrent load (benchmarks/short_*.csv lineage).
+    # why: decode progression whose numbers ARE benchmarks/short_{1..4}.csv (15.7 / 114 & 83 /
+    # 185 / 323 tok/s), which benchmarks/README.md indexes as A10G / E2B at N=1..32. The
+    # entries name neither, so the CSV is cited and is what pins the bound.
     "kb-20260611-029": _row(SI, {**A10G_E2B, "concurrency": [1, 32]},
                             "decode_step_batched ran one forward per row, so B rows cost B "
-                            "sequential forwards and nothing was GPU-batched."),
+                            "sequential forwards and nothing was GPU-batched.",
+                            [_csv("short_1_rowbyrow.csv"), _csv("short_2_batched_gather.csv")]),
     "kb-20260611-030": _row(SI, {**A10G_E2B, "concurrency": [1, 32]},
                             "Reading K/V straight from paged blocks via the block table removes "
                             "the per-step dense gather/pad whose Python per-row loop caused the "
-                            "N=32 knee."),
-    "kb-20260612-031": _row(SI, {**A10G_E2B, "concurrency": [8, 32]},
+                            "N=32 knee.",
+                            [_csv("short_3_kernel.csv")]),
+    "kb-20260612-032": _row(SI, {**A10G_E2B, "concurrency": [1, 32]},
+                            "Per-row Python tensor writes and block-table rebuilds cost ~N x layers "
+                            "tiny launches per step; one vectorised indexed write removes them.",
+                            [_csv("short_4_kernel_depython.csv")]),
+    # why: CUDA-graph decode; the entry names neither hardware nor model and no CSV holds it.
+    "kb-20260612-031": _row(SI, None,
                             "Decode was ~95% CPU dispatch-bound (~1000 launches/step, flat across "
                             "batch), so one captured graph removes the launch cost and padding to "
                             "max batch costs ~2 ms."),
-    "kb-20260612-032": _row(SI, {**A10G_E2B, "concurrency": [1, 32]},
-                            "Per-row Python tensor writes and block-table rebuilds cost ~N x layers "
-                            "tiny launches per step; one vectorised indexed write removes them."),
-    # why: A10G decode-step microbenchmark (eager vs graph vs compile), 4-32 real rows.
-    "kb-20260530-014": _row(SI, A10G_E2B,
+    # why: A10G decode-step microbenchmark (eager vs graph vs compile); model not stated.
+    "kb-20260530-014": _row(SI, {"hardware": "A10G"},
                             "Under the CUDA graph the decode floor is the matmuls reading all "
                             "weights from HBM each step (memory-bandwidth-bound), so op fusion has "
                             "nothing left to remove."),
@@ -122,13 +139,15 @@ MAPPING: dict[str, dict[str, Any]] = {
                                  "work is lose 0.53x to register spill; the A/B also ran with the "
                                  "prefill graph off, where dispatch dominates."),
     # ------------------------------------------------------------ long_context
-    # why: long (1000-token) workload to N=32 on Modal A10G/E2B; KV occupancy is the subject.
-    "kb-20260612-035": _row(LC, {**A10G_E2B, "concurrency": [1, 32], "context_tokens": 1000},
+    # why: long (1000-token) workload to N=32 on Modal A10G, all stated inline; model is not.
+    "kb-20260612-035": _row(LC, {"hardware": "A10G", "concurrency": [1, 32],
+                                 "context_tokens": 1000},
                             "Full-attention pools bind (they grow with sequence, sliding pools cap "
                             "at the window), so right-sizing pools and gating per pool turns the "
                             "windowed memory saving into admission headroom."),
-    # why: sliding-layer block release, validated on the long-workload Modal sweep.
-    "kb-20260612-036": _row(LC, A10G_E2B,
+    # why: sliding-layer block release on the long-workload Modal sweep; neither hardware nor
+    # model is stated and no CSV is identifiably that sweep, so no bound.
+    "kb-20260612-036": _row(LC, None,
                             "Sliding layers (28/35) only attend the last 512 tokens, so blocks "
                             "fully out of window can be released without touching the kernel."),
     # why: correctness of prompts past the 512 window; measured on E2B (CPU parity + Modal).
@@ -207,11 +226,13 @@ def apply(directory: Path = KNOWLEDGE_DIR) -> dict[str, Any]:
     written: list[str] = []
     for eid, row in MAPPING.items():
         e = entries[eid]
-        if (e.regime, e.validity_range, e.mechanism) == (
+        new_evidence = [ev for ev in row["evidence"] if ev not in e.evidence]
+        if not new_evidence and (e.regime, e.validity_range, e.mechanism) == (
                 row["regime"], row["validity_range"], row["mechanism"]):
             continue
         e.regime, e.validity_range, e.mechanism = (
             row["regime"], dict(row["validity_range"]), row["mechanism"])
+        e.evidence = e.evidence + new_evidence
         save_entry(e, directory)
         written.append(eid)
     return {

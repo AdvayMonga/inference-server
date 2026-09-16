@@ -20,13 +20,6 @@
   "title": "CUDA-graph decode: single max-batch graph, not bucketing",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.316756,
-  "validity_range": {
-    "concurrency": [
-      8,
-      32
-    ],
-    "hardware": "A10G",
-    "model": "gemma-4-e2b"
-  }
+  "updated_at": 1789567195.4316318,
+  "validity_range": {}
 }

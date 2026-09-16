@@ -360,6 +360,74 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 Settled. Kept because the reasoning still constrains new work.
 
+### [2026-06-12] Windowed KV storage (free out-of-window blocks on sliding layers)
+*tags: `cache`, `decode`, `kernel`, `kv`, `memory`, `modal`, `prefill`, `scheduler`* · `kb-20260612-036`
+
+Follows the sliding-window-attention entry below. Sliding layers (28/35) only need the last 512 tokens of KV, but were storing the full history. **Decision — sentinel eviction, no kernel change:** `BlockPool.window` carries the per-layer window (set from `attn.sliding_window` in `make_pools_for_gemma`); `PagedKVCache.append` (and `BatchedPagedKVCache.append`) call `_evict()` after each write — once a block is fully out of window it's `pool.release()`d and its block-table slot set to `-1`. The decode kernel's existing `start_b = (L-window)//block_size` already skips exactly those slots (`start_b == evicted count`), so **the kernel is unchanged**; `free_all`/`get`/`block_table_tensor` treat `-1` as "skip / map to 0" (out-of-window positions are masked anyway). **Prefix-cache interaction:** only cache prefixes ≤ window — if a sliding layer evicted (prompt > 512), `prefill` skips `store()` (`cache.any_evicted`). This avoids offset-tracking in the PrefixCache; long-prefix sharing (rare, previously on wrong outputs) is dropped. **Validation:** unit test (blocks freed, in-window tail readable, clean `free_all`); 540-token windowed-decode-vs-HF (CPU); long-workload Modal sweep 0 errors, no perf regression. **Follow-up DONE:** window-aware per-pool admission now turns the freed memory into concurrency (see entry above). **Still OPEN (minor):** block-table list/tensor grows with context (sentinels kept, no offset trim) — tiny int32 data, a long-context micro-opt.
+
+**Regime:** `long_context`
+
+**Mechanism:** Sliding layers (28/35) only attend the last 512 tokens, so blocks fully out of window can be released without touching the kernel.
+
+### [2026-06-12] Window-aware per-pool KV admission
+*tags: `decode`, `kernel`, `kv`, `memory`, `modal`, `prefill`, `scheduler`* · `kb-20260612-035`
+
+Turns the windowed-storage memory savings into actual long-context concurrency. **Insight:** with all pools equal-sized, the FULL-attention pools bind (they grow with sequence; sliding pools cap at the window), so windowing alone doesn't raise admission — and naively shrinking the reservation for sliding layers would under-protect the full pools → OOM. **Two changes together:** (1) **right-size pools** — `make_pools_for_gemma(sliding_blocks=...)` + `CUSTOM_BACKEND_SLIDING_BLOCKS`; sliding pools shrink (capped at window), freeing memory to enlarge the full pools. (2) **per-pool window-aware gate** — `CustomTorchBackend.kv_reserve/kv_release` (base class no-op so `TorchBackend` is unaffected) reserve per-request *per-pool* block footprints (sliding capped at `window//bs + 1`) and admit only if EVERY pool fits; wired into `_admit_pending` (soft-hold on False) with `kv_release` on every exit (evict / prefill-fail / chunk-fail / `_fail_all`). The scalar `MAX_ACTIVE_KV_TOKENS` stays as a coarse cap. **Demonstrated (Modal, A10G):** long (1000-token) workload to N=32 with 0 rejections at ~equal memory (full=2048 + sliding=1200 ≈ 422 MB vs baseline 432 MB), where the baseline's 22000 token cap blocked ~1/3 at N=32 → ~1.45× concurrency. Win scales with context/window ratio (≈1/16 at 8k context). Tests: `tests/test_kv_admission.py` (footprint cap, full-pool binding, reject doesn't mutate state). **Note:** footprint is reservation-based (worst case `prompt + max_tokens`), not live usage — conservative, prevents decode OOM.
+
+**Regime:** `long_context`
+
+**Valid over:** `{"concurrency": [1, 32], "context_tokens": 1000, "hardware": "A10G"}`
+
+**Mechanism:** Full-attention pools bind (they grow with sequence, sliding pools cap at the window), so right-sizing pools and gating per pool turns the windowed memory saving into admission headroom.
+
+### [2026-06-12] CUDA-graph decode: single max-batch graph, not bucketing
+*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `modal`* · `kb-20260612-031`
+
+Profiling showed decode was ~95% CPU-bound (~50 ms/step, ~1000 tiny kernel launches across 35 unfused layers; GPU compute a few ms) and **flat across batch size** (49 ms @ N=8 → 57 ms @ N=32). So we're dispatch-bound, not compute-bound. **Decision:** capture ONE CUDA graph at `max_batch_size` and pad smaller batches up to it — NOT vLLM-style per-bucket graphs. Bucketing exists to avoid max-batch *compute* at low concurrency, but since our GPU compute is nearly free (flat curve), padding N=1→32 wastes ~2 ms while still removing ~50 ms of dispatch; one graph is simpler, lighter on memory, no bucket-selection. **Implementation:** persistent `BatchedDecodeState` (block tables/seq_lens as GPU tensors — prerequisite, the old `torch.tensor(python_list)` rebuild was uncapturable) → `_GraphCtx` over FIXED static buffers (tokens/positions/seq_lens/block_tables, block tables pre-sized to `context_window/bs`) → warmup (JITs Triton kernel, stabilizes allocator) → `torch.cuda.graph` capture → per-step: copy inputs into static buffers, `graph.replay()`, read `logits[:n]`. Inactive padding rows point at a scratch block. `prepare_step()` (alloc) + `advance()` (evict) run on the state *outside* the graph. Falls back to eager on capture failure (`CUSTOM_BACKEND_CUDA_GRAPH=0` to disable). **Result:** decode ~50→25 ms/step (~2×), byte-identical to eager (`scripts/gpu_tests/test_paged_kernel_integration_modal.py`: GRAPH vs EAGER OK). **Why not the full ~10×:** the graph removes CPU *launch* overhead, but the GPU still runs ~1000 unfused tiny kernels/step. Closing the rest needs **op fusion** (torch.compile of the custom forward, or hand-fusing the per-layer norm/proj/gate ops) — a separate effort. Earlier `torch.compile` trouble was with the HF model (DECISIONS 2026-05-30); our custom forward is untried under compile. Also still open: `prepare_step`/`advance` keep ~1–2 GPU→CPU syncs/step (alloc/evict bookkeeping) which prevent full CPU/GPU overlap.
+
+**Regime:** `steady_interactive`
+
+**Mechanism:** Decode was ~95% CPU dispatch-bound (~1000 launches/step, flat across batch), so one captured graph removes the launch cost and padding to max batch costs ~2 ms.
+
+### [2026-06-12] De-Python the decode step (vectorized scatter + one-shot block table)
+*tags: `cache`, `decode`, `graph`, `kernel`, `kv`* · `kb-20260612-032`
+
+Follows [[m2-3-paged-attention-kernel]]. The kernel removed the gather, but TPOT still sloped (N=32 173 ms vs N=1 50 ms): every decode step ran a Python per-row loop doing per-row tensor writes for the scatter-append (~N×non-shared-layers tiny GPU launches/step) and rebuilt the per-layer block table from Python lists. **Fix:** `BatchedPagedKVCache.append` now does ONE vectorized indexed write (`pool.k[block_ids, :, slots, :] = k_new`) for the whole batch (block-boundary alloc stays in Python — rare, no tensor writes); `block_table_tensor` builds with a single host→device copy. **Result:** N=32 TPOT 173→99 ms, decode throughput 185→323 tok/s (short workload). Net vs row-by-row at N=32: ~20×. Remaining slope (N=1 47 → N=32 99 ms) is partly real compute (A10G nearing compute-bound) + per-layer kernel launches — CUDA graphs is the lever for the rest.
+
+**Evidence:** benchmarks/short_4_kernel_depython.csv
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Per-row Python tensor writes and block-table rebuilds cost ~N x layers tiny launches per step; one vectorised indexed write removes them.
+
+### [2026-06-11] M2.3 — Triton paged-attention decode kernel
+*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `modal`, `numerics`, `prefill`* · `kb-20260611-030`
+
+<a name="m2-3-paged-attention-kernel"></a>Context: the batched gather+SDPA decode (above) regressed at N=32 because every step rebuilt a dense `[N,H,Lmax,D]` tensor with a Python per-row pad/cat loop + padded SDPA on short rows. **Decision:** write our own Triton kernel (`models/paged_attention_kernel.py::paged_decode_attention`) reading K/V directly from the scattered blocks via the block table — no gather, no padding, FlashAttention-style online softmax. **Triton, not raw CUDA C++:** Triton compiles to PTX/GPU (it *is* a CUDA kernel), ships with torch (no toolchain on the Modal image), ~90 lines vs many hundreds, and is what the serving stack (vLLM Triton kernels, FlashInfer) uses for exactly this. **Why our own and not vLLM's/FlashInfer's prebuilt kernel:** Gemma 4's full-attention layers have `head_dim=512`, the same ceiling that ruled out FA2 (see [2026-05-30 FA2]); prebuilt kernels cap at 256. A hand-written Triton kernel tiles `D` via a constexpr → handles 256 (sliding) and 512 (full) in one kernel. Also GQA (Hq query heads share num_kv_heads), scale=1.0 (norms absorb scaling). Wired behind a `paged_ctx` kwarg threaded `forward → layer → attention`; only the attention K/V-assembly+SDPA core is replaced, every norm/MLP/RoPE/projection path untouched. CPU/MPS keep the gather+SDPA path as portable reference (`decode_step_batched` branches on `device.type == "cuda"`). **Validation (GPU, Modal):** isolated kernel vs torch reference max|diff| 5e-4 across D∈{256,512} & GQA; single-step identical-input argmax agrees with gather on every row (full-model logit diff ~0.3 ≈ 1% of the ±30 softcap, from online-softmax vs SDPA reduction-order over 35 layers); full-sequence kernel output == gather. **Result:** N=32 TPOT 385→173 ms, decode throughput 83→185 tok/s and monotonic in batch (knee gone). Net vs original row-by-row: ~12× at N=32. **Parity caveat:** greedy tokens are NOT byte-identical to the SDPA/HF path — ~1% logit noise flips near-ties (same reason vLLM ≠ HF bit-exact); validation is by tolerance + argmax-agreement, not `torch.equal`. **Still open:** the slope isn't flat (N=32 TPOT 173 ms vs N=1 50 ms) — residual per-step Python (`block_table_tensor` built per-layer) + per-layer kernel-launch overhead across 35 layers; **CUDA graphs** is the next lever. Prefill still uses per-row SDPA (kernel is decode-only).
+
+**Evidence:** benchmarks/short_3_kernel.csv
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Reading K/V straight from paged blocks via the block table removes the per-step dense gather/pad whose Python per-row loop caused the N=32 knee.
+
+### [2026-06-11] Custom backend decode is row-by-row, not GPU-batched (M2.4)
+*tags: `cache`, `decode`, `kernel`, `kv`, `numerics`, `scheduler`* · `kb-20260611-029`
+
+Context: M2.4 made `CustomTorchBackend` scheduler-drivable. The batched KV is a plain `list[PagedKVCache]` (one per active row); `decode_step_batched` looped `self.model(...)` once per row — correct, but ~B sequential forwards, no GPU-batching win. CUDA load-test confirmed it: TPOT scaled perfectly linearly (64 ms × N) and aggregate decode throughput was pinned flat at ~15.7 tok/s regardless of batch size. **Resolution:** real batched decode — one forward over all rows. Two stages, both landed: (1) **batched gather+SDPA** — `BatchedPagedKVCache` left-pad-gathers all rows to `[N,H,Lmax,D]`, one masked SDPA; bf16-exact vs row-by-row in test. Throughput then scaled with batch (15→114 tok/s @ N=16, ~7×) but regressed at N=32 (114→83) from the Python per-row pad/cat loop. (2) **[[m2-3-paged-attention-kernel]]** removed that knee. See that entry. The scheduler's `attention_mask` is still ignored by the custom backend (we build our own).
+
+**Evidence:** benchmarks/short_1_rowbyrow.csv, benchmarks/short_2_batched_gather.csv
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
+
+**Mechanism:** decode_step_batched ran one forward per row, so B rows cost B sequential forwards and nothing was GPU-batched.
+
 ### [2026-09-06] A100-80GB draws are bimodal: 2.31x TPOT spread at identical config
 *tags: `benchmarking`, `modal`, `variance`, `harness`, `validity`* · `kb-20260906-a81f6d18`
 
@@ -456,28 +524,6 @@ Gemma 4 is 28/35 `sliding_attention` (window=512); the forward stored `sliding_w
 
 **Mechanism:** The forward stored sliding_window but never applied it, and the 5-token parity fixture could not see a 512-token window.
 
-### [2026-06-12] Windowed KV storage (free out-of-window blocks on sliding layers)
-*tags: `cache`, `decode`, `kernel`, `kv`, `memory`, `modal`, `prefill`, `scheduler`* · `kb-20260612-036`
-
-Follows the sliding-window-attention entry below. Sliding layers (28/35) only need the last 512 tokens of KV, but were storing the full history. **Decision — sentinel eviction, no kernel change:** `BlockPool.window` carries the per-layer window (set from `attn.sliding_window` in `make_pools_for_gemma`); `PagedKVCache.append` (and `BatchedPagedKVCache.append`) call `_evict()` after each write — once a block is fully out of window it's `pool.release()`d and its block-table slot set to `-1`. The decode kernel's existing `start_b = (L-window)//block_size` already skips exactly those slots (`start_b == evicted count`), so **the kernel is unchanged**; `free_all`/`get`/`block_table_tensor` treat `-1` as "skip / map to 0" (out-of-window positions are masked anyway). **Prefix-cache interaction:** only cache prefixes ≤ window — if a sliding layer evicted (prompt > 512), `prefill` skips `store()` (`cache.any_evicted`). This avoids offset-tracking in the PrefixCache; long-prefix sharing (rare, previously on wrong outputs) is dropped. **Validation:** unit test (blocks freed, in-window tail readable, clean `free_all`); 540-token windowed-decode-vs-HF (CPU); long-workload Modal sweep 0 errors, no perf regression. **Follow-up DONE:** window-aware per-pool admission now turns the freed memory into concurrency (see entry above). **Still OPEN (minor):** block-table list/tensor grows with context (sentinels kept, no offset trim) — tiny int32 data, a long-context micro-opt.
-
-**Regime:** `long_context`
-
-**Valid over:** `{"hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Sliding layers (28/35) only attend the last 512 tokens, so blocks fully out of window can be released without touching the kernel.
-
-### [2026-06-12] Window-aware per-pool KV admission
-*tags: `decode`, `kernel`, `kv`, `memory`, `modal`, `prefill`, `scheduler`* · `kb-20260612-035`
-
-Turns the windowed-storage memory savings into actual long-context concurrency. **Insight:** with all pools equal-sized, the FULL-attention pools bind (they grow with sequence; sliding pools cap at the window), so windowing alone doesn't raise admission — and naively shrinking the reservation for sliding layers would under-protect the full pools → OOM. **Two changes together:** (1) **right-size pools** — `make_pools_for_gemma(sliding_blocks=...)` + `CUSTOM_BACKEND_SLIDING_BLOCKS`; sliding pools shrink (capped at window), freeing memory to enlarge the full pools. (2) **per-pool window-aware gate** — `CustomTorchBackend.kv_reserve/kv_release` (base class no-op so `TorchBackend` is unaffected) reserve per-request *per-pool* block footprints (sliding capped at `window//bs + 1`) and admit only if EVERY pool fits; wired into `_admit_pending` (soft-hold on False) with `kv_release` on every exit (evict / prefill-fail / chunk-fail / `_fail_all`). The scalar `MAX_ACTIVE_KV_TOKENS` stays as a coarse cap. **Demonstrated (Modal, A10G):** long (1000-token) workload to N=32 with 0 rejections at ~equal memory (full=2048 + sliding=1200 ≈ 422 MB vs baseline 432 MB), where the baseline's 22000 token cap blocked ~1/3 at N=32 → ~1.45× concurrency. Win scales with context/window ratio (≈1/16 at 8k context). Tests: `tests/test_kv_admission.py` (footprint cap, full-pool binding, reject doesn't mutate state). **Note:** footprint is reservation-based (worst case `prompt + max_tokens`), not live usage — conservative, prevents decode OOM.
-
-**Regime:** `long_context`
-
-**Valid over:** `{"concurrency": [1, 32], "context_tokens": 1000, "hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Full-attention pools bind (they grow with sequence, sliding pools cap at the window), so right-sizing pools and gating per pool turns the windowed memory saving into admission headroom.
-
 ### [2026-09-06] No saturation knee exists between 1 and 8 req/s — batching is working
 *tags: `scheduling`, `batching`, `attribution`, `decode`, `tpot`* · `kb-20260906-f13d8e3d`
 
@@ -555,50 +601,6 @@ batch-invariant kernels (fixed split-K reductions), a real project.
 **Valid over:** `{"hardware": "A100-80GB", "model": "gemma-4-e4b"}`
 
 **Mechanism:** A [B,1,H]@[H,H] GEMM picks a different cuBLAS kernel per padded batch width, so accumulation order and near-tie argmaxes change with the number of rows in flight.
-
-### [2026-06-12] De-Python the decode step (vectorized scatter + one-shot block table)
-*tags: `cache`, `decode`, `graph`, `kernel`, `kv`* · `kb-20260612-032`
-
-Follows [[m2-3-paged-attention-kernel]]. The kernel removed the gather, but TPOT still sloped (N=32 173 ms vs N=1 50 ms): every decode step ran a Python per-row loop doing per-row tensor writes for the scatter-append (~N×non-shared-layers tiny GPU launches/step) and rebuilt the per-layer block table from Python lists. **Fix:** `BatchedPagedKVCache.append` now does ONE vectorized indexed write (`pool.k[block_ids, :, slots, :] = k_new`) for the whole batch (block-boundary alloc stays in Python — rare, no tensor writes); `block_table_tensor` builds with a single host→device copy. **Result:** N=32 TPOT 173→99 ms, decode throughput 185→323 tok/s (short workload). Net vs row-by-row at N=32: ~20×. Remaining slope (N=1 47 → N=32 99 ms) is partly real compute (A10G nearing compute-bound) + per-layer kernel launches — CUDA graphs is the lever for the rest.
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Per-row Python tensor writes and block-table rebuilds cost ~N x layers tiny launches per step; one vectorised indexed write removes them.
-
-### [2026-06-12] CUDA-graph decode: single max-batch graph, not bucketing
-*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `modal`* · `kb-20260612-031`
-
-Profiling showed decode was ~95% CPU-bound (~50 ms/step, ~1000 tiny kernel launches across 35 unfused layers; GPU compute a few ms) and **flat across batch size** (49 ms @ N=8 → 57 ms @ N=32). So we're dispatch-bound, not compute-bound. **Decision:** capture ONE CUDA graph at `max_batch_size` and pad smaller batches up to it — NOT vLLM-style per-bucket graphs. Bucketing exists to avoid max-batch *compute* at low concurrency, but since our GPU compute is nearly free (flat curve), padding N=1→32 wastes ~2 ms while still removing ~50 ms of dispatch; one graph is simpler, lighter on memory, no bucket-selection. **Implementation:** persistent `BatchedDecodeState` (block tables/seq_lens as GPU tensors — prerequisite, the old `torch.tensor(python_list)` rebuild was uncapturable) → `_GraphCtx` over FIXED static buffers (tokens/positions/seq_lens/block_tables, block tables pre-sized to `context_window/bs`) → warmup (JITs Triton kernel, stabilizes allocator) → `torch.cuda.graph` capture → per-step: copy inputs into static buffers, `graph.replay()`, read `logits[:n]`. Inactive padding rows point at a scratch block. `prepare_step()` (alloc) + `advance()` (evict) run on the state *outside* the graph. Falls back to eager on capture failure (`CUSTOM_BACKEND_CUDA_GRAPH=0` to disable). **Result:** decode ~50→25 ms/step (~2×), byte-identical to eager (`scripts/gpu_tests/test_paged_kernel_integration_modal.py`: GRAPH vs EAGER OK). **Why not the full ~10×:** the graph removes CPU *launch* overhead, but the GPU still runs ~1000 unfused tiny kernels/step. Closing the rest needs **op fusion** (torch.compile of the custom forward, or hand-fusing the per-layer norm/proj/gate ops) — a separate effort. Earlier `torch.compile` trouble was with the HF model (DECISIONS 2026-05-30); our custom forward is untried under compile. Also still open: `prepare_step`/`advance` keep ~1–2 GPU→CPU syncs/step (alloc/evict bookkeeping) which prevent full CPU/GPU overlap.
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"concurrency": [8, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Decode was ~95% CPU dispatch-bound (~1000 launches/step, flat across batch), so one captured graph removes the launch cost and padding to max batch costs ~2 ms.
-
-### [2026-06-11] M2.3 — Triton paged-attention decode kernel
-*tags: `compile`, `decode`, `graph`, `kernel`, `kv`, `modal`, `numerics`, `prefill`* · `kb-20260611-030`
-
-<a name="m2-3-paged-attention-kernel"></a>Context: the batched gather+SDPA decode (above) regressed at N=32 because every step rebuilt a dense `[N,H,Lmax,D]` tensor with a Python per-row pad/cat loop + padded SDPA on short rows. **Decision:** write our own Triton kernel (`models/paged_attention_kernel.py::paged_decode_attention`) reading K/V directly from the scattered blocks via the block table — no gather, no padding, FlashAttention-style online softmax. **Triton, not raw CUDA C++:** Triton compiles to PTX/GPU (it *is* a CUDA kernel), ships with torch (no toolchain on the Modal image), ~90 lines vs many hundreds, and is what the serving stack (vLLM Triton kernels, FlashInfer) uses for exactly this. **Why our own and not vLLM's/FlashInfer's prebuilt kernel:** Gemma 4's full-attention layers have `head_dim=512`, the same ceiling that ruled out FA2 (see [2026-05-30 FA2]); prebuilt kernels cap at 256. A hand-written Triton kernel tiles `D` via a constexpr → handles 256 (sliding) and 512 (full) in one kernel. Also GQA (Hq query heads share num_kv_heads), scale=1.0 (norms absorb scaling). Wired behind a `paged_ctx` kwarg threaded `forward → layer → attention`; only the attention K/V-assembly+SDPA core is replaced, every norm/MLP/RoPE/projection path untouched. CPU/MPS keep the gather+SDPA path as portable reference (`decode_step_batched` branches on `device.type == "cuda"`). **Validation (GPU, Modal):** isolated kernel vs torch reference max|diff| 5e-4 across D∈{256,512} & GQA; single-step identical-input argmax agrees with gather on every row (full-model logit diff ~0.3 ≈ 1% of the ±30 softcap, from online-softmax vs SDPA reduction-order over 35 layers); full-sequence kernel output == gather. **Result:** N=32 TPOT 385→173 ms, decode throughput 83→185 tok/s and monotonic in batch (knee gone). Net vs original row-by-row: ~12× at N=32. **Parity caveat:** greedy tokens are NOT byte-identical to the SDPA/HF path — ~1% logit noise flips near-ties (same reason vLLM ≠ HF bit-exact); validation is by tolerance + argmax-agreement, not `torch.equal`. **Still open:** the slope isn't flat (N=32 TPOT 173 ms vs N=1 50 ms) — residual per-step Python (`block_table_tensor` built per-layer) + per-layer kernel-launch overhead across 35 layers; **CUDA graphs** is the next lever. Prefill still uses per-row SDPA (kernel is decode-only).
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Reading K/V straight from paged blocks via the block table removes the per-step dense gather/pad whose Python per-row loop caused the N=32 knee.
-
-### [2026-06-11] Custom backend decode is row-by-row, not GPU-batched (M2.4)
-*tags: `cache`, `decode`, `kernel`, `kv`, `numerics`, `scheduler`* · `kb-20260611-029`
-
-Context: M2.4 made `CustomTorchBackend` scheduler-drivable. The batched KV is a plain `list[PagedKVCache]` (one per active row); `decode_step_batched` looped `self.model(...)` once per row — correct, but ~B sequential forwards, no GPU-batching win. CUDA load-test confirmed it: TPOT scaled perfectly linearly (64 ms × N) and aggregate decode throughput was pinned flat at ~15.7 tok/s regardless of batch size. **Resolution:** real batched decode — one forward over all rows. Two stages, both landed: (1) **batched gather+SDPA** — `BatchedPagedKVCache` left-pad-gathers all rows to `[N,H,Lmax,D]`, one masked SDPA; bf16-exact vs row-by-row in test. Throughput then scaled with batch (15→114 tok/s @ N=16, ~7×) but regressed at N=32 (114→83) from the Python per-row pad/cat loop. (2) **[[m2-3-paged-attention-kernel]]** removed that knee. See that entry. The scheduler's `attention_mask` is still ignored by the custom backend (we build our own).
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"concurrency": [1, 32], "hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** decode_step_batched ran one forward per row, so B rows cost B sequential forwards and nothing was GPU-batched.
 
 ### [2026-09-06] An isolated kernel win of 10x can be worth nothing end to end
 *tags: `kernel`, `benchmark`, `loop`, `prefill`* · `kb-20260905-d2a675d5`
@@ -745,6 +747,21 @@ A100 run that failed with `AttributeError: no attribute '_graph_buckets'`.
 ## Rejected (9)
 
 **Tried, measured, does not work.** Do not retry blind — these are the entries that stop the loop re-treading dead ends.
+
+### [2026-05-30] `torch.compile` + Gemma 4 forward
+*tags: `benchmark`, `cache`, `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `numerics`, `prefill`, `quantization`, `torch-compile`* · `kb-20260530-014`
+
+Context: the original crash was in **HF's** `modeling_gemma4.py:2505` — `logits = self.lm_head(hidden_states[:, slice_indices, :])` with `slice_indices=None` under dynamo. That blocker is specific to HF's forward; it does **not** apply to our custom `models/gemma4.py`, whose `lm_head(h)` is unconditional.
+**Resolution (2026-06-13):** the forward IS compilable, but op fusion is **not our decode lever** — measured and reverted. Two findings:
+1. **Traceability (kept).** Probed with `torch._dynamo.explain` (`scripts/probes/probe_compile.py`, CPU — graph breaks are device-independent): square prefill and paged prefill trace with **0 graph breaks** (op_count ~1.9–2.3k). The *only* Dynamo-hostile code is the **cache/scatter bookkeeping** (`BatchedPagedKVCache.get/append`, `paged_ctx` — `if seq_len==0`, `max(...,default=)`, `L//bs>=len(bt)`), never the math. Clean seam: compile the math, leave bookkeeping eager. Numerics safe (RMSNorm byte-identical, prefill argmax-identical).
+2. **Fusion is a no-op under the CUDA graph (the reason for reverting).** A10G, decode ms/step: eager 65.4 → graph 19.98 → compile(leaf, no graph) 54.3 → compile+graph **19.86** = **1.01×**, token-identical. The HANDOFF hypothesis ("residual ~25 ms = ~1000 unfused tiny kernels") is **falsified**: fusing them changed nothing under the graph. The graph step costs ~20 ms whether 4 or 32 rows are real → the floor is the **matmuls reading all weights from HBM each step** (small-batch decode is memory-bandwidth-bound), not launch/exec of tiny kernels. So compile (and the q/k/v-pack hand-fusion idea — same weight bytes) can't move it. Knob reverted (no-op + cold-start codegen tax); finding kept.
+**Forward use:** because the forward is compile-clean, compile becomes load-bearing for a **quantized** forward (Inductor fuses dequant into the GEMV epilogue) — that's the actual bandwidth lever. Next: quantization (see CLAUDE.md). Also re-measure decode at full batch (32 real rows: 19.86/32 ≈ 0.62 ms/tok ≈ 1600 tok/s) — the current bench under-loads the max-batch graph.
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"hardware": "A10G"}`
+
+**Mechanism:** Under the CUDA graph the decode floor is the matmuls reading all weights from HBM each step (memory-bandwidth-bound), so op fusion has nothing left to remove.
 
 ### [2026-09-05] Prefill bucket padding costs grid slots, not compute
 *tags: `prefill`, `graph`, `kernel`* · `kb-20260905-33842618`
@@ -939,18 +956,3 @@ quantitative reason.
 **Valid over:** `{"concurrency": [1, 32], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
 
 **Mechanism:** A mixed step has a variable (B, S) shape so it cannot replay the decode CUDA graph, and the eager forward is dispatch-bound at 3-5x the graphed step.
-
-### [2026-05-30] `torch.compile` + Gemma 4 forward
-*tags: `benchmark`, `cache`, `compile`, `decode`, `graph`, `kernel`, `kv`, `memory`, `numerics`, `prefill`, `quantization`, `torch-compile`* · `kb-20260530-014`
-
-Context: the original crash was in **HF's** `modeling_gemma4.py:2505` — `logits = self.lm_head(hidden_states[:, slice_indices, :])` with `slice_indices=None` under dynamo. That blocker is specific to HF's forward; it does **not** apply to our custom `models/gemma4.py`, whose `lm_head(h)` is unconditional.
-**Resolution (2026-06-13):** the forward IS compilable, but op fusion is **not our decode lever** — measured and reverted. Two findings:
-1. **Traceability (kept).** Probed with `torch._dynamo.explain` (`scripts/probes/probe_compile.py`, CPU — graph breaks are device-independent): square prefill and paged prefill trace with **0 graph breaks** (op_count ~1.9–2.3k). The *only* Dynamo-hostile code is the **cache/scatter bookkeeping** (`BatchedPagedKVCache.get/append`, `paged_ctx` — `if seq_len==0`, `max(...,default=)`, `L//bs>=len(bt)`), never the math. Clean seam: compile the math, leave bookkeeping eager. Numerics safe (RMSNorm byte-identical, prefill argmax-identical).
-2. **Fusion is a no-op under the CUDA graph (the reason for reverting).** A10G, decode ms/step: eager 65.4 → graph 19.98 → compile(leaf, no graph) 54.3 → compile+graph **19.86** = **1.01×**, token-identical. The HANDOFF hypothesis ("residual ~25 ms = ~1000 unfused tiny kernels") is **falsified**: fusing them changed nothing under the graph. The graph step costs ~20 ms whether 4 or 32 rows are real → the floor is the **matmuls reading all weights from HBM each step** (small-batch decode is memory-bandwidth-bound), not launch/exec of tiny kernels. So compile (and the q/k/v-pack hand-fusion idea — same weight bytes) can't move it. Knob reverted (no-op + cold-start codegen tax); finding kept.
-**Forward use:** because the forward is compile-clean, compile becomes load-bearing for a **quantized** forward (Inductor fuses dequant into the GEMV epilogue) — that's the actual bandwidth lever. Next: quantization (see CLAUDE.md). Also re-measure decode at full batch (32 real rows: 19.86/32 ≈ 0.62 ms/tok ≈ 1600 tok/s) — the current bench under-loads the max-batch graph.
-
-**Regime:** `steady_interactive`
-
-**Valid over:** `{"hardware": "A10G", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Under the CUDA graph the decode floor is the matmuls reading all weights from HBM each step (memory-bandwidth-bound), so op fusion has nothing left to remove.

@@ -1,6 +1,10 @@
 {
   "created_at": 1781150400.0,
-  "evidence": [],
+  "evidence": [
+    {
+      "csv": "benchmarks/short_3_kernel.csv"
+    }
+  ],
   "id": "kb-20260611-030",
   "mechanism": "Reading K/V straight from paged blocks via the block table removes the per-step dense gather/pad whose Python per-row loop caused the N=32 knee.",
   "regime": "steady_interactive",
@@ -21,7 +25,7 @@
   "title": "M2.3 \u2014 Triton paged-attention decode kernel",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.3166301,
+  "updated_at": 1789567195.431438,
   "validity_range": {
     "concurrency": [
       1,

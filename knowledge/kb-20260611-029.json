@@ -1,6 +1,13 @@
 {
   "created_at": 1781150400.0,
-  "evidence": [],
+  "evidence": [
+    {
+      "csv": "benchmarks/short_1_rowbyrow.csv"
+    },
+    {
+      "csv": "benchmarks/short_2_batched_gather.csv"
+    }
+  ],
   "id": "kb-20260611-029",
   "mechanism": "decode_step_batched ran one forward per row, so B rows cost B sequential forwards and nothing was GPU-batched.",
   "regime": "steady_interactive",
@@ -19,7 +26,7 @@
   "title": "Custom backend decode is row-by-row, not GPU-batched (M2.4)",
   "transfer_checked": null,
   "triggers": [],
-  "updated_at": 1789565416.3162198,
+  "updated_at": 1789567195.4311712,
   "validity_range": {
     "concurrency": [
       1,
