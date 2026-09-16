@@ -13,9 +13,11 @@ so `rank_correlation` is the validation primitive; the hardware validation itsel
 and is deferred. Simulated panels carry `harness="simulator"` and are refused by compare.py
 against hardware panels, which is correct.
 
-NOT modelled in v1: preemption, chunked or batched prefill (a wave prefills monolithically and
-stalls decode, the engine's default), prefix-cache eviction, and cache-held blocks counting
-against the pool. Tokens are `len(prompt) // 4` because traces are text.
+NOT modelled in v1: preemption, chunked prefill, prefix-cache eviction, and cache-held blocks
+counting against the pool. `prefill_mode` is "monolithic" (serial, the engine default) or
+"batched" (one wave, the custom backend). Prefill stalls decode in both, as in the engine. The
+KV gate reserves the engine's worst case, prompt + max_tokens, BEFORE any prefix lookup; a hit
+only shrinks prefill cost. Tokens are `len(prompt) // 4` because traces are text.
 
     python -m inference_server.research.loop simulate --class steady_interactive \\
         --config '{"policy": "fcfs"}' --config '{"policy": "fair"}' [--timing t.json] [--emit]
@@ -103,7 +105,8 @@ def _lstsq(xs: list[list[float]], ys: list[float]) -> list[float]:
     for col in range(k):
         piv = max(range(col, k), key=lambda r: abs(a[r][col]))
         if abs(a[piv][col]) < 1e-12:
-            raise ValueError("singular fit: a predictor is constant across the rows")
+            raise ValueError("singular fit: the normal matrix has a (near-)zero pivot, so the "
+                             "predictors are collinear or constant")
         a[col], a[piv] = a[piv], a[col]
         b[col], b[piv] = b[piv], b[col]
         for r in range(k):
@@ -141,6 +144,7 @@ def fit_timing_model(rows: list[dict[str, Any]], **identity: str) -> TimingModel
 # ------------------------------------------------------------------ config
 
 POLICIES = ("fcfs", "fair")
+PREFILL_MODES = ("monolithic", "batched")
 
 
 @dataclass(frozen=True)
@@ -154,10 +158,14 @@ class SimConfig:
     block_size: int = 16
     policy: str = "fcfs"
     rate_scale: float = 1.0
+    prefill_mode: str = "monolithic"        # monolithic: serial; batched: one wave
 
     def __post_init__(self) -> None:
         if self.policy not in POLICIES:
             raise ValueError(f"policy must be one of {POLICIES}, got {self.policy!r}")
+        if self.prefill_mode not in PREFILL_MODES:
+            raise ValueError(f"prefill_mode must be one of {PREFILL_MODES}, "
+                             f"got {self.prefill_mode!r}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -218,6 +226,8 @@ class SimResult:
     active_sum: int = 0
     cache_lookups: int = 0
     cache_hits: int = 0
+    pool_free_end: int = 0          # free blocks when the run ends
+    pool_free_min: int = 0          # the low-water mark, the useful one for a replay
 
     def summary(self, cls: WorkloadClass) -> dict[str, Any]:
         """Same keys replay_trace reports, plus the pressure signals the simulator can see."""
@@ -247,6 +257,7 @@ class SimResult:
             "active_high_water": self.active_high_water,
             "active_mean": (round(self.active_sum / self.decode_steps, 2)
                             if self.decode_steps else None),
+            "pool_free_end": self.pool_free_end, "pool_free_min": self.pool_free_min,
             "cache_hit_rate": (round(self.cache_hits / self.cache_lookups, 3)
                                if self.cache_lookups else None),
         }
@@ -274,7 +285,9 @@ class SimResult:
                                    "total_expired", "decode_steps", "active_high_water",
                                    "active_mean")}
         cache = {"hit_rate": s["cache_hit_rate"], "lookups": self.cache_lookups,
-                 "pool_total_blocks": self.cfg.kv_blocks, "pool_free_blocks": self.cfg.kv_blocks}
+                 "pool_total_blocks": self.cfg.kv_blocks, "pool_free_blocks": self.pool_free_end,
+                 # peak, not end-of-run: the pressure a replay actually reached
+                 "pool_utilization": round(1 - self.pool_free_min / self.cfg.kv_blocks, 3)}
         return H.panel_from_stats(
             validity, scheduler_stats={**sched, "total_preempted": 0, "total_iteration_errors": 0},
             cache_stats=cache,
@@ -330,7 +343,7 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
     counters: dict[str, float] = {}
     pending: list[_Req] = []
     active: list[_Req] = []
-    free_blocks = cfg.kv_blocks
+    free_blocks = free_min = cfg.kv_blocks
     now, next_arrival = 0.0, 0
 
     def reject(r: _Req, why: str, expired: bool = False) -> None:
@@ -359,15 +372,14 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
                 pending.remove(r)
                 reject(r, "expired", expired=True)
 
-        # (b) admit in policy order while a slot and the KV reservation fit (HOL-wait on KV)
+        # (b) admit in policy order while a slot and the KV reservation fit (HOL-wait on KV).
+        # Worst-case reservation, before any prefix lookup, exactly as scheduler._admit_pending.
         ranked = (fair_order(pending, counters) if cfg.policy == "fair" else fcfs_order(pending))
         wave: list[_Req] = []
         for r in ranked:
             if len(active) + len(wave) >= cfg.max_batch_size:
                 break
-            r.matched_tokens = cache.lookup(r.trace.prompt)
-            r.blocks = math.ceil((r.prompt_tokens - r.matched_tokens + r.trace.max_tokens)
-                                 / cfg.block_size)
+            r.blocks = math.ceil((r.prompt_tokens + r.trace.max_tokens) / cfg.block_size)
             if r.blocks > cfg.kv_blocks:
                 pending.remove(r)
                 reject(r, "kv_too_large")
@@ -376,14 +388,20 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
                 res.kv_admit_blocked += 1
                 break
             free_blocks -= r.blocks
+            free_min = min(free_min, free_blocks)
             pending.remove(r)
             r.admit = now
             wave.append(r)
 
-        # (c) monolithic prefill of the wave: decode stalls, first token at each prefill's end
+        # (c) prefill: decode stalls, first token at each prefill's end. A prefix hit shrinks
+        # the work here only; the reservation above already happened.
         if wave:
-            res.wave_sizes[len(wave)] = res.wave_sizes.get(len(wave), 0) + 1
-            wave_tokens = sum(r.prompt_tokens - r.matched_tokens for r in wave)
+            for r in wave:
+                r.matched_tokens = cache.lookup(r.trace.prompt)
+            batched = cfg.prefill_mode == "batched"
+            if batched:
+                res.wave_sizes[len(wave)] = res.wave_sizes.get(len(wave), 0) + 1
+            wave_tokens = sum(r.prompt_tokens - r.matched_tokens for r in wave) if batched else 0
             for r in wave:
                 now += timing.prefill_s(r.prompt_tokens - r.matched_tokens, wave_tokens)
                 r.first_token = now
@@ -412,6 +430,7 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
 
     res.wall_s = now
     res.cache_lookups, res.cache_hits = cache.lookups, cache.hits
+    res.pool_free_end, res.pool_free_min = free_blocks, free_min
     for r in sorted(reqs, key=lambda r: r.index):
         ok = r.error is None
         tpot = ((r.finish - r.first_token) / (r.generated - 1) * 1000
@@ -452,4 +471,4 @@ def rank_correlation(a: list[float], b: list[float]) -> float:
     ma, mb = sum(ra) / len(ra), sum(rb) / len(rb)
     cov = sum((x - ma) * (y - mb) for x, y in zip(ra, rb))
     var = math.sqrt(sum((x - ma) ** 2 for x in ra) * sum((y - mb) ** 2 for y in rb))
-    return cov / var if var else 0.0
+    return cov / var if var else 0.0      # all ties on one side: no ordering to agree with

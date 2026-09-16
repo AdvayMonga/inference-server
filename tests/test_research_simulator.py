@@ -99,6 +99,9 @@ def test_kv_exhaustion_blocks_admission_until_blocks_free():
     assert s["active_high_water"] == 2
     third = res.rows[2]
     assert third.queue_ms > res.rows[0].queue_ms
+    assert s["pool_free_min"] == 2 and s["pool_free_end"] == 10
+    panel = res.to_panel(CLS)
+    assert panel.pool_free_blocks == 10 and panel.pool_utilization == 0.8
 
 
 def test_request_larger_than_the_pool_is_rejected_not_stuck():
@@ -107,12 +110,35 @@ def test_request_larger_than_the_pool_is_rejected_not_stuck():
     assert errors(res) == ["kv_too_large"]
 
 
-def test_batch_slots_cap_the_active_set_and_wave_sizes_are_recorded():
+def test_batch_slots_cap_the_active_set():
     trace = [req(0.0, max_tokens=10) for _ in range(6)]
     res = simulate(trace, SimConfig(max_batch_size=4), FAST)
-    s = res.summary(CLS)
-    assert s["active_high_water"] == 4
-    assert s["wave_sizes"] == {4: 1, 2: 1}
+    assert res.summary(CLS)["active_high_water"] == 4
+
+
+# ---------------------------------------------------------------- prefill modes
+
+def test_monolithic_prefill_is_serial_with_no_wave_term_and_empty_wave_sizes():
+    """The engine default: serial prefill, wave_sizes never populated."""
+    timing = TimingModel(prefill=(0.0, 0.001, 0.010), decode=(0.001, 0.0, 0.0))
+    trace = [req(0.0, prompt="x" * 400, max_tokens=2) for _ in range(3)]  # 100 tokens each
+    res = simulate(trace, SimConfig(prefill_mode="monolithic"), timing)
+    assert res.summary(CLS)["wave_sizes"] == {}
+    assert [r.prefill_ms for r in res.rows] == [100.0, 200.0, 300.0]
+
+
+def test_batched_prefill_applies_the_wave_term_and_records_wave_sizes():
+    timing = TimingModel(prefill=(0.0, 0.001, 0.010), decode=(0.001, 0.0, 0.0))
+    trace = [req(0.0, prompt="x" * 400, max_tokens=2) for _ in range(3)]
+    res = simulate(trace, SimConfig(prefill_mode="batched"), timing)
+    assert res.summary(CLS)["wave_sizes"] == {3: 1}
+    # each prefill costs 0.1s own + 0.01 * 300 wave tokens = 3.1s, cumulative
+    assert [r.prefill_ms for r in res.rows] == [3100.0, 6200.0, 9300.0]
+
+
+def test_unknown_prefill_mode_is_rejected():
+    with pytest.raises(ValueError, match="prefill_mode"):
+        SimConfig(prefill_mode="chunked")
 
 
 # ---------------------------------------------------------------- prefix cache
@@ -127,6 +153,21 @@ def test_prefix_hit_shortens_prefill_for_a_repeated_prompt():
     assert repeat.matched_tokens == 104, "longest block-aligned prefix, in tokens"
     assert repeat.prefill_ms < first.prefill_ms
     assert res.summary(CLS)["cache_hit_rate"] == pytest.approx(1 / 3, abs=1e-3)
+
+
+def test_prefix_hit_does_not_shrink_the_kv_reservation():
+    """The engine reserves prompt + max_tokens before any lookup (scheduler._admit_pending).
+    A sim that reserved less would admit more than the engine and could bless a policy
+    the engine cannot run — wrong in the one direction a tier-1 tool must never be."""
+    prompt = "shared system prompt " * 20             # 105 tokens + 10 out = 29 blocks of 4
+    timing = TimingModel(prefill=(0.0, 0.001, 0.0), decode=(0.001, 0.0, 0.0), fitted_from="t")
+    trace = [req(0.0, prompt=prompt), req(0.05, prompt=prompt)]   # 2nd arrives mid-decode
+    # 50 blocks: two fit only if the 104 matched tokens were subtracted (29 + 3 blocks).
+    res = simulate(trace, SimConfig(block_size=4, kv_blocks=50), timing)
+    first, repeat = res.rows
+    assert repeat.matched_tokens == 104 and repeat.prefill_ms < first.prefill_ms
+    assert res.summary(CLS)["kv_admit_blocked"] >= 1 and res.summary(CLS)["active_high_water"] == 1
+    assert res.summary(CLS)["pool_free_min"] == 50 - 29
 
 
 # ---------------------------------------------------------------- the shared policy code
