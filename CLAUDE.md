@@ -46,11 +46,12 @@ closed-loop harness, and a cache-hit benchmark that hid every miss-path bug).
 python -m inference_server.research.loop attribute runs/<id>.json --out gaps.json
 python -m inference_server.research.loop kb --status rejected     # what is already disproved
 python -m inference_server.research.loop kb --regime cold_start   # what applies to a regime (--situation k=v narrows by validity_range)
-python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, routed to a venue
+python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, flags known dead ends
 python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}'  # tier 1: policy hypotheses, no GPU
-python -m inference_server.research.loop budget                    # cap, ledger, venues (cloud opt-in: RESEARCH_VENUES)
+python -m inference_server.research.loop no-claim --why "..."      # engine diff that claims no behaviour change
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
 python scripts/bench/replay_trace.py --class steady_interactive --split seen --base-url URL  # open-loop corpus replay
+RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py --gpu '...'  # rent a GPU, run one instrument, terminate
 ```
 
 - **Workload corpus (2026-09-15):** `corpus/` holds frozen traces for three classes (`cold_start`,
@@ -80,30 +81,68 @@ python scripts/bench/replay_trace.py --class steady_interactive --split seen --b
 
 ## What This Project Is
 
-A production-grade, multi-user LLM inference engine built from scratch in Python, competing with **vLLM at the engine layer**. Target: real concurrent traffic, mixed prompt/output lengths, tight tail-latency.
+A single-GPU LLM inference engine written from scratch in Python, plus the research loop that
+improves it — on its way to becoming a **regime-adaptive, multi-replica serving system whose
+policies are learned offline by the loop and selected at runtime by a controller**. The plan of
+record is the three-plane design below; the first regime is cold start, because a replica's
+first thirty seconds are deterministically different from its steady state and the regime is
+detected by reading the replica's age, no classifier needed.
 
-**Engine-layer features (all in scope):** continuous batching, chunked prefill, paged KV cache with cross-session prefix sharing, fair scheduling + preemption hooks, backpressure under memory pressure, quantization / attention kernels / KV eviction policies.
+### Three planes
+
+| plane | clock | role | status |
+|---|---|---|---|
+| **Data** — `src/inference_server/` minus `research/` | microseconds | serves tokens; emits one telemetry row per request | built (see *Engine already built*) |
+| **Control** — router, global prefix index, replica launcher, controller, policy table | seconds | routes, selects a policy, manages replica lifecycle | does not exist yet (Phases 5–7) |
+| **Improvement** — `research/`, `corpus/`, `knowledge/`, `scripts/` | hours | turns telemetry into validated configs; changes the other two | built; extended by Phases 1–3 |
+
+Flow: the data plane emits telemetry → the improvement plane turns it into validated configs →
+the control plane selects among them at runtime. The knowledge base is both research artifact
+and production policy store. Nothing in the data plane ever calls a model for judgment;
+judgment is compiled into a table offline.
+
+### The metric
+
+**Primary:** GPU-seconds per session, subject to p95 TTFT under a fixed per-class ceiling
+(placeholders in `corpus/manifest.json` until Phase 0 sets them). Cold start is a latency/cost
+tradeoff; pinning one and optimising the other avoids inventing weights, counts idle warm-pool
+time, and is measurable entirely from outside the system. **Guardrail:** warm-path TTFT/TPOT
+stay within their current distance of vLLM. The vLLM head-to-head is the guardrail measurement,
+not the objective.
+
+**Objective hierarchy** — higher overrides lower; a win that breaks a level above is not a win:
+1. **Hard invariants** — output equivalence against the reference path, memory ceiling, no crashes.
+2. **Guardrails** — no workload class regresses beyond epsilon; warm-path distance to vLLM.
+3. **Primary metric** — the one number maximised.
+
+### Where we stand
+
+A100-80GB, Gemma 4 E4B, 32 concurrent, June 2026 (`benchmarks/`): this engine **1151 tok/s,
+TPOT p50 24 ms, TTFT p50 107 ms**; vLLM 0.23 **2628 tok/s, 11 ms, 48 ms**. 9× over naive HF,
+2.3× behind vLLM. The loop's attribution says the rest of that gap is per-decode-step cost at
+low batch and long-prompt prefill compute — kernel and fusion work on vLLM's home turf — so we
+stopped racing it and kept parity as a guardrail. Three loop findings constrain everything:
+
+- The TTFT tail is prefill **compute** (203 ms of 213 ms at rate 1), not queueing. Every scheduling lever died at once.
+- A100 draws are bimodal (2.3× TPOT spread on identical config). Only simultaneous A/B arms are evidence.
+- A 10.8× isolated kernel win was worth nothing end to end.
 
 **Out of scope:** platform layer — model registry, LoRA hot-swap, multi-tenant auth/quotas, gateway features. Engine first; platform later. **Narrow exception:** `openai_shim.py` serves `/v1/completions`, `/v1/chat/completions` and `/v1/models`. It exists so one load generator can drive both us and vLLM in the head-to-head, and so Open WebUI can be the chat frontend instead of us maintaining one. Compatibility surface, not a public API: no auth, registry, tools, logprobs, or multimodal parts. Accepts optional `X-Session-Id` / `X-Turn-Index` / `X-Trace-Id` headers for the harness (absent → auto ids) and echoes `X-Trace-Id`.
-
-**Primary metrics:** per-user p95 TTFT/TPOT under concurrent load, and throughput at a fixed tail-latency budget. Single-request latency is one point on the curve, not the goal.
-
-**Comparison point:** vLLM, same model, same hardware.
 
 ---
 
 ## Key Design Decisions
 
-- **Model:** Gemma 4 E2B-it (dev) → E4B (load/bench). HuggingFace Transformers.
+- **Model:** Gemma 4 E2B-it (dev) → E4B (load/bench). HuggingFace Transformers. Phase 0 may move the benchmark model to a ~30 GB class so cold start is dramatic.
 - **Framework:** PyTorch.
-- **Optimization priority:** throughput at p95 SLO > KV capacity > single-request latency > cold start.
+- **Optimization priority:** hard invariants > guardrails (warm-path distance to vLLM, no class regresses) > GPU-seconds per session at the p95 TTFT ceiling. Cold start is the first regime; warm-path latency is a guardrail, not a goal.
 - **Hardware:** auto-detect CUDA → MPS → CPU. Manual override via `DEVICE`.
 - **Backend abstraction (`InferenceBackend`):** server never talks to model directly. Swap = config change.
 - **Session IDs everywhere:** all per-request state scoped by `session_id`. Multi-tenancy/quotas plug in later without a rewrite.
-- **Pluggable scheduler (`SchedulerInterface`):** continuous batching with fairness + preemption hooks.
-- **Rich request objects:** `session_id`, arrival_ts, priority, max_tokens, timeout. Never bare token lists. Extensible by field-add.
-- **Benchmarking:** every optimization measured against baseline; final compare vs vLLM.
-- **Modal-deployable:** no host-machine assumptions (no hardcoded paths, ports, `localhost` — env/config only). One-time setup in a startup hook (model load, KV pre-alloc), never lazy on first request. All state in-process per-container, scoped by `session_id`. FastAPI + SSE only. `/metrics` pull-based and externally scrapable. No filesystem writes on the request path.
+- **Pluggable scheduler (`SchedulerInterface`):** continuous batching with fairness + preemption hooks. Ordering decisions are pure functions in `scheduling_policy.py` so the simulator shares them.
+- **Rich request objects:** `session_id`, `trace_id`, `turn_index`, arrival_ts, priority, max_tokens, timeout. Never bare token lists. Extensible by field-add.
+- **Benchmarking:** every engine change lands with an experiment record judged by the loop (`LOOP.md`); policy hypotheses die in the simulator before they cost a GPU; vLLM is the warm-path guardrail arm.
+- **Modal-deployable:** no host-machine assumptions (no hardcoded paths, ports, `localhost` — env/config only). One-time setup in a startup hook (model load, KV pre-alloc), never lazy on first request. All state in-process per-container, scoped by `session_id`. FastAPI + SSE only. `/metrics` pull-based and externally scrapable. No filesystem writes on the request path (telemetry writes happen off the scheduler thread and only when `TELEMETRY_DIR` is set).
 
 ---
 
@@ -136,6 +175,8 @@ Do **not** build yet: model registry, LoRA hot-swap, multi-tenant auth/quotas, g
 | `Sampler` | `sampling.py::sample()` — temperature, top-k, top-p, greedy. Per-request `SamplingParams` carried on `ScheduledRequest`. |
 | `server.py` | Thin HTTP — session routing only |
 | `config.py` | Engine params first-class; platform params deferred |
+| `research/corpus.py` | `corpus/` manifest + traces: frozen, hashed per class (`cold_start`, `steady_interactive`, `long_context`), split seen / held-out; `corpus_version` in every panel's validity block |
+| `research/simulator.py` | Tier-1 falsifier: discrete-event replay of a corpus trace through the scheduler's iteration order with a fitted `TimingModel` in place of attention; shares `scheduling_policy.py`; `loop simulate` |
 | `telemetry.py` | `RequestRecord` + `RowStore` — one SQLite row per request (conditions at arrival, spans, outcome; `trace_id`/`session_id`/`turn_index`), written off the scheduler thread. Off unless `TELEMETRY_DIR` is set |
 | Prometheus metrics | All labeled by `session_id` |
 
@@ -147,57 +188,67 @@ Any change that adds/removes/alters a feature, component, queue, endpoint, env v
 
 ## Roadmap
 
-### ✅ Phases 0–5 — complete
-Project setup, tokenization, autoregressive loop, streaming, request batching, KV cache (block manager + radix tree + cache manager + LRU/AttentionSink/H2O eviction + cache wired through single + batched generation, `/cache/stats` endpoint, `eviction_benchmark.py`). Phase 5 has 4 contained gaps tracked in DECISIONS.md — do not redo Stages 1–7.
+Phases from the plan of record. Dependencies are strict; each phase is independently demoable
+and benchmarkable, so the project produces results even if later phases are cut.
 
-### Phase 6 — Engine-Level Concurrency & vLLM Parity (active)
+### Engine already built (data plane) — do not re-plan
 
-- ✅ **Continuous batching** (`ContinuousBatchScheduler`) — iteration-level scheduling, immediate slot fill
-- ✅ **Scheduler** — `FairScheduler` behind `SchedulerInterface`; FCFS + Fair/VTC policies (`SCHEDULING_POLICY` env); priority hooks; per-session admission primitives
-- ✅ **Backpressure** — queue-level (HTTP 429) + KV-pressure-aware admission (active-KV gate + cache-pool gate), metrics on `/scheduler/stats`
-- ✅ **Load-test client** — `scripts/bench/load_test.py` + `scripts/bench/plot_load_test.py`
-- ✅ **No built-in UI** — the chat page and its metrics sidebar are gone (sidebar 2026-09-09, page 2026-09-11). `GET /` returns a JSON service index. Chat frontends such as Open WebUI attach at `/v1/chat/completions`; aggregates live only in Grafana via `monitoring/docker-compose.yml`. The sidebar was a second implementation of the Prometheus histograms, and the chat panel was a second implementation of the API. Do not add a page back without a reason neither of those covers.
-- ✅ **Off-box load generator** — `scripts/bench/load_test.py` with the weighted short/medium/long prompt bank at `scripts/bench/prompt_bank.py` (`--workload realistic`). The in-server simulator at `/simulate/{start,stop,status}` was deleted on 2026-09-09: it ran its virtual users on the server's own event loop, so it competed with the request handling it was measuring, and the interference scaled with the user count it was varying. Cache regime is an explicit dial: prompts carry a unique first block by default so a sweep exercises the `PrefixCache` miss path, `--prefix-share full` pins one prompt to measure the hit path, and the choice is written into every CSV row. Before this, `short`/`long`/`mixed` tiled one seed sentence and silently measured hits only. Guarded by `tests/test_load_workloads.py`.
-- ✅ **CUDA-ready backend** — `TorchBackend(device=...)`; factory routes `cuda|mps|cpu`
-- ✅ **bf16 weights**, `compile_model` flag wired (default off)
-- ✅ **Pre-allocated per-layer KV pools** in `BlockManager` (vLLM/PagedAttention layout)
-- ✅ **M1 — Custom Gemma 4 forward** (`models/gemma4.py`) — byte-identical to HF on the parity fixture. Owns embedding, dual-RoPE, GQA attention with QK/V-norm and KV sharing, GeGLU MLP, per-layer embedding gating, softcapping. Reachable via `BACKEND=custom-{cuda,mps,cpu}`.
-- ✅ **M2.1 — Custom KV cache** (`models/gemma4.py::KVCache`) — per-layer (K, V) tensors threaded through the forward; one prefill then incremental single-token decode. Cache-vs-no-cache logit parity tested. Shared layers correctly read the source layer's full cached + new K/V via the rebuilt `shared_kv` dict each call.
-- ✅ **M2.2 — Block-paged KV cache** (`models/paged_kv_cache.py`) — `BlockPool` per non-shared layer with refcounted blocks; `PagedKVCache` per session holds per-layer block tables + seq_lens, allocates blocks lazily on append, gathers via `index_select` for SDPA, releases blocks on session end. KV-shared layers get a `None` pool slot. Byte-identical to contiguous KVCache on parity prompt; two-session pool-sharing test verifies no leaks. `CustomTorchBackend.generate`/`stream` switched to paged; pool size knobs `CUSTOM_BACKEND_BLOCKS` / `CUSTOM_BACKEND_BLOCK_SIZE`.
-- ✅ **M2.2b — Cross-session prefix sharing** (`PrefixCache` in `paged_kv_cache.py`) — `PrefixCache.lookup(token_ids) → (matched_tokens, per-layer-blocks)` returns the longest aligned-prefix hit (sharing happens at full-block boundaries only). Blocks are refcounted: storing in the cache acquires; sessions claiming the prefix acquire too; `free_all` releases. `PagedKVCache(shared_prefix=...)` seeds the block tables + seq_lens so the model runs forward only on the suffix. Plumbed into `CustomTorchBackend`: lookup → suffix-only prefill → decode → store. Test `test_prefix_cache_hit_logits_match` shows byte-identical last-position logits with shared prefix; smoke shows **3.88× speedup** on a repeat 5-token prompt at block_size=2 (0.84s → 0.22s on CPU bf16, 4 of 5 tokens hit). `last_cache_hit_tokens` populated for downstream stats. **Not yet:** eviction (entries grow unbounded); a proper radix tree (currently a dict keyed by aligned-prefix tuples — handles same-prompt and "shared system prompt" cases but not partial-block sharing).
-- ✅ **M2.4 — Scheduler-facing primitives on `CustomTorchBackend`** — implements `prefill`, `prefill_lookup/chunk/store`, `decode_step_batched`, `splice_into_batched`, `remove_row_from_cache`, `kv_length` so `ContinuousBatchScheduler` drives `BACKEND=custom-*` end-to-end with paged KV + prefix sharing. Batched KV = `list[PagedKVCache]` (one per row); decode is row-by-row (one forward/row, not GPU-batched — `attention_mask` ignored since each row's paged cache holds only its real tokens). `set_cache_adapter` is a no-op (custom backend caches via its own `PrefixCache`); blocks freed on eviction via `remove_row_from_cache → free_all`. Scheduler `_evict_row` now always routes through `remove_row_from_cache` so the last row's blocks don't leak. Tests in `test_custom_backend_scheduler.py` (output matches manual greedy; no block leak across repeats; concurrent shared-prefix hits + frees). **Not yet:** real single-forward batched decode, scheduler-visible pool-pressure backpressure (pool exhaustion → request rejection), custom prefix-cache stats on `/cache/stats`.
-- ✅ **Per-request telemetry rows** (2026-09-15, `telemetry.py`) — conditions snapshotted in `enqueue()` before any work (so a 429 still records the load it saw), spans from the existing scheduler timestamps, outcome on every terminal path (`ok`/`rejected_429`/`expired`/`preempted`/`error`). `ScheduledRequest` carries `trace_id` (auto uuid4) + `turn_index`; `/generate` accepts both and echoes `trace_id` in the SSE meta chunk. SQLite, one file per run under `TELEMETRY_DIR`, bounded queue + one writer thread; `stats()["telemetry"]` = enabled / rows_written / rows_dropped. `tests/test_telemetry.py` holds the per-request cost under 200µs — a regression there is a correctness failure. **Deferred** (`kb-20260915-2c4513a1`): CUDA-event device spans; prefix-cache state *at arrival* as a condition (only post-hoc `cache_hit_tokens` today); block alloc/free/evict counters; KV high-water; CUDA-graph hit/miss by bucket; preemptions caused vs suffered; detokenize and per-chunk prefill spans — v1 narrows to one snapshot at enqueue + one fill at the terminal boundary so nothing timestamps per decode step on the hot path. `config_id` is None until a policy registry exists.
-- ⏳ **Chunked prefill — Version A (alternating)** — in progress, MPS-feasible
-- 📋 **Modal deploy** — `modal_app.py` written; CLI auth + `modal deploy` + smoke-test `/health` `/ready` `/generate` (HANDOFF.md)
-- 📋 **FlashAttention-2** — CUDA-only; flip `attn_implementation="flash_attention_2"` + add `flash-attn` to Modal image. Land before the load-test sweep so baseline reflects shipped config.
-- 📋 **Real load-test sweep** — held until CUDA; run after FlashAttention is on
-- 📋 **Swap to E4B**, flip `COMPILE_MODEL=true` on CUDA
-- 📋 **vLLM head-to-head** — throughput, p50/p95/p99 TTFT/TPOT, KV utilization, saturation
-- 📋 **PagedAttention kernel (decision point)** — only if head-to-head shows we're attention-bound. Requires writing our own forward pass to call vLLM's paged-attention kernel (or Triton equivalent) against our existing block pool. Big lift, model-arch-specific.
-- ⏸ **Preemption, V-B mixed-batch prefill, per-session KV quotas, batch utilization %, MLX cache integration** — deferred (DECISIONS.md)
+Continuous batching (`ContinuousBatchScheduler`, iteration-level) · monolithic / chunked / batched prefill · block-paged KV cache with refcounted blocks, window-aware sliding layers and a radix `PrefixCache` for cross-session sharing · Triton paged decode + prefill kernels (split-K decode) · bucketed CUDA-graph decode, `torch.compile`, int8 weight-only quantization · custom Gemma 4 forward, byte-identical to HF on the parity fixture · FCFS / fair (VTC) scheduling with priority hooks · queue + KV backpressure (HTTP 429), admission deadline, preemption under KV pressure · FastAPI + SSE with `session_id` end to end, OpenAI shim · Prometheus + Grafana (`monitoring/`). Detail lives in `docs/arch-*.html`; engine work measured and set aside (mixed-batch prefill, tiled prefill attention, length-grouped waves, per-session KV quotas, MLX) is in `knowledge/` as `rejected` / `deferred` entries.
 
-### Phase 7+ — outline
+### Phase 0 — decide 🔲 open
 
-- **7. Hardware auto-detection** — CUDA/MPS/CPU, `DEVICE` override, startup summary, auto-size KV cache
-- **8. Observability** — structured JSON logs, Prometheus metrics, Grafana dashboard, timing middleware
-- **9. Resilience** — graceful shutdown, request timeouts, `/health` + `/ready`, error isolation
-- **10. Containerization** — Dockerfile, `.env.example`. ✅ `monitoring/docker-compose.yml` brings up Prometheus + Grafana with the datasource and dashboard provisioned; the server stays outside the stack and is scraped over `host.docker.internal:8000`.
-- **11. Benchmarking** — single `scripts/benchmark.py`, vs vLLM charts, `BENCHMARKS.md`
-- ✅ **12. CI** — GitHub Actions: `loop` / `engine` / `gpu` lanes behind one `ci-ok` check,
-  ruff (`F` rules) and the premerge gate. No mypy. Process in `CONTRIBUTING.md`.
+Cheap, and everything downstream depends on it.
+- **Model and size.** E4B loads too fast for cold start to be dramatic; a ~30 GB class makes the story real.
+- **Substrate.** Modal credits are exhausted (2026-09-07). Rented pods via `research/venues.py` are the executor today; whether SLURM is worth a second launcher, and whether it has node-local NVMe and a fast interconnect (decides migrate-vs-recompute in Phase 6).
+- **KV bytes per token** for the chosen model — drives every threshold in Phases 5–6.
+- **SLO ceiling per workload class.** `corpus/manifest.json` holds placeholders.
+- **Loop authority in the adaptive phase:** policy-only, or code too.
 
-### Future extensions
+### Phase 1 — per-request telemetry ✅ (PR #18, 2026-09-15)
 
-- **MLX continuous batching backend** — requires custom MLX forward loop (mlx_lm doesn't expose the primitives we need)
-- **Remote load generation** — drive `load_test.py` from a separate VM so the client's own cost never lands on the server's box
+- ✅ `telemetry.py`: one row per request — conditions at arrival snapshotted in `enqueue()` before any work (so a 429 still records the load it saw), spans from the scheduler timestamps, outcome on every terminal path. `trace_id` / `turn_index` on `ScheduledRequest`, echoed by `/generate` and the shim. SQLite, one file per run under `TELEMETRY_DIR`, written off the scheduler thread; `tests/test_telemetry.py` holds per-request cost under 200 µs.
+- ⏸ **Deferred** (`kb-20260915-2c4513a1`): CUDA-event device spans; prefix-cache state *at arrival* (only post-hoc `cache_hit_tokens` today); block alloc/free/evict counters; KV high-water; CUDA-graph hit/miss by bucket; preemptions caused vs suffered; detokenize and per-chunk prefill spans. `config_id` is None until a policy registry exists (Phase 7).
 
-### Optional (pick what's interesting)
+### Phase 2 — corpus and harness (PRs #17, #21)
 
-Conversation persistence (SQLite `ConversationStore`, zero hot-path coupling) · Agent/MCP integration · Quantization · Paged attention · Flash attention · Tensor parallelism · Speculative decoding · gRPC · K8s autoscaling · OpenTelemetry tracing · Web UI · Python client lib · Response style system (caveman-inspired token compression)
+- ✅ `corpus/`: three classes (`cold_start`, `steady_interactive`, `long_context`), each split `seen` / `heldout`, hashed into a `corpus_version` that rides in the validity block and `compare.py` refuses across. `scripts/bench/replay_trace.py` replays a trace open-loop on the client's own clock, posting through the shim with `X-Session-Id` / `X-Turn-Index` / `X-Trace-Id` so its CSV row joins the telemetry row.
+- ⏳ **Total accounting** from process start (the panel has peak host/device memory; process-start-to-first-token is not yet in it).
+- ⏳ **Noise floor** procedure per class per hardware, banded and filed in `knowledge/`; the A100 bimodality quantified rather than remembered.
+- ⏳ **Held-out replication in the merge gate.** ≥3 runs per arm is enforced today; a confirmed win replaying on `heldout` before merge is not.
+
+### Phase 3 — simulator ✅ built (PRs #20, #22; KB regime fields #19, #23)
+
+- ✅ `scheduling_policy.py`: ordering decisions as pure functions the scheduler and simulator share. `research/simulator.py`: discrete-event trace replay through the loop's iteration order with attention replaced by a `TimingModel`; `loop simulate --class <cls> --config '{...}'`; panels carry `harness="simulator"` and cannot be compared to hardware. `fit_timing_model` (from replay/telemetry rows) and `rank_correlation` exist. Knowledge entries carry `regime` + `validity_range`; `loop kb --regime / --situation` queries them.
+- ⏳ **Fit the timing model from real rows** — today's default is the `PLACEHOLDER_A100_E4B` coefficients.
+- ⏳ **Hardware rank-correlation validation** as a scheduled experiment; tier-1 results are suspended if it drifts.
+- ⏸ v1 does not model preemption, chunked prefill, prefix-cache eviction, or cache-held blocks against the pool.
+
+### Phase 4 — cold start 📋 (first result against the thesis metric)
+
+Snapshot/restore baseline on the chosen substrate; layer-ordered weight streaming with prefill overlap; graph-capture cache; cold TTFT decomposition by component; GPU-seconds per session at fixed SLO — warm pool vs scale-to-zero vs snapshot. Stretch: warm draft-model hedging.
+
+### Phase 5 — router and multi-replica 📋 (needs two GPUs)
+
+`ReplicaLauncher` interface (rented-pod and local implementations); centralized global prefix index; prefix-aware session-affine router with a locality-vs-load knob, searched in the simulator first and confirmed on hardware.
+
+### Phase 6 — session migration 📋
+
+Session state manager (quiesce, serialize, re-layout on arrival); append-only pipelined KV copy vs multi-round token recompute behind one interface so migrate-vs-recompute is a searchable knob; copy-verify-switch atomicity. Demo: the crossover plot vs context length and interconnect.
+
+### Phase 7 — controller and policy table 📋
+
+Policy registry in the data plane (cheap knobs swappable at a step boundary); policy table as a view on the knowledge base; safe default trained on minimax regret; controller with replica-age regime detection, hysteresis, dwell time, fallback logging; pinned vs adaptive mode in the harness; current-policy readout and override. Demo: controller-on vs best fixed config across a mixed-regime traffic mix — if the controller cannot beat the best single config, that is a publishable negative result.
+
+### Stretch — probably not this year
+
+Blue-green reconfiguration with cross-config migration · disaggregated prefill/decode · spot-eviction handling · multi-tenant LoRA.
+
+**Standing risk:** scope creep back into the engine-vs-vLLM race. The warm path is a guardrail, never the objective.
 
 ---
 
 ## Current Status
 
-**Active:** Phase 6 — M2.4 done (custom backend scheduler-driven). Next: Modal deploy of `BACKEND=custom-cuda` + load-test sweep.
-**Next concrete step:** deploy `BACKEND=custom-cuda` to Modal (`modal deploy modal_app.py`), then run `scripts/bench/load_test.py` + `scripts/bench/plot_load_test.py` against it. Numbers decide the next optimization: decode GPU-bound → M2.3 Triton paged-attention kernel; queueing-bound → tune scheduler; KV-pressure-bound → PrefixCache LRU + block-size tuning + scheduler-visible pool backpressure. Later: real batched `decode_step_batched`, chunked prefill V-A on CUDA, FlashAttention (ruled out for Gemma 4 — head_dim>256), E4B + `COMPILE_MODEL=true`, vLLM head-to-head.
+**Built:** Phases 1–3 (PRs #17–#23, merged 2026-09-15/16). 517 tests; 483 run on CPU, 34 model-heavy ones opt in with `-m heavy`. `knowledge/` holds 69 entries.
+**Next:** Phase 4, gated on the Phase 0 decisions. The first GPU job is the simulator's hardware check: run the engine with `TELEMETRY_DIR` set on a rented pod (`scripts/tools/run_on_runpod.py`, needs `RUNPOD_API_KEY`; smoke the venue first with `scripts/tools/venue_smoke.py`), replay a corpus class with `scripts/bench/replay_trace.py`, `fit_timing_model` on the telemetry rows, then a policy sweep in `loop simulate` vs the same sweep on hardware → `rank_correlation`, filed in `knowledge/`.
+**GPU budget:** Modal credits ran out on 2026-09-07. The `*_modal.py` instruments and `run_instrument.sh` still exist; new GPU work runs cheap tiers locally first and only then on a rented pod through `research/venues.py`.
