@@ -290,3 +290,28 @@ def test_related_finds_settled_entries_by_tag_not_wording(tmp_path):
 
     # and it must not drag in everything
     assert all(e.title != "Unrelated quantisation note" for _, e in hits)
+
+
+# ---------------------------------------------------------------- corpus provenance
+
+def test_corpus_fields_default_none_and_panel_version_is_unchanged():
+    """Optional None-default fields on Validity do not bump PANEL_VERSION (precedent: the
+    occupancy fields on Vitals). A pre-corpus panel must still load and validate."""
+    v = _validity()
+    assert v.corpus_version is None and v.workload_class is None
+    p = Vitals.from_dict(json.loads(_panel().to_json()))
+    assert p.panel_version == PANEL_VERSION and p.validity.corpus_version is None
+
+
+def test_differing_corpus_version_refused_but_absent_version_is_not():
+    """Corpus drift: a changed trace is a different workload. Panels from pre-corpus instruments
+    carry no version and are not refused on that ground alone."""
+    a = _panel(validity=_validity(corpus_version="aaaa1111", workload_class="steady_interactive"))
+    b = _panel(validity=_validity(corpus_version="bbbb2222", workload_class="steady_interactive"))
+    c = comparable(a, b)
+    assert not c and any("corpus_version" in r for r in c.reasons)
+    same = _panel(validity=_validity(corpus_version="aaaa1111", workload_class="steady_interactive"))
+    assert comparable(a, same)
+    assert comparable(a, _panel()), "no version on one side is not drift"
+    other_class = _panel(validity=_validity(corpus_version="aaaa1111", workload_class="cold_start"))
+    assert not comparable(a, other_class)

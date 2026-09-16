@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+  "classes": {
+    "cold_start": {
+      "name": "cold_start",
+      "description": "The first requests to a fresh replica: few, sparse, mixed short/medium.",
+      "slo_ttft_ms": 2000.0,
+      "slo_tpot_ms": null,
+      "arrival_rate_rps": 0.5,
+      "seen": "cold_start/seen.jsonl",
+      "heldout": "cold_start/heldout.jsonl"
+    },
+    "steady_interactive": {
+      "name": "steady_interactive",
+      "description": "Warm replica, mixed lengths at a rate that fills the batch; some sessions return for a second turn.",
+      "slo_ttft_ms": 200.0,
+      "slo_tpot_ms": 50.0,
+      "arrival_rate_rps": 4.0,
+      "seen": "steady_interactive/seen.jsonl",
+      "heldout": "steady_interactive/heldout.jsonl"
+    },
+    "long_context": {
+      "name": "long_context",
+      "description": "Long prompts only, high KV pressure; where eviction policy matters.",
+      "slo_ttft_ms": 1000.0,
+      "slo_tpot_ms": null,
+      "arrival_rate_rps": 1.0,
+      "seen": "long_context/seen.jsonl",
+      "heldout": "long_context/heldout.jsonl"
+    }
+  },
+  "files": {
+    "cold_start/heldout.jsonl": "e434ee177bee8218040ae26e999a7450802252c92d2e0548d052e6e09dfcbd92",
+    "cold_start/seen.jsonl": "9c03e43e9509aed2f984f0e464fddb3cdc58a49dc1869692a1cca32232cc0e8c",
+    "long_context/heldout.jsonl": "86a06223626a57ae89511e94f4edbd08695a978dc6f4d8b2f615ca63b671ff2f",
+    "long_context/seen.jsonl": "982acbeeda407051c13601e9227dc6c3d4c425f9084515a7ecf03c757b7af847",
+    "steady_interactive/heldout.jsonl": "c6662fcc41a190721cb24954f97f668f88e64319d6aef4d9423db448fd98d15e",
+    "steady_interactive/seen.jsonl": "ad0a6794b2df381cd1de60e56049be5f916e1f473c217fb0cea85299549a4ada"
+  },
+  "notes": "SLO values are placeholders pending the plan's Phase 0 decision: steady_interactive carries bench_serving's current p95 TTFT 200ms / TPOT 50ms, cold_start 2000ms TTFT, long_context 1000ms TTFT. Built by scripts/tools/build_corpus.py with seed 20260915; a rebuild with any other input is a new corpus version."
+}

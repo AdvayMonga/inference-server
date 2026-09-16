@@ -27,6 +27,7 @@ CONFIG_KEYS_THAT_MATTER = (
     "model", "gpu", "max_batch_size", "prefill_mode", "compile", "prefill_graph",
     "blocks", "sliding_blocks", "context_window", "rates", "duration", "pool_size",
     "max_queue_wait_s", "prefix_cache_impl", "wave_window_mult",
+    "split", "rate_scale",      # replay_trace: seen vs held-out, or a compressed schedule
 )
 
 
@@ -58,6 +59,13 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
 
     if a.validity.harness != b.validity.harness:
         reasons.append(f"different harness ({a.validity.harness} vs {b.validity.harness})")
+
+    # Corpus drift: a trace that changed is a different workload however similar it looks.
+    # Only refused when both panels carry a version — pre-corpus instruments carry none.
+    for attr in ("corpus_version", "workload_class"):
+        av, bv = getattr(a.validity, attr), getattr(b.validity, attr)
+        if av is not None and bv is not None and av != bv:
+            reasons.append(f"{attr} {av[:12]} vs {bv[:12]}: the panels replay different traces")
 
     for key in CONFIG_KEYS_THAT_MATTER:
         av, bv = a.validity.harness_config.get(key), b.validity.harness_config.get(key)

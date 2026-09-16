@@ -48,8 +48,15 @@ python -m inference_server.research.loop kb --status rejected     # what is alre
 python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, routed to a venue
 python -m inference_server.research.loop budget                    # cap, ledger, venues (cloud opt-in: RESEARCH_VENUES)
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
+python scripts/bench/replay_trace.py --class steady_interactive --split seen --base-url URL  # open-loop corpus replay
 ```
 
+- **Workload corpus (2026-09-15):** `corpus/` holds frozen traces for three classes (`cold_start`,
+  `steady_interactive`, `long_context`), each split `seen` / `heldout`, hashed into a
+  `corpus_version` that `replay_trace.py` stamps on every panel and `compare.py` refuses to
+  compare across. Optimise against `seen`; a win must replicate on `heldout`. A changed trace
+  is a new version (`scripts/tools/build_corpus.py`), never an edit. Class SLOs are placeholders
+  until the plan's Phase 0 decision. See `corpus/README.md`.
 - **Knowledge base:** `knowledge/*.json` is the source of truth. `DECISIONS.md` is a GENERATED
   view (tracked in git since 2026-09-08) — edit the JSON, then `loop index`, commit both.
 - **`scripts/` layout (2026-09-08):** `bench/` (tier-4 sweeps, roofline, load_test), `probes/`
