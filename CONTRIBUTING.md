@@ -29,7 +29,7 @@ smoke detector, not a door.
 
 | lane | runs when you touch | what it is |
 |---|---|---|
-| `loop` | `research/`, `knowledge/`, `experiments/`, `tests/test_research_*` | the research package's own tests, plus a check that `DECISIONS.md` still matches `knowledge/`. Installs pytest and ruff and **nothing else**: if `research/` ever imports the engine, this lane goes red. That is the seam the whole project rests on. |
+| `loop` | `research/`, `knowledge/`, `experiments/`, `tests/test_research_*` | the research package's own tests, plus a check that `DECISIONS.md` still matches `knowledge/`. Installs pytest and ruff and **nothing else**: if `research/` ever imports the engine, this lane goes red. That is the seam the whole project rests on. One sanctioned exception: `research/simulator.py` imports `inference_server.scheduling_policy`, stdlib-only pure functions the simulator must share with the scheduler or its conclusions drift. |
 | `engine` | everything else | ruff, the full fast suite, and `premerge_check.py`. CPU only — the model-heavy tests are deselected and no kernel runs. |
 | `gpu` | never automatically | `scripts/gpu_tests/` on a rented CUDA box via Modal. Weekly, or dispatch it by hand. |
 
