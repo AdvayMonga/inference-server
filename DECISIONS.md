@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-68 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(26), `prefill`(25), `cache`(23), `decode`(21), `modal`(21), `graph`(18), `scheduler`(16), `compile`(13), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `triton`(4), `roofline`(4), `quantization`(3), `attention`(3), `metrics`(2), `observability`(2), `attribution`(2), `batching`(2), `slo`(2), `benchmarking`(2), `tpot`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `validity`(1), `scheduling`(1)
+69 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(23), `decode`(21), `modal`(21), `graph`(18), `scheduler`(16), `compile`(13), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `triton`(4), `roofline`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `metrics`(2), `batching`(2), `slo`(2), `benchmarking`(2), `tpot`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `validity`(1), `scheduling`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -228,9 +228,16 @@ DECODE ladder is coarse when compiling (powers of four) and fine otherwise. Pref
 go through compile — all eight capture in 6.9s — so the PREFILL ladder is fine-grained, because
 there a graph processes its whole bucket and padding is pure waste. Do not "unify" them.
 
-## Deferred (9)
+## Deferred (10)
 
 Deliberately not doing this yet; each carries the trigger that would change that.
+
+### [2026-09-16] CUDA-event device spans for kernel-level attribution: not implemented
+*tags: `observability`, `attribution`, `kernel`* · `kb-20260915-2c4513a1`
+
+Per-request telemetry (`telemetry.py`, 2026-09-15) times its spans with `perf_counter` at scheduler boundaries only — enqueue, admit, first token, end. That is honest there because every token is host-resident by the time the scheduler reads it (the batched D2H copy in `_decode_step` has already synchronised), so nothing asynchronous is in flight at the boundary. It says nothing about WHERE inside a step the time went (attention vs MLP vs sampling), and a `perf_counter` around a kernel launch would measure the launch, not the work. Device spans need CUDA events with explicit, recorded synchronisation points, and per notes/infserv/02-telemetry.md they belong to a profiler trigger fired by an anomaly or by a hypothesis that names a kernel — never always-on, or the instrument becomes the thing measured. The rows are the always-on layer; the profiler is the escalation.
+
+**Revisit when:** a hypothesis names a specific kernel and the scheduler-boundary spans cannot separate it; the anomaly trigger (baseline band from the noise-floor procedure) exists and needs a profiler to escalate to
 
 ### [2026-05-18] vLLM head-to-head — use Modal `stopwatch` / `guidellm`
 *tags: `benchmark`, `modal`* · `kb-20260518-042`

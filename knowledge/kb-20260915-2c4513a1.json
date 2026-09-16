@@ -1,0 +1,19 @@
+{
+  "created_at": 1789530600.4157062,
+  "evidence": [],
+  "id": "kb-20260915-2c4513a1",
+  "status": "deferred",
+  "summary": "Per-request telemetry (`telemetry.py`, 2026-09-15) times its spans with `perf_counter` at scheduler boundaries only \u2014 enqueue, admit, first token, end. That is honest there because every token is host-resident by the time the scheduler reads it (the batched D2H copy in `_decode_step` has already synchronised), so nothing asynchronous is in flight at the boundary. It says nothing about WHERE inside a step the time went (attention vs MLP vs sampling), and a `perf_counter` around a kernel launch would measure the launch, not the work. Device spans need CUDA events with explicit, recorded synchronisation points, and per notes/infserv/02-telemetry.md they belong to a profiler trigger fired by an anomaly or by a hypothesis that names a kernel \u2014 never always-on, or the instrument becomes the thing measured. The rows are the always-on layer; the profiler is the escalation.",
+  "superseded_by": null,
+  "tags": [
+    "observability",
+    "attribution",
+    "kernel"
+  ],
+  "title": "CUDA-event device spans for kernel-level attribution: not implemented",
+  "triggers": [
+    "a hypothesis names a specific kernel and the scheduler-boundary spans cannot separate it",
+    "the anomaly trigger (baseline band from the noise-floor procedure) exists and needs a profiler to escalate to"
+  ],
+  "updated_at": 1789530600.4157069
+}
