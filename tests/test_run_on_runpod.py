@@ -67,6 +67,18 @@ def test_hf_token_prefers_env_then_the_cache_file_then_nothing(monkeypatch, tmp_
     assert rr.hf_token() == ("hf_fromenv", "env")
 
 
+def test_every_engine_knob_the_instrument_advertises_is_forwarded():
+    """Two hand-maintained lists drifted: the launcher forwarded neither SCHEDULING_POLICY nor
+    MAX_QUEUE_SIZE, so a knob set in the local shell was silently ignored on the pod."""
+    import replay_corpus_runpod as rcr
+    src = (REPO / "scripts" / "tools" / "run_on_runpod.py").read_text()
+    assert "*ENGINE_DEFAULTS, *ENGINE_PASSTHROUGH" in src, "forward the instrument's own tables"
+    for knob in ("SCHEDULING_POLICY", "MAX_QUEUE_SIZE", "KV_CACHE_BLOCK_SIZE", "MAX_QUEUE_WAIT_S",
+                 "PREFILL_CHUNK_SIZE", "WAVE_WINDOW_MULT", "CONTEXT_WINDOW",
+                 "CUSTOM_BACKEND_PREFILL_GRAPH"):
+        assert knob in (*rcr.ENGINE_DEFAULTS, *rcr.ENGINE_PASSTHROUGH), knob
+
+
 def test_dry_run_needs_no_api_key_and_never_prints_the_token(tmp_path):
     env = {k: v for k, v in os.environ.items() if k != "RUNPOD_API_KEY"}
     f = tmp_path / ".cache" / "huggingface" / "token"
@@ -75,14 +87,17 @@ def test_dry_run_needs_no_api_key_and_never_prints_the_token(tmp_path):
     env.update({"HOME": str(tmp_path), "PYTHONPATH": str(REPO / "src"),
                 "REPLAY_CLASSES": "cold_start", "TELEMETRY_DIR": "/tmp/t"})
     env.pop("HF_TOKEN", None)
+    env["SCHEDULING_POLICY"] = "fair"
     r = subprocess.run([sys.executable, str(REPO / "scripts" / "tools" / "run_on_runpod.py"),
-                        "scripts/bench/replay_corpus_runpod.py", "--dry-run"],
+                        "scripts/bench/replay_corpus_runpod.py", "--dry-run",
+                        "--timeout", "5400"],
                        capture_output=True, text=True, env=env, timeout=120)
     assert r.returncode == 0, r.stderr[-500:]
     assert "[dry-run] would rent NVIDIA A100 80GB PCIe and run scripts/bench/replay_corpus_runpod.py" in r.stdout
     assert f"[hf] token from {f}" in r.stdout
     assert "hf_supersecret" not in r.stdout + r.stderr
+    assert "[dry-run] timeouts: run 5400s, ssh-ready 300s" in r.stdout
     env_line = next(ln for ln in r.stdout.splitlines() if ln.startswith("[dry-run] env:"))
     for k in ("HF_TOKEN", "REPLAY_CLASSES", "TELEMETRY_DIR", "RESEARCH_RUN_GROUP",
-              "RESEARCH_ENGINE_SHA"):
+              "RESEARCH_ENGINE_SHA", "SCHEDULING_POLICY"):
         assert k in env_line, k

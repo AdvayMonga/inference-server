@@ -46,6 +46,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -58,28 +59,46 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import replay_trace as rt  # noqa: E402
 from bench_serving import one_request  # noqa: E402
+from inference_server.config import Settings  # noqa: E402
 from inference_server.research.corpus import load_trace  # noqa: E402
 from inference_server.research.venues import emit_payload  # noqa: E402
 
 # Engine env the server subprocess gets. Defaults mirror modal_app.py so a panel measured here
 # is comparable to the Modal ones; anything already in the environment wins.
+#
+# Every knob the simulator needs is pinned EXPLICITLY, even where the value is just the engine's
+# own default. An unset knob is not recorded in engine_env, and fit_timing_from_runs then has to
+# guess it: MAX_QUEUE_SIZE unset meant --validate simulated a 256-deep queue against a server
+# that ran 1000-deep, which rejects far earlier than reality in exactly the overload regime the
+# rank correlation is supposed to judge.
 ENGINE_DEFAULTS = {
     "BACKEND": "custom-cuda",
     "MODEL_NAME": "google/gemma-4-E4B-it",
     "MAX_BATCH_SIZE": "256",
     "PREFILL_MODE": "batched",
-    "CUSTOM_BACKEND_COMPILE": "1",
+    # 0, unlike modal_app.py. This is a calibration run, and the decode-graph compile ladder at
+    # MAX_BATCH_SIZE=256 costs ~21 minutes on a cold box (knowledge/kb-20260902-008.json) — with
+    # the model download and three rate scales that risks the venue's run timeout, and a run that
+    # is killed mid-print emits NO payload, so the whole rental yields nothing. The timing model
+    # then describes eager decode; a refit with compile on is a second, cheaper run (the weights
+    # are cached by then) once this one has proved the pipeline.
+    "CUSTOM_BACKEND_COMPILE": "0",
     "CUSTOM_BACKEND_BLOCKS": "8192",
     "CUSTOM_BACKEND_SLIDING_BLOCKS": "4096",
     "KV_CACHE_NUM_BLOCKS": "16384",
     "MAX_ACTIVE_KV_TOKENS": "200000",
     "LOG_FORMAT": "text",
+    # Engine defaults, pinned so they are recorded rather than inherited. See SIM_KNOBS in
+    # scripts/tools/fit_timing_from_runs.py, which refuses to simulate without them.
+    "MAX_QUEUE_SIZE": str(Settings.max_queue_size),
+    "MAX_QUEUE_WAIT_S": str(Settings.max_queue_wait_s),
+    "KV_CACHE_BLOCK_SIZE": str(Settings.kv_cache_block_size),
+    "SCHEDULING_POLICY": str(Settings.scheduling_policy),
 }
 # Passed through when set; never defaulted. HF_TOKEN reaches the server but never the payload.
-ENGINE_PASSTHROUGH = ("KV_CACHE_BLOCK_SIZE", "MAX_QUEUE_SIZE", "MAX_QUEUE_WAIT_S",
-                      "SCHEDULING_POLICY", "PREFILL_CHUNK_SIZE", "WAVE_WINDOW_MULT",
-                      "CONTEXT_WINDOW", "CUSTOM_BACKEND_PREFILL_GRAPH", "HF_TOKEN",
-                      "HF_HOME", "TORCHINDUCTOR_CACHE_DIR")
+ENGINE_PASSTHROUGH = ("PREFILL_CHUNK_SIZE", "WAVE_WINDOW_MULT", "CONTEXT_WINDOW",
+                      "CUSTOM_BACKEND_PREFILL_GRAPH", "HF_TOKEN", "HF_HOME",
+                      "TORCHINDUCTOR_CACHE_DIR")
 SECRET_KEYS = ("HF_TOKEN",)
 
 WARMUP_MAX_TOKENS = 16
@@ -211,45 +230,53 @@ async def warmup(client: httpx.AsyncClient, cls_name: str, split: str, n: int) -
     return done
 
 
-async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]], *,
-                   warmup_n: int, drain_timeout_s: float, settle_s: float = 2.0,
-                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]],
+                   replays: list[dict[str, Any]], panels: list[dict[str, Any]], *,
+                   warmup_n: int, drain_timeout_s: float, settle_s: float = 2.0) -> None:
     """Warm up, then one open-loop replay per (class, split, rate_scale).
 
-    Returns (replays, panels): per-replay row dicts keyed by their trace prefix, and the Vitals
-    dicts that share this process's RESEARCH_RUN_GROUP. Telemetry is attached by the caller
-    after the server has flushed it.
+    Appends into the caller's `replays` and `panels` rather than returning them, and catches per
+    replay, because both are money already spent: an exception on the last config used to discard
+    the panels of the ones that succeeded, and a rental that yields nothing is the expensive
+    failure this whole module is arranged around. A failed replay keeps its `error` and the plan
+    continues — a dead server makes the rest fail fast anyway, and says so in their errors.
     """
-    replays: list[dict[str, Any]] = []
-    panels: list[dict[str, Any]] = []
     if warmup_n and plan:
         ok = await warmup(client, plan[0][0], plan[0][1], warmup_n)
         print(f"[replay] warmup {ok}/{warmup_n} ok (discarded)", flush=True)
     for cls_name, split, rate_scale in plan:
-        manifest, trace = load_trace(cls_name, split)
-        cls = manifest.classes[cls_name]
         prefix = rt.new_trace_prefix(cls_name, split)
-        print(f"-- replay {cls_name}/{split} x{rate_scale:g} ({len(trace)} requests, "
-              f"trace ids {prefix}-<i>) --", flush=True)
-        res = await rt.run_replay(client, trace, rate_scale=rate_scale,
-                                  drain_timeout_s=drain_timeout_s, trace_prefix=prefix)
-        sched = await rt.fetch_stats(client, "/scheduler/stats")
-        cache = await rt.fetch_stats(client, "/cache/stats")
-        summary = res.summary(cls)
-        rt.print_summary(cls, summary)
-        if summary["n_ok"]:
-            panel = rt.build_panel(res, cls, corpus_version=manifest.corpus_version,
-                                   split=split, rate_scale=rate_scale, scheduler_stats=sched,
-                                   cache_stats=cache, trace_prefix=prefix)
-            panel.validate()                     # fail here, in the run, not on the way home
-            panels.append(panel.to_dict())
-        else:
-            print("  no request succeeded; no panel for this replay", flush=True)
-        replays.append({"class": cls_name, "split": split, "rate_scale": rate_scale,
-                        "trace_prefix": prefix, "summary": summary,
-                        "rows": [asdict(r) for r in res.rows], "telemetry_rows": []})
+        rep: dict[str, Any] = {"class": cls_name, "split": split, "rate_scale": rate_scale,
+                               "trace_prefix": prefix, "summary": {}, "rows": [],
+                               "telemetry_rows": [], "error": None}
+        replays.append(rep)
+        try:
+            manifest, trace = load_trace(cls_name, split)
+            cls = manifest.classes[cls_name]
+            print(f"-- replay {cls_name}/{split} x{rate_scale:g} ({len(trace)} requests, "
+                  f"trace ids {prefix}-<i>) --", flush=True)
+            res = await rt.run_replay(client, trace, rate_scale=rate_scale,
+                                      drain_timeout_s=drain_timeout_s, trace_prefix=prefix)
+            sched = await rt.fetch_stats(client, "/scheduler/stats")
+            cache = await rt.fetch_stats(client, "/cache/stats")
+            summary = res.summary(cls)
+            rt.print_summary(cls, summary)
+            rep["summary"] = summary
+            rep["rows"] = [asdict(r) for r in res.rows]
+            if summary["n_ok"]:
+                panel = rt.build_panel(res, cls, corpus_version=manifest.corpus_version,
+                                       split=split, rate_scale=rate_scale, scheduler_stats=sched,
+                                       cache_stats=cache, trace_prefix=prefix)
+                panel.validate()                 # fail here, in the run, not on the way home
+                panels.append(panel.to_dict())
+            else:
+                print("  no request succeeded; no panel for this replay", flush=True)
+        except Exception as e:                   # noqa: BLE001 — one dead config, not a dead run
+            rep["error"] = f"{type(e).__name__}: {e}"
+            traceback.print_exc()
+            print(f"[replay] {cls_name}/{split} x{rate_scale:g} FAILED: {rep['error']}",
+                  file=sys.stderr, flush=True)
         await asyncio.sleep(settle_s)
-    return replays, panels
 
 
 # ------------------------------------------------------------------ entry point
@@ -268,6 +295,8 @@ def main() -> int:
     base_url = f"http://127.0.0.1:{port}"
     payload: dict[str, Any] = {"panels": [], "replays": [], "engine_env": public_env(env),
                                "hardware": hardware_name(), "plan": plan}
+    replays: list[dict[str, Any]] = []
+    panels: list[dict[str, Any]] = []
 
     print(f"[replay] starting server on {base_url} (model={env['MODEL_NAME']} "
           f"backend={env['BACKEND']} telemetry={telemetry_dir})", flush=True)
@@ -285,9 +314,13 @@ def main() -> int:
 
         async def go():
             async with make_client(base_url) as client:
-                return await run_plan(client, plan, warmup_n=warmup_n,
-                                      drain_timeout_s=drain_timeout_s)
-        replays, panels = asyncio.run(go())
+                await run_plan(client, plan, replays, panels, warmup_n=warmup_n,
+                               drain_timeout_s=drain_timeout_s)
+        try:
+            asyncio.run(go())
+        except Exception as e:                   # noqa: BLE001 — whatever ran is still evidence
+            traceback.print_exc()
+            payload["error"] = f"replay plan aborted: {type(e).__name__}: {e}"
     finally:
         stop_server(proc)
 
@@ -297,8 +330,15 @@ def main() -> int:
           + ", ".join(f"{r['class']}/{r['split']} x{r['rate_scale']:g}: "
                       f"{len(r['telemetry_rows'])}" for r in replays), flush=True)
     payload["panels"], payload["replays"] = panels, replays
+    failed = [f"{r['class']}/{r['split']} x{r['rate_scale']:g}" for r in replays if r["error"]]
+    if failed:
+        payload["error"] = ((payload.get("error", "") + "; ") if payload.get("error") else "") \
+            + f"{len(failed)} replay(s) failed: {', '.join(failed)}"
+    if payload.get("error"):
+        payload["server_log_tail"] = tail(log_path)
     print(emit_payload(payload), flush=True)
-    return 0
+    # Partial evidence is still evidence and is emitted above; the exit code says it is partial.
+    return 1 if payload.get("error") else 0
 
 
 if __name__ == "__main__":

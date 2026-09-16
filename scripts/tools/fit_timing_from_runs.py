@@ -19,11 +19,20 @@ Row mapping, from `telemetry.RequestRecord` to what `simulator.fit_timing_model`
                                          (the simulator passes UNCACHED tokens as the first
                                           prefill_s argument; a prefix hit shrinks the work)
     decode_step_s  <- decode_s / decode_steps   (rows with decode_steps > 0)
-    batch_size     <- active_size + 1    (active_size is the batch at arrival EXCLUDING this
-                                          request; during its own decode it holds a slot too)
+    batch_size     <- active_size + 1    (see the caveat below)
 
 `batch_prompt_tokens` and `total_kv_tokens` are not in the telemetry row, so their coefficients
 fit to 0. That is the v1 model: cost linear in the request's own size and in batch width.
+
+The batch_size caveat, which bounds what this fit can claim. `active_size` is snapshotted ONCE,
+at enqueue, before the request is admitted, and is never updated — so it is the batch width this
+request ARRIVED into, not the width it decoded in. A request that arrives alone and then decodes
+for 200 steps inside a batch of 30 contributes the row (batch_size=1, decode_step_s measured at
+~30 rows wide). "+1" corrects only for the row's own slot. Under steady load the two are close
+and the decode slope is usable; under a ramp the predictor is biased low and the fitted slope is
+too flat. Fixing it needs a per-step width in the telemetry row (an engine change, not done here)
+— until then, prefer rate scales that hold a steady width, and read the decode slope as a
+lower bound.
 
 Validation (--validate): for each hardware panel's (class, split, rate_scale), simulate the same
 trace under a SimConfig built from `engine_env.json`, then report Spearman rank correlation of
@@ -109,16 +118,31 @@ def slug(s: str) -> str:
 
 # ------------------------------------------------------------------ validation
 
+# Every knob the simulated scheduler shares with the served one. Absent from engine_env is a
+# REFUSAL, not a default: SimConfig's own defaults are not the engine's (max_queue_size 256 vs
+# the engine's 1000), so falling back silently simulates a queue that rejects far earlier than
+# the hardware did — in exactly the overload regime the rank correlation is meant to judge.
+SIM_KNOBS = ("MAX_BATCH_SIZE", "MAX_QUEUE_SIZE", "MAX_QUEUE_WAIT_S", "KV_CACHE_NUM_BLOCKS",
+             "KV_CACHE_BLOCK_SIZE", "SCHEDULING_POLICY", "PREFILL_MODE")
+
+
 def sim_config(engine_env: dict[str, str], rate_scale: float) -> SimConfig:
-    """The simulator knobs the served engine actually ran with."""
+    """The simulator knobs the served engine actually ran with. Raises on any knob it did not
+    record — `replay_corpus_runpod.ENGINE_DEFAULTS` pins all of them for exactly this reason."""
+    missing = [k for k in SIM_KNOBS if not engine_env.get(k)]
+    if missing:
+        raise ValueError(
+            f"engine_env does not record {', '.join(missing)}, so the simulated scheduler would "
+            f"not be the one that ran. Re-run the instrument (its ENGINE_DEFAULTS pin these), or "
+            f"pass the values explicitly if you know what the server used.")
     return SimConfig(
-        max_batch_size=int(engine_env.get("MAX_BATCH_SIZE", SimConfig.max_batch_size)),
-        max_queue_size=int(engine_env.get("MAX_QUEUE_SIZE", SimConfig.max_queue_size)),
-        max_queue_wait_s=float(engine_env.get("MAX_QUEUE_WAIT_S", SimConfig.max_queue_wait_s)),
-        kv_blocks=int(engine_env.get("KV_CACHE_NUM_BLOCKS", SimConfig.kv_blocks)),
-        block_size=int(engine_env.get("KV_CACHE_BLOCK_SIZE", SimConfig.block_size)),
-        policy=engine_env.get("SCHEDULING_POLICY", SimConfig.policy),
-        prefill_mode="batched" if engine_env.get("PREFILL_MODE") == "batched" else "monolithic",
+        max_batch_size=int(engine_env["MAX_BATCH_SIZE"]),
+        max_queue_size=int(engine_env["MAX_QUEUE_SIZE"]),
+        max_queue_wait_s=float(engine_env["MAX_QUEUE_WAIT_S"]),
+        kv_blocks=int(engine_env["KV_CACHE_NUM_BLOCKS"]),
+        block_size=int(engine_env["KV_CACHE_BLOCK_SIZE"]),
+        policy=engine_env["SCHEDULING_POLICY"],
+        prefill_mode="batched" if engine_env["PREFILL_MODE"] == "batched" else "monolithic",
         rate_scale=rate_scale,
     )
 
@@ -192,6 +216,11 @@ def main(argv: list[str] | None = None) -> int:
                   f"{d['hw_tpot_p50']!s:>12} {d['sim_tpot_p50']!s:>13}")
         for metric, rho in v["rank_correlation"].items():
             print(f"spearman {metric}: {rho if rho is None else round(rho, 3)}")
+        if engine_env.get("BACKEND", "").startswith("custom"):
+            print(f"note: BACKEND={engine_env['BACKEND']} gates admission on the token budget "
+                  f"MAX_ACTIVE_KV_TOKENS={engine_env.get('MAX_ACTIVE_KV_TOKENS', '?')}, while the "
+                  f"simulator gates on a block pool (kv_blocks). Under KV pressure the two "
+                  f"constraints differ, so disagreement there is the model's, not the engine's.")
         print("simulated: ranks configurations, makes no absolute claim; file the result as a "
               "knowledge entry by hand with this run_group as evidence")
         return 0

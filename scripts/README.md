@@ -87,6 +87,10 @@ trustworthy (notes 04-simulator.md). The whole recipe, in order:
 RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/bench/replay_corpus_runpod.py
 #    -> runs/<run_id>.json per replay, runs/<run_group>/<class>-<split>-x<scale>.{rows,telemetry}.csv
 #    REPLAY_CLASSES / REPLAY_SPLITS / REPLAY_RATE_SCALES (default steady_interactive / seen / 1,2,4)
+#    `--timeout` is the instrument's wall budget on the pod (default 3600s); a run killed by it
+#    prints no closing payload marker, so the rental yields NOTHING. Raise it before turning
+#    CUSTOM_BACKEND_COMPILE on: the decode ladder at MAX_BATCH_SIZE=256 costs ~21 min on a cold
+#    box (kb-20260902-008), which is why this instrument defaults it to 0.
 # 2. fit, locally
 python scripts/tools/fit_timing_from_runs.py <run_group>
 #    -> knowledge/timing/<model>-<hardware>-<sha>.json

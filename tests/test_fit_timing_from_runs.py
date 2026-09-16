@@ -19,8 +19,10 @@ sys.path.insert(0, str(REPO / "scripts" / "tools"))
 import fit_timing_from_runs as ft  # noqa: E402
 
 TRUTH = TimingModel(prefill=(0.012, 0.0011, 0.0), decode=(0.008, 0.00025, 0.0))
+# Every SIM_KNOB, as the instrument records them: sim_config refuses anything less.
 ENV = {"MODEL_NAME": "google/gemma-4-E4B-it", "MAX_BATCH_SIZE": "32", "PREFILL_MODE": "batched",
-       "KV_CACHE_NUM_BLOCKS": "4096", "KV_CACHE_BLOCK_SIZE": "16"}
+       "KV_CACHE_NUM_BLOCKS": "4096", "KV_CACHE_BLOCK_SIZE": "16", "MAX_QUEUE_SIZE": "1000",
+       "MAX_QUEUE_WAIT_S": "30.0", "SCHEDULING_POLICY": "fcfs"}
 
 
 def _telemetry_row(i: int, ok: bool = True) -> dict:
@@ -123,6 +125,7 @@ def test_validate_reports_rho_one_when_hardware_equals_the_simulator(tmp_path, c
     out = capsys.readouterr().out
     assert "spearman ttft_p95: 1.0" in out and "spearman tpot_p50: 1.0" in out
     assert "steady_interactive/seen x0.25" in out
+    assert "MAX_ACTIVE_KV_TOKENS" not in out, "no custom backend recorded, so no KV-gate caveat"
 
     panels, meta, _ = ft.load_group(runs, "grp-val")
     v = ft.validate(panels, TRUTH, meta["engine_env"])
@@ -133,9 +136,20 @@ def test_validate_reports_rho_one_when_hardware_equals_the_simulator(tmp_path, c
 
 def test_sim_config_is_read_from_the_engine_env_the_server_ran_with():
     cfg = ft.sim_config({**ENV, "SCHEDULING_POLICY": "fair", "MAX_QUEUE_WAIT_S": "5"}, 2.0)
-    assert cfg == SimConfig(max_batch_size=32, kv_blocks=4096, block_size=16, policy="fair",
-                            prefill_mode="batched", rate_scale=2.0, max_queue_wait_s=5.0)
-    assert ft.sim_config({}, 1.0).prefill_mode == "monolithic"
+    assert cfg == SimConfig(max_batch_size=32, max_queue_size=1000, kv_blocks=4096, block_size=16,
+                            policy="fair", prefill_mode="batched", rate_scale=2.0,
+                            max_queue_wait_s=5.0)
+
+
+def test_sim_config_refuses_a_knob_the_run_did_not_record():
+    """SimConfig's defaults are not the engine's — max_queue_size 256 vs 1000. Silently taking
+    the simulator's would model a queue that rejects far earlier than the hardware's did, and
+    the rank correlation would be of two different schedulers."""
+    for missing in ("MAX_QUEUE_SIZE", "SCHEDULING_POLICY", "PREFILL_MODE"):
+        with pytest.raises(ValueError, match=missing):
+            ft.sim_config({k: v for k, v in ENV.items() if k != missing}, 1.0)
+    with pytest.raises(ValueError, match="MAX_BATCH_SIZE"):
+        ft.sim_config({}, 1.0)
 
 
 def test_validate_refuses_fewer_than_two_panels(tmp_path, capsys):
@@ -145,3 +159,22 @@ def test_validate_refuses_fewer_than_two_panels(tmp_path, capsys):
     assert ft.main(["grp-one", "--runs-dir", str(runs), "--validate",
                     "--timing", str(tmp_path / "t.json")]) == 1
     assert "needs >= 2" in capsys.readouterr().err
+
+
+def test_validate_flags_the_kv_gate_the_simulator_does_not_model(tmp_path, capsys):
+    """With BACKEND=custom-*, admission gates on a token budget, not the block pool the
+    simulator counts. Disagreement under KV pressure is the model's, and must be said out loud."""
+    runs = tmp_path / "runs"
+    (runs / "grp-kv").mkdir(parents=True)
+    env = {**ENV, "BACKEND": "custom-cuda", "MAX_ACTIVE_KV_TOKENS": "200000"}
+    (runs / "grp-kv" / "engine_env.json").write_text(json.dumps({"engine_env": env}))
+    TRUTH.to_json(tmp_path / "t.json")
+    manifest, trace = load_trace("cold_start", "seen")
+    for scale in (0.5, 1.0):
+        s = simulate(trace, ft.sim_config(env, scale), TRUTH).summary(manifest.classes["cold_start"])
+        _hardware_panel(runs, "grp-kv", "cold_start", "seen", scale, s)
+
+    assert ft.main(["grp-kv", "--runs-dir", str(runs), "--validate",
+                    "--timing", str(tmp_path / "t.json")]) == 0
+    out = capsys.readouterr().out
+    assert "MAX_ACTIVE_KV_TOKENS=200000" in out and "kv_blocks" in out

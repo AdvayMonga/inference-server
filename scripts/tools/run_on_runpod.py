@@ -30,8 +30,10 @@ from time import strftime
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts" / "bench"))
 
 from inference_server.research.venues import PodSpec, VenueError, run_instrument  # noqa: E402
+from replay_corpus_runpod import ENGINE_DEFAULTS, ENGINE_PASSTHROUGH  # noqa: E402
 
 
 def _git(*args: str) -> str:
@@ -94,16 +96,23 @@ def main() -> int:
     ap.add_argument("--gpu", default="NVIDIA A100 80GB PCIe")
     ap.add_argument("--name", default=PodSpec.name,
                     help="pod name; CI uses ci-cuda-gate so its reaper never touches a human's pod")
+    ap.add_argument("--timeout", type=int, default=3600,
+                    help="seconds the instrument may run on the pod. A run killed by this "
+                         "prints no closing payload marker, so the rental yields nothing — "
+                         "raise it for anything that loads a model AND compiles (default 3600)")
+    ap.add_argument("--ready-timeout", type=float, default=300.0,
+                    help="seconds to wait for the pod's ssh endpoint (default 300)")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be rented and exit without spending")
     args = ap.parse_args()
 
     env = provenance()
-    # Passed through so the instrument configures the engine identically to modal_app.py.
-    for k in ("BACKEND", "MODEL_NAME", "MAX_BATCH_SIZE", "PREFILL_MODE", "BENCH_RATES",
-              "BENCH_DURATION", "BENCH_WARMUP", "BENCH_ARM", "BENCH_POOL_SIZE",
-              "CUSTOM_BACKEND_COMPILE", "CUSTOM_BACKEND_BLOCKS",
-              "CUSTOM_BACKEND_SLIDING_BLOCKS", "KV_CACHE_NUM_BLOCKS"):
+    # Passed through so the instrument configures the engine identically to modal_app.py. The
+    # engine keys come from the instrument's own tables rather than a second hand-maintained
+    # list: they drifted once, and a knob that does not survive the hop is silently ignored on
+    # the pod while the local shell says it was set.
+    for k in (*ENGINE_DEFAULTS, *ENGINE_PASSTHROUGH,
+              "BENCH_RATES", "BENCH_DURATION", "BENCH_WARMUP", "BENCH_ARM", "BENCH_POOL_SIZE"):
         if k in os.environ:
             env[k] = os.environ[k]
     for k, v in os.environ.items():
@@ -127,28 +136,33 @@ def main() -> int:
     if args.dry_run:
         print(f"[dry-run] would rent {args.gpu} and run {args.instrument}")
         print(f"[dry-run] env: {', '.join(sorted(env))}")
+        print(f"[dry-run] timeouts: run {args.timeout}s, ssh-ready {args.ready_timeout:.0f}s")
         return 0
 
     try:
-        payload = run_instrument(args.instrument, env, repo=str(REPO), spec=spec)
+        payload = run_instrument(args.instrument, env, repo=str(REPO), spec=spec,
+                                 run_timeout_s=args.timeout,
+                                 ready_timeout_s=args.ready_timeout)
     except VenueError as e:
         print(f"[error] {e}", file=sys.stderr)
         return 1
 
-    # An instrument that could not run reports why and exits non-zero; no panel is evidence then.
-    if "error" in payload:
-        print(f"[error] instrument: {payload['error']}", file=sys.stderr)
-        for line in payload.get("log_tail") or []:
-            print(f"    {line}", file=sys.stderr)
-        return 1
-
     from inference_server.research.schemas import Vitals
     runs = REPO / "runs"
-    panels = payload.get("panels", [])
-    for d in panels:
-        v = Vitals.from_dict(d)
+    # A panel that does not parse is never written. A run that failed can print anything on its
+    # way down, and a malformed panel in runs/ is worse than a missing one — it looks usable.
+    # This is also what keeps a partial run's VALID panels (below) from being thrown out with it.
+    written = 0
+    for d in payload.get("panels", []):
+        try:
+            v = Vitals.from_dict(d)
+        except Exception as e:                  # noqa: BLE001 — a bad panel is not a bad run
+            print(f"[warn] skipping an unparseable panel: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            continue
         v.to_json(runs / f"{v.validity.run_id}.json")
-    print(f"wrote {len(panels)} panel(s) to runs/ (run_group={env['RESEARCH_RUN_GROUP']})")
+        written += 1
+    print(f"wrote {written} panel(s) to runs/ (run_group={env['RESEARCH_RUN_GROUP']})")
     if payload.get("replays"):
         for p in write_replays(payload, env["RESEARCH_RUN_GROUP"], runs):
             print(f"  {p.relative_to(REPO)}")
@@ -162,6 +176,16 @@ def main() -> int:
     if "gate" in payload:
         print(json.dumps(payload["gate"], indent=2, sort_keys=True))
         return 0 if payload["gate"].get("passed") else 1
+
+    # An instrument that could not run, or that lost part of a run, reports why and exits
+    # non-zero. This is checked AFTER the writing above, not before: an instrument that could not
+    # start has no panels to lose, but one that lost its last config still measured the earlier
+    # ones, and those GPU-minutes are already billed. The exit code says the run was not clean.
+    if payload.get("error"):
+        print(f"[error] instrument: {payload['error']}", file=sys.stderr)
+        for line in payload.get("log_tail") or payload.get("server_log_tail") or []:
+            print(f"    {line}", file=sys.stderr)
+        return 1
     return 0
 
 

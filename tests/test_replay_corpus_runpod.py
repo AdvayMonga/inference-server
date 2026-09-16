@@ -16,12 +16,16 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
+from inference_server.config import Settings
 from inference_server.research import harness as H
 from inference_server.research.venues import extract_payload
 from inference_server.telemetry import RequestRecord, RowStore
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "bench"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "tools"))
+import fit_timing_from_runs as ft  # noqa: E402
 import replay_corpus_runpod as rcr  # noqa: E402
+import replay_trace as rt  # noqa: E402
 
 
 def _mock_server(store: RowStore) -> FastAPI:
@@ -108,12 +112,26 @@ def test_engine_env_mirrors_modal_app_and_the_environment_wins(tmp_path):
     assert env["BACKEND"] == "custom-cuda" and env["MODEL_NAME"] == "google/gemma-4-E4B-it"
     assert env["MAX_BATCH_SIZE"] == "256" and env["PREFILL_MODE"] == "batched"
     assert Path(env["TELEMETRY_DIR"]).is_dir(), "a fresh telemetry dir is minted when unset"
+    # compile OFF by default here, unlike modal_app.py: the ladder costs ~21 min on a cold box
+    # (kb-20260902-008) and a run killed by the venue timeout emits no payload at all.
+    assert env["CUSTOM_BACKEND_COMPILE"] == "0"
 
     env = rcr.engine_env({"MAX_BATCH_SIZE": "32", "TELEMETRY_DIR": str(tmp_path),
                           "HF_TOKEN": "tok", "SCHEDULING_POLICY": "fair"})
     assert env["MAX_BATCH_SIZE"] == "32" and env["TELEMETRY_DIR"] == str(tmp_path)
     assert env["HF_TOKEN"] == "tok" and env["SCHEDULING_POLICY"] == "fair"
     assert "HF_TOKEN" not in rcr.public_env(env), "the secret reaches the server, never stdout"
+
+
+def test_every_knob_the_simulator_needs_is_pinned_not_inherited():
+    """An unset knob is not recorded in engine_env, and --validate then has to guess it. The
+    engine's max_queue_size is 1000 and SimConfig's is 256: guessing rejects far earlier than
+    the hardware did, in exactly the overload regime the rank correlation judges."""
+    env = rcr.engine_env({})
+    for knob in ft.SIM_KNOBS:
+        assert env.get(knob), knob
+    assert env["MAX_QUEUE_SIZE"] == str(Settings.max_queue_size) != "256"
+    ft.sim_config(rcr.public_env(env), 1.0)          # the strict builder accepts it as recorded
 
 
 def test_plan_is_the_cross_product_with_documented_defaults():
@@ -168,6 +186,38 @@ def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path,
     assert len(warm) == 2
     joined = {t["trace_id"] for r in payload["replays"] for t in r["telemetry_rows"]}
     assert not any(t in joined for t in warm)
+
+
+def test_a_replay_that_blows_up_midway_keeps_the_panels_already_paid_for(
+        monkeypatch, tmp_path, capsys):
+    """Three configs, the second raises. The first and third are GPU-minutes already billed; a
+    payload that dropped them would make the whole rental worthless."""
+    store = RowStore(tmp_path / "telemetry")
+    app = _mock_server(store)
+    proc = FakeProc(store)
+    _wire(monkeypatch, tmp_path, app, proc, ready=True)
+    monkeypatch.setenv("REPLAY_RATE_SCALES", "50,100,200")
+
+    real, calls = rt.run_replay, {"n": 0}
+
+    async def flaky(client, trace, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("connection reset by the engine")
+        return await real(client, trace, **kw)
+    monkeypatch.setattr(rt, "run_replay", flaky)
+
+    assert rcr.main() == 1, "a partial run is not a clean run"
+    payload = extract_payload(capsys.readouterr().out)
+
+    assert len(payload["panels"]) == 2, "the two that finished are still here"
+    assert [r["rate_scale"] for r in payload["replays"]] == [50.0, 100.0, 200.0]
+    good, bad = payload["replays"][0], payload["replays"][1]
+    assert good["error"] is None and len(good["rows"]) == 8 and good["telemetry_rows"]
+    assert "connection reset" in bad["error"] and bad["rows"] == []
+    assert payload["replays"][2]["error"] is None, "the plan continued past the failure"
+    assert "1 replay(s) failed: cold_start/seen x100" in payload["error"]
+    assert "server_log_tail" in payload
 
 
 def test_a_server_that_never_becomes_ready_is_an_error_payload_not_a_silent_result(
