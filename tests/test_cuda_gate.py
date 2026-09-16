@@ -101,8 +101,8 @@ def _launcher(monkeypatch, payload):
     spec.loader.exec_module(mod)
     seen = {}
 
-    def fake_run_instrument(script, env, *, repo, spec):
-        seen["spec"] = spec
+    def fake_run_instrument(script, env, *, repo, spec, **kw):
+        seen["spec"], seen["kw"] = spec, kw
         return payload
 
     monkeypatch.setattr(mod, "run_instrument", fake_run_instrument)
@@ -114,6 +114,8 @@ def test_launcher_exits_with_the_gate_verdict_and_names_the_pod(monkeypatch, cap
     monkeypatch.setattr(sys, "argv", ["x", "scripts/gpu_tests/cuda_gate.py", "--name", "ci-cuda-gate"])
     assert mod.main() == 1
     assert seen["spec"].name == "ci-cuda-gate"
+    # the venue's wall budget and ssh wait are the launcher's to set, not defaults buried below
+    assert seen["kw"]["run_timeout_s"] == 3600 and seen["kw"]["ready_timeout_s"] == 300.0
     assert '"passed": false' in capsys.readouterr().out
 
 
@@ -125,4 +127,6 @@ def test_launcher_surfaces_an_instrument_error_and_writes_no_panels(monkeypatch,
     assert mod.main() == 1
     err = capsys.readouterr().err
     assert "server not ready" in err and "OOM at layer 3" in err
+    # The panel this payload carries does not parse, so nothing is written. A partial run whose
+    # panels DO parse keeps them (test_venues: a partial run keeps the panels it did measure).
     assert not (tmp_path / "runs").exists()

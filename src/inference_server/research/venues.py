@@ -53,6 +53,15 @@ class VenueError(RuntimeError):
     """A venue could not run the job. Never raised for a FAILING experiment, only a broken one."""
 
 
+class InstrumentFailed(VenueError):
+    """The instrument exited non-zero. Carries its stdout, because a partly-successful run can
+    exit non-zero AND have printed a payload, and that payload is evidence already paid for."""
+
+    def __init__(self, message: str, stdout: str = ""):
+        super().__init__(message)
+        self.stdout = stdout
+
+
 # ------------------------------------------------------------------ payload transport
 
 def extract_payload(stdout: str) -> dict[str, Any]:
@@ -298,31 +307,36 @@ def run_remote(pod: Pod, script: str, env: dict[str, str], shell: Shell = _shell
     Provenance env is exported remotely for the same reason run_instrument.sh exports it locally:
     the box has no git repo, so a panel measured here cannot name its own sha.
 
-    A gate instrument reports, then exits by its verdict so a direct run is usable on its own,
-    and an instrument that cannot start (server never ready) reports `{"error": ...}` and exits
-    non-zero. Both are the instrument speaking, not a broken venue, so their stdout is returned.
-    A non-zero exit with only panels, or with no payload, is still a broken run.
+    A non-zero exit always raises `InstrumentFailed`, which carries the stdout. Deciding whether
+    that exit was the instrument speaking (a `gate` verdict, an honest `{"error": ...}` report)
+    or a broken run is `run_instrument`'s job, so the policy lives in exactly one place.
     """
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items()))
     remote = (f"cd /workspace/repo && export PYTHONPATH=/workspace/repo/src && "
               f"{exports} timeout {timeout_s} python {script}")
     r = shell(_ssh_base(pod) + [remote])
-    if r.returncode != 0 and not reports_its_own_failure(r.stdout):
-        raise VenueError(f"instrument exited {r.returncode} on pod {pod.id}: "
-                         f"{(r.stderr or r.stdout).strip()[-600:]}")
+    if r.returncode != 0:
+        raise InstrumentFailed(f"instrument exited {r.returncode} on pod {pod.id}: "
+                               f"{(r.stderr or r.stdout).strip()[-600:]}", stdout=r.stdout or "")
     return r.stdout
 
 
 def run_instrument(script: str, env: dict[str, str], *, repo: str,
                    spec: PodSpec | None = None, client: RunPodClient | None = None,
                    shell: Shell = _shell, log: Callable[[str], None] = print,
-                   ready_timeout_s: float = 300.0,
+                   ready_timeout_s: float = 300.0, run_timeout_s: int = 3600,
                    sleep: Callable[[float], None] = time.sleep) -> dict[str, Any]:
     """Rent -> sync -> run -> parse -> terminate. The whole venue, one call.
 
     Terminate is in a `finally` and swallows its own errors: a failure to tear down must not mask
     the real exception, but it must also never be skipped. Nothing else in this repo can leave a
     billed resource running.
+
+    `run_timeout_s` is the instrument's own wall budget, and it was previously unreachable: a run
+    that needs longer than the default hour is killed mid-print, the payload never closes, and the
+    whole rental yields nothing. An instrument that loads a model AND compiles a decode ladder is
+    already within a factor of two of it (knowledge/kb-20260902-008.json: ~21 minutes of compile
+    at MAX_BATCH_SIZE=256), so it has to be the caller's choice.
     """
     client = client or RunPodClient()
     spec = spec or PodSpec()
@@ -336,7 +350,19 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
         sync_repo(pod, repo, shell=shell)
         log("[venue] installing dependencies")
         provision(pod, shell=shell)
-        out = run_remote(pod, script, env, shell=shell)
+        try:
+            out = run_remote(pod, script, env, shell=shell, timeout_s=run_timeout_s)
+        except InstrumentFailed as e:
+            # A non-zero exit is the instrument SPEAKING when its payload is a verdict (`gate`)
+            # or an honest failure report (`error`) — a gate exits by its verdict so a direct run
+            # is usable alone, and a replay that lost one config reports the rest plus `error`.
+            # Keeping that payload saves GPU-minutes already billed. Anything else — panels only,
+            # or no payload at all — is a broken run and still raises, which is the rule that
+            # stops a crash from reading as "no effect measured".
+            if not reports_its_own_failure(e.stdout):
+                raise
+            log(f"[venue] instrument exited non-zero and reported why — keeping its payload: {e}")
+            return extract_payload(e.stdout)
         return extract_payload(out)
     finally:
         try:

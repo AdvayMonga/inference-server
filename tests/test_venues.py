@@ -167,6 +167,20 @@ def test_the_last_payload_wins():
     assert extract_payload(two) == {"attempt": 2}
 
 
+def test_the_run_timeout_is_the_callers_choice_and_reaches_the_pod():
+    """A run killed by this prints no closing marker, so the whole rental yields nothing. It was
+    unreachable from run_instrument: every caller silently got one hour."""
+    api, seen = FakeAPI(), []
+
+    def spy(cmd):
+        seen.append(" ".join(cmd))
+        return subprocess.CompletedProcess(cmd, 0, emit_payload({"ok": 1}), "")
+
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api), shell=spy,
+                   log=lambda _: None, run_timeout_s=5400)
+    assert "timeout 5400 python scripts/x.py" in seen[-1]
+
+
 def test_a_run_with_no_payload_is_an_error_not_an_empty_result():
     """The failure this guards: an empty result reads as 'no effect measured' and gets believed."""
     with pytest.raises(VenueError, match="no evidence"):
@@ -362,6 +376,20 @@ def test_an_instrument_that_reports_its_own_failure_is_heard():
     out = run_instrument("scripts/bench/replay.py", {}, repo="/repo", client=_client(api),
                          shell=_exit_nonzero_with(emit_payload(report)), log=lambda _: None)
     assert out == report
+    assert api.terminated
+
+
+def test_a_partial_run_keeps_the_panels_it_did_measure_alongside_its_error():
+    """The replay instrument's other honest exit: two of three configs finished, so the payload
+    carries their panels AND an `error` naming the third. Those GPU-minutes are already billed —
+    dropping them on the exit code would make a partly-failed rental worth nothing. `error` is
+    what distinguishes this from the panels-only crash below."""
+    api, logs = FakeAPI(), []
+    partial = {"panels": [{"x": 1}, {"x": 2}], "replays": [], "error": "1 replay(s) failed: x4"}
+    out = run_instrument("scripts/bench/replay.py", {}, repo="/repo", client=_client(api),
+                         shell=_exit_nonzero_with(emit_payload(partial)), log=logs.append)
+    assert out == partial
+    assert any("reported why — keeping its payload" in ln for ln in logs)
     assert api.terminated
 
 

@@ -149,6 +149,12 @@ Start with `scripts/tools/venue_smoke.py`, which answers "can this venue run our
 for the price of the cheapest GPU-minute available, and emits no panel because it measures the
 transport rather than the engine.
 
+The first instrument that measures the engine there is `scripts/bench/replay_corpus_runpod.py`:
+it serves the engine on the pod with telemetry on, replays corpus classes through
+`replay_trace`, and returns panels, per-request rows and telemetry rows in one payload.
+`scripts/tools/fit_timing_from_runs.py` fits the simulator's `TimingModel` from those rows and,
+with `--validate`, reports the rank correlation above against the same configs on hardware.
+
 ## Step 4 — EXPERIMENT
 
 - own branch + worktree, one variable changed
