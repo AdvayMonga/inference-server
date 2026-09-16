@@ -25,6 +25,7 @@ runs locally.
 | script | measures |
 |---|---|
 | `bench_serving.py` | open-loop client for `/v1/completions`: Poisson arrivals, realistic lengths, SLO-gated |
+| `replay_trace.py` | open-loop replay of one `corpus/` trace (class, split) on the harness's own clock; panel stamped with `corpus_version`, per-request CSV beside it |
 | `bench_serving_modal.py` | the primary SLO curve — `bench_serving.py` co-located with the engine on an A100 |
 | `bench_stress_modal.py` | overload and KV-pressure stress: does the engine degrade or break |
 | `bench_load_sweep_modal.py` | closed-loop concurrency sweep of our engine (+ an HF baseline arm) |
@@ -55,6 +56,8 @@ CPU-runnable parity tests live in `tests/`.
 ## tools/
 
 `smoke_custom.py`, `test_scheduler.py`, `test_batch_cache.py` are local end-to-end smoke runs.
+`build_corpus.py` generated the frozen traces in `corpus/` once, from a fixed seed; rerun it only to
+cut a new corpus version (see `corpus/README.md`).
 `migrate_decisions_to_kb.py` and `backfill_experiments.py` are the one-shot migrations that
 turned prose notes into `knowledge/` and `experiments/` records; kept for provenance.
 
