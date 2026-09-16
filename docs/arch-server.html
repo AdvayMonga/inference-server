@@ -33,12 +33,13 @@
   </defs>
 
   <g>
-    <rect class="box http" x="20" y="20" width="320" height="120" rx="6"/>
+    <rect class="box http" x="20" y="20" width="320" height="136" rx="6"/>
     <text class="title" x="40" y="48">POST /generate</text>
     <text x="40" y="70">main inference endpoint</text>
     <text class="small" x="40" y="90">accepts text, max_tokens, stream, session_id, priority</text>
     <text class="small" x="40" y="106">returns SSE stream OR a JSON response</text>
     <text class="small" x="40" y="122">tags response with cache-hit token count</text>
+    <text class="small" x="40" y="138">trace_id (echoed back for correlation), turn_index</text>
   </g>
 
   <g>
@@ -96,7 +97,7 @@
 <table>
   <tr><th>Endpoint</th><th>Reports</th></tr>
   <tr><td><code>/cache/stats</code></td><td>Whichever cache is <em>actually serving</em>. With <code>BACKEND=custom-*</code> that is the backend's <code>PrefixCache</code>: hit rate, entries vs the entry cap, blocks held vs the block watermark, evictions, and pool utilization. It previously always described the HF-format <code>CacheManager</code> — a cache the custom backend does not use — so the numbers referred to nothing the engine was doing.</td></tr>
-  <tr><td><code>/scheduler/stats</code></td><td>Queue depths and counters, including the pressure signals: <code>kv_admit_blocked</code> (soft holds), <code>total_rejected</code>, <code>total_expired</code> (shed at the admission deadline), <code>total_preempted</code> (rows evicted under KV pressure), <code>total_iteration_errors</code>, and <code>wave_sizes</code> (the prefill wave-width histogram — the thing that shows whether the queue is actually backing up).</td></tr>
+  <tr><td><code>/scheduler/stats</code></td><td>Queue depths and counters, including the pressure signals: <code>kv_admit_blocked</code> (soft holds), <code>total_rejected</code>, <code>total_expired</code> (shed at the admission deadline), <code>total_preempted</code> (rows evicted under KV pressure), <code>total_iteration_errors</code>, <code>wave_sizes</code> (the prefill wave-width histogram — the thing that shows whether the queue is actually backing up), and <code>telemetry</code> (<code>enabled</code>, <code>rows_written</code>, <code>rows_dropped</code>, <code>run_id</code>).</td></tr>
 </table>
 
 <h2 id="startup">Startup (the lifespan hook)</h2>
@@ -198,7 +199,7 @@
   <g>
     <rect class="box" x="20" y="130" width="1100" height="120" rx="6"/>
     <text class="title" x="40" y="158">What rides on each event</text>
-    <text class="small" x="40" y="180">first event carries TTFT (time-to-first-token in ms) so the client and metrics layer can both record it</text>
+    <text class="small" x="40" y="180">first event carries TTFT (ms), prompt_tokens, cache_hit_tokens and the request's trace_id for correlation</text>
     <text class="small" x="40" y="198">subsequent events carry the next token (already detokenized to text)</text>
     <text class="small" x="40" y="216">final event carries the close marker plus total_ms, tokens_generated, prompt_tokens, cache_hit_tokens</text>
     <text class="small" x="40" y="234">non-streaming mode collects all of the above and returns one JSON GenerateResponse instead</text>
@@ -259,6 +260,14 @@
 
 <div class="callout">
   <strong>Prometheus <code>/metrics</code> (Phase 8, shipped).</strong> Pull-based exposition at <code>/metrics</code> (<code>prometheus_metrics.py</code>): counters (requests by outcome, tokens, prefill chunks), histograms (TTFT/TPOT/latency + HTTP duration from the timing middleware), gauges (active batch, queue/prefilling depth, KV pressure — refreshed from the scheduler at scrape time). Completions/rejections/chunks are observed through the existing <code>MetricsTracker</code>, so the scheduler gains no direct Prometheus coupling. <strong>Aggregate — no <code>session_id</code> label:</strong> session_id is unbounded → a per-session label would explode Prometheus cardinality; per-session detail stays in <code>/scheduler/stats</code> (JSON, pull-on-demand). Only low-cardinality labels (outcome, HTTP method/endpoint/status). Config + dashboard in <code>monitoring/</code>, brought up together by <code>monitoring/docker-compose.yml</code> (Prometheus scrapes the host; Grafana provisions the datasource and dashboard on boot). The server is intentionally not in that stack.
+</div>
+<div class="callout">
+  <strong>Per-request rows (2026-09-15).</strong> Aggregates cannot be re-sliced after the fact, so
+  with <code>TELEMETRY_DIR</code> set the scheduler also writes one SQLite row per request —
+  conditions at arrival, spans, outcome, keyed by <code>trace_id</code> / <code>session_id</code> /
+  <code>turn_index</code> — into one file per run, from a background thread. The row store is built
+  in the lifespan hook next to the scheduler; unset (the default, and the Modal deploy) means no
+  filesystem writes at all. Details on the <a href="arch-scheduler.html#telemetry">scheduler page</a>.
 </div>
 <div class="callout note">
   <strong>Structured logs + timing middleware.</strong> <code>LOG_FORMAT=json</code> (default <code>text</code>) switches stdlib logging to one JSON object per line (<code>logging_config.py</code>); <code>logger.info(..., extra={...})</code> fields merge in. A FastAPI middleware times every HTTP request → the <code>inference_http_request_duration_seconds</code> histogram (labeled by the matched route template, not the raw path) + a structured log line.

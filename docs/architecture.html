@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-13.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-15.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -26,7 +26,7 @@
 <p class="lead">A request walks left to right. The HTTP layer turns text into a job, the scheduler decides who runs when, the backend does the math, and the KV cache makes sure we don't redo work we've already done.</p>
 <p class="click-hint">↓ Each colored block is a link — click to open its detail page.</p>
 
-<svg viewBox="0 0 1160 640" role="img" aria-label="Top-level architecture overview">
+<svg viewBox="0 0 1160 700" role="img" aria-label="Top-level architecture overview">
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e"/></marker>
     <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#79c0ff"/></marker>
@@ -164,6 +164,15 @@
     <text class="lbl" x="40" y="556">EVICTION_POLICY, SCHEDULING_POLICY, KV_CACHE_*</text>
   </g>
 
+  <!-- Telemetry row store -->
+  <g>
+    <rect class="box" x="500" y="590" width="540" height="90" rx="6"/>
+    <text class="title" x="520" y="616">Telemetry row store</text>
+    <text class="lbl" x="520" y="632">telemetry.py — RequestRecord · RowStore</text>
+    <text class="small" x="520" y="652">one SQLite row per request: conditions at arrival, spans, counters, outcome</text>
+    <text class="small" x="520" y="666">background thread writes one file per run under TELEMETRY_DIR; off when unset</text>
+  </g>
+
   <!-- Arrows -->
   <path class="flow-strong" d="M180,80 L220,80"/>
   <path class="flow-strong" d="M460,100 L500,100"/>
@@ -175,6 +184,7 @@
   <path class="flow" d="M460,380 L500,380"/>
   <path class="flow" d="M180,220 L220,100"/>
   <path class="flow-loop" d="M620,300 C 620,330 620,335 620,340"/>
+  <path class="flow" d="M760,290 L1050,290 L1050,635 L1040,635"/>
 </svg>
 
 <div class="legend">
@@ -195,6 +205,7 @@
   <tr><td>KV Cache</td><td>Remember attention state so we don't recompute prompt prefixes.</td><td><a href="arch-cache.html">arch-cache.html</a></td></tr>
   <tr><td>Tokenizer</td><td>Stateless text ↔ tokens with the Gemma chat template.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
+  <tr><td>Telemetry rows</td><td>One SQLite row per request — conditions at arrival, spans, outcome — for the loop to re-slice. Off unless <code>TELEMETRY_DIR</code> is set.</td><td><a href="arch-scheduler.html#telemetry">arch-scheduler.html</a></td></tr>
   <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
   <tr><td>Monitoring</td><td>Prometheus scrape and Grafana dashboard. No UI is served by the engine.</td><td><a href="arch-server.html#clients">arch-server.html</a></td></tr>
   <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
@@ -206,7 +217,7 @@
 
 <ol>
   <li><strong>Client sends a POST to <code>/generate</code></strong> with the prompt text, max tokens, optional <code>session_id</code>, and optional <code>priority</code>.</li>
-  <li><strong>Server tokenizes</strong> the text using the Gemma chat template and wraps it in a <code>ScheduledRequest</code> object that carries the session ID and arrival time.</li>
+  <li><strong>Server tokenizes</strong> the text using the Gemma chat template and wraps it in a <code>ScheduledRequest</code> object that carries the session ID, a <code>trace_id</code> and arrival time.</li>
   <li><strong>Scheduler queues the request</strong>. The fairness policy (FCFS or VTC) decides where it lands relative to other waiting requests.</li>
   <li><strong>Each tick the scheduler tries to admit pending requests</strong>. It only admits if there's room in both the active-KV budget and the cache block pool. If not, the request waits — and if it has already waited past the admission deadline, it is rejected rather than queued forever.</li>
   <li><strong>If the prompt is long, prefill is split into chunks</strong>, one chunk per tick — long prompts no longer freeze every other user's stream.</li>
@@ -214,6 +225,7 @@
   <li><strong>The backend runs a single batched decode forward pass</strong> across every active request, producing one new token per request per tick.</li>
   <li><strong>Each new token is streamed to its client</strong> via SSE. Metrics track TTFT and TPOT.</li>
   <li><strong>When a request hits EOS or max tokens, it leaves the active batch</strong>, releases its blocks, and frees its KV reservation.</li>
+  <li><strong>However it ends — finished, rejected, expired, preempted or errored — the scheduler completes the request's telemetry row</strong> (conditions snapshotted at step 3, spans, outcome) and hands it to the row store off its own thread.</li>
 </ol>
 
 <h2 id="loop">The research loop</h2>
@@ -292,6 +304,7 @@ the in-flight work, releases its KV, and keeps serving.</p>
   <tr><td>6 — Open-loop + stress harnesses</td><td>SLO-gated Poisson sweep, plus an overload/KV-pressure stress that drives cache-missing traffic past the knee</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — CUDA graphs &amp; kernels</td><td>Bucketed decode graphs, prefill graphs incl. prefix hits, split-K decode attention, de-Pythoned decode/prefill steps, capture-time kernel variants</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>6 — Tiled prefill attention</td><td>FlashAttention-style tiling of the paged prefill kernel</td><td><span class="badge b-defer">measured, rejected</span></td></tr>
+  <tr><td>— Per-request telemetry</td><td>One row per request with conditions at arrival, spans, counters and outcome; SQLite, one file per run; overhead-budget test. CUDA-event device spans deferred to a profiler trigger</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>— Research loop</td><td>Fixed vitals panel, five gates, replicated A/B judging, JSON knowledge base, merge gate. 10 iterations run: 2 confirmed, 3 noise, 3 invalid</td><td><span class="badge b-done">done</span></td></tr>
   <tr><td>— Serving-level performance</td><td>End-to-end throughput and tail latency, replicated</td><td><span class="badge b-todo">unquantified</span></td></tr>
   <tr><td>6 — vLLM head-to-head benchmark</td><td>Same model, same hardware, measured against vLLM</td><td><span class="badge b-todo">later</span></td></tr>

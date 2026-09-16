@@ -22,6 +22,7 @@
   <a href="#waves">Wave planning</a>·
   <a href="#chunked">Chunked prefill</a>·
   <a href="#reservation">Reservation accounting</a>·
+  <a href="#telemetry">Telemetry rows</a>·
   <a href="arch-backend.html">→ Backend</a>·
   <a href="arch-cache.html">→ KV Cache</a>
 </div>
@@ -363,6 +364,36 @@ step and surfaced in <code>/scheduler/stats</code>:</p>
   <code>active_size</code> 0, and the research panel's <code>concurrency_observed</code> was being
   fed <code>pending_high_water</code>: queue depth, labelled as concurrency. It reported the
   opposite of what it claimed.
+</div>
+
+<h2 id="telemetry">Telemetry rows — one per request</h2>
+<p class="lead">Every aggregate above throws away exactly what attribution needs: a p95 cannot be
+re-sliced by the load it was measured under. So the scheduler — the one component that sees
+admission, batching and preemption — also emits <strong>one row per request</strong>
+(<code>telemetry.py</code>), keyed by <code>trace_id</code> / <code>session_id</code> /
+<code>turn_index</code>. Off unless <code>TELEMETRY_DIR</code> is set; then one SQLite file per
+run, <code>run-&lt;date&gt;-&lt;id&gt;.sqlite</code>, table <code>requests</code>.</p>
+<table>
+  <tr><th>Part</th><th>Fields</th><th>Taken</th></tr>
+  <tr><td>Conditions at arrival</td><td><code>pending_depth</code>, <code>active_size</code> / <code>max_batch_size</code>, <code>kv_free_blocks</code> + <code>kv_free_frac</code>, <code>concurrent_sessions</code>, <code>prompt_tokens</code>, <code>replica_age_s</code>, <code>config_id</code> (None until a policy registry exists)</td><td>inside <code>enqueue()</code>, under the pending lock, before any work — so a request 429'd at the door still records the load it saw</td></tr>
+  <tr><td>Spans</td><td><code>queue_wait_s</code>, <code>prefill_s</code>, <code>decode_s</code>, <code>decode_steps</code></td><td>from <code>enqueue_ts</code> / <code>admit_ts</code> / <code>first_token_ts</code> and the end time</td></tr>
+  <tr><td>Counters</td><td><code>cache_hit_tokens</code>, <code>preempted</code></td><td>after prefill lookup; at preemption</td></tr>
+  <tr><td>Outcome</td><td><code>ttft_s</code>, <code>tpot_s</code>, <code>total_s</code>, <code>tokens_out</code>, <code>terminal_state</code> &isin; ok · rejected_429 · expired · preempted · error</td><td>on the terminal path: <code>_resolve</code>, or <code>_reject</code> for queue-full, deadline, prefill failure, preemption and a crashed tick</td></tr>
+</table>
+<div class="callout">
+  <strong>Never on the critical path.</strong> The scheduler thread fills a dataclass and does one
+  <code>put_nowait</code> onto a bounded queue; a daemon thread batches rows into SQLite. A full
+  queue drops the row and counts it — <code>stats()["telemetry"]</code> reports
+  <code>enabled</code>, <code>rows_written</code>, <code>rows_dropped</code>, <code>run_id</code>.
+  <code>tests/test_telemetry.py</code> asserts the per-request cost stays under 200&micro;s mean;
+  treat a regression there as a correctness failure. Per-request detail lives in rows only: no
+  Prometheus label ever carries a <code>trace_id</code> or <code>session_id</code>.
+</div>
+<div class="callout note">
+  <strong>Wall clock, deliberately.</strong> Timing around a CUDA launch measures the launch, not
+  the work — but at these boundaries every token is already host-resident (the scheduler has read
+  it), so <code>perf_counter</code> spans are honest. Device-side kernel attribution via CUDA
+  events is deferred to a profiler trigger; see the knowledge base.
 </div>
 
 <h2 id="reservation">Reservation accounting (the load-bearing invariant)</h2>
