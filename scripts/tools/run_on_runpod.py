@@ -49,6 +49,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("instrument", help="repo-relative path, e.g. scripts/bench/x.py")
     ap.add_argument("--gpu", default="NVIDIA A100 80GB PCIe")
+    ap.add_argument("--name", default=PodSpec.name,
+                    help="pod name; CI uses ci-cuda-gate so its reaper never touches a human's pod")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would be rented and exit without spending")
     args = ap.parse_args()
@@ -62,7 +64,7 @@ def main() -> int:
         if k in os.environ:
             env[k] = os.environ[k]
 
-    spec = PodSpec(gpu_type_ids=[args.gpu])
+    spec = PodSpec(gpu_type_ids=[args.gpu], name=args.name)
     print(f"[provenance] sha={env['RESEARCH_ENGINE_SHA']} "
           f"dirty={env['RESEARCH_ENGINE_DIRTY']} group={env['RESEARCH_RUN_GROUP']}")
     if env["RESEARCH_ENGINE_DIRTY"] == "1":
@@ -81,6 +83,13 @@ def main() -> int:
         print(f"[error] {e}", file=sys.stderr)
         return 1
 
+    # An instrument that could not run reports why and exits non-zero; no panel is evidence then.
+    if "error" in payload:
+        print(f"[error] instrument: {payload['error']}", file=sys.stderr)
+        for line in payload.get("log_tail") or []:
+            print(f"    {line}", file=sys.stderr)
+        return 1
+
     from inference_server.research.schemas import Vitals
     runs = REPO / "runs"
     panels = payload.get("panels", [])
@@ -92,6 +101,10 @@ def main() -> int:
     # A smoke run returns no panels on purpose; print what it did return so the run is readable.
     if "smoke" in payload:
         print(json.dumps(payload["smoke"], indent=2, sort_keys=True))
+    # A gate returns a verdict, not panels; its verdict is this process's exit status.
+    if "gate" in payload:
+        print(json.dumps(payload["gate"], indent=2, sort_keys=True))
+        return 0 if payload["gate"].get("passed") else 1
     return 0
 
 

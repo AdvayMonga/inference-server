@@ -8,8 +8,11 @@ on:
     - cron: "0 7 * * 1"        # Mondays 07:00 UTC — the GPU lane, which nothing else exercises
   workflow_dispatch:
     inputs:
+      runpod_gpu:
+        description: "RunPod GPU type id for the CUDA gate (RUNPOD_API_KEY path)"
+        default: "NVIDIA GeForce RTX 4090"
       gpu_tests:
-        description: "Space-separated scripts/gpu_tests/*.py to run on a rented GPU"
+        description: "Space-separated scripts/gpu_tests/*_modal.py to run (MODAL_TOKEN_* fallback path only)"
         default: "scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py"
 
 permissions:
@@ -195,10 +198,13 @@ jobs:
           git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
           python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
 
-  # Triton compiles only on CUDA, so this rents a GPU through Modal. Manual, not per-PR.
+  # Triton compiles only on CUDA, so this rents a GPU: RunPod when RUNPOD_API_KEY is set,
+  # Modal when only MODAL_TOKEN_* are. Manual, not per-PR.
   gpu:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    # Bounds the money. A pod bills until terminated; run_instrument terminates in a finally,
+    # but a runner killed here never runs it — the reap step at the end does.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -206,27 +212,39 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - id: start
+        # The reaper only touches ci-cuda-gate pods started after this.
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Install the launcher only
-        # --no-deps: modal builds the real image remotely from pyproject.toml. Installing torch
-        # here would download 200 MB to launch a job that does not use it.
-        run: |
-          pip install modal
-          pip install -e . --no-deps
+        # --no-deps: the pod (or Modal) installs the real dependencies remotely. Installing
+        # torch here would download 200 MB to launch a job that does not use it.
+        run: pip install -e . --no-deps
 
       - name: Run the CUDA correctness gate
         env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          RUNPOD_GPU: ${{ inputs.runpod_gpu || 'NVIDIA GeForce RTX 4090' }}
           MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
           MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
           TESTS: ${{ inputs.gpu_tests || 'scripts/gpu_tests/test_paged_kernel_modal.py scripts/gpu_tests/test_paged_prefill_kernel_modal.py' }}
           EVENT: ${{ github.event_name }}
         run: |
+          if [ -n "${RUNPOD_API_KEY:-}" ]; then
+            # One instrument runs every check on one pod; the launcher exits with the verdict.
+            exec python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py \
+              --gpu "$RUNPOD_GPU" --name ci-cuda-gate
+          fi
           if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
-            echo "MODAL_TOKEN_ID / MODAL_TOKEN_SECRET are not set in this repo's secrets."
-            echo "Add them (Settings → Secrets → Actions), or run locally: venv/bin/modal run <script>"
+            echo "Neither RUNPOD_API_KEY nor MODAL_TOKEN_ID / MODAL_TOKEN_SECRET is set in this repo's secrets."
+            echo "Add one (Settings → Secrets → Actions), or run locally:"
+            echo "  RUNPOD_API_KEY=... python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py"
             # Asked for by hand: fail. On the weekly tick: say so and stop, do not cry wolf.
             [ "$EVENT" = "schedule" ] && exit 0
             exit 1
           fi
+          # Modal fallback: the original per-script path, kept until the credits question is settled.
+          pip install modal
           for t in $TESTS; do
             case "$t" in
               scripts/gpu_tests/*.py) ;;
@@ -237,6 +255,16 @@ jobs:
             modal run "$t"
             echo "::endgroup::"
           done
+
+      - name: Reap any pod this job left behind
+        # A job killed by timeout-minutes skips every finally on the runner. Pods named
+        # ci-cuda-gate (CI's name; humans keep the launcher's default) and started since the
+        # job began are terminated here; nothing else is touched. No RUNPOD_API_KEY: nothing
+        # was rented, the reaper says so and exits 0.
+        if: always()
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: python scripts/tools/runpod_reap.py --name ci-cuda-gate --since "${{ steps.start.outputs.at }}"
 
   # The one check branch protection requires: a skipped lane must not leave a PR blocked
   # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately

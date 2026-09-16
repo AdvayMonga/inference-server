@@ -31,7 +31,7 @@ smoke detector, not a door.
 |---|---|---|
 | `loop` | `research/`, `knowledge/`, `experiments/`, `tests/test_research_*` | the research package's own tests, plus a check that `DECISIONS.md` still matches `knowledge/`. Installs pytest and ruff and **nothing else**: if `research/` ever imports the engine, this lane goes red. That is the seam the whole project rests on. One sanctioned exception: `research/simulator.py` imports `inference_server.scheduling_policy`, stdlib-only pure functions the simulator must share with the scheduler or its conclusions drift. |
 | `engine` | everything else | ruff, the full fast suite, and `premerge_check.py`. CPU only — the model-heavy tests are deselected and no kernel runs. |
-| `gpu` | never automatically | `scripts/gpu_tests/` on a rented CUDA box via Modal. Weekly, or dispatch it by hand. |
+| `gpu` | never automatically | the CUDA correctness gate on a rented GPU — RunPod first, Modal as fallback. Weekly, or dispatch it by hand. |
 
 Anything the classifier does not recognise routes to `engine`: safe, not fast. Markdown,
 `docs/` and `runs/` gate nothing.
@@ -42,7 +42,37 @@ Triton compiles only on CUDA, so **no lane above can execute a kernel**. That is
 detail: `_paged_decode_kernel` once referenced a name that did not exist in its scope and was
 dead for three commits, on the decode path used above 128 concurrent sequences. Dispatch the
 GPU lane before merging anything under `src/inference_server/models/` — `ci-ok` prints a
-warning when a PR touches it. Needs `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` in repo secrets.
+warning when a PR touches it.
+
+The gate is `scripts/gpu_tests/cuda_gate.py`: every check in `scripts/gpu_tests/checks.py`
+(paged decode parity, sliding window, no-recompile, paged prefill parity) on one box, emitting
+a `{"gate": ...}` verdict and exiting by it. The `*_modal.py` scripts call the same checks.
+
+**Venue, by which secret is set** (Settings → Secrets → Actions):
+
+| secret | what happens |
+|---|---|
+| `RUNPOD_API_KEY` | `run_on_runpod.py` rents one pod (default `NVIDIA GeForce RTX 4090` — the gate needs no 80 GB), runs `cuda_gate.py`, terminates it, and exits with the verdict. Preferred. |
+| `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` only | the original path: `modal run` on each script in the `gpu_tests` input. Modal credits ran out on 2026-09-07, so this is a fallback. |
+| neither | on the weekly tick the lane says so and exits 0; dispatched by hand it fails. |
+
+A stuck run is bounded by the job's `timeout-minutes`, and because a killed runner never
+reaches `run_instrument`'s `finally`, a last step with `if: always()` runs
+`scripts/tools/runpod_reap.py --name ci-cuda-gate --since <job start>`: it terminates pods
+with that exact name started after the job began, and nothing else.
+
+**Pod-name convention:** CI owns `ci-cuda-gate` (`run_on_runpod.py --name ci-cuda-gate`).
+Humans keep the launcher's default, `inference-server-instrument`, so a pod you started by
+hand during the weekly window is never the reaper's. A row the API returns malformed is
+logged and skipped; a same-named pod whose start time is unreadable is terminated, because
+"cannot tell how old" must not mean "keeps billing".
+
+By hand, with a GPU type:
+
+```bash
+gh workflow run ci.yml --ref main -f runpod_gpu='NVIDIA GeForce RTX 4090'
+gh workflow run ci.yml --ref main -f gpu_tests='scripts/gpu_tests/test_splitk_kernel_modal.py'  # Modal path only
+```
 
 ## Evidence for an engine change
 

@@ -32,6 +32,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 API_BASE = "https://rest.runpod.io/v1"
@@ -77,6 +78,17 @@ def extract_payload(stdout: str) -> dict[str, Any]:
         raise VenueError(f"panel block is not valid JSON: {e}") from e
 
 
+def reports_its_own_failure(stdout: str) -> bool:
+    """True when stdout holds a parseable payload that is a verdict (`gate`) or an honest
+    failure report (`error`). A `panels`-only payload does not qualify: a measurement that then
+    crashed is not evidence, whatever it printed first."""
+    try:
+        payload = extract_payload(stdout)
+    except VenueError:
+        return False
+    return "gate" in payload or "error" in payload
+
+
 def emit_payload(payload: dict[str, Any]) -> str:
     """The instrument side of `extract_payload`. Kept here so the two cannot drift apart."""
     return f"\n{PANEL_BEGIN}\n{json.dumps(payload)}\n{PANEL_END}\n"
@@ -90,10 +102,20 @@ class Pod:
     host: str | None = None
     port: int | None = None
     cost_per_hr: float = 0.0
+    name: str = ""
+    last_started_at: str | None = None          # ISO-8601 from the API; the reaper's clock
 
     @property
     def reachable(self) -> bool:
         return bool(self.host and self.port)
+
+
+def _cost(v: Any) -> float:
+    """costPerHr as a float, 0.0 when the API sends nothing or something that is not a number."""
+    try:
+        return float(v or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _http(method: str, path: str, body: dict | None, key: str) -> tuple[int, dict]:
@@ -134,7 +156,7 @@ class RunPodClient:
 
     def create(self, spec: PodSpec) -> Pod:
         d = self._call("POST", "/pods", spec.as_body())
-        return Pod(id=d["id"], cost_per_hr=float(d.get("costPerHr") or 0.0))
+        return Pod(id=d["id"], cost_per_hr=_cost(d.get("costPerHr")))
 
     def get(self, pod_id: str) -> Pod:
         d = self._call("GET", f"/pods/{pod_id}")
@@ -149,10 +171,37 @@ class RunPodClient:
         if isinstance(d.get("portMappings"), dict):
             ssh_port = ssh_port or int(d["portMappings"].get("22") or 0) or None
         return Pod(id=d["id"], host=d.get("publicIp") or None, port=ssh_port,
-                   cost_per_hr=float(d.get("costPerHr") or 0.0))
+                   cost_per_hr=_cost(d.get("costPerHr")))
 
     def terminate(self, pod_id: str) -> None:
         self._call("DELETE", f"/pods/{pod_id}")
+
+    def list(self, log: Callable[[str], None] = print) -> list[Pod]:
+        """Every pod on the account. The reaper needs names and start times, nothing else.
+
+        One malformed row must not abort the sweep — the other leaked pods would keep billing —
+        so a row without an id is logged and skipped, never raised. An unexpected response
+        shape is logged loudly rather than read as "no pods".
+        """
+        d = self._call("GET", "/pods")
+        if isinstance(d, list):
+            rows = d
+        elif isinstance(d, dict) and isinstance(d.get("pods"), list):
+            rows = d["pods"]
+        else:
+            log(f"[venue] WARNING GET /pods returned an unexpected shape, treating as empty: "
+                f"{str(d)[:200]} — check runpod.io/console/pods by hand")
+            rows = []
+        pods: list[Pod] = []
+        for p in rows:
+            if not isinstance(p, dict) or not p.get("id"):
+                log(f"[venue] WARNING skipping malformed pod record: {str(p)[:200]}")
+                continue
+            started = p.get("lastStartedAt")
+            pods.append(Pod(id=str(p["id"]), name=str(p.get("name") or ""),
+                            last_started_at=str(started) if started else None,
+                            cost_per_hr=_cost(p.get("costPerHr"))))
+        return pods
 
 
 @dataclass
@@ -248,12 +297,17 @@ def run_remote(pod: Pod, script: str, env: dict[str, str], shell: Shell = _shell
 
     Provenance env is exported remotely for the same reason run_instrument.sh exports it locally:
     the box has no git repo, so a panel measured here cannot name its own sha.
+
+    A gate instrument reports, then exits by its verdict so a direct run is usable on its own,
+    and an instrument that cannot start (server never ready) reports `{"error": ...}` and exits
+    non-zero. Both are the instrument speaking, not a broken venue, so their stdout is returned.
+    A non-zero exit with only panels, or with no payload, is still a broken run.
     """
     exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in sorted(env.items()))
     remote = (f"cd /workspace/repo && export PYTHONPATH=/workspace/repo/src && "
               f"{exports} timeout {timeout_s} python {script}")
     r = shell(_ssh_base(pod) + [remote])
-    if r.returncode != 0:
+    if r.returncode != 0 and not reports_its_own_failure(r.stdout):
         raise VenueError(f"instrument exited {r.returncode} on pod {pod.id}: "
                          f"{(r.stderr or r.stdout).strip()[-600:]}")
     return r.stdout
@@ -291,3 +345,46 @@ def run_instrument(script: str, env: dict[str, str], *, repo: str,
         except Exception as e:                      # noqa: BLE001 — see docstring
             log(f"[venue] WARNING could not terminate {pod.id}: {e} — "
                 f"check runpod.io/console/pods, it is still billing")
+
+
+# ------------------------------------------------------------------ the reaper
+
+def _parse_ts(s: str) -> datetime | None:
+    """ISO-8601 to an aware datetime; None when the string is not one."""
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def reap_pods(client: RunPodClient, name: str = PodSpec.name, since: str | None = None,
+              log: Callable[[str], None] = print) -> list[str]:
+    """Terminate every pod carrying `name`; with `since` (ISO-8601), only those started at or
+    after it. Returns the ids terminated.
+
+    The CI cleanup step. A runner killed by its timeout never reaches `run_instrument`'s
+    finally, and that pod bills until someone finds it in a web console. The name is the proof
+    of ownership — only pods this repo named are candidates; `since` is the guard against a
+    concurrent local run that used the same name. A pod whose start time is missing or
+    unreadable is still ours by name, so it is terminated, loudly: "cannot tell how old" must
+    not mean "keeps billing".
+    """
+    cutoff = _parse_ts(since) if since else None
+    if since and cutoff is None:
+        raise VenueError(f"--since {since!r} is not an ISO-8601 timestamp")
+    reaped: list[str] = []
+    for pod in client.list(log=log):
+        if pod.name != name:
+            continue
+        started = _parse_ts(pod.last_started_at) if pod.last_started_at else None
+        if cutoff and started and started < cutoff:
+            log(f"[reap] leaving {pod.id}: started {pod.last_started_at}, before {since}")
+            continue
+        if cutoff and started is None:
+            log(f"[reap] {pod.id} has no readable start time ({pod.last_started_at!r}); "
+                f"it carries our name, so it goes")
+        client.terminate(pod.id)
+        log(f"[reap] terminated {pod.id} ({name}, ${pod.cost_per_hr:.2f}/hr)")
+        reaped.append(pod.id)
+    return reaped

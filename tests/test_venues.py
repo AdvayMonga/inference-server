@@ -19,6 +19,7 @@ from inference_server.research.venues import (
     VenueError,
     emit_payload,
     extract_payload,
+    reap_pods,
     run_instrument,
     wait_until_ready,
 )
@@ -28,10 +29,11 @@ class FakeAPI:
     """Records calls; hands back whatever shape the test needs."""
 
     def __init__(self, *, ready_after: float = 1, create_status: int = 201,
-                 terminate_status: int = 200):
+                 terminate_status: int = 200, pods: list[dict] | None = None):
         self.calls: list[tuple[str, str]] = []
         self.ready_after, self.create_status = ready_after, create_status
         self.terminate_status = terminate_status
+        self.pods = pods or []                      # what GET /pods lists
         self._gets = 0
 
     def __call__(self, method, path, body, key):
@@ -40,6 +42,8 @@ class FakeAPI:
             if self.create_status >= 400:
                 return self.create_status, {"error": "insufficient funds"}
             return 201, {"id": "pod-1", "costPerHr": 1.29}
+        if method == "GET" and path == "/pods":
+            return 200, self.pods
         if method == "GET":
             self._gets += 1
             if self._gets < self.ready_after:
@@ -52,6 +56,10 @@ class FakeAPI:
     @property
     def terminated(self) -> bool:
         return any(m == "DELETE" for m, _ in self.calls)
+
+    @property
+    def deleted_ids(self) -> list[str]:
+        return [p.rsplit("/", 1)[1] for m, p in self.calls if m == "DELETE"]
 
 
 def _client(api: FakeAPI) -> RunPodClient:
@@ -320,3 +328,165 @@ def test_venue_smoke_emits_a_payload_the_venue_can_parse():
     for mod, ver in smoke["imports"].items():
         assert not ver.startswith("MISSING"), f"{mod} is not importable: {ver}"
     assert "available" in smoke["gpu"]
+
+
+# ---------------------------------------------------------------- a gate's verdict
+
+def test_a_gate_that_reports_then_fails_still_brings_its_verdict_home():
+    """cuda_gate.py exits 1 when a check fails, so a direct run needs no parser. Through the
+    venue that exit must read as a verdict, not a broken run — and still terminate the pod."""
+    api = FakeAPI()
+
+    def verdict(cmd):
+        rc = 1 if "python " in " ".join(cmd) else 0
+        return subprocess.CompletedProcess(cmd, rc, emit_payload({"gate": {"passed": False}}), "")
+
+    out = run_instrument("scripts/gpu_tests/cuda_gate.py", {}, repo="/repo",
+                         client=_client(api), shell=verdict, log=lambda _: None)
+    assert out == {"gate": {"passed": False}}
+    assert api.terminated
+
+
+def _exit_nonzero_with(stdout: str):
+    def run(cmd):
+        rc = 1 if "python " in " ".join(cmd) else 0
+        return subprocess.CompletedProcess(cmd, rc, stdout, "Killed")
+    return run
+
+
+def test_an_instrument_that_reports_its_own_failure_is_heard():
+    """PR #26's replay instrument emits {"error", "log_tail"} when the server never comes up
+    and exits 1. That report must reach the launcher, not be flattened into a VenueError."""
+    api = FakeAPI()
+    report = {"error": "server not ready after 120s", "log_tail": ["loading weights", "OOM"]}
+    out = run_instrument("scripts/bench/replay.py", {}, repo="/repo", client=_client(api),
+                         shell=_exit_nonzero_with(emit_payload(report)), log=lambda _: None)
+    assert out == report
+    assert api.terminated
+
+
+def test_a_nonzero_exit_with_only_panels_is_still_a_broken_run():
+    """A measurement that printed panels and then crashed is not evidence."""
+    api = FakeAPI()
+    with pytest.raises(VenueError, match="exited 1"):
+        run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                       shell=_exit_nonzero_with(emit_payload({"panels": [{"x": 1}]})),
+                       log=lambda _: None)
+    assert api.terminated
+
+
+def test_a_nonzero_exit_with_no_payload_is_still_a_broken_run():
+    api = FakeAPI()
+    with pytest.raises(VenueError, match="exited 1"):
+        run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                       shell=_exit_nonzero_with("<<<RESEARCH_PANEL_JSON\n{"), log=lambda _: None)
+    assert api.terminated
+
+
+# ---------------------------------------------------------------- the reaper
+
+def _pods():
+    return [
+        {"id": "ours-new", "name": "inference-server-instrument",
+         "lastStartedAt": "2026-09-16T07:05:00.000Z", "costPerHr": 0.44},
+        {"id": "ours-old", "name": "inference-server-instrument",
+         "lastStartedAt": "2026-09-15T22:00:00.000Z", "costPerHr": 0.44},
+        {"id": "ours-undated", "name": "inference-server-instrument", "costPerHr": 0.44},
+        {"id": "theirs", "name": "someone-elses-training-run",
+         "lastStartedAt": "2026-09-16T07:06:00.000Z", "costPerHr": 2.99},
+    ]
+
+
+def test_list_reads_names_and_start_times():
+    api = FakeAPI(pods=_pods())
+    pods = _client(api).list()
+    assert [(p.id, p.name, p.last_started_at) for p in pods][:2] == [
+        ("ours-new", "inference-server-instrument", "2026-09-16T07:05:00.000Z"),
+        ("ours-old", "inference-server-instrument", "2026-09-15T22:00:00.000Z"),
+    ]
+    assert api.calls == [("GET", "/pods")]
+
+
+def test_reaper_never_terminates_a_pod_it_did_not_name():
+    """The whole safety property. A shared account can hold someone's real job."""
+    api = FakeAPI(pods=_pods())
+    reaped = reap_pods(_client(api), log=lambda _: None)
+    assert "theirs" not in reaped and "theirs" not in api.deleted_ids
+    assert set(reaped) == {"ours-new", "ours-old", "ours-undated"}
+
+
+def test_reaper_with_since_leaves_pods_started_before_the_job():
+    """`since` is the job start: a local run that began earlier with the default name survives.
+    An undated pod carries our name, so it goes."""
+    api = FakeAPI(pods=_pods())
+    logs: list[str] = []
+    reaped = reap_pods(_client(api), since="2026-09-16T07:00:00Z", log=logs.append)
+    assert set(reaped) == {"ours-new", "ours-undated"}
+    assert api.deleted_ids == reaped
+    assert any("leaving ours-old" in ln for ln in logs)
+
+
+def test_reaper_with_nothing_to_reap_calls_no_delete():
+    api = FakeAPI(pods=[_pods()[3]])
+    assert reap_pods(_client(api), log=lambda _: None) == []
+    assert not api.terminated
+
+
+def test_reaper_cli_without_a_key_rents_and_kills_nothing():
+    """CI runs the reaper with `if: always()`, secrets or not. No key means nothing was rented."""
+    import os
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[1]
+    env = {k: v for k, v in os.environ.items() if k != "RUNPOD_API_KEY"}
+    r = subprocess.run([sys.executable, str(repo / "scripts" / "tools" / "runpod_reap.py"),
+                        "--since", "2026-09-16T07:00:00Z"],
+                       capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr[-500:]
+    assert "nothing to reap" in r.stdout
+
+
+
+# ---------------------------------------------------------------- the API lying to the reaper
+
+def test_a_malformed_row_is_skipped_and_the_sweep_continues():
+    """One bad record must not abort the sweep: every other leaked pod would keep billing."""
+    rows = [{"name": "inference-server-instrument", "costPerHr": 0.44},        # no id
+            "not even a dict",
+            {"id": "ours-1", "name": "inference-server-instrument", "costPerHr": "n/a"},
+            {"id": "ours-2", "name": "inference-server-instrument", "lastStartedAt": 12345}]
+    api, logs = FakeAPI(pods=rows), []
+    pods = _client(api).list(log=logs.append)
+    assert [p.id for p in pods] == ["ours-1", "ours-2"]
+    assert pods[0].cost_per_hr == 0.0 and pods[1].last_started_at == "12345"
+    assert sum("malformed" in ln for ln in logs) == 2
+
+    reaped = reap_pods(_client(api), since="2026-09-16T07:00:00Z", log=logs.append)
+    assert set(reaped) == {"ours-1", "ours-2"}
+
+
+def test_an_unreadable_start_time_on_our_pod_means_terminate_not_crash():
+    rows = [{"id": "ours-bad-ts", "name": "inference-server-instrument",
+             "lastStartedAt": "yesterday-ish"},
+            {"id": "ours-old", "name": "inference-server-instrument",
+             "lastStartedAt": "2026-09-15T22:00:00Z"}]
+    api, logs = FakeAPI(pods=rows), []
+    reaped = reap_pods(_client(api), since="2026-09-16T07:00:00Z", log=logs.append)
+    assert reaped == ["ours-bad-ts"]
+    assert any("no readable start time" in ln for ln in logs)
+
+
+def test_an_unexpected_pods_response_shape_is_logged_not_read_as_empty():
+    api, logs = FakeAPI(pods={"data": [{"id": "hidden"}]}), []   # dict without a "pods" key
+    assert _client(api).list(log=logs.append) == []
+    assert any("unexpected shape" in ln for ln in logs)
+    api2 = FakeAPI(pods={"pods": [{"id": "wrapped", "name": "x"}]})
+    assert [p.id for p in api2 and _client(api2).list(log=logs.append)] == ["wrapped"]
+
+
+def test_a_bad_since_is_refused_before_anything_is_touched():
+    api = FakeAPI(pods=_pods())
+    with pytest.raises(VenueError, match="ISO-8601"):
+        reap_pods(_client(api), since="last monday", log=lambda _: None)
+    assert not api.terminated
