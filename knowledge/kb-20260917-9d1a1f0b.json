@@ -1,0 +1,36 @@
+{
+  "created_at": 1789686591.14007,
+  "evidence": [
+    {
+      "url": "https://docs.nvidia.com/deploy/nvidia-smi/index.html"
+    },
+    {
+      "url": "https://docs.nvidia.com/deploy/driver-persistence/index.html"
+    }
+  ],
+  "id": "kb-20260917-9d1a1f0b",
+  "mechanism": "The nvidia-smi verbs that pin clocks are driver-privileged, and a container tenant cannot acquire a capability the host owns \u2014 so the lock is unavailable by construction, not by configuration.",
+  "regime": null,
+  "status": "open",
+  "summary": "Locking a GPU's clocks requires root. `nvidia-smi -pm` (persistence mode), `-lgc` (lock graphics clock), `-ac` (application clocks) and `-pl` (power limit) are all privileged verbs, and none of them can be reached from inside an unprivileged container. That rules out every venue this project can currently rent: RunPod Pods, Vast's Docker offering, and Modal's gVisor sandbox are all containers, so a run on any of them measures a GPU that is free to boost and to thermally throttle while it is being measured.\n\nUntil now that was a SILENT limitation. It is now a RECORDED one. `research/determinism.py` attempts the lock on every run, and whatever happens:\n\n- `query_device()` reads the device read-only (`nvidia-smi --query-gpu=...`), which works unprivileged everywhere, so the *recording* half never fails. No GPU at all yields an all-None `DeviceState`, which is the correct record for a laptop run rather than an error.\n- `lock_clocks()` returns `(False, reason)` on refusal instead of raising. A refusal is an ordinary outcome, not a failed rental \u2014 every container venue lands there.\n- The launcher (`venues.run_instrument`) exports the result as `RESEARCH_DEVICE_STATE`, and `harness.build_validity` stamps `device_state` + `clocks_locked` into the panel's validity block.\n- `compare.py` refuses to compare a locked arm against an unlocked one: boost and thermal drift are an uncontrolled variable, and a delta measured across that boundary is not attributable to code.\n\n**Why this matters here specifically.** This repo measured a **2.31x TPOT spread on byte-identical A100-80GB config** ([[a100-80gb-draws-are-bimodal-2-31x-tpot-spread-at-identical-config]]). That is far larger than any optimization the project has merged, and it had two live candidate explanations:\n\n1. **Unpinned clocks** \u2014 boost and thermal behaviour drifting within and between runs.\n2. **Heterogeneous hosts behind one SKU label** \u2014 two \"A100 80GB PCIe\" rentals are two physically different machines.\n\nNeither was recorded, so neither could be ruled out. Both are recorded now: `clocks_locked` + the clock/throttle fields attack (1), and the provider's `host_id` (RunPod's `machineId`) attacks (2). A differing `host_id` is deliberately a **note, not a bar** \u2014 same-model-different-host is a legal comparison, and making it visible without refusing it is exactly what lets the two explanations be told apart after the fact. Note that the harness's own null variance was already calibrated separately ([[harness-null-variance-on-a100-e4b-calibration]]), so this spread is not the instrument.\n\n**The fix is a venue with real VM root**, not more code. Bare metal, or a provider that rents a VM rather than a container, would let the same `determinism.py` start succeeding with no diff \u2014 `PodSpec.lock_clocks` already defaults to True precisely so that day requires no change. Nothing short of that helps: this is the same privilege wall that ruled out CRIU/cuda-checkpoint snapshotting ([[privileged-gpu-snapshotting-criu-cuda-checkpoint-is-out-of-reach-for-a-rented-box]]) and it is another entry in the running cost of not owning the host ([[modal-dropped-as-a-venue-gvisor-alpha-snapshots-and-a-silent-gpu-substitution]], [[a-portable-compile-cache-is-keyed-to-the-exact-gpu-venue-consistency-is-a-correctness-issue]]).\n\n**What is NOT established:** that unpinned clocks actually caused the 2.31x. Nothing in this change measures that \u2014 it only makes the next occurrence attributable. Until a locked-clock run exists to compare against, every GPU panel this project holds carries `clocks_locked=false`, and no cross-panel comparison can separate machine draw from clock drift.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "determinism",
+    "venue",
+    "harness",
+    "validity",
+    "variance",
+    "benchmarking"
+  ],
+  "title": "Clock locking needs root, so container venues structurally cannot pin a GPU",
+  "transfer_checked": null,
+  "triggers": [
+    "A venue with real VM root (bare metal, or a VM rather than a container) \u2014 then lock_clocks starts succeeding with no code change and a locked-vs-locked comparison becomes possible",
+    "A pair of panels with clocks_locked=true whose TPOT still spreads >1.5x \u2014 that would move the 2.31x explanation onto host heterogeneity",
+    "A pair of panels sharing one host_id whose TPOT still spreads >1.5x \u2014 that would move it onto clock drift",
+    "nvidia-smi gaining an unprivileged read-your-own-lock verb, or a provider exposing clock pinning through its API"
+  ],
+  "updated_at": 1789686591.140073,
+  "validity_range": {}
+}

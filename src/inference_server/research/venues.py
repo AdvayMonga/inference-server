@@ -22,7 +22,7 @@ What a rented pod costs that a managed platform did not:
     the only way this module can lose real money.
   * A pod is a container, so nothing here can lock the GPU's clocks — the nvidia-smi verbs that
     do are root-only. `determinism.py` tries anyway, records the refusal, and reads the device
-    state either way; see `run_instrument` and knowledge/kb-20260916-e7ac1f60.
+    state either way; see `run_instrument` and knowledge/kb-20260917-9d1a1f0b.
 """
 
 from __future__ import annotations

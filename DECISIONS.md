@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-76 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(6), `triton`(4), `roofline`(4), `venue`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `benchmarking`(3), `literature`(3), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `validity`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `variance`(1), `harness`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1)
+77 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `validity`(3), `literature`(3), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `variance`(2), `harness`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `determinism`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,11 +12,40 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (10): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (41) — no `regime` field yet
+- **unassigned** (42) — no `regime` field yet
 
-## Open (23)
+## Open (24)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-17] Clock locking needs root, so container venues structurally cannot pin a GPU
+*tags: `determinism`, `venue`, `harness`, `validity`, `variance`, `benchmarking`* · `kb-20260917-9d1a1f0b`
+
+Locking a GPU's clocks requires root. `nvidia-smi -pm` (persistence mode), `-lgc` (lock graphics clock), `-ac` (application clocks) and `-pl` (power limit) are all privileged verbs, and none of them can be reached from inside an unprivileged container. That rules out every venue this project can currently rent: RunPod Pods, Vast's Docker offering, and Modal's gVisor sandbox are all containers, so a run on any of them measures a GPU that is free to boost and to thermally throttle while it is being measured.
+
+Until now that was a SILENT limitation. It is now a RECORDED one. `research/determinism.py` attempts the lock on every run, and whatever happens:
+
+- `query_device()` reads the device read-only (`nvidia-smi --query-gpu=...`), which works unprivileged everywhere, so the *recording* half never fails. No GPU at all yields an all-None `DeviceState`, which is the correct record for a laptop run rather than an error.
+- `lock_clocks()` returns `(False, reason)` on refusal instead of raising. A refusal is an ordinary outcome, not a failed rental — every container venue lands there.
+- The launcher (`venues.run_instrument`) exports the result as `RESEARCH_DEVICE_STATE`, and `harness.build_validity` stamps `device_state` + `clocks_locked` into the panel's validity block.
+- `compare.py` refuses to compare a locked arm against an unlocked one: boost and thermal drift are an uncontrolled variable, and a delta measured across that boundary is not attributable to code.
+
+**Why this matters here specifically.** This repo measured a **2.31x TPOT spread on byte-identical A100-80GB config** ([[a100-80gb-draws-are-bimodal-2-31x-tpot-spread-at-identical-config]]). That is far larger than any optimization the project has merged, and it had two live candidate explanations:
+
+1. **Unpinned clocks** — boost and thermal behaviour drifting within and between runs.
+2. **Heterogeneous hosts behind one SKU label** — two "A100 80GB PCIe" rentals are two physically different machines.
+
+Neither was recorded, so neither could be ruled out. Both are recorded now: `clocks_locked` + the clock/throttle fields attack (1), and the provider's `host_id` (RunPod's `machineId`) attacks (2). A differing `host_id` is deliberately a **note, not a bar** — same-model-different-host is a legal comparison, and making it visible without refusing it is exactly what lets the two explanations be told apart after the fact. Note that the harness's own null variance was already calibrated separately ([[harness-null-variance-on-a100-e4b-calibration]]), so this spread is not the instrument.
+
+**The fix is a venue with real VM root**, not more code. Bare metal, or a provider that rents a VM rather than a container, would let the same `determinism.py` start succeeding with no diff — `PodSpec.lock_clocks` already defaults to True precisely so that day requires no change. Nothing short of that helps: this is the same privilege wall that ruled out CRIU/cuda-checkpoint snapshotting ([[privileged-gpu-snapshotting-criu-cuda-checkpoint-is-out-of-reach-for-a-rented-box]]) and it is another entry in the running cost of not owning the host ([[modal-dropped-as-a-venue-gvisor-alpha-snapshots-and-a-silent-gpu-substitution]], [[a-portable-compile-cache-is-keyed-to-the-exact-gpu-venue-consistency-is-a-correctness-issue]]).
+
+**What is NOT established:** that unpinned clocks actually caused the 2.31x. Nothing in this change measures that — it only makes the next occurrence attributable. Until a locked-clock run exists to compare against, every GPU panel this project holds carries `clocks_locked=false`, and no cross-panel comparison can separate machine draw from clock drift.
+
+**Revisit when:** A venue with real VM root (bare metal, or a VM rather than a container) — then lock_clocks starts succeeding with no code change and a locked-vs-locked comparison becomes possible; A pair of panels with clocks_locked=true whose TPOT still spreads >1.5x — that would move the 2.31x explanation onto host heterogeneity; A pair of panels sharing one host_id whose TPOT still spreads >1.5x — that would move it onto clock drift; nvidia-smi gaining an unprivileged read-your-own-lock verb, or a provider exposing clock pinning through its API
+
+**Evidence:** https://docs.nvidia.com/deploy/nvidia-smi/index.html, https://docs.nvidia.com/deploy/driver-persistence/index.html
+
+**Mechanism:** The nvidia-smi verbs that pin clocks are driver-privileged, and a container tenant cannot acquire a capability the host owns — so the lock is unavailable by construction, not by configuration.
 
 ### [2026-09-06] Throughput plateaus at ~23 req/s, but batch occupancy was never measured — cause unresolved
 *tags: `scheduler`, `throughput`, `observability`, `batching`, `measurement-gap`* · `kb-20260906-6000f7f5`
