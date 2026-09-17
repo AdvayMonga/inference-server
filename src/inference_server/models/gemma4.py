@@ -16,9 +16,29 @@ Architecture quirks to remember:
 
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+@contextlib.contextmanager
+def _skip_param_init():
+    """Allocate parameters without randomly filling them — from_hf overwrites every one.
+
+    Kaiming-uniform over 4.6B params is ~24.7s of a ~37s E2B load and is pure waste when the
+    next step is a full copy from the checkpoint. Buffers are untouched, so the RoPE tables,
+    embedding normalizer and per-layer scalars still compute exactly as before.
+    """
+    saved = {c: c.reset_parameters for c in (nn.Linear, nn.Embedding)}
+    for c in saved:
+        c.reset_parameters = lambda self: None
+    try:
+        yield
+    finally:
+        for c, fn in saved.items():
+            c.reset_parameters = fn
 
 
 class KVCache:
@@ -628,23 +648,24 @@ class GemmaForCausalLM(nn.Module):
     def from_hf(cls, model_name: str = "google/gemma-4-E2B-it", dtype: torch.dtype = torch.bfloat16):
         from transformers import AutoConfig, AutoModelForCausalLM
         cfg = AutoConfig.from_pretrained(model_name).text_config
-        model = GemmaModel(
+        with _skip_param_init():
+            model = GemmaModel(
             vocab_size=cfg.vocab_size,
-            hidden_size=cfg.hidden_size,
-            num_layers=cfg.num_hidden_layers,
-            intermediate_size=cfg.intermediate_size,
-            num_q_heads=cfg.num_attention_heads,
-            num_kv_heads=cfg.num_key_value_heads,
-            head_dim=cfg.head_dim,
-            global_head_dim=cfg.global_head_dim,
-            hidden_per_layer=cfg.hidden_size_per_layer_input,
-            layer_types=list(cfg.layer_types),
-            sliding_window=cfg.sliding_window,
-            num_kv_shared_layers=cfg.num_kv_shared_layers,
-            use_double_wide_mlp=getattr(cfg, "use_double_wide_mlp", True),
-            eps=cfg.rms_norm_eps,
-            dtype=dtype,
-        )
+                hidden_size=cfg.hidden_size,
+                num_layers=cfg.num_hidden_layers,
+                intermediate_size=cfg.intermediate_size,
+                num_q_heads=cfg.num_attention_heads,
+                num_kv_heads=cfg.num_key_value_heads,
+                head_dim=cfg.head_dim,
+                global_head_dim=cfg.global_head_dim,
+                hidden_per_layer=cfg.hidden_size_per_layer_input,
+                layer_types=list(cfg.layer_types),
+                sliding_window=cfg.sliding_window,
+                num_kv_shared_layers=cfg.num_kv_shared_layers,
+                use_double_wide_mlp=getattr(cfg, "use_double_wide_mlp", True),
+                eps=cfg.rms_norm_eps,
+                dtype=dtype,
+            )
         sd = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).state_dict()
         model.load_hf_weights(sd)
         return cls(model, final_logit_softcapping=cfg.final_logit_softcapping)
