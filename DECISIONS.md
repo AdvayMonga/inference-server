@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-77 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `numerics`(10), `loop`(10), `backpressure`(8), `cold-start`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `validity`(3), `literature`(3), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `variance`(2), `harness`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `gates`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `determinism`(1)
+78 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `loop`(11), `numerics`(10), `backpressure`(8), `cold-start`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `harness`(3), `validity`(3), `literature`(3), `gates`(2), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `variance`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `determinism`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,7 +12,7 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (10): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (42) — no `regime` field yet
+- **unassigned** (43) — no `regime` field yet
 
 ## Open (24)
 
@@ -471,9 +471,60 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (32)
+## Resolved (33)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-17] The staleness rule was shaped for same-sha experiments, so every two-commit A/B was forced onto a blanket escape hatch
+*tags: `loop`, `harness`, `gates`* · `kb-20260917-93eb1bac`
+
+`session.check_still_measurable` refuses to judge panels whose engine files have moved since
+they were measured — the rebase-after-measuring rule, enforced instead of remembered. It was
+written against one experiment shape: two arms at the SAME sha differing only by a config knob.
+Against that shape, "no engine file changed between this arm's sha and HEAD" is exactly right.
+
+There is a second legal shape, and the rule could never pass it. A **two-commit A/B** measures the
+baseline arm at the parent commit and the treatment arm at the child — that is how you A/B a code
+change rather than a knob. The drift between the *baseline* arm's sha and HEAD is then the
+treatment commit itself: the change under test, not staleness. The per-arm rule read it as drift
+and refused, every time.
+
+The only way through was `judge_group(check_drift=False)` (`loop judge --no-drift-check`), which
+is blanket: it disables the check for the **treatment** arm too, and that is the arm where
+staleness would actually matter — the treatment arm is the one whose sha the merge gate later
+vouches for. So the shape that most needed the check was the one shape that structurally could
+not have it. `exp-20260917-e1acb732` (branch `perf/skip-param-init-on-load`, a -67.8% cold-start
+win, baseline d562396 vs treatment 5dd1762) was judged exactly that way, with the requester
+hand-verifying the treatment arm against HEAD afterwards. Hand-verification is the smell: the
+code should be doing it.
+
+**The fix: drift is measured from the experiment's tip, not from each arm's own sha.** The tip is
+the arm sha that every arm sha is an ancestor of — the commit the experiment ends at. One
+sentence, and it covers both shapes:
+
+- same-sha experiment: tip *is* that sha, so the rule is byte-for-byte what it was;
+- two-commit A/B: tip is the treatment commit, so the treatment arm is still checked strictly
+  against HEAD and the baseline arm's one-commit lag is no longer read as drift;
+- anything landed after **every** arm fails **every** arm, including the arm measured at the tip.
+
+Arms measured on divergent branches have no tip, and each is then checked against its own sha as
+before — a conservative fallback, not a silent pass.
+
+**The formulation that was rejected**, and why: "per arm, exclude the files that also changed
+between this arm's sha and a later arm's sha". It is closer to a literal reading of "per-arm" but
+it is wrong in a real case — if a post-experiment commit touches the *same* engine file the
+treatment commit touched, the exclusion swallows it and the baseline arm passes on stale panels.
+Measuring from the tip cannot have that hole, because the tip is downstream of the change under
+test.
+
+`check_drift` stays as a documented escape hatch, but it should now almost never be needed: the
+shape that forced everyone onto it is handled by the rule itself.
+
+**Revisit when:** An experiment with more than two arms, or arms measured on branches with no common tip — the fallback then checks each arm against its own sha and the two-commit relief does not apply; A judgement that still needs --no-drift-check: that is now evidence of a third experiment shape the rule does not describe, and should be written up rather than worked around
+
+**Evidence:** exp-20260917-e1acb732, src/inference_server/research/session.py::check_still_measurable
+
+**Mechanism:** A rule derived from one experiment shape treats the other shape's defining feature — the baseline arm deliberately sitting one commit behind — as the failure it was written to catch.
 
 ### [2026-09-16] Modal dropped as a venue: gVisor, alpha snapshots, and a silent GPU substitution
 *tags: `modal`, `venue`, `cold-start`, `snapshot`, `benchmarking`, `validity`* · `kb-20260916-57d2bb4a`

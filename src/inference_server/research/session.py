@@ -129,21 +129,57 @@ def _behavioural(files: list[str]) -> list[str]:
             and not any(f.startswith(x) for x in EXEMPT_PREFIXES)]
 
 
+def _is_ancestor(a: str, b: str) -> bool | None:
+    """True/False when git can relate the two commits; None when it cannot answer at all.
+
+    Tri-state on purpose. `--is-ancestor` exits 1 for "no" and 128 for "I cannot resolve that sha"
+    (a shallow clone, a truncated panel), and collapsing those to one False would make a guard
+    depend on an unanswered question reading as a negative.
+    """
+    rc = subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
+                        cwd=REPO_ROOT, capture_output=True).returncode
+    return rc == 0 if rc in (0, 1) else None
+
+
+def _experiment_tip(shas: list[str]) -> str:
+    """The arm sha that every arm sha is an ancestor of — the commit the experiment ends at.
+
+    Empty when the arms do not lie on one chain (measured on divergent branches) or when git
+    cannot resolve one of the shas, which leaves every arm checked against its own sha as before —
+    the stricter rule, so an unresolvable sha loses the two-commit relief rather than the guard.
+    """
+    for c in shas:
+        answers = [_is_ancestor(o, c) for o in shas]
+        if None in answers:
+            return ""
+        if all(answers):
+            return c
+    return ""
+
+
 def check_still_measurable(arms: dict[str, list[Vitals]], ref: str = "HEAD") -> None:
     """Refuse to judge panels that no longer describe the working tree.
 
+    An arm is stale iff an engine file differs between `ref` and the experiment's tip — the arm
+    sha every arm sha is an ancestor of — so a two-commit A/B's own treatment commit is not read
+    as drift, while anything landed after every arm still fails every arm. Same-sha experiments,
+    where the tip is that one sha, judge exactly as they did before.
+
     The rebase-after-measuring rule, enforced instead of remembered: an experiment vouches for the
-    sha it measured, and once engine files move, the panels describe code that is gone. Cost of
-    learning this the other way: one A100 run.
+    shas it measured, and once engine files move past all of them, the panels describe code that
+    is gone. Cost of learning this the other way: one A100 run.
     """
+    shas = [p[-1].validity.engine_sha for p in arms.values() if p[-1].validity.engine_sha]
+    tip = _experiment_tip(shas)
     for name, panels in arms.items():
         sha = panels[-1].validity.engine_sha
         if not sha:
             continue
-        drifted = _behavioural(_changed_files(sha, ref))
+        drifted = _behavioural(_changed_files(tip or sha, ref))
         if drifted:
+            measured = sha[:12] if tip in ("", sha) else f"{sha[:12]} (tip {tip[:12]})"
             raise NotMeasurable(
-                f"arm {name!r} measured {sha[:12]}, but engine files changed since:\n  "
+                f"arm {name!r} measured {measured}, but engine files changed since:\n  "
                 + "\n  ".join(drifted)
                 + "\n  Re-measure the current commit — do not rebase after measuring.")
         if any(p.validity.dirty for p in panels):
@@ -169,6 +205,11 @@ def judge_group(
 
     Returns the judgement and the record. The record is saved unless `record=False` — a rejected
     hypothesis is written with the same weight as a confirmed one, which is the whole point.
+
+    `check_drift=False` is the escape hatch (`loop judge --no-drift-check`) and should now almost
+    never be needed: the staleness rule measures drift from the experiment's tip, so a two-commit
+    A/B no longer trips it. Turning it off disables the check for the treatment arm too, which is
+    the arm where staleness actually matters.
     """
     hypothesis.validate()
     arms = arms_for(run_group, runs_dir)
