@@ -26,7 +26,7 @@ Locking a GPU's clocks requires root. `nvidia-smi -pm` (persistence mode), `-lgc
 Until now that was a SILENT limitation. It is now a RECORDED one. `research/determinism.py` attempts the lock on every run, and whatever happens:
 
 - `query_device()` reads the device read-only (`nvidia-smi --query-gpu=...`), which works unprivileged everywhere, so the *recording* half never fails. No GPU at all yields an all-None `DeviceState`, which is the correct record for a laptop run rather than an error.
-- `lock_clocks()` returns `(False, reason)` on refusal instead of raising. A refusal is an ordinary outcome, not a failed rental — every container venue lands there.
+- `lock_clocks()` returns `(False, reason)` on refusal instead of raising. A refusal is an ordinary outcome, not a failed rental — every container venue lands there. It also **reads the clock back** after `-lgc` and refuses unless it moved: `-lgc` can exit 0 without pinning anything, and a wrong-but-plausible `clocks_locked=true` would be worse than no lock at all. `lock_attempted` is recorded separately so "never tried" is distinguishable from "tried and refused".
 - The launcher (`venues.run_instrument`) exports the result as `RESEARCH_DEVICE_STATE`, and `harness.build_validity` stamps `device_state` + `clocks_locked` into the panel's validity block.
 - `compare.py` refuses to compare a locked arm against an unlocked one: boost and thermal drift are an uncontrolled variable, and a delta measured across that boundary is not attributable to code.
 
