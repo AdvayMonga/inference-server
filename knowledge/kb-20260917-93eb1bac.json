@@ -1,0 +1,31 @@
+{
+  "created_at": 1789688436.507967,
+  "evidence": [
+    {
+      "experiment_id": "exp-20260917-e1acb732"
+    },
+    {
+      "url": "src/inference_server/research/session.py::check_still_measurable"
+    }
+  ],
+  "id": "kb-20260917-93eb1bac",
+  "mechanism": "A rule derived from one experiment shape treats the other shape's defining feature \u2014 the baseline arm deliberately sitting one commit behind \u2014 as the failure it was written to catch.",
+  "regime": null,
+  "status": "resolved",
+  "summary": "`session.check_still_measurable` refuses to judge panels whose engine files have moved since\nthey were measured \u2014 the rebase-after-measuring rule, enforced instead of remembered. It was\nwritten against one experiment shape: two arms at the SAME sha differing only by a config knob.\nAgainst that shape, \"no engine file changed between this arm's sha and HEAD\" is exactly right.\n\nThere is a second legal shape, and the rule could never pass it. A **two-commit A/B** measures the\nbaseline arm at the parent commit and the treatment arm at the child \u2014 that is how you A/B a code\nchange rather than a knob. The drift between the *baseline* arm's sha and HEAD is then the\ntreatment commit itself: the change under test, not staleness. The per-arm rule read it as drift\nand refused, every time.\n\nThe only way through was `judge_group(check_drift=False)` (`loop judge --no-drift-check`), which\nis blanket: it disables the check for the **treatment** arm too, and that is the arm where\nstaleness would actually matter \u2014 the treatment arm is the one whose sha the merge gate later\nvouches for. So the shape that most needed the check was the one shape that structurally could\nnot have it. `exp-20260917-e1acb732` (branch `perf/skip-param-init-on-load`, a -67.8% cold-start\nwin, baseline d562396 vs treatment 5dd1762) was judged exactly that way, with the requester\nhand-verifying the treatment arm against HEAD afterwards. Hand-verification is the smell: the\ncode should be doing it.\n\n**The fix: drift is measured from the experiment's tip, not from each arm's own sha.** The tip is\nthe arm sha that every arm sha is an ancestor of \u2014 the commit the experiment ends at. One\nsentence, and it covers both shapes:\n\n- same-sha experiment: tip *is* that sha, so the rule is byte-for-byte what it was;\n- two-commit A/B: tip is the treatment commit, so the treatment arm is still checked strictly\n  against HEAD and the baseline arm's one-commit lag is no longer read as drift;\n- anything landed after **every** arm fails **every** arm, including the arm measured at the tip.\n\nArms measured on divergent branches have no tip, and each is then checked against its own sha as\nbefore \u2014 a conservative fallback, not a silent pass.\n\n**The formulation that was rejected**, and why: \"per arm, exclude the files that also changed\nbetween this arm's sha and a later arm's sha\". It is closer to a literal reading of \"per-arm\" but\nit is wrong in a real case \u2014 if a post-experiment commit touches the *same* engine file the\ntreatment commit touched, the exclusion swallows it and the baseline arm passes on stale panels.\nMeasuring from the tip cannot have that hole, because the tip is downstream of the change under\ntest.\n\n`check_drift` stays as a documented escape hatch, but it should now almost never be needed: the\nshape that forced everyone onto it is handled by the rule itself.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "loop",
+    "harness",
+    "gates"
+  ],
+  "title": "The staleness rule was shaped for same-sha experiments, so every two-commit A/B was forced onto a blanket escape hatch",
+  "transfer_checked": null,
+  "triggers": [
+    "An experiment with more than two arms, or arms measured on branches with no common tip \u2014 the fallback then checks each arm against its own sha and the two-commit relief does not apply",
+    "A judgement that still needs --no-drift-check: that is now evidence of a third experiment shape the rule does not describe, and should be written up rather than worked around"
+  ],
+  "updated_at": 1789688436.507971,
+  "validity_range": {}
+}

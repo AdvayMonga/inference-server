@@ -190,6 +190,17 @@ anything if: an arm is untagged, there are not exactly 2 arms, an arm has <3 run
 blocks rather than alternating, a panel came from a dirty tree, or **engine files changed since the
 panels were measured**. That last one is the rebase rule below, enforced instead of remembered.
 
+Staleness is measured from the experiment's **tip** — the arm sha every arm sha is an ancestor of —
+not separately from each arm's own sha. The two shapes an experiment comes in need that: two arms
+at the SAME sha differing by a config knob (tip is that sha, so the rule is what it always was),
+and a two-commit A/B where baseline is measured at the parent and treatment at the child (tip is
+the child, so the commit *under test* is not read as its own drift). The per-arm version could
+never pass the second shape, and the only way through was `check_drift=False` — which also
+disabled the check for the treatment arm, the one arm where staleness actually matters.
+`exp-20260917-e1acb732` was judged that way, with the treatment arm verified by hand instead.
+Anything landed after **every** arm still fails **every** arm, so the escape hatch should now
+almost never be needed.
+
 The one thing that stays a script is `scripts/premerge_check.py`: it runs at merge time, where
 there is no agent in the loop. Instruments stay scripts too — they run in another process, on
 another machine.
@@ -287,8 +298,9 @@ claim is auditable in git forever, and it cannot drift onto later commits.
 
 ## Workflow rule: never rebase after measuring
 
-An experiment vouches for one commit sha. Rebasing the branch after the A/B run moves
+An experiment vouches for the commits it measured. Rebasing the branch after the A/B run moves
 every engine file to a new sha, and `premerge_check.py` correctly refuses the merge —
 the measurement no longer describes the code being merged. Land any main-side changes
 you need *first*, then measure the final commit. Cost of learning this: one extra A100
-run (iter9 → iter10, ~$0.55).
+run (iter9 → iter10, ~$0.55). Measuring the baseline arm at the parent commit is not a rebase and
+is not refused: it is one of the two legal experiment shapes above.

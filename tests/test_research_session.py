@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import pytest
 
-from inference_server.research.schemas import Validity, Vitals
+from inference_server.research.schemas import Hypothesis, Validity, Vitals
 from inference_server.research.session import (
     NotMeasurable,
     _alternating,
@@ -141,6 +142,123 @@ def test_doc_and_test_churn_since_measurement_is_fine(tmp_path, monkeypatch):
                         lambda a, b: ["docs/architecture.html", "tests/test_x.py",
                                       "src/inference_server/research/gates.py"])
     session.check_still_measurable(arms_for("g1", runs_dir=tmp_path))
+
+
+# ------------------------------------------- the staleness rule, against a real git history
+#
+# These build an actual repo because the rule is now about ancestry, not just a file list: the
+# baseline arm of a two-commit A/B sits one commit behind the treatment arm on purpose.
+
+
+def _git(repo, *args):
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def _commit(repo, path, text):
+    f = repo / path
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", f"touch {path}")
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+                          text=True, check=True).stdout.strip()
+
+
+def _history(tmp_path):
+    """A repo whose commits are, in order: an engine baseline, the change under test, and two
+    follow-ons (one engine, one doc) the tests check out as HEAD."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t"); _git(repo, "config", "user.name", "t")
+    base = _commit(repo, "src/inference_server/backend.py", "v1\n")
+    treat = _commit(repo, "src/inference_server/backend.py", "v2\n")
+    later = _commit(repo, "src/inference_server/scheduler.py", "v1\n")
+    _git(repo, "checkout", "-q", treat)
+    docs = _commit(repo, "docs/architecture.html", "<p>x</p>\n")
+    _git(repo, "checkout", "-q", treat)
+    return repo, base, treat, later, docs
+
+
+def _ab(runs_dir, base_sha, treat_sha):
+    """Six alternating panels, baseline measured at one sha and treatment at another."""
+    runs_dir.mkdir(exist_ok=True)
+    for i, arm in enumerate(["baseline", "treatment"] * 3):
+        _panel(runs_dir, arm, started_at=1000.0 + i,
+               sha=base_sha if arm == "baseline" else treat_sha)
+    return arms_for("g1", runs_dir=runs_dir)
+
+
+def test_same_sha_arms_still_fail_when_an_engine_file_moved(tmp_path, monkeypatch):
+    """The case the rule was written for, unchanged: one sha, one engine commit after it."""
+    from inference_server.research import session
+
+    repo, base, treat, later, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    arms = _ab(tmp_path / "runs", base, base)
+    with pytest.raises(NotMeasurable, match="do not rebase after measuring"):
+        session.check_still_measurable(arms, ref=treat)
+
+
+def test_same_sha_arms_pass_when_nothing_engine_moved(tmp_path, monkeypatch):
+    from inference_server.research import session
+
+    repo, base, treat, _, docs = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    session.check_still_measurable(_ab(tmp_path / "runs", treat, treat), ref=docs)
+
+
+def test_two_commit_ab_needs_no_escape_hatch(tmp_path, monkeypatch):
+    """baseline@parent, treatment@child, HEAD==child. The drift between the baseline arm's sha
+    and HEAD is the change under test; only a blanket --no-drift-check used to get through."""
+    from inference_server.research import session
+
+    repo, base, treat, _, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    session.check_still_measurable(_ab(tmp_path / "runs", base, treat), ref=treat)
+
+
+def test_a_commit_after_a_two_commit_ab_fails_both_arms(tmp_path, monkeypatch):
+    """Drift is what landed after EVERY arm, so it invalidates every arm — including the one
+    measured at the tip."""
+    from inference_server.research import session
+
+    repo, base, treat, later, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    arms = _ab(tmp_path / "runs", base, treat)
+    for first in ("baseline", "treatment"):
+        ordered = {first: arms[first], **arms}
+        with pytest.raises(NotMeasurable, match=f"arm '{first}' measured"):
+            session.check_still_measurable(ordered, ref=later)
+
+
+def test_non_engine_commit_after_a_two_commit_ab_fails_neither_arm(tmp_path, monkeypatch):
+    from inference_server.research import session
+
+    repo, base, treat, _, docs = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    session.check_still_measurable(_ab(tmp_path / "runs", base, treat), ref=docs)
+
+
+def test_escape_hatch_still_bypasses_the_check(tmp_path, monkeypatch):
+    """check_drift=False remains, for the case the rule cannot know about."""
+    from inference_server.research import session
+
+    called = []
+    monkeypatch.setattr(session, "check_still_measurable",
+                        lambda *a, **k: called.append(a))
+    monkeypatch.setattr(session, "judge", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))
+    _group(tmp_path, ["baseline", "treatment", "baseline",
+                      "treatment", "baseline", "treatment"])
+    hyp = Hypothesis(statement="s", gap_id="g1", predicted_metric="ttft_p95",
+                     predicted_direction="decrease", predicted_magnitude=">10%",
+                     falsification_tier=2, falsification_test="cpu repro")
+    for check_drift, expected in ((True, 1), (False, 0)):
+        called.clear()
+        with pytest.raises(RuntimeError):
+            session.judge_group(hyp, "g1", check_drift=check_drift, record=False,
+                                runs_dir=tmp_path)
+        assert len(called) == expected
 
 
 def test_drift_prefixes_match_the_merge_gate():
