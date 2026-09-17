@@ -5,7 +5,10 @@ nothing about these; the research loop (`src/inference_server/research/`) knows 
 contract they emit. Instruments write `runs/<id>.json` via `research.harness` alongside their
 human-readable tables.
 
-GPU work goes to a rented pod through `tools/run_on_runpod.py` (`research/venues.py`). The
+GPU work goes to a rented pod through `tools/run_on_runpod.py` (`research/venues.py`), which
+tries to pin the SM clock, reads the device either way, and exports the result as
+`RESEARCH_DEVICE_STATE` so the instrument's panel records which machine it ran on and whether
+its clocks were locked — a pod is a container, so the lock is always refused and recorded. The
 `*_modal.py` instruments that produced the 2026 A100/A10G evidence were archived on 2026-09-16
 under `archive/modal/` — kept as the provenance 13 `knowledge/` entries cite, not expected to
 run. Everything else here runs locally.
