@@ -34,6 +34,7 @@ run. Everything else here runs locally.
 | `load_test.py` / `plot_load_test.py` | HTTP concurrency sweep against a running server, and its plots |
 | `eviction_benchmark.py` / `fairness_benchmark.py` / `kv_pressure_benchmark.py` | CPU-runnable policy checks: LRU vs sink vs H2O, FCFS vs fair, backpressure |
 | `baseline_benchmark.py` | the original single-request baseline (kept for the record) |
+| `coldstart_load.py` | one cold `GemmaForCausalLM.from_hf` per PROCESS, as one panel (`wall_s` = load time, stage split in `harness_config.stage_ms`). Replicates are repeated processes; `RESEARCH_ARM` tags the arm. Tier 2, runs on any box |
 
 The eleven A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
 `bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py`, `bench_chunked_prefill_modal.py`,

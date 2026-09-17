@@ -1,0 +1,98 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260917-d6d05507",
+        "run-20260917-6607bcf2",
+        "run-20260917-e2a5f2ff",
+        "run-20260917-d4fbc1fe"
+      ],
+      "sha": "d562396"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260917-6c65d80e",
+        "run-20260917-deeea8ea",
+        "run-20260917-8e58e799",
+        "run-20260917-c4e64bc5"
+      ],
+      "sha": "5dd1762"
+    }
+  ],
+  "branch": "perf/skip-param-init-on-load",
+  "cost_usd": 0.0,
+  "delta": {
+    "wall_s": {
+      "after": 12.09,
+      "before": 37.534666666666666,
+      "delta": -25.444666666666667,
+      "detail": "|t|=45.57 across 3v3 runs, moved as predicted",
+      "metric": "wall_s",
+      "pct": -67.78977656211147,
+      "verdict": "significant"
+    }
+  },
+  "engine_sha_base": "d562396",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "525 passed, 34 skipped, 2 warnings in 16.35s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "sanity": {
+      "evidence": {
+        "declared": []
+      },
+      "name": "sanity",
+      "passed": true,
+      "reason": "no sanity metrics declared (consider adding some)"
+    },
+    "significance": {
+      "evidence": {
+        "after": 12.09,
+        "before": 37.534666666666666,
+        "delta": -25.444666666666667,
+        "detail": "|t|=45.57 across 3v3 runs, moved as predicted",
+        "metric": "wall_s",
+        "pct": -67.78977656211147,
+        "verdict": "significant"
+      },
+      "name": "significance",
+      "passed": true,
+      "reason": "-67.8% on wall_s (|t|=45.57 across 3v3 runs, moved as predicted)"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "coldstart_load",
+        "regime": "synthetic"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-20260917-e92d2fb3",
+  "id": "exp-20260917-e1acb732",
+  "no_behaviour_change": "",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789687592.1733088,
+  "verdict": "confirmed"
+}
