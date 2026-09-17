@@ -180,6 +180,14 @@ def _history(tmp_path):
     return repo, base, treat, later, docs
 
 
+def _sibling(repo, of, path, text):
+    """A commit on a branch that forks from `of`, so it and `of`'s other children have no tip."""
+    _git(repo, "checkout", "-q", of)
+    sha = _commit(repo, path, text)
+    _git(repo, "checkout", "-q", of)
+    return sha
+
+
 def _ab(runs_dir, base_sha, treat_sha):
     """Six alternating panels, baseline measured at one sha and treatment at another."""
     runs_dir.mkdir(exist_ok=True)
@@ -259,6 +267,45 @@ def test_escape_hatch_still_bypasses_the_check(tmp_path, monkeypatch):
             session.judge_group(hyp, "g1", check_drift=check_drift, record=False,
                                 runs_dir=tmp_path)
         assert len(called) == expected
+
+
+def test_arms_on_divergent_branches_fall_back_to_their_own_shas(tmp_path, monkeypatch):
+    """No arm sha is an ancestor of the other, so there is no tip and no relief: each arm is
+    checked against its own sha, which is the stricter rule."""
+    from inference_server.research import session
+
+    repo, base, treat, _, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    fork = _sibling(repo, base, "src/inference_server/backend.py", "v3\n")
+    assert session._experiment_tip([treat, fork]) == ""
+    # `fork` is not in treat's history, so treat's own panels are stale against it and vice versa.
+    with pytest.raises(NotMeasurable, match="do not rebase after measuring"):
+        session.check_still_measurable(_ab(tmp_path / "runs", treat, fork), ref=fork)
+
+
+def test_the_tip_of_a_three_commit_chain_is_the_last_one_whatever_the_order(tmp_path, monkeypatch):
+    """The tip is a property of the history, not of the order the arms happen to be listed in."""
+    import itertools
+
+    from inference_server.research import session
+
+    repo, base, treat, later, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    for order in itertools.permutations([base, treat, later]):
+        assert session._experiment_tip(list(order)) == later
+
+
+def test_a_sha_git_cannot_resolve_yields_no_tip(tmp_path, monkeypatch):
+    """An unanswerable ancestry question must not read as 'not an ancestor': it drops the arms
+    back to the per-arm check rather than silently picking a tip from the shas that did resolve."""
+    from inference_server.research import session
+
+    repo, base, treat, _, _ = _history(tmp_path)
+    monkeypatch.setattr(session, "REPO_ROOT", repo)
+    assert session._is_ancestor(base, treat) is True
+    assert session._is_ancestor(treat, base) is False
+    assert session._is_ancestor("deadbee", treat) is None
+    assert session._experiment_tip([base, treat, "deadbee"]) == ""
 
 
 def test_drift_prefixes_match_the_merge_gate():

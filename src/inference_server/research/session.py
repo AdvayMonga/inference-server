@@ -129,19 +129,30 @@ def _behavioural(files: list[str]) -> list[str]:
             and not any(f.startswith(x) for x in EXEMPT_PREFIXES)]
 
 
-def _is_ancestor(a: str, b: str) -> bool:
-    return subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
-                          cwd=REPO_ROOT, capture_output=True).returncode == 0
+def _is_ancestor(a: str, b: str) -> bool | None:
+    """True/False when git can relate the two commits; None when it cannot answer at all.
+
+    Tri-state on purpose. `--is-ancestor` exits 1 for "no" and 128 for "I cannot resolve that sha"
+    (a shallow clone, a truncated panel), and collapsing those to one False would make a guard
+    depend on an unanswered question reading as a negative.
+    """
+    rc = subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
+                        cwd=REPO_ROOT, capture_output=True).returncode
+    return rc == 0 if rc in (0, 1) else None
 
 
 def _experiment_tip(shas: list[str]) -> str:
     """The arm sha that every arm sha is an ancestor of — the commit the experiment ends at.
 
-    Empty when the arms do not lie on one chain (they were measured on divergent branches), which
-    leaves every arm checked against its own sha as before.
+    Empty when the arms do not lie on one chain (measured on divergent branches) or when git
+    cannot resolve one of the shas, which leaves every arm checked against its own sha as before —
+    the stricter rule, so an unresolvable sha loses the two-commit relief rather than the guard.
     """
     for c in shas:
-        if all(_is_ancestor(o, c) for o in shas):
+        answers = [_is_ancestor(o, c) for o in shas]
+        if None in answers:
+            return ""
+        if all(answers):
             return c
     return ""
 
