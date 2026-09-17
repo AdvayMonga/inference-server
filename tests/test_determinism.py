@@ -134,6 +134,15 @@ def test_an_unrecognised_failure_names_itself():
     assert locked is False and "255" in why and "device handle" in why
 
 
+def test_an_unsupported_verb_is_not_reported_as_a_root_problem():
+    """MIG parts and most GeForce cards answer -lgc with 'not supported'. Filing that under
+    'requires root' would send the next reader to find a venue with root, which would not help."""
+    locked, why = lock_clocks(FakeShell(lgc=(3, "Setting GPU clocks is not supported for GPU 0")),
+                              sm_clock=1410)
+    assert locked is False
+    assert why != NO_ROOT and "not supported" in why
+
+
 def test_locking_succeeds_and_says_what_it_pinned():
     sh = FakeShell()
     locked, why = lock_clocks(sh, sm_clock=1200)

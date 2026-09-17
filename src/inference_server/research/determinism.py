@@ -118,7 +118,10 @@ def query_device(shell: Shell) -> DeviceState:
 
 NO_ROOT = "requires root; clocks left at default"
 
-_PERMISSION_MARKERS = ("insufficient permission", "permission denied", "not supported",
+# Permissions ONLY. "not supported" is deliberately absent: nvidia-smi says that when the part
+# or the mode cannot do it at all (MIG, most GeForce), and recording "requires root" there would
+# put a false reason in the panel — the one thing this module exists not to do.
+_PERMISSION_MARKERS = ("insufficient permission", "permission denied",
                        "requires root", "must be run as", "operation not permitted")
 
 
