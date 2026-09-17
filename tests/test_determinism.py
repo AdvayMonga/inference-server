@@ -13,6 +13,7 @@ import subprocess
 
 from inference_server.research.compare import comparable
 from inference_server.research.determinism import (
+    LOCK_TOLERANCE_MHZ,
     NO_ROOT,
     DeviceState,
     lock_clocks,
@@ -32,11 +33,15 @@ class FakeShell:
 
     def __init__(self, *, query_out: str = A100_ROW, query_rc: int = 0,
                  pm: tuple[int, str] = (0, ""), lgc: tuple[int, str] = (0, ""),
-                 missing: bool = False):
+                 missing: bool = False, sm_after_lock: int | str | None = None):
         self.calls: list[list[str]] = []
         self.query_out, self.query_rc = query_out, query_rc
         self.pm, self.lgc = pm, lgc
         self.missing = missing
+        # What clocks.sm reads once -lgc has been issued. None = the card did what it was
+        # told, i.e. it reads back whatever -lgc asked for.
+        self.sm_after_lock = sm_after_lock
+        self.locked_to: int | None = None
 
     def __call__(self, cmd: list[str]) -> subprocess.CompletedProcess:
         self.calls.append(cmd)
@@ -44,10 +49,18 @@ class FakeShell:
             raise FileNotFoundError("nvidia-smi")
         joined = " ".join(cmd)
         if "--query-gpu" in joined:
-            return subprocess.CompletedProcess(cmd, self.query_rc, self.query_out, "")
+            out = self.query_out
+            if self.locked_to is not None and self.query_rc == 0:
+                sm = self.sm_after_lock if self.sm_after_lock is not None else self.locked_to
+                cells = out.strip().split(",")
+                cells[3] = f" {sm}"
+                out = ", ".join(c.strip() for c in cells) + "\n"
+            return subprocess.CompletedProcess(cmd, self.query_rc, out, "")
         if "-pm" in cmd:
             return subprocess.CompletedProcess(cmd, self.pm[0], "", self.pm[1])
         if "-lgc" in cmd:
+            if self.lgc[0] == 0:
+                self.locked_to = int(cmd[cmd.index("-lgc") + 1])
             return subprocess.CompletedProcess(cmd, self.lgc[0], "", self.lgc[1])
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -147,7 +160,8 @@ def test_locking_succeeds_and_says_what_it_pinned():
     sh = FakeShell()
     locked, why = lock_clocks(sh, sm_clock=1200)
     assert locked is True and "1200" in why
-    assert sh.verbs == ["-pm 1", "-lgc 1200"]
+    assert sh.verbs[0] == "-pm 1" and sh.verbs[1] == "-lgc 1200"
+    assert "--query-gpu" in sh.verbs[-1], "the pin must be read back, not assumed"
 
 
 def test_with_no_clock_given_it_locks_to_the_cards_maximum():
@@ -155,7 +169,28 @@ def test_with_no_clock_given_it_locks_to_the_cards_maximum():
     locked, why = lock_clocks(sh)
     assert locked is True and "1410" in why           # clocks.max.sm from the A100 row
     assert sh.verbs[0] == "-pm 1" and "--query-gpu" in sh.verbs[1]
-    assert sh.verbs[-1] == "-lgc 1410"
+    assert sh.verbs[2] == "-lgc 1410"
+
+
+def test_a_lock_that_exits_zero_without_moving_the_clock_is_not_a_lock():
+    """The worst defect this module could have: -lgc can return 0 and leave the card where it
+    was. Believing the exit code writes a wrong-but-plausible clocks_locked=true into the
+    validity block, and every comparison downstream then trusts a control that never existed."""
+    sh = FakeShell(sm_after_lock=1005)
+    locked, why = lock_clocks(sh, sm_clock=1410)
+    assert locked is False
+    assert "read back at 1005" in why and "1410" in why
+
+
+def test_a_readback_within_one_boost_bin_still_counts_as_locked():
+    sh = FakeShell(sm_after_lock=1410 - LOCK_TOLERANCE_MHZ)
+    assert lock_clocks(sh, sm_clock=1410)[0] is True
+
+
+def test_a_clock_that_cannot_be_read_back_is_not_reported_as_locked():
+    """No read-back, no claim. Silence is not confirmation."""
+    locked, why = lock_clocks(FakeShell(sm_after_lock="[N/A]"), sm_clock=1410)
+    assert locked is False and "could not be read back" in why
 
 
 def test_an_unreadable_max_clock_refuses_rather_than_guessing():
@@ -184,6 +219,13 @@ def _validity(**kw) -> Validity:
 
 def _panel(**kw) -> Vitals:
     return Vitals(validity=_validity(**kw), tpot_p50=20.0)
+
+
+def test_lock_attempted_separates_never_tried_from_tried_and_refused():
+    """Both record clocks_locked=False. Only lock_attempted says which, without parsing prose."""
+    assert DeviceState().lock_attempted is False
+    d = DeviceState(lock_attempted=True, clocks_locked=False, lock_error=NO_ROOT)
+    assert d.to_dict()["lock_attempted"] is True
 
 
 def test_build_validity_picks_the_device_state_up_from_the_env(monkeypatch):

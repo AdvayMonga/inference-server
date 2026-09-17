@@ -56,6 +56,11 @@ class DeviceState:
     power_limit_w: float | None = None
     persistence_mode: str | None = None
     ecc_mode: str | None = None
+    # Two different facts, deliberately separate. `clocks_locked=False` alone conflates "we
+    # never tried" (PodSpec.lock_clocks=False) with "we tried and were refused root", and the
+    # only way to tell them apart used to be string-matching `lock_error`. A reader should
+    # never have to parse prose to know whether a control was attempted.
+    lock_attempted: bool = False
     clocks_locked: bool = False
     lock_error: str | None = None
     throttle_reasons: str | None = None
@@ -118,6 +123,11 @@ def query_device(shell: Shell) -> DeviceState:
 
 NO_ROOT = "requires root; clocks left at default"
 
+# How far the read-back SM clock may sit from the one we asked for and still count as pinned.
+# `-lgc X` sets a floor and a ceiling, so a healthy card reads back exactly X; one boost bin is
+# ~15 MHz, so this allows one bin of rounding and nothing like a card that ignored us.
+LOCK_TOLERANCE_MHZ = 30
+
 # Permissions ONLY. "not supported" is deliberately absent: nvidia-smi says that when the part
 # or the mode cannot do it at all (MIG, most GeForce), and recording "requires root" there would
 # put a false reason in the panel — the one thing this module exists not to do.
@@ -152,7 +162,19 @@ def lock_clocks(shell: Shell, sm_clock: int | None = None) -> tuple[bool, str]:
     rc, out, err = _run(shell, ["nvidia-smi", "-lgc", str(sm_clock)])
     if rc != 0:
         return False, _refusal(rc, out, err)
-    return True, f"SM clock locked to {sm_clock} MHz"
+
+    # `-lgc` exiting 0 is NOT proof the clock moved: the driver can accept the request and
+    # leave the card where it was (thermal state, an already-active lock, driver quirk).
+    # Believing the exit code would write a wrong-but-plausible `clocks_locked=true` into the
+    # validity block, and this whole methodology rests on that block being true. So read it
+    # back. A refusal we know about is worth far more than a lock we only think we took.
+    readback = query_device(shell).sm_clock_mhz
+    if readback is None:
+        return False, "lock reported success but the SM clock could not be read back"
+    if abs(readback - sm_clock) > LOCK_TOLERANCE_MHZ:
+        return False, (f"lock reported success but clocks read back at {readback} MHz, "
+                       f"not the {sm_clock} MHz asked for")
+    return True, f"SM clock locked to {sm_clock} MHz (read back {readback} MHz)"
 
 
 def unlock_clocks(shell: Shell) -> None:
