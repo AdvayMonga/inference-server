@@ -69,7 +69,11 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py -
   in `runs/` (gitignored).
 - **Instruments emit panels.** Anything measuring the engine writes `runs/<id>.json` via
   `research.harness`, with a validity block. A number without its harness config and workload
-  regime is not evidence.
+  regime is not evidence. The block also records the machine — `device_state` (GPU, driver,
+  clocks, throttle reasons, the provider's `host_id`) and `clocks_locked`, stamped from
+  `RESEARCH_DEVICE_STATE` by the venue. Clock locking is root-only, so container venues always
+  record `clocks_locked=false`; `compare.py` refuses a locked arm against an unlocked one.
+  See `research/determinism.py` and `knowledge/kb-20260917-9d1a1f0b.json`.
 - **Merging engine changes requires an experiment.** `scripts/premerge_check.py` refuses a merge
   that touches `src/inference_server/` without an `experiments/*.json` whose five gates are
   green — or a correctness-fix or no-claim record (see CONTRIBUTING.md). Docs, tests,

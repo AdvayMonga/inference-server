@@ -72,6 +72,10 @@ is a versioned change that invalidates comparison to prior iterations.
 | `n_samples`, `stderr`, `run_id`, `started_at` | judging an effect smaller than noise |
 | `workload_regime` — `cache_hit_heavy` \| `cache_miss_heavy` \| `mixed` | quoting a prefill number without its regime |
 | `concurrency_observed` | claiming a concurrency the run never reached |
+| `device_state` — GPU name/uuid, driver, SM+mem clocks, power limit, ECC, throttle reasons, provider `host_id` | attributing a machine difference to the code |
+| `clocks_locked`, `lock_attempted` | comparing a boosting GPU against a pinned one; and telling "never tried" apart from "tried and refused root" without parsing prose |
+
+> **Clock state is a comparability key.** `nvidia-smi -pm/-lgc/-ac/-pl` are all root-only, so no container venue (RunPod Pods, Vast, Modal) can pin a clock; `research/determinism.py` tries, records the refusal, and reads the device either way. An unlocked panel is still evidence — `compare.py` simply refuses to put it beside a locked one, because boost and thermal drift are then an uncontrolled variable. A differing `host_id` is a **note, not a bar**: same-model-different-host is a legal comparison, and it is the other candidate explanation for the 2.31x spread below — recording both is what finally tells them apart. **The sharp edge this leaves:** a panel written before these fields existed has `clocks_locked=None`, and unknown is not a bar — so it still compares against a locked arm, even though every such panel was almost certainly measured *unlocked*. That comparison can still misattribute a clock effect to code. Back-compat is deliberate; re-measure rather than trust an old panel across that boundary.
 
 ---
 
@@ -137,6 +141,9 @@ Two rules this code exists to enforce:
 
 Arms still must share one machine. `RESEARCH_RUN_GROUP` makes them comparable on paper; two pods
 are two machines, and two identical A100-80GB draws differed 2.31x on byte-identical config.
+Every run now records which machine it got and whether its clocks were pinned: the launcher
+exports `RESEARCH_DEVICE_STATE` into the instrument's env after a best-effort `nvidia-smi -pm/-lgc`,
+and `build_validity` stamps it into the panel.
 
 Two things the live API taught us that no amount of reading would have:
 

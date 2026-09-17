@@ -14,12 +14,14 @@ import subprocess
 import pytest
 
 from inference_server.research.venues import (
+    Pod,
     PodSpec,
     RunPodClient,
     VenueError,
     emit_payload,
     extract_payload,
     reap_pods,
+    remote_shell,
     run_instrument,
     wait_until_ready,
 )
@@ -178,7 +180,7 @@ def test_the_run_timeout_is_the_callers_choice_and_reaches_the_pod():
 
     run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api), shell=spy,
                    log=lambda _: None, run_timeout_s=5400)
-    assert "timeout 5400 python scripts/x.py" in seen[-1]
+    assert any("timeout 5400 python scripts/x.py" in c for c in seen)
 
 
 def test_a_run_with_no_payload_is_an_error_not_an_empty_result():
@@ -244,7 +246,7 @@ def test_provenance_env_reaches_the_remote_command():
                                           "RESEARCH_RUN_GROUP": "grp-1"},
                    repo="/repo", client=_client(api), shell=spy, log=lambda _: None)
 
-    remote = " ".join(seen[-1])
+    remote = next(" ".join(c) for c in seen if "python scripts/bench/x.py" in " ".join(c))
     assert "RESEARCH_ENGINE_SHA=abc123" in remote and "RESEARCH_RUN_GROUP=grp-1" in remote
     assert "PYTHONPATH=/workspace/repo/src" in remote
 
@@ -327,6 +329,11 @@ def test_venue_smoke_emits_a_payload_the_venue_can_parse():
     import os
     import sys
     from pathlib import Path
+
+    # venue_smoke asserts the engine's dependencies are importable, so this one test needs
+    # them. The rest of this file is engine-free, which is what lets the loop lane run it —
+    # and the loop lane installs no torch on purpose, so there it skips rather than lies.
+    pytest.importorskip("torch", reason="venue_smoke checks that the engine's deps installed")
 
     repo = Path(__file__).resolve().parents[1]
     env = {**os.environ, "PYTHONPATH": str(repo / "src"),
@@ -518,3 +525,124 @@ def test_a_bad_since_is_refused_before_anything_is_touched():
     with pytest.raises(VenueError, match="ISO-8601"):
         reap_pods(_client(api), since="last monday", log=lambda _: None)
     assert not api.terminated
+
+
+# ---------------------------------------------------------------- the machine as a variable
+
+def _remote(seen: list[str]):
+    """A shell that answers nvidia-smi and records everything, like a pod with no root."""
+    def run(cmd):
+        joined = " ".join(cmd)
+        seen.append(joined)
+        if "--query-gpu" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, "NVIDIA A100 80GB PCIe, GPU-abc, 550.90.07, 1410, 1512, 1410, "
+                        "300.00, Enabled, Enabled, 0x0\n", "")
+        if "nvidia-smi -pm" in joined:
+            return subprocess.CompletedProcess(cmd, 3, "", "Insufficient Permissions")
+        return subprocess.CompletedProcess(cmd, 0, emit_payload({"ok": 1}), "")
+    return run
+
+
+def test_the_device_state_reaches_the_instrument_even_when_locking_is_refused():
+    """A container venue can never lock. The run still has to happen AND still has to record
+    which machine it ran on — otherwise a 2.3x spread stays unattributable, as it did."""
+    api, seen, logs = FakeAPI(), [], []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                   shell=_remote(seen), log=logs.append)
+
+    run_cmd = next(c for c in seen if "python scripts/x.py" in c)
+    blob = run_cmd.split("RESEARCH_DEVICE_STATE=", 1)[1].split(" timeout")[0]
+    import json as _json
+    state = _json.loads(blob.strip("'"))
+    assert state["gpu_name"] == "NVIDIA A100 80GB PCIe" and state["sm_clock_mhz"] == 1410
+    assert state["clocks_locked"] is False
+    assert state["lock_error"] == "requires root; clocks left at default"
+    assert any("NOT locked" in ln for ln in logs)
+    assert api.terminated, "a refused lock is not a reason to keep renting"
+
+
+def test_the_host_id_is_recorded_so_two_a100s_can_be_told_apart():
+    """The other candidate explanation for the 2.31x: two draws of one SKU are two machines."""
+    api = FakeAPI()
+    api_get = api.__call__
+
+    def with_machine(method, path, body, key):
+        status, data = api_get(method, path, body, key)
+        if method == "GET" and path != "/pods" and isinstance(data, dict):
+            data = {**data, "machineId": "mach-7"}
+        return status, data
+
+    seen = []
+    run_instrument("scripts/x.py", {}, repo="/repo",
+                   client=RunPodClient(api_key="k", transport=with_machine),
+                   shell=_remote(seen), log=lambda _: None)
+    assert '"host_id":"mach-7"' in next(c for c in seen if "python scripts/x.py" in c)
+
+
+def test_the_clocks_are_released_before_the_pod_goes_away():
+    api, seen = FakeAPI(), []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                   shell=_remote(seen), log=lambda _: None)
+    assert any("nvidia-smi -rgc" in c for c in seen)
+
+
+def test_every_nvidia_smi_call_is_bounded_on_the_far_side():
+    """These run inside run_instrument's outer try. An unbounded call on a wedged box hangs
+    before the `finally`, and the pod bills until someone notices."""
+    seen = []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(FakeAPI()),
+                   shell=_remote(seen), log=lambda _: None)
+    smi = [c for c in seen if "nvidia-smi" in c]
+    assert smi, "expected the device to be read at all"
+    for c in smi:
+        assert "timeout 30 nvidia-smi" in c, c
+
+
+def test_a_hung_nvidia_smi_still_terminates_the_pod():
+    """The money-safety assertion. A shell that never returns must degrade to a refusal, not
+    propagate or block — an orphaned A100 bills at about $1.30/hr forever."""
+    api = FakeAPI()
+
+    def hangs(cmd):
+        # Match the wrapper remote_shell puts on, not a bare "nvidia-smi": the instrument's
+        # own command carries the recorded lock_error, which names nvidia-smi too.
+        if "timeout 30 nvidia-smi" in " ".join(cmd):
+            raise subprocess.TimeoutExpired(cmd, 45)
+        return subprocess.CompletedProcess(cmd, 0, emit_payload({"ok": 1}), "")
+
+    out = run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                         shell=hangs, log=lambda _: None)
+    assert out == {"ok": 1}, "a hung nvidia-smi is not a reason to lose the measurement"
+    assert api.terminated, "the pod MUST still be terminated"
+
+
+def test_the_local_ceiling_is_only_swapped_in_for_the_real_shell():
+    """An injected shell stays in charge — otherwise every test here would shell out for real."""
+    pod = Pod(id="p", host="1.2.3.4", port=22)
+    seen = []
+    remote_shell(pod, lambda cmd: seen.append(cmd) or subprocess.CompletedProcess(cmd, 0, "", ""))(
+        ["nvidia-smi", "-pm", "1"])
+    assert seen and "timeout 30 nvidia-smi -pm 1" in seen[0][-1]
+
+
+def test_lock_attempted_is_recorded_alongside_the_outcome():
+    """clocks_locked=False alone cannot say whether a control was tried and refused, or never
+    tried at all. A reader must not have to string-match lock_error to find out."""
+    seen = []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(FakeAPI()),
+                   shell=_remote(seen), log=lambda _: None)
+    assert '"lock_attempted":true' in next(c for c in seen if "python scripts/x.py" in c)
+
+    seen = []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(FakeAPI()),
+                   spec=PodSpec(lock_clocks=False), shell=_remote(seen), log=lambda _: None)
+    assert '"lock_attempted":false' in next(c for c in seen if "python scripts/x.py" in c)
+
+
+def test_a_run_that_does_not_want_clock_locking_touches_no_privileged_verb():
+    api, seen = FakeAPI(), []
+    run_instrument("scripts/x.py", {}, repo="/repo", client=_client(api),
+                   spec=PodSpec(lock_clocks=False), shell=_remote(seen), log=lambda _: None)
+    assert not any(v in c for c in seen for v in ("-pm 1", "-lgc", "-rgc"))
+    assert any("--query-gpu" in c for c in seen), "we still record what we could not control"

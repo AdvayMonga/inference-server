@@ -9,6 +9,7 @@ discouraged: arms measured in one process share it, and compare.py refuses acros
 
 from __future__ import annotations
 
+import json
 import os
 import statistics
 import time
@@ -74,6 +75,25 @@ def infer_regime(hit_rate: float | None, pool_size: int | None = None) -> str:
     return "mixed"
 
 
+def device_state_from_env() -> tuple[dict[str, Any] | None, bool | None]:
+    """The machine record the venue stamped into `RESEARCH_DEVICE_STATE`, or (None, None).
+
+    A laptop or CPU run has no such env and is unaffected — the fields stay None and
+    compare.py treats "unknown" as "not a reason to refuse".
+    """
+    raw = os.environ.get("RESEARCH_DEVICE_STATE")
+    if not raw:
+        return None, None
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return None, None
+    if not isinstance(state, dict):
+        return None, None
+    locked = state.get("clocks_locked")
+    return state, (locked if isinstance(locked, bool) else None)
+
+
 def build_validity(
     harness: str,
     harness_config: dict[str, Any],
@@ -84,6 +104,7 @@ def build_validity(
     concurrency_observed: int | None = None,
     notes: str = "",
 ) -> Validity:
+    device_state, clocks_locked = device_state_from_env()
     return Validity(
         engine_sha=git_sha(),
         dirty=git_dirty(),
@@ -95,6 +116,8 @@ def build_validity(
         stderr=stderr_value,
         concurrency_observed=concurrency_observed,
         notes=notes,
+        device_state=device_state,
+        clocks_locked=clocks_locked,
     )
 
 

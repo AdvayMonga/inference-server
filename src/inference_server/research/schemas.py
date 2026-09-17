@@ -86,6 +86,12 @@ class Validity:
     # and PANEL_VERSION does not move — an added field cannot change a measurement already taken.
     corpus_version: str | None = None
     workload_class: str | None = None
+    # Machine provenance, from RESEARCH_DEVICE_STATE. Same precedent as the two fields above:
+    # None-default, so older panels still load and PANEL_VERSION does not move.
+    # `clocks_locked` is a comparability key — an unlocked run's boost and thermal drift are not
+    # a controlled variable, and two identical A100 draws already measured 2.31x apart.
+    device_state: dict[str, Any] | None = None
+    clocks_locked: bool | None = None
 
     REGIMES = ("cache_hit_heavy", "cache_miss_heavy", "mixed", "synthetic")
 

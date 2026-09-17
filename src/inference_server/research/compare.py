@@ -7,6 +7,7 @@ comparisons between things that were not comparable:
   * POOL_SIZE=64 quietly made the SLO sweep a cache-HIT benchmark, hiding every miss-path bug
   * MAX_BATCH_SIZE 256 vs 32 across runs read as a 2.4x TPOT regression
   * 957 vs 1151 tok/s for identical config, measured in different sessions
+  * 2.31x on TPOT between two supposedly identical A100-80GB draws, byte-identical config
 
 So the API makes the unsafe thing hard: `comparable()` must pass before any delta is computed,
 and it refuses by default rather than warning.
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from inference_server.research.schemas import Vitals
@@ -35,6 +36,9 @@ CONFIG_KEYS_THAT_MATTER = (
 class Comparability:
     ok: bool
     reasons: list[str]
+    # Things worth saying that are NOT bars. A same-model different-host comparison is legal;
+    # it is also the first thing to look at when two arms disagree by more than the code should.
+    notes: list[str] = field(default_factory=list)
 
     def __bool__(self) -> bool:
         return self.ok
@@ -47,6 +51,7 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
     Set it False only for deliberate historical inspection, never to judge an experiment.
     """
     reasons: list[str] = []
+    notes: list[str] = []
 
     if a.panel_version != b.panel_version:
         reasons.append(f"panel_version {a.panel_version} vs {b.panel_version}: the panels "
@@ -72,13 +77,33 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
         if av != bv:
             reasons.append(f"harness_config[{key}]: {av!r} vs {bv!r}")
 
+    # The machine. Clock state is a comparability key because an unlocked run's boost and
+    # thermal behaviour is an uncontrolled variable — that is one of the two live explanations
+    # for the 2.31x spread this repo measured between two supposedly identical A100 draws.
+    al, bl = a.validity.clocks_locked, b.validity.clocks_locked
+    if al is not None and bl is not None and al != bl:
+        reasons.append(
+            f"clocks_locked {al} vs {bl}: one arm ran with unlocked clocks; boost and thermal "
+            f"drift are not a controlled variable")
+
+    da, db = a.validity.device_state or {}, b.validity.device_state or {}
+    ga, gb = da.get("gpu_name"), db.get("gpu_name")
+    if ga and gb and ga != gb:
+        reasons.append(f"gpu_name {ga} vs {gb}: the panels were measured on different hardware")
+
+    # NOT a bar, on purpose: the other explanation for that 2.31x is heterogeneous hosts behind
+    # one SKU label, and recording it is what makes the two distinguishable after the fact.
+    ha, hb = da.get("host_id"), db.get("host_id")
+    if ha and hb and ha != hb:
+        notes.append(f"host_id {ha} vs {hb}: same GPU model, different physical machine")
+
     if same_group_required and a.validity.run_group != b.validity.run_group:
         reasons.append(
             f"different run_group ({a.validity.run_group} vs {b.validity.run_group}): arms must "
             f"be measured in the same session. This repo has seen 957 vs 1151 tok/s for "
             f"identical config across sessions")
 
-    return Comparability(ok=not reasons, reasons=reasons)
+    return Comparability(ok=not reasons, reasons=reasons, notes=notes)
 
 
 @dataclass
