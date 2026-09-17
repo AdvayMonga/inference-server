@@ -276,14 +276,42 @@ def _ssh_base(pod: Pod) -> list[str]:
             f"root@{pod.host}"]
 
 
-def remote_shell(pod: Pod, shell: Shell = _shell) -> Shell:
-    """A `Shell` that runs its argv on the pod instead of here.
+def _shell_bounded(timeout_s: float) -> Shell:
+    """`_shell` with a hard local ceiling, reporting a timeout as rc 124 like `timeout(1)`."""
+    def run(cmd: list[str]) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(cmd, 124, "", f"local timeout after {timeout_s:.0f}s")
+    return run
+
+
+def remote_shell(pod: Pod, shell: Shell = _shell, timeout_s: int = 30) -> Shell:
+    """A `Shell` that runs its argv on the pod instead of here, bounded at both ends.
 
     `determinism.py` speaks plain argv and knows nothing about pods, which is what lets its
     tests use a fake shell and what would let it run on a local box unchanged.
+
+    **Both bounds are money safety, not tidiness.** These calls happen inside
+    `run_instrument`'s outer `try`; a wedged driver or a blackholed ssh here would hang
+    forever, the `finally` that terminates the pod would never run, and an orphaned A100
+    bills at about $1.30/hour until someone notices. `timeout N` on the far side bounds a
+    hung nvidia-smi; the local ceiling bounds an ssh that never returns at all, which the
+    remote timeout cannot help with. `_shell` itself stays unbounded on purpose — rsync and
+    pip legitimately take many minutes — so the ceiling is swapped in here, where every call
+    is a seconds-long query.
     """
+    runner = _shell_bounded(timeout_s + 15) if shell is _shell else shell
+
     def run(cmd: list[str]) -> subprocess.CompletedProcess:
-        return shell(_ssh_base(pod) + [" ".join(shlex.quote(c) for c in cmd)])
+        argv = _ssh_base(pod) + [f"timeout {timeout_s} "
+                                 + " ".join(shlex.quote(c) for c in cmd)]
+        try:
+            return runner(argv)
+        except subprocess.TimeoutExpired:
+            # An injected shell that enforces its own deadline must degrade to a refusal,
+            # never propagate — determinism.py treats rc != 0 as "no lock", which is right.
+            return subprocess.CompletedProcess(argv, 124, "", f"timed out after {timeout_s}s")
     return run
 
 
@@ -366,6 +394,7 @@ def _device_state_json(pod: Pod, spec: PodSpec, shell: Shell,
     log(f"[venue] clocks {'LOCKED' if locked else 'NOT locked'}: {why}")
 
     state = determinism.query_device(dev)
+    state.lock_attempted = spec.lock_clocks
     state.clocks_locked = locked
     state.lock_error = None if locked else why
     state.host_id = pod.machine_id
