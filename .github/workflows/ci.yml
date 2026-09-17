@@ -84,7 +84,7 @@ jobs:
           while IFS= read -r -d "" f; do
             echo "    $f"
             case "$f" in
-              src/inference_server/research/*|tests/test_research_*|knowledge/*|experiments/*)
+              src/inference_server/research/*|tests/test_research_*|tests/test_determinism.py|knowledge/*|experiments/*)
                 loop=true ;;
               pyproject.toml|.github/workflows/*)
                 loop=true; engine=true ;;
@@ -118,7 +118,7 @@ jobs:
           cache: pip
       - run: pip install pytest pytest-asyncio ruff
       - name: Lint
-        run: ruff check src/inference_server/research tests/test_research_*.py
+        run: ruff check src/inference_server/research tests/test_research_*.py tests/test_determinism.py
       - name: Tests
         run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py
 
