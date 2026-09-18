@@ -41,6 +41,18 @@ BAND_DIR = REPO_ROOT / "knowledge" / "noise"
 # of either arm can land ~2 sd from the mean, so a difference that size is not distinguishable
 # from having drawn two runs of ONE config; the measured min/max range backs that up (tpot_p50
 # spans 1.08x, i.e. about +-4% around its mean, against a 2-sigma width of 4.8%).
+#
+# PROVISIONAL, and the weakest part of this module. The reasoning above is general, but the
+# number is calibrated from n=1: one null experiment, one workload class (cold_start), one box
+# (M4 Pro / E2B), one observed false positive on one metric. It is project-wide only because
+# there is nothing else yet to key it on. Two ways it could be wrong that a second null would
+# expose: a saturated regime may have a fatter-than-Gaussian tail, where 2 sd under-covers; and
+# a metric whose null distribution is tight and well-behaved (`wall_s`, cv 1%) may deserve a
+# smaller multiplier than one that is not (`ttft_queue_p50`, cv 45%), which a single scalar
+# cannot express. Revisit when a second null lands on a different regime or hardware — and if
+# they disagree, the fix is probably a per-metric multiplier stored in the band, not a different
+# global constant. `inside(metric, pct, sigmas=...)` already takes an override, so a caller can
+# disagree without editing this. See kb-20260917-aa6b0f4d.
 BAND_SIGMAS = 2.0
 
 # The panel fields a serving replay actually populates. Structural fields (wave_sizes,

@@ -109,6 +109,20 @@ def test_differing_workload_regime_refused():
     assert not comparable(a, b)
 
 
+def test_a_different_scheduler_is_not_a_comparable_arm():
+    """A queue that rejects at a different depth, and a policy that orders differently, ARE the
+    scheduler. `replay_local.py` puts several engine configs in one run group deliberately, so
+    without these keys two of its panels would read as comparable — the MAX_BATCH_SIZE 256-vs-32
+    error in a new place. Panels written before these keys existed carry None on both sides, so
+    adding them refuses nothing that used to compare (test_identical_setup_is_comparable, whose
+    harness_config mentions neither, still passes)."""
+    for key, value in (("max_queue_size", 1000), ("scheduling_policy", "fair")):
+        b = _panel(validity=_validity(harness_config={**_validity().harness_config, key: value}))
+        c = comparable(_panel(), b)
+        assert not c, f"{key} changed the scheduler but the panels compared anyway"
+        assert any(key in r for r in c.reasons)
+
+
 def test_identical_setup_is_comparable():
     assert comparable(_panel(), _panel(tok_s=110.0))
 

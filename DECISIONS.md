@@ -679,6 +679,20 @@ exists to stop, caught on the first null rather than on a merge. It is also why 
 2 sd: at 1 sd (the literal "inside the measured cv" reading) the band is 2.39% and this false
 positive slips through by three tenths of a percent.
 
+**The 2 sd multiplier is provisional and the weakest part of this work.** The reasoning behind
+it is general — a single run of either arm can land ~2 sd from the mean, so a difference that
+size is not distinguishable from having drawn two runs of one config — but the number is
+calibrated from **n=1**: this one null experiment, on `cold_start`, on this one box, from one
+observed false positive on one metric. `BAND_SIGMAS` is project-wide only because there is
+nothing else yet to key it on, and it is not covered by this entry's `validity_range`, which
+scopes the band rather than the multiplier. Two ways a second null could show it wrong: a
+saturated regime may have a fatter-than-Gaussian tail, where 2 sd under-covers; and a metric
+whose null is tight (`wall_s`, cv 1%) may warrant a smaller multiplier than one that is not
+(`ttft_queue_p50`, cv 45%), which one scalar cannot express. If a second null on another regime
+or another machine disagrees, the fix is probably a per-metric multiplier stored in the band
+rather than a different global constant — `inside(metric, pct, sigmas=...)` already takes an
+override, so a caller can disagree without editing the constant.
+
 ## What it says
 
 - **Latency percentiles are the noisy ones; throughput and occupancy are not.** `ttft_p50`
@@ -732,7 +746,7 @@ In particular:
 - **It is a low-concurrency band**: `active_high_water` was 5 in every run. Nothing here speaks
   to the spread at the batch widths the project actually targets.
 
-**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null
+**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (it is calibrated from this experiment alone; the fix is likely a per-metric multiplier, not a new constant)
 
 **Evidence:** grp-null-coldstart-mps, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260917-9d0303be, run-20260917-d8085cf4, run-20260917-16cdf4b2, run-20260917-953f1e80, run-20260917-6a701351, run-20260917-6236f1a5, run-20260917-2dfa8031, run-20260917-35dbe2c6, run-20260917-5401a20b, run-20260917-f6b0feb2, run-20260917-020cb034, run-20260917-95f2f1c0
 
