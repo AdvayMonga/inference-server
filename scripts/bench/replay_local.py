@@ -22,6 +22,12 @@ Outputs, deliberately the layout the rest of the loop already reads:
     runs/<group>/<label>.telemetry.csv   the engine's own per-request rows
     runs/<group>/engine_env.json  what the servers ran under
 
+Every run also carries a **total accounting** block (notes/03): wall clock from the server
+process's launch — model load, warm-up, idle and shutdown included, not from the first request —
+plus the server's own peak RSS, device memory and storage reads, which reach the panel through
+the sidecar `serve_accounted.py` writes at exit. That is what the primary metric printed after
+each run divides: GPU-seconds per session at the class's p95 TTFT ceiling.
+
 `ttft_queue_*` / `ttft_prefill_*` — the split LOOP.md calls the one that rules out whole classes
 of fix — are filled from the telemetry rows, because the client cannot see where inside the
 server its TTFT went. That is why the panel is built AFTER the server is stopped: SIGTERM is
@@ -60,8 +66,12 @@ from replay_corpus_runpod import (  # noqa: E402
 )
 
 from inference_server.research import harness as H  # noqa: E402
+from inference_server.research.accounting import Accounting  # noqa: E402
 from inference_server.research.corpus import load_trace  # noqa: E402
 from inference_server.research.schemas import Vitals  # noqa: E402
+from inference_server.research.session import primary_metric  # noqa: E402
+
+SERVE_ENTRY = [str(Path(__file__).resolve().parent / "serve_accounted.py")]
 
 # The engine every run starts from. Every knob `fit_timing_from_runs.SIM_KNOBS` needs is pinned
 # explicitly, even where it is the engine's own default — an unrecorded knob means the simulator
@@ -246,7 +256,8 @@ async def replay_once(base_url: str, spec: RunSpec, *, warmup_n: int, drain_time
 
 
 def build_panel(spec: RunSpec, env: dict[str, str], manifest, res, sched, cache, prefix,
-                telemetry: list[dict[str, Any]], hardware: str) -> Vitals:
+                telemetry: list[dict[str, Any]], hardware: str,
+                accounting: Accounting | None = None) -> Vitals:
     cls = manifest.classes[spec.cls]
     panel = rt.build_panel(res, cls, corpus_version=manifest.corpus_version, split=spec.split,
                            rate_scale=spec.rate_scale, scheduler_stats=sched, cache_stats=cache,
@@ -269,7 +280,49 @@ def build_panel(spec: RunSpec, env: dict[str, str], manifest, res, sched, cache,
     })
     panel.validity.notes = (f"arm={spec.arm} label={spec.label} local replay on {hardware}, "
                             f"fresh server per run, trial={H.trial_id()}")
+    if accounting is not None:
+        accounting.apply(panel)
     return panel
+
+
+def build_accounting(sidecar_path: Path, *, wall_from_launch_s: float, serving_wall_s: float,
+                     sessions: int) -> Accounting:
+    """What the whole run cost, from the two vantage points that can each see half of it.
+
+    The instrument owns the clock — `wall_from_launch_s` starts before `start_server` and ends
+    after the server has exited, so model load, warm-up, idle and shutdown are all inside it.
+    That is the "wall clock from process start, not from first successful request" term, and it
+    is why `Vitals.wall_s` (the replay window) is NOT reused for it.
+
+    The server owns its own resident set, its device and its file reads, so those arrive through
+    the sidecar `serve_accounted.py` writes at exit. A missing sidecar (server died before
+    writing one) leaves those terms None and NAMED in `unmeasured`, never zeroed.
+    """
+    side: dict[str, Any] = {}
+    if sidecar_path.exists():
+        try:
+            side = json.loads(sidecar_path.read_text())
+        except json.JSONDecodeError:
+            side = {}
+    unmeasured: dict[str, str] = {}
+    if not side:
+        unmeasured["server resources"] = (f"no accounting sidecar at {sidecar_path}; the server "
+                                          f"exited without writing one")
+    if side.get("peak_device_mem_gb") is None:
+        unmeasured.setdefault("peak_device_mem_gb", "no CUDA or MPS device in the server process")
+    if side.get("storage_read_bytes") is None:
+        unmeasured.setdefault("storage_read_bytes",
+                              side.get("storage_read_note") or "not readable on this platform")
+    return Accounting(
+        wall_s_from_process_start=round(wall_from_launch_s, 3),
+        serving_wall_s=round(serving_wall_s, 3),
+        sessions_served=sessions,
+        peak_host_rss_gb=side.get("peak_host_rss_gb"),
+        peak_device_mem_gb=side.get("peak_device_mem_gb"),
+        device_mem_source=side.get("device_mem_source"),
+        storage_read_bytes=side.get("storage_read_bytes"),
+        unmeasured=unmeasured,
+    )
 
 
 def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
@@ -277,6 +330,8 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
     env = spec.engine_env()
     telemetry_dir = Path(tempfile.mkdtemp(prefix=f"telemetry-{spec.label}-"))
     env["TELEMETRY_DIR"] = str(telemetry_dir)
+    sidecar = telemetry_dir / "accounting.json"
+    env["ACCOUNTING_SIDECAR"] = str(sidecar)
     log_path = telemetry_dir / "server.log"
     port = free_port()
     base_url = f"http://127.0.0.1:{port}"
@@ -284,8 +339,8 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
     print(f"\n== {spec.label} ({spec.arm}) {spec.cls}/{spec.split} x{spec.rate_scale:g} "
           f"mbs={env['MAX_BATCH_SIZE']} policy={env['SCHEDULING_POLICY']} "
           f"deadline={env['MAX_QUEUE_WAIT_S']}s ==", flush=True)
-    t0 = time.perf_counter()
-    proc = start_server(env, port, log_path)
+    t0 = time.perf_counter()               # the process's START: everything after is its cost
+    proc = start_server(env, port, log_path, entry=SERVE_ENTRY)
     try:
         if not wait_ready(base_url, proc, ready_timeout_s):
             print("\n".join(["  server never became ready; log tail:"] + tail(log_path)),
@@ -296,6 +351,7 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
                                       drain_timeout_s=drain_timeout_s))
     finally:
         stop_server(proc)                 # SIGTERM, so the lifespan flushes the telemetry rows
+    wall_from_launch_s = time.perf_counter() - t0
 
     manifest, res, sched, cache, prefix = out
     telemetry = read_telemetry(telemetry_dir)
@@ -305,7 +361,13 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
         print("  no request succeeded; no panel for this run", flush=True)
         return None
 
-    panel = build_panel(spec, env, manifest, res, sched, cache, prefix, telemetry, hardware)
+    accounting = build_accounting(
+        sidecar, wall_from_launch_s=wall_from_launch_s, serving_wall_s=res.wall_s,
+        sessions=len({r.session_id for r in res.rows if r.error is None}))
+    print(accounting.summary(), flush=True)
+    panel = build_panel(spec, env, manifest, res, sched, cache, prefix, telemetry, hardware,
+                        accounting=accounting)
+    print(primary_metric(panel).format(), flush=True)
     path = H.emit(panel, label=spec.label, runs_dir=runs_dir)
     rt.write_rows(path.with_suffix(".csv"), res.rows)
     write_csv(group_dir / f"{spec.label}.telemetry.csv", telemetry)
