@@ -86,6 +86,8 @@ jobs:
             case "$f" in
               src/inference_server/research/*|tests/test_research_*|tests/test_determinism.py|tests/test_venues.py|knowledge/*|experiments/*)
                 loop=true ;;
+              src/control_plane/*|tests/test_control_plane.py)
+                loop=true ;;                    # control plane: stdlib-only policy, no torch
               pyproject.toml|.github/workflows/*)
                 loop=true; engine=true ;;
               docs/*|runs/*|*.md)
@@ -102,9 +104,9 @@ jobs:
           echo "cuda=$cuda"     >> "$GITHUB_OUTPUT"
           echo "lanes: loop=$loop engine=$engine cuda=$cuda"
 
-  # Installing no torch is the assertion, not an optimisation: if research/ ever imports the
-  # engine, this lane goes red on ModuleNotFoundError. README's "the loop knows only the panel
-  # contract" is otherwise enforced by nothing.
+  # Installing no torch is the assertion, not an optimisation: if research/ or control_plane/
+  # ever imports the engine, this lane goes red on ModuleNotFoundError. README's "the loop knows
+  # only the panel contract" is otherwise enforced by nothing.
   loop:
     needs: changes
     if: needs.changes.result == 'success' && needs.changes.outputs.loop == 'true'
@@ -118,9 +120,9 @@ jobs:
           cache: pip
       - run: pip install pytest pytest-asyncio ruff
       - name: Lint
-        run: ruff check src/inference_server/research tests/test_research_*.py tests/test_determinism.py tests/test_venues.py
+        run: ruff check src/inference_server/research src/control_plane tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
       - name: Tests
-        run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py tests/test_venues.py
+        run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
 
       - name: DECISIONS.md matches knowledge/
         # DECISIONS.md is generated and tracked. Drift silently re-opens dead ends, because
