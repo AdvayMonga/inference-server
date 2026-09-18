@@ -1,0 +1,30 @@
+{
+  "created_at": 1789694301.8612201,
+  "evidence": [],
+  "id": "kb-20260917-0c9ba6de",
+  "mechanism": "Locality and load are normalised to [0,1] and mixed by one scalar, so the endpoints are exactly the two pure policies and the loop can sweep the knob; affinity is a separate coefficient so it can be ablated rather than inferred.",
+  "regime": null,
+  "status": "open",
+  "summary": "The control plane's first decision is per request: route for **locality** (the replica holding this session's KV, or the longest matching prefix) or for **load** (the shortest queue). These conflict, because the replica with the best cache hit is usually the loaded one. `src/control_plane/router.py` resolves it with a single normalised weight:\n\n    score = w * (aw * holds_session + matched_blocks / prompt_blocks) / (1 + aw)\n            + (1 - w) * (1 - load / max_load)          load = queue_depth + active\n\nFour choices are worth recording, because each had a live alternative:\n\n1. **One scalar knob, normalised at both endpoints.** `w=0` is *exactly* shortest-queue (the locality term drops out) and `w=1` is *exactly* best-locality (the load term drops out), and both terms are scaled to [0, 1] so `w` means what it says in between. The alternative \u2014 a rule ladder (\"prefer the session holder unless its queue exceeds N\") \u2014 is not searchable: the loop can sweep a scalar, and cannot sweep a ladder. The knob exists to be searched, so it has to be a number.\n2. **Session affinity is an explicit term, not an emergent one.** It could have been left to fall out of the prefix match, since a replica holding a session also holds its prompt's prefix. It is separate because the plan calls affinity \"the single highest-value routing behavior for multi-turn workloads\" (a routing miss costs a full prefill), and because a term with its own coefficient `aw` can be turned OFF (`aw=0`) to measure what it was worth. An emergent behaviour cannot be ablated.\n3. **The index is allowed to be wrong, and knows when it was last right.** `prefix_index.py` never updates itself; only a replica report writes it, and every entry records the tick it was confirmed at. This is deliberate: the plan wants the staleness-tolerance curve (\"how stale can the index be before routing gets worse than random\") as a result, which requires an index that can be fed late rather than one that is correct by construction. A test asserts the failure mode \u2014 routing to a replica that no longer holds the prefix \u2014 rather than avoiding it.\n4. **Ties break on replica id, not on arrival or randomly.** A nondeterministic router makes every downstream experiment unreproducible, and the score is rounded before the tie-break so float noise cannot decide a replica.\n\n**What is NOT established \u2014 nothing about performance.** No curve has been measured. The router is pure CPU policy that nothing calls: it is not wired into `research/simulator.py` (a separate branch was editing that file), there is no `ReplicaLauncher`, and no hardware has ever run two replicas of this engine. Specifically open:\n\n- the **locality-vs-load curve** per workload class, i.e. the best `w` and how sharply it matters;\n- the **staleness-tolerance curve**, i.e. the update lag at which prefix routing stops beating random;\n- the **value of session affinity** alone, via `aw=0` versus `aw=1` on the multi-turn classes;\n- whether the whole thing matters at all, which rests on the repo's own attribution that the TTFT tail is prefill compute rather than queueing \u2014 if that holds, avoiding a prefill by routing to the replica that already has the prefix is worth more than any queueing improvement, and the curve should be steep near `w=1`.\n\nUntil those exist, the formula is a defensible default and nothing more. Treat any claim about the right `w` as unmeasured.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "control-plane",
+    "router",
+    "prefix-cache",
+    "locality",
+    "session-affinity",
+    "simulator",
+    "staleness"
+  ],
+  "title": "Router locality-vs-load is one normalised weight, with session affinity as a separable term; no curve measured yet",
+  "transfer_checked": null,
+  "triggers": [
+    "The router wired into research/simulator.py \u2014 then the locality-vs-load curve per workload class becomes a tier-1 sweep and this entry gets its numbers",
+    "Two GPUs available simultaneously \u2014 the simulator curve confirmed on hardware, or refuted",
+    "An attribution run showing the TTFT tail is queueing rather than prefill compute \u2014 that would invert the premise and push the best w toward 0",
+    "Evidence that a centralized index is the bottleneck \u2014 the plan's gossip / consistent-hashing alternatives only become interesting then"
+  ],
+  "updated_at": 1789694301.861223,
+  "validity_range": {}
+}
