@@ -35,6 +35,14 @@ from inference_server.research.schemas import REPO_ROOT, Vitals
 
 BAND_DIR = REPO_ROOT / "knowledge" / "noise"
 
+# How many null standard deviations wide the band is. 2, not 1, and the first null experiment is
+# why: with k=1 its own two arms produced a t-significant +2.7% on `tpot_p50`, whose null cv is
+# 2.4% — the same config, on the same box, judged a win by every rule the loop had. A single run
+# of either arm can land ~2 sd from the mean, so a difference that size is not distinguishable
+# from having drawn two runs of ONE config; the measured min/max range backs that up (tpot_p50
+# spans 1.08x, i.e. about +-4% around its mean, against a 2-sigma width of 4.8%).
+BAND_SIGMAS = 2.0
+
 # The panel fields a serving replay actually populates. Structural fields (wave_sizes,
 # *_by_bucket) are not summarisable this way and counters that are 0 in every run carry no
 # spread; `band_from_arms` drops whatever is absent or constant rather than inventing a band.
@@ -87,22 +95,22 @@ class NoiseBand:
         return (f"{self.harness}/{self.workload_class} on {self.hardware} with {self.model}"
                 f"{f', corpus {self.corpus_version[:12]}' if self.corpus_version else ''}")
 
-    def inside(self, metric: str, pct: float) -> bool | None:
+    def inside(self, metric: str, pct: float, sigmas: float = BAND_SIGMAS) -> bool | None:
         """Is a percentage change no bigger than what this metric does on its own?
 
         `None` means the band says nothing about `metric` — the caller must then behave exactly
-        as it did before the band existed. The width is the null coefficient of variation: the
-        relative measure, because a band measured at one absolute level (150 ms TTFT) is only
-        usable at another if it is expressed as a fraction.
+        as it did before the band existed. The width is `sigmas` times the null coefficient of
+        variation: relative, because a band measured at one absolute level (150 ms TTFT) is only
+        usable at another if it is expressed as a fraction, and `sigmas`-wide because a single
+        run of either arm can land that far from the mean (see BAND_SIGMAS).
         """
-        b = self.metrics.get(metric)
-        if b is None:
-            return None
-        return abs(pct) <= b.cv * 100.0
+        w = self.width_pct(metric, sigmas)
+        return None if w is None else abs(pct) <= w
 
-    def width_pct(self, metric: str) -> float | None:
+    def width_pct(self, metric: str, sigmas: float = BAND_SIGMAS) -> float | None:
+        """The band's half-width for `metric`, as a percentage of its null mean."""
         b = self.metrics.get(metric)
-        return None if b is None else round(b.cv * 100.0, 1)
+        return None if b is None else round(b.cv * 100.0 * sigmas, 2)
 
     # -- io ---------------------------------------------------------------------------
 
@@ -243,9 +251,9 @@ def band_for(panel: Vitals, directory: Path = BAND_DIR) -> NoiseBand | None:
 
 def format_band(b: NoiseBand) -> str:
     """The markdown table the knowledge entry carries, so the two never disagree."""
-    lines = ["| metric | mean | sd | cv | min | max | max/min |",
-             "|---|---|---|---|---|---|---|"]
+    lines = [f"| metric | mean | sd | cv | min | max | max/min | band (+-{BAND_SIGMAS:g}sd) |",
+             "|---|---|---|---|---|---|---|---|"]
     for name, m in b.metrics.items():
         lines.append(f"| {name} | {m.mean:g} | {m.sd:g} | {m.cv * 100:.0f}% | {m.min:g} | "
-                     f"{m.max:g} | {m.min_max_ratio:.2f}x |")
+                     f"{m.max:g} | {m.min_max_ratio:.2f}x | {b.width_pct(name):g}% |")
     return "\n".join(lines)

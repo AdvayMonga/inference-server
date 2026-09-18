@@ -193,9 +193,9 @@ def significance_replicated(
         return Significance(
             "inconclusive", metric, mb, mt, delta, pct,
             f"|t|={abs(tstat):.2f} separates the arms, but {pct:+.1f}% on {metric} is inside "
-            f"the measured noise band ({band.width_pct(metric)}% null cv over "
-            f"{band.metrics[metric].n} runs of {band.identity()}) — a delta this size appears "
-            f"with nothing changed, so it is not evidence")
+            f"the measured noise band (+-{band.width_pct(metric)}%, from {band.metrics[metric].n} "
+            f"null runs of {band.identity()}) — a delta this size appears with nothing changed, "
+            f"so it is not evidence")
     right = (direction == "increase" and delta > 0) or (direction == "decrease" and delta < 0)
     return Significance("significant", metric, mb, mt, delta, pct,
                         f"|t|={abs(tstat):.2f} across {len(b)}v{len(t)} runs, moved "
