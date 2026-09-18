@@ -7,6 +7,7 @@ purpose — if the formula changes, these fail loudly rather than drifting.
 from __future__ import annotations
 
 import ast
+import time
 from pathlib import Path
 
 import pytest
@@ -64,6 +65,29 @@ def test_entries_record_when_they_were_confirmed():
     index.insert("b", P, as_of=3)          # a report that was true two ticks ago
     ages = {m.replica_id: index.tick - m.confirmed_at for m in index.lookup(P)}
     assert ages == {"a": 5, "b": 2}
+
+
+def test_lookup_does_not_rebuild_every_aligned_prefix():
+    """Complexity pin. Building a key per block boundary costs 157 ms on this prompt; the
+    `_lengths` skip PrefixCache uses brings it to ~0.2 ms, so 20 ms is a 100x margin."""
+    ids = list(range(32768))
+    index = PrefixIndex(16)
+    index.insert("a", ids[:16384])
+    start = time.perf_counter()
+    assert [m.matched_blocks for m in index.lookup(ids)] == [1024]
+    elapsed = time.perf_counter() - start
+    assert elapsed < 0.02, f"one 32k-token lookup took {elapsed * 1000:.0f} ms"
+
+
+def test_length_bookkeeping_survives_evict_and_reinsert():
+    """The skip must never skip a length that is still live, or a real hit reads as a miss."""
+    index = idx(("a", P), ("b", P))
+    index.evict("a", P)
+    assert [m.replica_id for m in index.lookup(P)] == ["b"]
+    index.evict("b", P)
+    assert index.lookup(P) == []
+    index.insert("a", P)
+    assert [m.replica_id for m in index.lookup(P)] == ["a"]
 
 
 def test_evict_forgets_one_entry():

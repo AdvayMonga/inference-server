@@ -1,20 +1,8 @@
-"""Global prefix index: which replicas are believed to hold which block-aligned prefixes.
+"""Global prefix index: block-aligned prompt prefix -> replicas believed to hold it.
 
-Centralised on purpose (`notes/infserv/10-control-plane.md`): one process, easy to reason
-about, and the interesting result is the staleness-tolerance curve rather than the topology.
-
-It mirrors the engine's `PrefixCache.lookup` notion of a match — the longest prefix that is a
-whole number of blocks, because a trailing partial block is not safe to share — but imports
-nothing from the engine, which needs torch.
-
-Tokenisation is the caller's job, since the engine's tokenizer is not importable here. Supply
-`block_size` and then either pass pre-tokenised ids to every call, or construct with
-`tokenize` (a `str -> Sequence[int]`) and pass prompts; a text-only simulator can pass a
-stand-in that chunks characters, as long as the same one is used for insert and lookup.
-
-Staleness is first class: each entry records the tick it was last confirmed at, and the index
-never updates itself. Updates arrive only when a replica reports, so a simulation can feed them
-late (or not at all) and measure how wrong the routing decision was.
+Mirrors `PrefixCache.lookup` — longest whole-block prefix, and its `_lengths` skip so a lookup
+is not O(prompt^2) — without importing it, since that module needs torch. Tokenisation is the
+caller's: pass token ids, or construct with `tokenize`. Rationale: `kb-20260917-0c9ba6de`.
 """
 
 from __future__ import annotations
@@ -45,6 +33,11 @@ class PrefixIndex:
         # aligned prefix (tuple of token ids) -> replica_id -> tick last confirmed
         self._holders: dict[tuple[int, ...], dict[str, int]] = {}
         self._by_replica: dict[str, set[tuple[int, ...]]] = {}
+        # Block counts some entry actually has, so lookup only builds keys for lengths that
+        # exist. Same guard, and the same reason, as PrefixCache._lengths: without it every
+        # lookup builds one prefix tuple per block boundary, which is O(prompt^2) — 157 ms on
+        # a 32k prompt, on the one component whose job is to add no latency.
+        self._lengths: dict[int, int] = {}
 
     def advance(self, n: int = 1) -> int:
         """Move the index's clock on. Entry age is `tick - confirmed_at`."""
@@ -65,7 +58,12 @@ class PrefixIndex:
         key = self._key(prompt, n_blocks)
         if key is None:
             return
-        self._holders.setdefault(key, {})[replica_id] = self.tick if as_of is None else as_of
+        holders = self._holders.get(key)
+        if holders is None:
+            holders = self._holders[key] = {}
+            n = len(key) // self.block_size
+            self._lengths[n] = self._lengths.get(n, 0) + 1
+        holders[replica_id] = self.tick if as_of is None else as_of
         self._by_replica.setdefault(replica_id, set()).add(key)
 
     def lookup(self, prompt: Prompt) -> list[Match]:
@@ -77,6 +75,8 @@ class PrefixIndex:
         ids = self._ids(prompt)
         best: dict[str, Match] = {}
         for n in range(len(ids) // self.block_size, 0, -1):
+            if n not in self._lengths:
+                continue                       # no entry is this long; building its key is waste
             holders = self._holders.get(tuple(ids[: n * self.block_size]), {})
             for replica_id, tick in holders.items():
                 if replica_id not in best:
@@ -90,17 +90,25 @@ class PrefixIndex:
         if holders is None or replica_id not in holders:
             return
         del holders[replica_id]
-        if not holders:
-            del self._holders[key]
         self._by_replica.get(replica_id, set()).discard(key)
+        self._forget_if_empty(key)
 
     def drop_replica(self, replica_id: str) -> None:
         """Forget everything a replica held. It can no longer win any routing decision."""
         for key in self._by_replica.pop(replica_id, set()):
-            holders = self._holders.get(key, {})
-            holders.pop(replica_id, None)
-            if not holders:
-                self._holders.pop(key, None)
+            self._holders.get(key, {}).pop(replica_id, None)
+            self._forget_if_empty(key)
+
+    def _forget_if_empty(self, key: tuple[int, ...]) -> None:
+        """Drop a key nobody holds any more, keeping `_lengths` exact — a stale length would
+        put the O(prompt^2) key building back for prefix lengths that no longer exist."""
+        if self._holders.get(key) == {}:
+            del self._holders[key]
+            n = len(key) // self.block_size
+            if self._lengths.get(n, 0) <= 1:
+                self._lengths.pop(n, None)
+            else:
+                self._lengths[n] -= 1
 
     def _ids(self, prompt: Prompt) -> list[int]:
         if isinstance(prompt, str):

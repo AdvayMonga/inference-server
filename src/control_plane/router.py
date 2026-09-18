@@ -1,21 +1,9 @@
-"""Prefix-aware, session-affine router: locality versus load, one decision per request.
+"""Prefix-aware session-affine router: locality (session affinity, then prefix) versus load.
 
-`route()` is the decision and it is pure — the `scheduling_policy.py` pattern — so a live
-router and the simulator call the same code and cannot drift. `Router` is a thin stateful
-shell holding the replica table and the index; it contains no policy of its own.
+    score = w*(aw*holds_session + matched_blocks/prompt_blocks)/(1+aw) + (1-w)*(1 - load/max_load)
 
-The score, highest wins:
-
-    score = w * (aw * holds_session + matched_blocks / prompt_blocks) / (1 + aw)
-            + (1 - w) * (1 - load / max_load)          load = queue_depth + active
-
-`w` is the locality-vs-load knob the loop searches: `w=0` is exactly shortest-queue (the
-locality term drops out), `w=1` is exactly best-locality (the load term drops out). `aw` is the
-session-affinity coefficient, separate from the prefix term so its contribution can be measured
-by setting it to 0; at the default 1.0 holding the session is worth a full prefix match, which
-is why affinity beats any partial match elsewhere. Both terms are normalised to [0, 1] so `w`
-means what it says in between. Replicas reporting no free KV blocks are skipped while any other
-replica has room, and ties break on `replica_id` ascending so a sweep is reproducible.
+`w=0` is exactly shortest-queue, `w=1` exactly best-locality, `aw=0` ablates affinity. `route()`
+is pure, the `scheduling_policy.py` pattern. Why this shape: `kb-20260917-0c9ba6de`.
 """
 
 from __future__ import annotations
@@ -32,7 +20,9 @@ class ReplicaView(NamedTuple):
     replica_id: str
     queue_depth: int = 0
     active: int = 0
-    free_blocks: int = 1                       # 0 means "full"; the router skips it if it can
+    # Only ever tested > 0: capacity is a gate, not a score term, so the magnitude is not
+    # consulted. A replica reporting 0 is skipped while any other has room.
+    free_blocks: int = 1
     sessions: frozenset[str] = frozenset()     # sessions whose KV this replica holds
 
     @property
@@ -60,6 +50,7 @@ def replica_score(replica: ReplicaView, session_id: str, matched_blocks: int, pr
 def route(request: RequestView, replicas: Sequence[ReplicaView], index: PrefixIndex,
           weight: float, affinity_weight: float = 1.0) -> str | None:
     """Pick a replica for one request. Pure, deterministic; None only if there are none."""
+    # Full replicas are skipped, but with nowhere else to go a full one is still a decision.
     candidates = [r for r in replicas if r.free_blocks > 0] or list(replicas)
     if not candidates:
         return None
