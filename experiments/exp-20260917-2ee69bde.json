@@ -1,0 +1,98 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [
+        "run-20260917-2a8ff4d3",
+        "run-20260917-4e8796b7",
+        "run-20260917-6672e388",
+        "run-20260917-d26a39db"
+      ],
+      "sha": "d562396"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [
+        "run-20260917-8ad0db52",
+        "run-20260917-b83b8e7f",
+        "run-20260917-9cb7e1d2",
+        "run-20260917-c7f39f2b"
+      ],
+      "sha": "b4439d1"
+    }
+  ],
+  "branch": "perf/skip-param-init-on-load",
+  "cost_usd": 0.0,
+  "delta": {
+    "wall_s": {
+      "after": 12.007,
+      "before": 39.089666666666666,
+      "delta": -27.082666666666668,
+      "detail": "|t|=50.01 across 3v3 runs, moved as predicted",
+      "metric": "wall_s",
+      "pct": -69.28344234196592,
+      "verdict": "significant"
+    }
+  },
+  "engine_sha_base": "d562396",
+  "finished_at": null,
+  "gates": {
+    "correctness": {
+      "evidence": {
+        "iteration_errors": {
+          "after": 0,
+          "before": 0
+        },
+        "pytest": "528 passed, 35 skipped, 2 warnings in 16.99s"
+      },
+      "name": "correctness",
+      "passed": true,
+      "reason": "fast suite green; no new iteration errors"
+    },
+    "cost": {
+      "evidence": {},
+      "name": "cost",
+      "passed": true,
+      "reason": "no undeclared startup or memory regression"
+    },
+    "sanity": {
+      "evidence": {
+        "declared": []
+      },
+      "name": "sanity",
+      "passed": true,
+      "reason": "no sanity metrics declared (consider adding some)"
+    },
+    "significance": {
+      "evidence": {
+        "after": 12.007,
+        "before": 39.089666666666666,
+        "delta": -27.082666666666668,
+        "detail": "|t|=50.01 across 3v3 runs, moved as predicted",
+        "metric": "wall_s",
+        "pct": -69.28344234196592,
+        "verdict": "significant"
+      },
+      "name": "significance",
+      "passed": true,
+      "reason": "-69.3% on wall_s (|t|=50.01 across 3v3 runs, moved as predicted)"
+    },
+    "validity": {
+      "evidence": {
+        "harness": "coldstart_load",
+        "regime": "synthetic"
+      },
+      "name": "validity",
+      "passed": true,
+      "reason": "arms comparable and the harness exercised the change"
+    }
+  },
+  "hypothesis_id": "hyp-20260917-6a44dfb8",
+  "id": "exp-20260917-2ee69bde",
+  "no_behaviour_change": "",
+  "notes": "Three things the gates cannot say, recorded so the next reader does not rediscover them. (1) The saving is not ALL elimination. Skipping the fill leaves parameters torch.empty'd and untouched until load_hf_weights copies into them, so the first-touch page fault moves OUT of the construct stage and INTO copy. Review measured a first write at 2.3-2.6x an already-faulted one (20-23ms vs 9ms for an 800MB bf16 tensor), ~100-200ms across E2B's ~9.2GB. That is <1% of the ~27s delta \u2014 the overwhelming majority is Kaiming RNG that stops happening \u2014 but 'copy is untouched by this diff' is true only at the source-line level and was wrong as a mechanism. (2) compare.py drops each arm's FIRST run as warmup, a policy written for a persistent-server harness where first means JIT and cache warmup. This instrument is one process per run, so there is no in-process state to warm; the only warm thing is the OS page cache, which that heuristic was not written for. Here it is the conservative direction anyway: all four runs per arm give -70.4%, the judged 3v3 gives -69.3%. Flagged, not worked around \u2014 compare.py is untouched. (3) The headline is a verdict and a magnitude, not a decimal: n=3 per arm, so read it as a -65% to -72% band. The previous group (grp-20260918-coldstart-v2) carried one treatment run that spent 15.7s in copy against a ~10.4s typical; nothing in this diff explains it and the standing hypothesis is memory pressure on a 24GB box, which tests/conftest.py already warns about. This group shows no such run.",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789690676.009551,
+  "verdict": "confirmed"
+}

@@ -16,9 +16,51 @@ Architecture quirks to remember:
 
 from __future__ import annotations
 
+import contextlib
+import threading
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+# A plain Lock, not an RLock, on purpose: from_hf's two windows are SEQUENTIAL — the first closes
+# before transformers builds its own model — so same-thread nesting does not happen. If a change
+# ever introduces it, Lock deadlocks loudly at the call site; RLock would permit it silently and
+# hold the process-wide patch open across work that has no business being inside it.
+_INIT_PATCH_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _skip_param_init():
+    """Allocate parameters without randomly filling them — from_hf overwrites every one.
+
+    Kaiming-uniform over 4.6B params is ~24.7s of a ~37s E2B load and is pure waste when the
+    next step is a full copy from the checkpoint. Buffers are untouched, so the RoPE tables,
+    embedding normalizer and per-layer scalars still compute exactly as before.
+
+    What the lock does and does not protect. The patch is PROCESS-WIDE — nn.Linear and
+    nn.Embedding are shared by every module in the process, ours or not. The lock serialises
+    concurrent callers of this context manager, so two loads cannot restore each other's saved
+    functions in the wrong order. It cannot protect an unrelated `nn.Linear(...)` built by
+    another thread inside the window: that module comes back unfilled, which is silent garbage
+    rather than a crash. Accepted because the windows are small (~1.5s to allocate the model,
+    ~5ms for the tied head) and both happen once, at startup, before the server serves anything
+    — `CustomTorchBackend` awaits its single `run_in_executor` load before accepting traffic.
+
+    Not quite all of the saving is elimination: an unfilled parameter is untouched pages, so its
+    first-touch fault moves from construction into the copy `load_hf_weights` does (~100-200ms
+    across E2B's 9.2GB, against ~25s of Kaiming RNG that simply stops happening).
+    """
+    with _INIT_PATCH_LOCK:
+        saved = {c: c.reset_parameters for c in (nn.Linear, nn.Embedding)}
+        for c in saved:
+            c.reset_parameters = lambda self: None
+        try:
+            yield
+        finally:
+            for c, fn in saved.items():
+                c.reset_parameters = fn
 
 
 class KVCache:
@@ -628,23 +670,29 @@ class GemmaForCausalLM(nn.Module):
     def from_hf(cls, model_name: str = "google/gemma-4-E2B-it", dtype: torch.dtype = torch.bfloat16):
         from transformers import AutoConfig, AutoModelForCausalLM
         cfg = AutoConfig.from_pretrained(model_name).text_config
-        model = GemmaModel(
-            vocab_size=cfg.vocab_size,
-            hidden_size=cfg.hidden_size,
-            num_layers=cfg.num_hidden_layers,
-            intermediate_size=cfg.intermediate_size,
-            num_q_heads=cfg.num_attention_heads,
-            num_kv_heads=cfg.num_key_value_heads,
-            head_dim=cfg.head_dim,
-            global_head_dim=cfg.global_head_dim,
-            hidden_per_layer=cfg.hidden_size_per_layer_input,
-            layer_types=list(cfg.layer_types),
-            sliding_window=cfg.sliding_window,
-            num_kv_shared_layers=cfg.num_kv_shared_layers,
-            use_double_wide_mlp=getattr(cfg, "use_double_wide_mlp", True),
-            eps=cfg.rms_norm_eps,
-            dtype=dtype,
-        )
+        with _skip_param_init():
+            model = GemmaModel(
+                vocab_size=cfg.vocab_size,
+                hidden_size=cfg.hidden_size,
+                num_layers=cfg.num_hidden_layers,
+                intermediate_size=cfg.intermediate_size,
+                num_q_heads=cfg.num_attention_heads,
+                num_kv_heads=cfg.num_key_value_heads,
+                head_dim=cfg.head_dim,
+                global_head_dim=cfg.global_head_dim,
+                hidden_per_layer=cfg.hidden_size_per_layer_input,
+                layer_types=list(cfg.layer_types),
+                sliding_window=cfg.sliding_window,
+                num_kv_shared_layers=cfg.num_kv_shared_layers,
+                use_double_wide_mlp=getattr(cfg, "use_double_wide_mlp", True),
+                eps=cfg.rms_norm_eps,
+                dtype=dtype,
+            )
         sd = AutoModelForCausalLM.from_pretrained(model_name, dtype=dtype).state_dict()
         model.load_hf_weights(sd)
-        return cls(model, final_logit_softcapping=cfg.final_logit_softcapping)
+        # Also under the skip: __init__ builds lm_head as a [vocab, hidden] nn.Linear (403M
+        # elements for E2B) and the next line throws that fill away for the tied embedding.
+        # The HF construction between the two windows is deliberately left alone — skipping
+        # transformers' own init is not ours to reason about.
+        with _skip_param_init():
+            return cls(model, final_logit_softcapping=cfg.final_logit_softcapping)
