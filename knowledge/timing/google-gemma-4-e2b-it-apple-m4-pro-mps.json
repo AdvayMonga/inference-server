@@ -1,0 +1,16 @@
+{
+  "decode": [
+    0.16509611446330621,
+    0.0014933340564684777,
+    0.0
+  ],
+  "engine_sha": "cc2a166",
+  "fitted_from": "grp-fit-coldheld-mps",
+  "hardware": "Apple M4 Pro (MPS)",
+  "model": "google/gemma-4-E2B-it",
+  "prefill": [
+    0.15719093862594324,
+    0.001508858668454596,
+    0.0
+  ]
+}

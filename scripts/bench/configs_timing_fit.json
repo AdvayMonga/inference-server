@@ -1,0 +1,10 @@
+[
+  {"label": "fit-cold-heldout-x1", "arm": "fit", "class": "cold_start", "split": "heldout",
+   "rate_scale": 1.0, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "fit-cold-heldout-x2", "arm": "fit", "class": "cold_start", "split": "heldout",
+   "rate_scale": 2.0, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "fit-cold-heldout-x4", "arm": "fit", "class": "cold_start", "split": "heldout",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "fit-long-heldout-solo", "arm": "fit", "class": "long_context", "split": "heldout",
+   "rate_scale": 1.0, "env": {"MAX_BATCH_SIZE": 1, "MAX_QUEUE_WAIT_S": 3.0}}
+]
