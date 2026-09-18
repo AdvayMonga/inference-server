@@ -12,8 +12,12 @@ surfaces cannot drift apart again.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import asdict, dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
+from typing import Any
 
+from inference_server.research.accounting import Accounting
 from inference_server.research.gates import Judgement, judge
 from inference_server.research.kb import save_experiment
 from inference_server.research.noise import NoiseBand, band_for
@@ -349,3 +353,132 @@ def headline(panels: list[Vitals]) -> list[dict[str, float | None]]:
     """One headline per sweep. Replicates stay separate — averaging them here would hide the
     run-to-run spread that decides significance."""
     return [{"trial": t, **sweep_headline(pts)} for t, pts in sorted(sweeps(panels).items())]
+
+
+# --------------------------------------------------------------------------- primary metric
+#
+# notes/01: **GPU-seconds per session, subject to p95 TTFT under a fixed ceiling.**
+#
+# Pinning the latency and optimising the cost is what keeps both from degenerating: optimise
+# latency alone and the loop discovers warm pools on day one; optimise cost alone and it scales
+# to zero and latency explodes. The cost side only works if idle time counts, which is why the
+# numerator is wall clock from PROCESS START and not the serving window.
+#
+# Derived late, from the panel's accounting block, for the same reason sweep_headline is: the
+# instrument records the terms and this decides what they mean.
+
+
+@dataclass
+class PrimaryMetric:
+    """GPU-seconds per session at a stated p95 TTFT ceiling, or the reasons it is unknowable."""
+
+    gpu_s_per_session: float | None
+    ceiling_ms: float | None
+    ceiling_met: bool | None
+    ttft_p95_ms: float | None
+    gpu_s: float | None
+    sessions: int | None
+    refusals: list[str] = dc_field(default_factory=list)   # why there is no number
+    caveats: list[str] = dc_field(default_factory=list)    # terms nobody measured
+    runs: int = 0
+
+    def __bool__(self) -> bool:
+        return self.gpu_s_per_session is not None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    def format(self) -> str:
+        if not self:
+            return ("primary metric: REFUSED — the accounting is incomplete\n  "
+                    + "\n  ".join(self.refusals))
+        verdict = ("MET" if self.ceiling_met else "BROKEN")
+        lines = [f"primary metric: {self.gpu_s_per_session:.2f} GPU-seconds per session "
+                 f"at a p95 TTFT ceiling of {self.ceiling_ms:.0f}ms [{verdict}]",
+                 f"  {self.gpu_s:.1f} GPU-s (wall from process start, idle included) / "
+                 f"{self.sessions} session(s) over {self.runs} run(s)",
+                 f"  measured p95 TTFT {self.ttft_p95_ms:.0f}ms"]
+        lines += [f"  CAVEAT: {c}" for c in self.caveats]
+        return "\n".join(lines)
+
+
+def primary_metric(panels: Vitals | list[Vitals], *,
+                   ceiling_ms: float | None = None) -> PrimaryMetric:
+    """The project's primary metric, or a refusal naming every term that is missing.
+
+    It refuses rather than defaulting a missing term to zero. That is the whole point: an
+    unmeasured term reads as free, and notes/07 says a loop will eventually move cost into
+    whatever reads as free. In particular it will NOT fall back to `Vitals.wall_s` when
+    `wall_s_from_process_start` is absent — wall_s starts at the first arrival, so substituting
+    it would silently exclude model load, which on a cold replica is most of the bill.
+
+    Several panels aggregate by summing GPU-seconds and sessions, and the ceiling must be met by
+    every one of them. Each panel must come from its OWN process, or its share of the load time
+    is counted twice; `replay_local.py` guarantees that by starting one server per run.
+    """
+    points = [panels] if isinstance(panels, Vitals) else list(panels)
+    refusals: list[str] = []
+    caveats: list[str] = []
+    gpu_s = 0.0
+    sessions = 0
+    ttft_p95: float | None = None
+    ceilings: set[float] = set()
+    met = True
+
+    if not points:
+        return PrimaryMetric(None, ceiling_ms, None, None, None, None,
+                             refusals=["no panels"], runs=0)
+
+    for p in points:
+        rid = p.validity.run_id
+        acc = Accounting.of(p)
+        if acc is None:
+            refusals.append(f"{rid}: no accounting block — this panel cannot say what the run "
+                            f"cost before its first request")
+            continue
+        if acc.wall_s_from_process_start is None:
+            refusals.append(f"{rid}: wall_s_from_process_start is unmeasured, and wall_s is not "
+                            f"a substitute for it (it starts at the first arrival, so model "
+                            f"load would not be counted)")
+        else:
+            gpu_s += acc.wall_s_from_process_start
+        if acc.sessions_served is None:
+            refusals.append(f"{rid}: sessions_served is unmeasured, so there is nothing to "
+                            f"divide the GPU-seconds by")
+        else:
+            sessions += acc.sessions_served
+        caveats += [f"{rid}: {term} not accounted — {why}"
+                    for term, why in sorted(acc.unmeasured.items())]
+
+        ceiling = ceiling_ms if ceiling_ms is not None else p.slo_ttft_ms
+        if ceiling is None:
+            refusals.append(f"{rid}: no p95 TTFT ceiling — the metric is meaningless without "
+                            f"the latency it is subject to")
+        else:
+            ceilings.add(float(ceiling))
+        if p.ttft_p95 is None:
+            refusals.append(f"{rid}: no measured ttft_p95, so the ceiling cannot be checked")
+        else:
+            ttft_p95 = p.ttft_p95 if ttft_p95 is None else max(ttft_p95, p.ttft_p95)
+            if ceiling is not None:
+                met = met and p.ttft_p95 < ceiling
+
+    if len(ceilings) > 1:
+        refusals.append(f"panels state different ceilings {sorted(ceilings)}; one metric needs "
+                        f"one SLO")
+    if not sessions and not refusals:
+        refusals.append("no sessions served — cost per session is undefined")
+
+    if refusals:
+        return PrimaryMetric(None, next(iter(ceilings), ceiling_ms), None, ttft_p95, None, None,
+                             refusals=refusals, caveats=caveats, runs=len(points))
+    return PrimaryMetric(
+        gpu_s_per_session=round(gpu_s / sessions, 3),
+        ceiling_ms=ceilings.pop(),
+        ceiling_met=met,
+        ttft_p95_ms=ttft_p95,
+        gpu_s=round(gpu_s, 3),
+        sessions=sessions,
+        caveats=caveats,
+        runs=len(points),
+    )

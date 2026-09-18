@@ -11,6 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from inference_server.research.accounting import Accounting
 from inference_server.research.compare import (
     Significance,
     comparable,
@@ -189,33 +190,91 @@ def correctness_gate(
     return GateResult("correctness", True, "fast suite green; no new iteration errors", evidence)
 
 
+def _delta(baseline: Vitals, treatment: Vitals, attr: str,
+           evidence: dict[str, Any]) -> float | None:
+    """before/after for one panel field, recorded in the evidence. None when either is absent.
+
+    Absent means unchanged behaviour: a panel that does not carry a term cannot be judged on it,
+    and inventing a zero there is the same mistake this gate exists to catch.
+    """
+    b, t = getattr(baseline, attr, None), getattr(treatment, attr, None)
+    if not isinstance(b, (int, float)) or not isinstance(t, (int, float)):
+        return None
+    evidence[attr] = {"before": b, "after": t}
+    return t - b
+
+
 def cost_gate(baseline: Vitals, treatment: Vitals, *,
               max_startup_regression_s: float = 60.0,
-              max_mem_regression_gb: float = 2.0) -> GateResult:
-    """Latency wins that cost startup or memory must declare it, not hide it.
+              max_mem_regression_gb: float = 2.0,
+              max_host_mem_regression_gb: float = 2.0,
+              max_wall_regression_pct: float = 0.25,
+              min_wall_regression_s: float = 10.0) -> GateResult:
+    """Did we pay for the win somewhere unmeasured?
 
     Bucketed decode graphs were a real 1.8x win that quietly added ~21 minutes of startup; this
-    gate is why that has to be stated rather than discovered later.
+    gate is why that has to be stated rather than discovered later. notes/07 names the general
+    form: "move cost off the measured window" and "burn an unmeasured resource" are two of the
+    six ways this loop would reward hack, and both are invisible to every other gate.
+
+    Four costs, each checked only when BOTH arms carry it — a panel that does not measure a term
+    judges exactly as it did before this gate learned about the term:
+
+    * startup (`graph_capture_s`)
+    * peak device memory (`peak_gpu_mem_gb`)
+    * peak host RSS (`peak_host_rss_gb`) — in the panel since LOOP.md step 0 and populated by
+      instruments, but never read here until the accounting work
+    * total wall clock from process START (`accounting.wall_s_from_process_start`) — the term
+      that makes idle time and model load count. Deliberately conservative: it must rise by both
+      `max_wall_regression_pct` AND `min_wall_regression_s` to fail, because a gate that fires
+      spuriously is worse than one that fires late.
+
+    When the treatment has no accounting block the gate still passes, and says so: it cannot
+    tell whether the win was paid for outside the measured window.
     """
     evidence: dict[str, Any] = {}
     problems: list[str] = []
+    notes: list[str] = []
 
-    b_cap, t_cap = baseline.graph_capture_s, treatment.graph_capture_s
-    if b_cap is not None and t_cap is not None:
-        evidence["graph_capture_s"] = {"before": b_cap, "after": t_cap}
-        if t_cap - b_cap > max_startup_regression_s:
-            problems.append(f"startup +{t_cap - b_cap:.0f}s (graph capture)")
+    d_cap = _delta(baseline, treatment, "graph_capture_s", evidence)
+    if d_cap is not None and d_cap > max_startup_regression_s:
+        problems.append(f"startup +{d_cap:.0f}s (graph capture)")
 
-    b_mem, t_mem = baseline.peak_gpu_mem_gb, treatment.peak_gpu_mem_gb
-    if b_mem is not None and t_mem is not None:
-        evidence["peak_gpu_mem_gb"] = {"before": b_mem, "after": t_mem}
-        if t_mem - b_mem > max_mem_regression_gb:
-            problems.append(f"peak GPU memory +{t_mem - b_mem:.1f}GB")
+    d_mem = _delta(baseline, treatment, "peak_gpu_mem_gb", evidence)
+    if d_mem is not None and d_mem > max_mem_regression_gb:
+        problems.append(f"peak GPU memory +{d_mem:.1f}GB")
+
+    d_rss = _delta(baseline, treatment, "peak_host_rss_gb", evidence)
+    if d_rss is not None and d_rss > max_host_mem_regression_gb:
+        problems.append(f"peak host RSS +{d_rss:.1f}GB")
+
+    b_acc, t_acc = Accounting.of(baseline), Accounting.of(treatment)
+    if b_acc is None or t_acc is None:
+        notes.append("no accounting block on both arms, so this gate cannot see cost moved "
+                     "outside the measured window (model load, idle time, host RAM)")
+    else:
+        b_wall, t_wall = b_acc.wall_s_from_process_start, t_acc.wall_s_from_process_start
+        if b_wall and t_wall:
+            rise, pct_ = t_wall - b_wall, (t_wall - b_wall) / b_wall
+            evidence["wall_s_from_process_start"] = {
+                "before": round(b_wall, 2), "after": round(t_wall, 2),
+                "pct": round(pct_ * 100, 1)}
+            if pct_ > max_wall_regression_pct and rise > min_wall_regression_s:
+                problems.append(f"total wall from process start +{rise:.0f}s ({pct_:+.0%}) — "
+                                f"a win inside the serving window paid for before it")
+        unmeasured = sorted(set(b_acc.unmeasured) | set(t_acc.unmeasured))
+        if unmeasured:
+            evidence["unmeasured"] = unmeasured
+            notes.append("not accounted, so a regression in it would be invisible: "
+                         + ", ".join(unmeasured))
 
     if problems:
         return GateResult("cost", False, "; ".join(problems) + " — declare it or reduce it",
                           evidence)
-    return GateResult("cost", True, "no undeclared startup or memory regression", evidence)
+    reason = "no undeclared startup, memory or wall-clock regression"
+    if notes:
+        reason += " (" + "; ".join(notes) + ")"
+    return GateResult("cost", True, reason, evidence)
 
 
 @dataclass

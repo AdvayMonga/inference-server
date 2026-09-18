@@ -177,8 +177,15 @@ class Vitals:
     # --- resources -----------------------------------------------------------------
     peak_gpu_mem_gb: float | None = None
     peak_host_rss_gb: float | None = None
-    wall_s: float | None = None
+    wall_s: float | None = None          # the SERVING window; see `accounting` for the whole run
     gpu_cost_usd: float | None = None
+    # Total accounting (notes/03): wall clock from process START, idle time, sessions served,
+    # storage reads, and the terms this box could NOT measure. `wall_s` above is the window
+    # after the first request, which is precisely where cost can hide. Optional with a None
+    # default, same precedent as the batch-occupancy and corpus-provenance fields: an added
+    # field cannot change a measurement already taken, so PANEL_VERSION does not move and
+    # panels written before this existed still load. Shape: research/accounting.Accounting.
+    accounting: dict[str, Any] | None = None
 
     panel_version: int = PANEL_VERSION
 
