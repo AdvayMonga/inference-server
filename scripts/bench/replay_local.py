@@ -313,6 +313,15 @@ def build_accounting(sidecar_path: Path, *, wall_from_launch_s: float, serving_w
     if side.get("storage_read_bytes") is None:
         unmeasured.setdefault("storage_read_bytes",
                               side.get("storage_read_note") or "not readable on this platform")
+    # The sampler is a Python thread inside the server, so it is starved of the GIL exactly when
+    # the engine is busy. Coverage short of the run is a PARTIAL measurement, and saying which
+    # window a peak covers is the difference between a lower bound and a wrong number.
+    sampled_to = side.get("sampled_to_uptime_s")
+    if sampled_to is not None and sampled_to < 0.9 * wall_from_launch_s:
+        unmeasured["peak_device_mem_gb (coverage)"] = (
+            f"sampled only the first {sampled_to:.0f}s of a {wall_from_launch_s:.0f}s run "
+            f"({side.get('device_mem_samples')} samples); the sampler thread is GIL-starved "
+            f"while the engine computes, so the peak is a lower bound over that window")
     return Accounting(
         wall_s_from_process_start=round(wall_from_launch_s, 3),
         serving_wall_s=round(serving_wall_s, 3),

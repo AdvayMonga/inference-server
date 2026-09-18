@@ -18,11 +18,19 @@ spike between two samples is missed and the number is a lower bound. CUDA has a 
 (`max_memory_allocated`). The sidecar records which it was, so nobody reads a sampled floor as
 a measured peak.
 
-**The sidecar is rewritten every second, not only at exit.** Measured on this box: the engine's
-lifespan shutdown can outlast `stop_server`'s 60s SIGTERM grace, and the SIGKILL that follows
-runs no `finally`. An exit-only sidecar is therefore missing exactly when a run is slow, which
-is the run whose cost most needs accounting. A periodically-rewritten one is at most a second
-stale, and the instrument names any gap rather than assuming zero either way.
+**The sidecar is rewritten on every sample, not only at exit.** Measured on this box: the
+engine's lifespan shutdown can outlast `stop_server`'s 60s SIGTERM grace, and the SIGKILL that
+follows runs no `finally`. An exit-only sidecar is therefore missing exactly when a run is slow,
+which is the run whose cost most needs accounting.
+
+**And the sampler is GIL-starved under load.** A background Python thread gets almost no turns
+while the engine is running forwards in the same interpreter: measured 11 samples across 200 MPS
+matmuls, and in a real serve the sidecar stopped advancing at 84s of a 13-minute run. There is
+no fix available from this side — MPS has no peak counter to read once at the end, and the
+engine may not be touched to sample from inside. So the sidecar records `sampled_to_uptime_s`
+and `device_mem_samples`, `replay_local.py` compares the first against the run's own wall clock,
+and a short coverage is NAMED in the panel's `unmeasured`. The number is then honestly a peak
+over the window that was actually watched, rather than a peak over the run.
 """
 
 from __future__ import annotations
@@ -39,7 +47,6 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 SAMPLE_INTERVAL_S = 0.25
-WRITE_EVERY_N_SAMPLES = 4          # a sidecar at most ~1s stale, even if the process is killed
 
 
 class ResourceRecorder:
@@ -52,6 +59,8 @@ class ResourceRecorder:
         self.sidecar = sidecar
         self.started = time.monotonic()
         self.peak_bytes = 0.0
+        self.samples = 0
+        self.sampled_to = 0.0          # uptime of the last successful sample; see the docstring
         self._stop = threading.Event()
         if torch.cuda.is_available():
             self.kind, self.source = "cuda", "torch.cuda.max_memory_allocated (true peak)"
@@ -72,21 +81,23 @@ class ResourceRecorder:
         self.write()
 
     def _loop(self) -> None:
-        n = 0
         while not self._stop.wait(SAMPLE_INTERVAL_S):
             try:
                 self._sample()
-                n += 1
-                if n % WRITE_EVERY_N_SAMPLES == 0:
-                    self.write()
-            except Exception:          # noqa: BLE001 — accounting must never kill the server
-                return
+                self.write()
+            except Exception as e:     # noqa: BLE001 — accounting must never kill the server
+                # Keep going: one failed read is a gap in coverage, which `sampled_to_uptime_s`
+                # already reports. Dying would turn it into a silent one.
+                print(f"[accounting] sample failed: {type(e).__name__}: {e}",
+                      file=sys.stderr, flush=True)
 
     def _sample(self) -> None:
         if self.kind == "cuda":
             self.peak_bytes = max(self.peak_bytes, self.torch.cuda.max_memory_allocated())
         elif self.kind == "mps":
             self.peak_bytes = max(self.peak_bytes, self.torch.mps.driver_allocated_memory())
+        self.samples += 1
+        self.sampled_to = time.monotonic() - self.started
 
     def device_peak_gb(self) -> float | None:
         return round(self.peak_bytes / 1e9, 3) if self.kind else None
@@ -108,6 +119,8 @@ class ResourceRecorder:
             "device_mem_source": self.source or None,
             "storage_read_bytes": read_bytes,
             "storage_read_note": read_note or None,
+            "device_mem_samples": self.samples,
+            "sampled_to_uptime_s": round(self.sampled_to, 3),
             "server_uptime_s": round(time.monotonic() - self.started, 3),
         }, indent=2, sort_keys=True))
         tmp.replace(self.sidecar)
