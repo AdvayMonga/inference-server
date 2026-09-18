@@ -4,6 +4,7 @@
     python -m inference_server.research.loop screen <hypotheses.json>
     python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}'
     python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
+    python -m inference_server.research.loop band --run-group <null run group>
     python -m inference_server.research.loop index
     python -m inference_server.research.loop kb --status rejected
     python -m inference_server.research.loop no-claim --why "drops an unused import"
@@ -137,6 +138,46 @@ def cmd_judge(args) -> int:
     return 0
 
 
+def cmd_band(args) -> int:
+    """Reduce a NULL run group (same config as both arms) to a stored noise band.
+
+    `arms_for` is reused rather than reimplemented: a band measured from unbalanced or
+    block-ordered runs would understate the spread in exactly the way that makes the band
+    dangerous, and those are the same checks an A/B has to pass.
+    """
+    from inference_server.research.noise import BAND_DIR, band_from_arms, format_band
+    from inference_server.research.session import arms_for
+
+    try:
+        arms = arms_for(args.run_group)
+    except NotMeasurable as e:
+        print(f"NOT MEASURABLE: {e}")
+        return 2
+    band = band_from_arms(arms, drop_first_per_arm=not args.keep_warmup,
+                          entry_id=args.entry or "", notes=args.notes or "")
+    if not band.workload_class or not band.model or not band.hardware:
+        print("the panels do not identify (workload_class, model, hardware); a band that cannot "
+              "say where it applies would be applied everywhere", file=sys.stderr)
+        return 1
+    name = "-".join(_slug(x) for x in (band.harness, band.workload_class, band.model,
+                                       band.hardware))
+    out = Path(args.out) if args.out else BAND_DIR / f"{name}.json"
+    band.to_json(out)
+    print(f"-- noise band from {band.n_runs} run(s) of {band.identity()} --")
+    print(format_band(band))
+    print(f"\nwrote {out}")
+    print("a delta inside this band is reported `inconclusive` by compare.significance_"
+          "replicated and fails the significance gate")
+    return 0
+
+
+def _slug(text: str) -> str:
+    keep = "".join(c.lower() if c.isalnum() else "-" for c in text)
+    while "--" in keep:
+        keep = keep.replace("--", "-")
+    return keep.strip("-")
+
+
 def cmd_index(args) -> int:
     p = write_index()
     print(f"regenerated {p} from knowledge/ ({len(load_entries())} entries)")
@@ -234,6 +275,17 @@ def main(argv: list[str] | None = None) -> int:
     j.add_argument("--no-drift-check", action="store_true",
                    help="judge panels whose engine sha has since moved (you almost never want this)")
     j.set_defaults(fn=cmd_judge)
+
+    b = sub.add_parser("band", help="reduce a null run group to a noise band in knowledge/noise/")
+    b.add_argument("--run-group", required=True,
+                   help="a group whose two arms ran the SAME config (replay_local.py --null)")
+    b.add_argument("--out", help="default knowledge/noise/<harness>-<class>-<model>-<hw>.json")
+    b.add_argument("--entry", help="knowledge entry id this band belongs to")
+    b.add_argument("--notes", default="")
+    b.add_argument("--keep-warmup", action="store_true",
+                   help="do not drop each arm's first run (reports the raw spread instead of "
+                        "the one the significance gate faces)")
+    b.set_defaults(fn=cmd_band)
 
     i = sub.add_parser("index", help="regenerate DECISIONS.md from knowledge/")
     i.set_defaults(fn=cmd_index)

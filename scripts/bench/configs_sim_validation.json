@@ -1,0 +1,20 @@
+[
+  {"label": "mbs8-x1", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 1.0, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "mbs2-x1", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 1.0, "env": {"MAX_BATCH_SIZE": 2}},
+  {"label": "mbs1-x1", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 1.0, "env": {"MAX_BATCH_SIZE": 1}},
+  {"label": "mbs8-x05", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 0.5, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "mbs8-x4", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 8}},
+  {"label": "mbs2-x4", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 2}},
+  {"label": "mbs1-x4", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 1}},
+  {"label": "mbs2-fair-x4", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 2, "SCHEDULING_POLICY": "fair"}},
+  {"label": "mbs1-deadline5-x4", "arm": "cfg", "class": "cold_start", "split": "seen",
+   "rate_scale": 4.0, "env": {"MAX_BATCH_SIZE": 1, "MAX_QUEUE_WAIT_S": 5.0}}
+]

@@ -49,8 +49,10 @@ python -m inference_server.research.loop kb --regime cold_start   # what applies
 python -m inference_server.research.loop screen hypotheses.json   # cheapest falsification first, flags known dead ends
 python -m inference_server.research.loop simulate --class steady_interactive --config '{"policy":"fair"}'  # tier 1: policy hypotheses, no GPU
 python -m inference_server.research.loop no-claim --why "..."      # engine diff that claims no behaviour change
+python -m inference_server.research.loop band --run-group <null grp>  # the measured noise floor -> knowledge/noise/
 python -m inference_server.research.loop judge --hyp H.json --baseline A.json --treatment B.json
 python scripts/bench/replay_trace.py --class steady_interactive --split seen --base-url URL  # open-loop corpus replay
+python scripts/bench/replay_local.py --class cold_start --null 6   # serve + replay locally, fresh server per run
 RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py --gpu '...'  # rent a GPU, run one instrument, terminate
 ```
 
@@ -82,6 +84,10 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py -
   `rejected`. Nine such entries already exist and they are what stop the loop re-treading
   dead ends.
 - **Never compare across sessions.** `compare.py` enforces this; do not work around it.
+- **The variance budget is measured, not assumed.** `replay_local.py --null N` runs one config as
+  both arms on this box; `loop band` reduces that to `knowledge/noise/<...>.json` and `loop judge`
+  applies it, reporting a delta inside the band as `inconclusive` rather than significant. A band
+  covers exactly its (harness, workload class, model, hardware) and nothing near it.
 
 ## What This Project Is
 

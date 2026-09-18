@@ -43,5 +43,19 @@ both places. Entries written before these fields existed were backfilled on 2026
 `scripts/tools/backfill_kb_regime.py` (its mapping table is the record of why each entry got
 what it got); a new entry sets `regime` at write time, or says why it has none.
 
+## Subdirectories: machine-readable companions
+
+`load_entries()` globs `knowledge/*.json` only, so these are data files the loop reads directly
+rather than entries in the base. Each one has a `knowledge/` entry that tells its story.
+
+| dir | what | written by | read by |
+|---|---|---|---|
+| `timing/` | the simulator's fitted `TimingModel` coefficients, keyed `<model>-<hardware>-<sha>` | `scripts/tools/fit_timing_from_runs.py` | `research/simulator.py` |
+| `noise/` | the measured run-to-run spread with NOTHING changed, keyed `<harness>-<class>-<model>-<hardware>` | `loop band --run-group <null group>` | `research/compare.py` — a delta inside the band is `inconclusive`, never a win |
+
+A band applies to exactly the situation it names: `find_band` matches harness, workload class,
+model and hardware together and has no nearest-entry fallback, for the same reason `covers()`
+has none.
+
 Negative results are first-class here. A `rejected` entry is what stops the loop re-trying
 something that has already been measured and found not to matter.

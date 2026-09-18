@@ -38,6 +38,7 @@ run. Everything else here runs locally.
 | `eviction_benchmark.py` / `fairness_benchmark.py` / `kv_pressure_benchmark.py` | CPU-runnable policy checks: LRU vs sink vs H2O, FCFS vs fair, backpressure |
 | `baseline_benchmark.py` | the original single-request baseline (kept for the record) |
 | `coldstart_load.py` | one cold `GemmaForCausalLM.from_hf` per PROCESS, as one panel (`wall_s` = load time, stage split in `harness_config.stage_ms`). Replicates are repeated processes; `RESEARCH_ARM` tags the arm. Tier 2, runs on any box |
+| `replay_local.py` | serves the engine on THIS box and replays corpus traces against it, **one fresh server process per run**. `--null N` is the noise-floor experiment (the same config as both arms, ABBA); `--configs FILE` is a sweep of engine configs, one run each. Fills the `ttft_queue_*` / `ttft_prefill_*` split from the telemetry rows and writes the `runs/<group>/` layout `fit_timing_from_runs.py` reads |
 
 The eleven A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
 `bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py`, `bench_chunked_prefill_modal.py`,
@@ -80,6 +81,36 @@ instrument at `archive/modal/` when those scripts were archived (2026-09-16); it
 turned prose notes into `knowledge/` and `experiments/` records; `backfill_kb_regime.py` stamped
 `regime` and `validity_range` onto the entries that predate those fields (2026-09-16), and its
 mapping table is the record of why each got what it got. All kept for provenance.
+
+### The two local recipes
+
+```bash
+# the noise floor: a null experiment, then the band it implies (notes 03)
+PYTHONPATH=src python scripts/bench/replay_local.py --class cold_start --null 6
+PYTHONPATH=src python -m inference_server.research.loop band --run-group <that group>
+#   -> knowledge/noise/<harness>-<class>-<model>-<hardware>.json, which
+#      compare.significance_replicated then consults on every judged experiment
+
+# the simulator's rank check against real hardware (notes 04)
+PYTHONPATH=src python scripts/bench/replay_local.py --configs scripts/bench/configs_timing_fit.json
+python scripts/tools/fit_timing_from_runs.py <fit group> --out knowledge/timing/<name>.json
+PYTHONPATH=src python scripts/bench/replay_local.py --configs scripts/bench/configs_sim_validation.json
+python scripts/tools/fit_timing_from_runs.py <validation group> --validate \
+    --timing knowledge/timing/<name>.json
+```
+
+Two run groups, on purpose. The timing model is fitted from `configs_timing_fit.json`
+(`cold_start/heldout` at three rate scales, plus one `long_context/heldout` run at
+MAX_BATCH_SIZE=1 so a few long prompts prefill alone and give the slope leverage) and
+rank-checked against `configs_sim_validation.json` (nine `cold_start/seen` configs spanning
+MAX_BATCH_SIZE, rate scale, policy and the admission deadline). Held out by the corpus's own
+seen/heldout split — fitting and validating on the same runs would report how well the model
+reproduces its own training set.
+
+Do not fit from a class this box cannot serve. `steady_interactive` and `long_context` at x1
+shed 128 of 136 and 36 of 40 requests here, and the survivors' telemetry carries 40s "prefill"
+spans (one request behind seven others in a K=8 wave) and 98s "decode steps". Those are invalid
+inputs, not noisy ones. See `kb-20260917-c07eb94b`.
 
 `fit_timing_from_runs.py` turns a `replay_corpus_runpod.py` run group into the simulator's
 `TimingModel` (fit from the telemetry rows; mapping in its docstring) and, with `--validate`,

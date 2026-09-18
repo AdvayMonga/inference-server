@@ -20,6 +20,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from inference_server.research.noise import NoiseBand
 from inference_server.research.schemas import Vitals
 
 # Knobs that change the answer. Two panels differing on any of these measure different things,
@@ -29,6 +30,10 @@ CONFIG_KEYS_THAT_MATTER = (
     "blocks", "sliding_blocks", "context_window", "rates", "duration", "pool_size",
     "max_queue_wait_s", "prefix_cache_impl", "wave_window_mult",
     "split", "rate_scale",      # replay_trace: seen vs held-out, or a compressed schedule
+    # A queue that rejects at a different depth, and a scheduler that orders differently, are
+    # different schedulers. Panels written before these keys existed carry None on both sides,
+    # so adding them refuses nothing that used to compare.
+    "max_queue_size", "scheduling_policy",
 )
 
 
@@ -108,7 +113,12 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
 
 @dataclass
 class Significance:
-    # significant | noise | insufficient_samples | not_comparable | non_numeric_metric
+    # significant | inconclusive | noise | insufficient_samples | not_comparable
+    # | non_numeric_metric
+    #
+    # `inconclusive` is the band verdict: the t-test separated the arms, but the effect is no
+    # bigger than what this harness moves on its own with nothing changed. LOOP.md/notes-03:
+    # "any delta inside it is filed inconclusive, never a win".
     verdict: str
     metric: str
     before: float | None
@@ -134,12 +144,20 @@ def significance_replicated(
     direction: str,
     min_runs: int = 3,
     t_threshold: float = 2.0,
+    band: NoiseBand | None = None,
 ) -> Significance:
     """Significance from REPLICATE RUNS — the only honest way to judge a p95 on this harness.
 
     Variance comes from across runs, not within one. Also discards each arm's first run: three
     identical back-to-back runs measured 1494 / 401 / 229 ms on ttft_p95, strictly decreasing,
     so the first is warmup and including it biases whichever arm ran first.
+
+    `band` is the measured null spread for this harness / workload class / machine (see
+    `research.noise`). A t-test only asks whether these particular arms separate; the band asks
+    the harder question of whether an effect this size shows up when NOTHING changed. Three runs
+    an arm can pass the first test and fail the second, so a delta inside the band is reported
+    `inconclusive` rather than `significant`. Omitting the band restores the old behaviour
+    exactly, which is what a situation with no measured band gets.
     """
     if len(baseline_runs) < min_runs + 1 or len(treatment_runs) < min_runs + 1:
         return Significance(
@@ -171,6 +189,13 @@ def significance_replicated(
         return Significance("noise", metric, mb, mt, delta, pct,
                             f"|t|={abs(tstat):.2f} < {t_threshold} across "
                             f"{len(b)}v{len(t)} runs (sd {sb:.1f}/{st:.1f})")
+    if band is not None and pct is not None and band.inside(metric, pct):
+        return Significance(
+            "inconclusive", metric, mb, mt, delta, pct,
+            f"|t|={abs(tstat):.2f} separates the arms, but {pct:+.1f}% on {metric} is inside "
+            f"the measured noise band (+-{band.width_pct(metric)}%, from {band.metrics[metric].n} "
+            f"null runs of {band.identity()}) — a delta this size appears with nothing changed, "
+            f"so it is not evidence")
     right = (direction == "increase" and delta > 0) or (direction == "decrease" and delta < 0)
     return Significance("significant", metric, mb, mt, delta, pct,
                         f"|t|={abs(tstat):.2f} across {len(b)}v{len(t)} runs, moved "

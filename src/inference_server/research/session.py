@@ -16,6 +16,7 @@ from pathlib import Path
 
 from inference_server.research.gates import Judgement, judge
 from inference_server.research.kb import save_experiment
+from inference_server.research.noise import NoiseBand, band_for
 from inference_server.research.schemas import (
     REPO_ROOT,
     Arm,
@@ -200,11 +201,17 @@ def judge_group(
     check_drift: bool = True,
     record: bool = True,
     runs_dir: Path = RUNS_DIR,
+    band: NoiseBand | None = None,
 ) -> tuple[Judgement, Experiment]:
     """Steps 5 and 6 in one call: load the group, judge five gates, record the experiment.
 
     Returns the judgement and the record. The record is saved unless `record=False` — a rejected
     hypothesis is written with the same weight as a confirmed one, which is the whole point.
+
+    `band` is the measured null spread this harness shows with nothing changed. It is looked up
+    from the baseline arm's own validity block when not passed, so the calibration applies by
+    default rather than by anyone remembering it — that is the whole reason for measuring one.
+    A situation with no band recorded judges exactly as before.
 
     `check_drift=False` is the escape hatch (`loop judge --no-drift-check`) and should now almost
     never be needed: the staleness rule measures drift from the experiment's tip, so a two-commit
@@ -221,7 +228,9 @@ def judge_group(
         check_still_measurable(arms)
 
     base, treat = arms[baseline], arms[treatment]
-    j = judge(hypothesis, base, treat, run_tests=run_tests)
+    if band is None:
+        band = band_for(base[-1])
+    j = judge(hypothesis, base, treat, run_tests=run_tests, band=band)
     exp = Experiment(
         hypothesis_id=hypothesis.id,
         engine_sha_base=base[0].validity.engine_sha,
@@ -232,6 +241,10 @@ def judge_group(
         gates=j.to_dict(),
         delta={hypothesis.predicted_metric: j.gates["significance"].evidence or {}},
         cost_usd=cost_usd,
+        notes=(f"noise band {band.entry_id or band.key()} "
+               f"({band.n_runs} null runs) applied" if band else
+               "no noise band recorded for this situation; significance judged on the t-test "
+               "alone"),
     )
     if record:
         save_experiment(exp)
