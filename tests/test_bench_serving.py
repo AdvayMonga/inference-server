@@ -179,10 +179,13 @@ def test_inter_arrival_gaps_are_exponential_with_the_requested_mean(monkeypatch)
         monkeypatch.setattr(bs.asyncio, "sleep", spy)
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-            return await bs.run_rate(client, rate=1000.0, duration_s=0.3, rng=random.Random(2))
+            # 1.0s, not 0.3s: the floor below is a sample-sufficiency check, but at 0.3s it
+            # was really measuring how fast the host spins the event loop — this machine
+            # reached 872-1373 gaps while a hosted CI runner reached 148-176 and failed.
+            return await bs.run_rate(client, rate=1000.0, duration_s=1.0, rng=random.Random(2))
 
     asyncio.run(go())
-    assert len(gaps) >= 200
+    assert len(gaps) >= 200          # enough draws for the two statistics below to be tight
     mean = sum(gaps) / len(gaps)
     std = (sum((g - mean) ** 2 for g in gaps) / len(gaps)) ** 0.5
     assert abs(mean - 0.001) < 0.0002                           # 1 / rate
