@@ -35,8 +35,12 @@ too flat. Fixing it needs a per-step width in the telemetry row (an engine chang
 lower bound.
 
 Validation (--validate): for each hardware panel's (class, split, rate_scale), simulate the same
-trace under a SimConfig built from `engine_env.json`, then report Spearman rank correlation of
+trace under a SimConfig built from the panel's own `harness_config["engine_env"]` when it has one
+and from the group's `engine_env.json` otherwise, then report Spearman rank correlation of
 `ttft_p95` and `tpot_p50` between hardware and simulator across the configs. Needs >= 2 configs.
+The per-panel fallback is what lets one local group hold several engine configs (see
+`scripts/bench/replay_local.py`); a rented group serves every replay from one process and carries
+its env once.
 """
 
 from __future__ import annotations
@@ -147,6 +151,18 @@ def sim_config(engine_env: dict[str, str], rate_scale: float) -> SimConfig:
     )
 
 
+def panel_env(panel: Vitals, engine_env: dict[str, str]) -> dict[str, str]:
+    """The env THIS panel's server ran under.
+
+    A rented run serves every replay from one process, so the group's `engine_env.json` is the
+    whole story. A local sweep (`replay_local.py --configs`) deliberately restarts the server
+    per config, so the group env is only the base — the panel carries its own, and using the
+    group's would rank eight configs as if they had all been one.
+    """
+    own = panel.validity.harness_config.get("engine_env")
+    return {**engine_env, **own} if isinstance(own, dict) else dict(engine_env)
+
+
 def validate(panels: list[Vitals], timing: TimingModel,
              engine_env: dict[str, str]) -> dict[str, Any]:
     """Simulate every hardware config; return per-config pairs and the two Spearman rhos."""
@@ -155,12 +171,14 @@ def validate(panels: list[Vitals], timing: TimingModel,
         hc = p.validity.harness_config
         cls_name, split, scale = hc["workload_class"], hc["split"], float(hc["rate_scale"])
         manifest, trace = load_trace(cls_name, split)
-        s = simulate(trace, sim_config(engine_env, scale), timing).summary(
+        env = panel_env(p, engine_env)
+        s = simulate(trace, sim_config(env, scale), timing).summary(
             manifest.classes[cls_name])
         pairs.append({"class": cls_name, "split": split, "rate_scale": scale,
+                      "label": hc.get("run_label", ""),
                       "hw_ttft_p95": p.ttft_p95, "sim_ttft_p95": s["ttft_p95"],
                       "hw_tpot_p50": p.tpot_p50, "sim_tpot_p50": s["tpot_p50"]})
-    pairs.sort(key=lambda d: (d["class"], d["split"], d["rate_scale"]))
+    pairs.sort(key=lambda d: (d["class"], d["split"], d["rate_scale"], d["label"]))
     rho = {}
     for metric in ("ttft_p95", "tpot_p50"):
         hw = [d[f"hw_{metric}"] for d in pairs]
@@ -211,13 +229,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'config':<34} {'hw ttft_p95':>12} {'sim ttft_p95':>13} "
               f"{'hw tpot_p50':>12} {'sim tpot_p50':>13}")
         for d in v["pairs"]:
-            name = f"{d['class']}/{d['split']} x{d['rate_scale']:g}"
+            name = (f"{d['label'] or d['class']}/{d['split']} x{d['rate_scale']:g}")
             print(f"{name:<34} {d['hw_ttft_p95']!s:>12} {d['sim_ttft_p95']!s:>13} "
                   f"{d['hw_tpot_p50']!s:>12} {d['sim_tpot_p50']!s:>13}")
         for metric, rho in v["rank_correlation"].items():
             print(f"spearman {metric}: {rho if rho is None else round(rho, 3)}")
-        if engine_env.get("BACKEND", "").startswith("custom"):
-            print(f"note: BACKEND={engine_env['BACKEND']} gates admission on the token budget "
+        backends = {panel_env(p, engine_env).get("BACKEND", "") for p in panels}
+        if any(b.startswith("custom") for b in backends):
+            print(f"note: BACKEND={sorted(backends)[-1]} gates admission on the token budget "
                   f"MAX_ACTIVE_KV_TOKENS={engine_env.get('MAX_ACTIVE_KV_TOKENS', '?')}, while the "
                   f"simulator gates on a block pool (kv_blocks). Under KV pressure the two "
                   f"constraints differ, so disagreement there is the model's, not the engine's.")
