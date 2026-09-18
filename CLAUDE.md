@@ -97,7 +97,7 @@ detected by reading the replica's age, no classifier needed.
 | plane | clock | role | status |
 |---|---|---|---|
 | **Data** — `src/inference_server/` minus `research/` | microseconds | serves tokens; emits one telemetry row per request | built (see *Engine already built*) |
-| **Control** — router, global prefix index, replica launcher, controller, policy table | seconds | routes, selects a policy, manages replica lifecycle | does not exist yet (Phases 5–7) |
+| **Control** — `src/control_plane/` | seconds | routes, selects a policy, manages replica lifecycle | partly built: router + global prefix index exist as pure CPU policy, unmeasured and not wired to anything. Replica launcher, controller, policy table, blue-green do not exist (Phases 5–7) |
 | **Improvement** — `research/`, `corpus/`, `knowledge/`, `scripts/` | hours | turns telemetry into validated configs; changes the other two | built; extended by Phases 1–3 |
 
 Flow: the data plane emits telemetry → the improvement plane turns it into validated configs →
@@ -181,6 +181,8 @@ Do **not** build yet: model registry, LoRA hot-swap, multi-tenant auth/quotas, g
 | `config.py` | Engine params first-class; platform params deferred |
 | `research/corpus.py` | `corpus/` manifest + traces: frozen, hashed per class (`cold_start`, `steady_interactive`, `long_context`), split seen / held-out; `corpus_version` in every panel's validity block |
 | `research/simulator.py` | Tier-1 falsifier: discrete-event replay of a corpus trace through the scheduler's iteration order with a fitted `TimingModel` in place of attention; shares `scheduling_policy.py`; `loop simulate` |
+| `control_plane/prefix_index.py` | Global prefix index — block-aligned prompt prefix → replicas believed to hold it, `insert` / `lookup` / `evict` / `drop_replica`. Mirrors `PrefixCache.lookup` semantics without importing it. Entries carry the tick they were last confirmed at; the index never updates itself, so staleness is a dial an experiment sets |
+| `control_plane/router.py` | Prefix-aware session-affine router — pure `route()` scoring locality (session affinity + prefix match) against load (queue depth + active), one `weight` knob with `w=0` shortest-queue and `w=1` best-locality; `Router` is a thin stateful shell. Same pure-function pattern as `scheduling_policy.py`, so a live router and the simulator cannot drift |
 | `telemetry.py` | `RequestRecord` + `RowStore` — one SQLite row per request (conditions at arrival, spans, outcome; `trace_id`/`session_id`/`turn_index`), written off the scheduler thread. Off unless `TELEMETRY_DIR` is set |
 | Prometheus metrics | All labeled by `session_id` |
 
@@ -231,9 +233,11 @@ Cheap, and everything downstream depends on it.
 
 Snapshot/restore baseline on the chosen substrate; layer-ordered weight streaming with prefill overlap; graph-capture cache; cold TTFT decomposition by component; GPU-seconds per session at fixed SLO — warm pool vs scale-to-zero vs snapshot. Stretch: warm draft-model hedging.
 
-### Phase 5 — router and multi-replica 📋 (needs two GPUs)
+### Phase 5 — router and multi-replica ⏳ (hardware half needs two GPUs)
 
-`ReplicaLauncher` interface (rented-pod and local implementations); centralized global prefix index; prefix-aware session-affine router with a locality-vs-load knob, searched in the simulator first and confirmed on hardware.
+- ✅ **Router and global prefix index** (`src/control_plane/`, PR pending, 2026-09-17) — pure CPU policy, no GPU and no engine import. `route()` is a pure function of (request, replica snapshots, index, weight), the `scheduling_policy.py` pattern; the index mirrors `PrefixCache`'s block-aligned longest-prefix match and records when each entry was last confirmed so staleness can be dialled.
+- 📋 **The tradeoff curve is not measured.** Nothing routes through this yet: it is not wired into `research/simulator.py`, so the locality-vs-load curve, the staleness-tolerance curve and the value of session affinity are all still open (`kb-20260917-0c9ba6de`).
+- 📋 `ReplicaLauncher` interface (rented-pod and local implementations), and confirmation on hardware.
 
 ### Phase 6 — session migration 📋
 

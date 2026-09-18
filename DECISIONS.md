@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-78 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `loop`(11), `numerics`(10), `backpressure`(8), `cold-start`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `harness`(3), `validity`(3), `literature`(3), `gates`(2), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `variance`(2), `snapshot`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `router`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `determinism`(1)
+79 entries. Tags: `kv`(29), `benchmark`(27), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(21), `graph`(19), `scheduler`(16), `compile`(15), `memory`(13), `loop`(11), `numerics`(10), `backpressure`(8), `cold-start`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `harness`(3), `validity`(3), `literature`(3), `gates`(2), `metrics`(2), `batching`(2), `slo`(2), `tpot`(2), `variance`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `measurement-gap`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,11 +12,39 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (10): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (43) — no `regime` field yet
+- **unassigned** (44) — no `regime` field yet
 
-## Open (24)
+## Open (25)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-18] Router locality-vs-load is one normalised weight, with session affinity as a separable term; no curve measured yet
+*tags: `control-plane`, `router`, `prefix-cache`, `locality`, `session-affinity`, `simulator`, `staleness`* · `kb-20260917-0c9ba6de`
+
+The control plane's first decision is per request: route for **locality** (the replica holding this session's KV, or the longest matching prefix) or for **load** (the shortest queue). These conflict, because the replica with the best cache hit is usually the loaded one. `src/control_plane/router.py` resolves it with a single normalised weight:
+
+    score = w * (aw * holds_session + matched_blocks / prompt_blocks) / (1 + aw)
+            + (1 - w) * (1 - load / max_load)          load = queue_depth + active
+
+Four choices are worth recording, because each had a live alternative:
+
+1. **One scalar knob, normalised at both endpoints.** `w=0` is *exactly* shortest-queue (the locality term drops out) and `w=1` is *exactly* best-locality (the load term drops out), and both terms are scaled to [0, 1] so `w` means what it says in between. The alternative — a rule ladder ("prefer the session holder unless its queue exceeds N") — is not searchable: the loop can sweep a scalar, and cannot sweep a ladder. The knob exists to be searched, so it has to be a number.
+2. **Session affinity is an explicit term, not an emergent one.** It could have been left to fall out of the prefix match, since a replica holding a session also holds its prompt's prefix. It is separate because the plan calls affinity "the single highest-value routing behavior for multi-turn workloads" (a routing miss costs a full prefill), and because a term with its own coefficient `aw` can be turned OFF (`aw=0`) to measure what it was worth. An emergent behaviour cannot be ablated.
+3. **The index is allowed to be wrong, and knows when it was last right.** `prefix_index.py` never updates itself; only a replica report writes it, and every entry records the tick it was confirmed at. This is deliberate: the plan wants the staleness-tolerance curve ("how stale can the index be before routing gets worse than random") as a result, which requires an index that can be fed late rather than one that is correct by construction. A test asserts the failure mode — routing to a replica that no longer holds the prefix — rather than avoiding it.
+4. **Ties break on replica id, not on arrival or randomly.** A nondeterministic router makes every downstream experiment unreproducible, and the score is rounded before the tie-break so float noise cannot decide a replica.
+
+**What is NOT established — nothing about performance.** No curve has been measured. The router is pure CPU policy that nothing calls: it is not wired into `research/simulator.py` (a separate branch was editing that file), there is no `ReplicaLauncher`, and no hardware has ever run two replicas of this engine. Specifically open:
+
+- the **locality-vs-load curve** per workload class, i.e. the best `w` and how sharply it matters;
+- the **staleness-tolerance curve**, i.e. the update lag at which prefix routing stops beating random;
+- the **value of session affinity** alone, via `aw=0` versus `aw=1` on the multi-turn classes;
+- whether the whole thing matters at all, which rests on the repo's own attribution that the TTFT tail is prefill compute rather than queueing — if that holds, avoiding a prefill by routing to the replica that already has the prefix is worth more than any queueing improvement, and the curve should be steep near `w=1`.
+
+Until those exist, the formula is a defensible default and nothing more. Treat any claim about the right `w` as unmeasured.
+
+**Revisit when:** The router wired into research/simulator.py — then the locality-vs-load curve per workload class becomes a tier-1 sweep and this entry gets its numbers; Two GPUs available simultaneously — the simulator curve confirmed on hardware, or refuted; An attribution run showing the TTFT tail is queueing rather than prefill compute — that would invert the premise and push the best w toward 0; Evidence that a centralized index is the bottleneck — the plan's gossip / consistent-hashing alternatives only become interesting then
+
+**Mechanism:** Locality and load are normalised to [0,1] and mixed by one scalar, so the endpoints are exactly the two pure policies and the loop can sweep the knob; affinity is a separate coefficient so it can be ablated rather than inferred.
 
 ### [2026-09-17] Clock locking needs root, so container venues structurally cannot pin a GPU
 *tags: `determinism`, `venue`, `harness`, `validity`, `variance`, `benchmarking`* · `kb-20260917-9d1a1f0b`
