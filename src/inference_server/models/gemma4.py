@@ -24,8 +24,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# Re-entrant on purpose: from_hf opens this window twice and nesting must not deadlock.
-_INIT_PATCH_LOCK = threading.RLock()
+# A plain Lock, not an RLock, on purpose: from_hf's two windows are SEQUENTIAL — the first closes
+# before transformers builds its own model — so same-thread nesting does not happen. If a change
+# ever introduces it, Lock deadlocks loudly at the call site; RLock would permit it silently and
+# hold the process-wide patch open across work that has no business being inside it.
+_INIT_PATCH_LOCK = threading.Lock()
 
 
 @contextlib.contextmanager
@@ -41,9 +44,13 @@ def _skip_param_init():
     concurrent callers of this context manager, so two loads cannot restore each other's saved
     functions in the wrong order. It cannot protect an unrelated `nn.Linear(...)` built by
     another thread inside the window: that module comes back unfilled, which is silent garbage
-    rather than a crash. Accepted because the windows are small (~2.2s to allocate the model,
+    rather than a crash. Accepted because the windows are small (~1.5s to allocate the model,
     ~5ms for the tied head) and both happen once, at startup, before the server serves anything
     — `CustomTorchBackend` awaits its single `run_in_executor` load before accepting traffic.
+
+    Not quite all of the saving is elimination: an unfilled parameter is untouched pages, so its
+    first-touch fault moves from construction into the copy `load_hf_weights` does (~100-200ms
+    across E2B's 9.2GB, against ~25s of Kaiming RNG that simply stops happening).
     """
     with _INIT_PATCH_LOCK:
         saved = {c: c.reset_parameters for c in (nn.Linear, nn.Embedding)}

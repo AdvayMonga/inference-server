@@ -45,20 +45,15 @@ def test_restores_when_the_body_raises():
     assert nn.Linear.reset_parameters is real
 
 
-def test_nesting_does_not_deadlock_and_restores_the_real_function():
-    """from_hf opens the window twice; a plain Lock would deadlock the moment they nest."""
-    real = nn.Linear.reset_parameters
-    with gemma4._skip_param_init():
-        with gemma4._skip_param_init():
-            assert nn.Linear.reset_parameters is not real
-        assert nn.Linear.reset_parameters is not real      # inner restored the OUTER patch
-    assert nn.Linear.reset_parameters is real
-
-
 def test_concurrent_callers_are_serialised():
     """The failure the lock buys off: a second thread saving the first thread's no-op as if it
     were the real initialiser, and restoring THAT — after which nn.Linear never initialises
-    again, process-wide, with no error anywhere."""
+    again, process-wide, with no error anywhere.
+
+    There is deliberately no nesting test. from_hf's two windows are sequential, and the lock is
+    a plain Lock, so same-thread nesting deadlocks by design — loudly, at the call site — rather
+    than silently holding the process-wide patch open across unrelated work.
+    """
     real = nn.Linear.reset_parameters
     holder_inside, follower_inside, release = (threading.Event() for _ in range(3))
 
