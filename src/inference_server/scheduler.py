@@ -52,6 +52,11 @@ class ScheduledRequest:
     trace_id: str = ""          # per-request id, alongside session_id; generated when empty
     turn_index: int = 0         # position within the session's conversation
     record: RequestRecord | None = None  # telemetry row, set by scheduler at enqueue
+    # Batch width this row ACTUALLY decoded in, accumulated one step at a time by
+    # _decode_step. Not RequestRecord.active_size, which is the width at arrival.
+    decode_width_sum: int = 0
+    decode_width_steps: int = 0
+    decode_width_max: int = 0
 
     def __post_init__(self):
         if not self.trace_id:
@@ -684,7 +689,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row, tok in zip(self._active, next_tokens.tolist()):
             row.current_token = tok
             row.real_kv_len += 1
-            self.policy.on_tokens_processed(row.request, 1)
+            req = row.request
+            # Two int adds and a compare: the decode-time width every row here just shared.
+            req.decode_width_sum += batch_size
+            req.decode_width_steps += 1
+            if batch_size > req.decode_width_max:
+                req.decode_width_max = batch_size
+            self.policy.on_tokens_processed(req, 1)
 
     # --- Cross-thread helpers ---
 
@@ -769,7 +780,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._session_load.pop(request.session_id, None)
         rec.finish(state, enqueue_ts=request.enqueue_ts, admit_ts=request.admit_ts,
                    first_token_ts=request.first_token_ts, end_ts=time.perf_counter(),
-                   tokens_out=len(request.generated), cache_hit_tokens=request.cache_hit_tokens)
+                   tokens_out=len(request.generated), cache_hit_tokens=request.cache_hit_tokens,
+                   decode_width_sum=request.decode_width_sum,
+                   decode_width_steps=request.decode_width_steps,
+                   decode_width_max=request.decode_width_max)
         self._telemetry.put(rec)
 
     def _preempt_newest(self, exc: BaseException) -> None:

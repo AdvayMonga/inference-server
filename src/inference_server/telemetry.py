@@ -43,6 +43,12 @@ class RequestRecord:
     prefill_s: float | None = None
     decode_s: float | None = None
     decode_steps: int = 0
+    # --- decode-time batch width: measured WHILE this row decoded, not at arrival ---
+    # `active_size` above is the width this request ARRIVED into. These are the widths it
+    # actually shared a forward pass with. Conflating the two is what flattened the simulator's
+    # fitted decode slope by ~40x (kb-20260917-c07eb94b), so the names keep them apart.
+    decode_batch_width_mean: float | None = None   # sum(width) / steps, over its OWN steps
+    decode_batch_width_max: int = 0                # widest step it decoded in
     # --- counters ---
     cache_hit_tokens: int = 0
     preempted: int = 0
@@ -54,12 +60,23 @@ class RequestRecord:
     terminal_state: str = ""
 
     def finish(self, state: str, *, enqueue_ts: float, admit_ts: float, first_token_ts: float,
-               end_ts: float, tokens_out: int, cache_hit_tokens: int) -> None:
-        """Fill spans and outcome from the scheduler's timestamps (0.0 = boundary never reached)."""
+               end_ts: float, tokens_out: int, cache_hit_tokens: int,
+               decode_width_sum: int = 0, decode_width_steps: int = 0,
+               decode_width_max: int = 0) -> None:
+        """Fill spans and outcome from the scheduler's timestamps (0.0 = boundary never reached).
+
+        The three `decode_width_*` arguments are the scheduler's running accumulators for this
+        request; they are divided here rather than on the hot path.
+        """
         self.terminal_state = state
         self.tokens_out = tokens_out
         self.cache_hit_tokens = cache_hit_tokens
         self.preempted = int(state == "preempted")
+        self.decode_batch_width_max = decode_width_max
+        if decode_width_steps:
+            # Own denominator, not decode_steps: a row evicted on EOS decoded one more step
+            # than it emitted tokens, and the mean must match the steps it was summed over.
+            self.decode_batch_width_mean = decode_width_sum / decode_width_steps
         self.total_s = end_ts - enqueue_ts
         if admit_ts:
             self.queue_wait_s = admit_ts - enqueue_ts

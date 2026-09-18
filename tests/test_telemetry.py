@@ -61,6 +61,8 @@ async def test_ok_row_has_conditions_spans_and_outcome(tmp_path):
     assert row["queue_wait_s"] >= 0 and row["prefill_s"] >= 0 and row["decode_s"] >= 0
     assert row["ttft_s"] > 0 and row["total_s"] >= row["ttft_s"]
     assert row["tpot_s"] > 0 and row["decode_steps"] == 2
+    # decode-time width: this row decoded alone, so both are 1 while active_size stays 0
+    assert row["decode_batch_width_mean"] == 1.0 and row["decode_batch_width_max"] == 1
     assert row["preempted"] == 0
     assert sched.stats()["telemetry"] == {
         "enabled": True, "run_id": store.run_id, "rows_written": 1, "rows_dropped": 0}
@@ -150,6 +152,62 @@ async def test_error_row(tmp_path):
     (row,) = _rows(store)
     assert row["terminal_state"] == "error"
     assert row["queue_wait_s"] is not None and row["ttft_s"] is None
+
+
+def test_decode_width_is_measured_while_decoding_not_at_arrival(tmp_path):
+    """The distinction the field exists for: a row that ARRIVES alone can DECODE in a crowd.
+
+    Drives the loop's phases directly so the widths are exact rather than thread-timing luck.
+    """
+    store = RowStore(tmp_path)
+    backend = FakeChunkBackend()
+    sched = ContinuousBatchScheduler(backend, max_batch_size=4, telemetry=store)
+    loop = asyncio.new_event_loop()
+    try:
+        solo, late = _req(loop, session_id="solo"), _req(loop, session_id="late")
+        for r in (solo, late):
+            r.enqueue_ts = time.perf_counter()
+
+        solo.record = sched._arrival_record(solo)        # arrives into an idle scheduler
+        kv, tok, n = backend.prefill(solo.token_ids)
+        sched._promote_to_decode(solo, kv, n, tok, "cpu")
+        sched._decode_step("cpu")                        # width 1 — solo is alone
+
+        late.record = sched._arrival_record(late)        # arrives while solo is decoding
+        kv, tok, n = backend.prefill(late.token_ids)
+        sched._promote_to_decode(late, kv, n, tok, "cpu")
+        sched._decode_step("cpu")                        # width 2
+        sched._decode_step("cpu")                        # width 2
+
+        sched._finish_row(solo, "ok")
+        sched._finish_row(late, "ok")
+    finally:
+        loop.close()
+
+    rows = {r["session_id"]: r for r in _rows(store)}
+    # solo arrived at width 0 and decoded at 1, 2, 2 — the arrival snapshot misses all of it
+    assert rows["solo"]["active_size"] == 0
+    assert rows["solo"]["decode_batch_width_mean"] == pytest.approx(5 / 3)
+    assert rows["solo"]["decode_batch_width_max"] == 2
+    # late arrived behind one row and decoded both its steps at width 2
+    assert rows["late"]["active_size"] == 1
+    assert rows["late"]["decode_batch_width_mean"] == 2.0
+    assert rows["late"]["decode_batch_width_max"] == 2
+
+
+def test_a_row_that_never_decodes_reports_no_width(tmp_path):
+    """Rejected / expired rows have no decode steps: the mean must be None, not 0."""
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), max_queue_size=1, telemetry=store)
+    loop = asyncio.new_event_loop()
+    try:
+        sched.enqueue(_req(loop, session_id="a"))
+        with pytest.raises(QueueFullError):
+            sched.enqueue(_req(loop, session_id="b"))
+    finally:
+        loop.close()
+    (row,) = _rows(store)
+    assert row["decode_batch_width_mean"] is None and row["decode_batch_width_max"] == 0
 
 
 def test_every_terminal_state_is_named():
