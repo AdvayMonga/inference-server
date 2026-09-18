@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · Scheduler</div>
 <h1>Scheduler</h1>
-<p class="lead">The engine's heart. Decides which requests are batched together each tick, how to be fair across users, and how to refuse work cleanly when the system would otherwise melt. Last updated 2026-09-16.</p>
+<p class="lead">The engine's heart. Decides which requests are batched together each tick, how to be fair across users, and how to refuse work cleanly when the system would otherwise melt. Last updated 2026-09-18.</p>
 
 <div class="nav">
   <a href="#queues">Queues</a>·
@@ -382,6 +382,7 @@ run, <code>run-&lt;date&gt;-&lt;id&gt;.sqlite</code>, table <code>requests</code
   <tr><th>Part</th><th>Fields</th><th>Taken</th></tr>
   <tr><td>Conditions at arrival</td><td><code>pending_depth</code>, <code>active_size</code> / <code>max_batch_size</code>, <code>kv_free_blocks</code> + <code>kv_free_frac</code>, <code>concurrent_sessions</code>, <code>prompt_tokens</code>, <code>replica_age_s</code>, <code>config_id</code> (None until a policy registry exists)</td><td>inside <code>enqueue()</code>, under the pending lock, before any work — so a request 429'd at the door still records the load it saw</td></tr>
   <tr><td>Spans</td><td><code>queue_wait_s</code>, <code>prefill_s</code>, <code>decode_s</code>, <code>decode_steps</code></td><td>from <code>enqueue_ts</code> / <code>admit_ts</code> / <code>first_token_ts</code> and the end time</td></tr>
+  <tr><td>Decode-time batch width</td><td><code>decode_batch_width_mean</code>, <code>decode_batch_width_max</code></td><td>accumulated inside <code>_decode_step</code>, one step at a time, over the row's <strong>own</strong> decode steps. Deliberately <em>not</em> the <code>active_size</code> above, which is the width the request <em>arrived</em> into: a request can arrive alone and then spend 200 steps in a batch of 30, and reading the arrival snapshot as the decode width flattened the simulator's fitted decode slope by ~40&times; (<code>kb-20260917-c07eb94b</code>). Costs two int adds and a compare per row per step.</td></tr>
   <tr><td>Counters</td><td><code>cache_hit_tokens</code>, <code>preempted</code></td><td>after prefill lookup; at preemption</td></tr>
   <tr><td>Outcome</td><td><code>ttft_s</code>, <code>tpot_s</code>, <code>total_s</code>, <code>tokens_out</code>, <code>terminal_state</code> &isin; ok · rejected_429 · expired · preempted · error</td><td>on the terminal path: <code>_resolve</code>, or <code>_reject</code> for queue-full, deadline, prefill failure, preemption and a crashed tick</td></tr>
 </table>
