@@ -114,8 +114,25 @@ order with attention replaced by a fitted `TimingModel`, and calls the same pure
 `scheduling_policy.py` the engine does. It may **reject** a policy (loses in simulation, no GPU
 spent) and **promote** one to tier 3; it never confirms. Its panels carry `harness="simulator"`
 and cannot be compared to hardware panels. The timing model only has to rank configurations the
-way hardware does; `rank_correlation` is the check, and the hardware validation run is deferred
-until there is GPU budget. v1 does not model preemption or chunked prefill.
+way hardware does; `rank_correlation` is the check. v1 does not model preemption or chunked
+prefill.
+
+That check has now been run once, against **MPS / E2B on an M4 Pro** rather than the A100 / E4B
+tier 1 will eventually be used to predict (`scripts/bench/replay_local.py`, then
+`fit_timing_from_runs.py --validate`). It **half passed**, and the half that failed is the one
+that matters most: over nine configs, `tpot_p50` ranked at rho 0.966 and `ttft_p95` at 0.628 —
+below the two-tailed a=0.05 critical value of 0.683 at n=9, so not distinguishable from chance
+ordering. `kb-20260917-c07eb94b` has the per-config pairs and the mechanism (the fitted decode
+step is flat in batch width because the telemetry's `batch_size` is snapshotted at enqueue).
+
+So, until a refit clears that line: **a tier-1 rejection that hinges on `ttft_p95` is not
+supported by evidence.** Ordering by decode health is. Re-run the check on any machine it has
+not been run on — nothing above says anything about CUDA — and read the per-config pairs before
+the rho, because which shapes the simulator gets wrong is the more useful half.
+
+Proposed staleness rule, since notes/04 asks for a threshold and never names one: a simulator
+is fit to rank a metric when rho over >= 6 spanning configs clears the two-tailed a=0.05
+critical value for that n.
 
 ### Where a run actually happens
 
@@ -221,6 +238,23 @@ another machine.
    and 6.5x on `ttft_p95`. Using the former as the latter authorised a merge on noise once.
    Arms must also be order-alternated — three identical back-to-back runs measured
    1494 / 401 / 229 ms, so whichever arm runs second wins.
+
+   **The variance budget is a measured number, not a feeling.** Run the SAME config as both
+   arms, interleaved, on one machine; the run-to-run spread that comes out is the band, and any
+   delta inside it is `inconclusive` — never a win, however clean the t-test looks. Three runs
+   an arm can separate two identical configs; the band is what catches that.
+
+   ```bash
+   python scripts/bench/replay_local.py --class cold_start --null 6   # the null experiment
+   python -m inference_server.research.loop band --run-group <group>  # -> knowledge/noise/
+   ```
+
+   The band lands in `knowledge/noise/<harness>-<class>-<model>-<hardware>.json` and
+   `judge_group` looks it up from the baseline arm's own validity block, so it applies without
+   anyone remembering. **It applies to exactly the situation it names** — harness, workload
+   class, model and hardware together, with no nearest-entry fallback. A situation with no band
+   recorded is judged on the t-test alone, exactly as before, and that is a gap to close rather
+   than a licence.
 4. **Correctness** — fast suite green; parity gates **width-matched**, never across batch shapes;
    no new `total_iteration_errors`.
 5. **Cost** — startup, memory and $ regressions declared, not just latency.

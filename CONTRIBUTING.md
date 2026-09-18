@@ -89,6 +89,13 @@ after it.
 | fixes a bug | `regression_test` + `engine_sha_base` | hand-write it; model on `experiments/exp-20260908-9497648e.json`. The gate **re-runs** the test, so confirm it fails with the fix reverted. |
 | changes no behaviour | a no-claim record | `python -m inference_server.research.loop no-claim --why "..." --sha <sha>` — renames, dead imports, comments, type hints. |
 
+A "faster" claim must also clear the **noise band** for its situation: the measured run-to-run
+spread of the same harness, workload class, model and hardware with nothing changed, stored in
+`knowledge/noise/` and applied automatically by `loop judge`. A delta inside the band is
+recorded `inconclusive` — the arms separated, but by less than the harness moves on its own, so
+more replicates cannot rescue it. Measure a band before trusting an A/B on a machine that has
+none: `replay_local.py --null 6`, then `loop band --run-group <group>`.
+
 Touched no engine file? The gate passes on its own; say so in the PR.
 
 Read `LOOP.md` before running an experiment, and `loop kb --status rejected` before proposing
