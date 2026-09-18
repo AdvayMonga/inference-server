@@ -314,7 +314,10 @@ class Experiment:
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None
 
-    VERDICTS = ("pending", "confirmed", "rejected", "noise", "invalid")
+    # "inconclusive": the arms separated statistically but by less than the harness's own
+    # measured null spread (research/noise.py). Distinct from "noise", where they did not
+    # separate at all — the difference says whether more replicates would help.
+    VERDICTS = ("pending", "confirmed", "rejected", "noise", "inconclusive", "invalid")
 
     def validate(self) -> None:
         if self.verdict not in self.VERDICTS:

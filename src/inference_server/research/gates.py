@@ -17,6 +17,7 @@ from inference_server.research.compare import (
     significance,
     significance_replicated,
 )
+from inference_server.research.noise import NoiseBand
 from inference_server.research.schemas import REPO_ROOT, GateResult, Hypothesis, Vitals
 
 def _k1_share(wave_sizes: dict[str, int]) -> float:
@@ -113,16 +114,20 @@ def sanity_gate(hypothesis: Hypothesis, baseline: Vitals, treatment: Vitals,
                       f"{len(moved)} untouchable metric(s) held within {tolerance:.0%}", moved)
 
 
-def significance_gate(hypothesis: Hypothesis, baseline, treatment, **kw: Any) -> GateResult:
+def significance_gate(hypothesis: Hypothesis, baseline, treatment, *,
+                      band: NoiseBand | None = None, **kw: Any) -> GateResult:
     """Does the effect clear the variance budget, on the metric predicted beforehand?
 
     Accepts a list of runs per arm (the honest path — variance across runs) or a single panel
     per arm, which can now only ever return insufficient_samples. See compare.py for why.
+
+    `band` is the measured null spread for this situation; a delta inside it is `inconclusive`,
+    which fails this gate. Without a band the gate is exactly what it was.
     """
     if isinstance(baseline, list) or isinstance(treatment, list):
         s: Significance = significance_replicated(
             list(baseline), list(treatment), hypothesis.predicted_metric,
-            direction=hypothesis.predicted_direction, **kw)
+            direction=hypothesis.predicted_direction, band=band, **kw)
     else:
         s = significance(baseline, treatment, hypothesis.predicted_metric,
                          direction=hypothesis.predicted_direction, **kw)
@@ -131,10 +136,10 @@ def significance_gate(hypothesis: Hypothesis, baseline, treatment, **kw: Any) ->
     # significant effect there would either block behaviour-neutral instrumentation or push
     # people to dress it up as an optimisation.
     if hypothesis.kind in ("instrument_change", "harness_change"):
-        if s.verdict in ("noise", "significant"):
-            direction = ("no measurable change, as intended" if s.verdict == "noise"
+        if s.verdict in ("noise", "inconclusive", "significant"):
+            direction = ("no measurable change, as intended" if s.verdict != "significant"
                          else f"NOTE: it also moved {s.pct:+.1f}%")
-            passed = s.verdict == "noise"
+            passed = s.verdict != "significant"
             return GateResult("significance", passed,
                               f"{hypothesis.kind}: {direction}", s.to_dict())
         return GateResult("significance", False,
@@ -227,6 +232,8 @@ class Judgement:
         if not self.gates.get("sanity", GateResult("sanity", True, "")).passed:
             return "contaminated"
         sig = self.gates.get("significance")
+        if sig and not sig.passed and sig.evidence.get("verdict") == "inconclusive":
+            return "inconclusive"
         if sig and not sig.passed and sig.evidence.get("verdict") in ("noise",
                                                                      "insufficient_samples"):
             return "noise"
@@ -237,7 +244,7 @@ class Judgement:
 
 
 def judge(hypothesis: Hypothesis, baseline, treatment,
-          *, run_tests: bool = True) -> Judgement:
+          *, run_tests: bool = True, band: NoiseBand | None = None) -> Judgement:
     """Run the gates in order. Later gates still run so the record is complete, but the
     verdict is decided by the earliest failure.
 
@@ -249,7 +256,7 @@ def judge(hypothesis: Hypothesis, baseline, treatment,
     gates = {
         "validity": validity_gate(hypothesis, b_rep, t_rep),
         "sanity": sanity_gate(hypothesis, b_rep, t_rep),
-        "significance": significance_gate(hypothesis, baseline, treatment),
+        "significance": significance_gate(hypothesis, baseline, treatment, band=band),
         "correctness": correctness_gate(b_rep, t_rep, run_tests=run_tests),
         "cost": cost_gate(b_rep, t_rep),
     }
