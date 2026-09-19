@@ -323,3 +323,32 @@ def test_overhead_budget(tmp_path):
     rows = _rows(store)
     assert len(rows) == n and store.rows_dropped == 0
     assert per_request < 200e-6, f"{per_request * 1e6:.1f}us per request"
+
+
+def test_decode_step_budget_with_width_accumulators():
+    """The per-row width accumulators run inside _decode_step, the engine's hottest loop.
+
+    Drives 2000 steps at width 8 on the stub backend: the accumulators must come out exact, and
+    the whole step (stub forward, mask, position ids, bookkeeping) must stay under 2ms mean.
+    Measured 12-41us per step on an M4 Pro (quiet vs loaded box); the bound is ~50x the loaded
+    figure so CI noise cannot trip it, while anything blocking per row per step would.
+    """
+    width, n = 8, 2000
+    backend = FakeChunkBackend()
+    sched = ContinuousBatchScheduler(backend, max_batch_size=width)
+    loop = asyncio.new_event_loop()
+    try:
+        reqs = [_req(loop, session_id=f"s{i}", max_tokens=10**9) for i in range(width)]
+        for r in reqs:
+            kv, tok, kv_len = backend.prefill(r.token_ids)
+            sched._promote_to_decode(r, kv, kv_len, tok, "cpu")
+        t0 = time.perf_counter()
+        for _ in range(n):
+            sched._decode_step("cpu")
+        per_step = (time.perf_counter() - t0) / n
+    finally:
+        loop.close()
+    for r in reqs:
+        assert (r.decode_width_sum, r.decode_width_steps, r.decode_width_max) == \
+            (width * n, n, width)
+    assert per_step < 2e-3, f"{per_step * 1e6:.1f}us per decode step at width {width}"
