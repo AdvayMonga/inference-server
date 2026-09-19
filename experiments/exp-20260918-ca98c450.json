@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "8a7b6ce"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "bb85b10"
+    }
+  ],
+  "branch": "fix/custom-backend-stops-at-end-of-turn",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "8a7b6ce",
+  "finished_at": 1789779354.5307038,
+  "gates": {},
+  "hypothesis_id": "hyp-custom-backend-stop-set-from-generation-config",
+  "id": "exp-20260918-ca98c450",
+  "no_behaviour_change": "",
+  "notes": "Correctness fix, not a performance change. CustomTorchBackend built its stop set from tokenizer.eos_token_id, which for gemma-4-*-it is only <eos> (1); the model's generation config says [1, 106, 50]. The instruct model ends an answer with <turn|> (106), so every custom-* request ran to max_tokens. Both torch backends now use base.stop_token_ids (generation config, else model config, else tokenizer). The regression test fails to import at 8a7b6ce (no helper) and, with the helper reduced to the old tokenizer-only rule, fails with assert {1} == {1, 50, 106}; passes at bb85b10. The heavy end-to-end test tests/test_custom_backend_scheduler.py::test_generation_stops_at_end_of_turn fails at 8a7b6ce (106 in the output) and passes at bb85b10. On cold_start/seen (MPS, E2B, greedy) tokens out went 626 -> 220, every after-fix output a prefix of the before output. Measurements affected: kb-20260918-5906bc13. There is no metric delta to be significant about; the assertion is the measurement.",
+  "regression_test": "tests/test_stop_tokens.py::test_stop_set_includes_end_of_turn",
+  "source": "loop",
+  "started_at": 1789779354.530706,
+  "verdict": "confirmed"
+}
