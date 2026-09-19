@@ -200,8 +200,9 @@ def test_full_queue_drops_and_counts_instead_of_blocking(tmp_path):
 def test_bad_batch_is_dropped_and_the_writer_keeps_going(tmp_path, caplog):
     store = RowStore(tmp_path)
     store._q.put_nowait(object())          # not a record: the batch cannot be written
+    # Wait for both: the writer counts the drop, THEN logs, so polling on the count alone races the log.
     for _ in range(200):
-        if store.rows_dropped:
+        if store.rows_dropped and "telemetry write failed" in caplog.text:
             break
         time.sleep(0.005)
     assert store.rows_dropped == 1 and "telemetry write failed" in caplog.text
