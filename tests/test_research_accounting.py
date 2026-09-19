@@ -8,6 +8,8 @@ and this project has shipped one of those before.
 
 from __future__ import annotations
 
+import pytest
+
 from inference_server.research.accounting import (
     Accounting,
     peak_rss_gb,
@@ -21,7 +23,7 @@ from inference_server.research.session import primary_metric
 
 def _v(**over):
     base = dict(engine_sha="abc", dirty=False, harness="replay_trace",
-                harness_config={"model": "E2B", "split": "seen"},
+                harness_config={"model": "E2B", "split": "seen", "n_requests": 8},
                 workload_regime="cache_miss_heavy", n_samples=8, run_group="g1")
     base.update(over)
     return Validity(**base)
@@ -169,19 +171,44 @@ def test_unmeasured_terms_travel_with_the_number_as_caveats():
     assert "CAVEAT" in m.format()
 
 
+def _with_failures(n_requests: int, failed: int) -> Vitals:
+    cfg = {"model": "E2B", "split": "seen", "n_requests": n_requests}
+    return _panel(validity=_v(n_samples=n_requests - failed, harness_config=cfg))
+
+
 def test_failed_requests_count_against_the_ceiling_not_for_it():
     """ttft_p95 is over successful requests only, so dropping requests would flatter it. Measured
     on MPS: 2 of 8 cold_start requests returned no tokens while the survivors' p95 read 464ms."""
-    v = _v(n_samples=6, harness_config={"model": "E2B", "split": "seen", "n_requests": 8})
-    m = primary_metric(_panel(validity=v))
+    m = primary_metric(_with_failures(8, 2))
     assert m and m.ceiling_met is False
     assert any("2 of 8 requests produced no first token" in c for c in m.caveats)
 
 
-def test_a_failure_below_the_p95_position_does_not_break_the_ceiling():
-    v = _v(n_samples=99, harness_config={"model": "E2B", "split": "seen", "n_requests": 100})
-    m = primary_metric(_panel(validity=v))
-    assert m.ceiling_met is True and any("1 of 100" in c for c in m.caveats)
+@pytest.mark.parametrize("n_requests, failed, met", [
+    (8, 1, False),     # the floor-interpolation index let this through: int(0.95 * 7) = 6 < 7
+    (9, 1, False),     # likewise: int(0.95 * 8) = 7 < 8
+    (20, 1, True),     # exactly 5% failed: 19 of 20 answered, so nearest-rank p95 is finite
+    (20, 2, False),
+    (100, 5, True),
+    (100, 6, False),
+])
+def test_one_failure_breaks_the_ceiling_exactly_when_it_reaches_the_p95_rank(
+        n_requests, failed, met):
+    """The adversarial case is ONE dropped request at small n. Pinned from both sides."""
+    m = primary_metric(_with_failures(n_requests, failed))
+    assert m and m.ceiling_met is met
+    assert any(f"{failed} of {n_requests}" in c for c in m.caveats)
+
+
+@pytest.mark.parametrize("cfg_n_requests", [None, 5])
+def test_it_refuses_when_attempts_are_unknown_or_fewer_than_successes(cfg_n_requests):
+    """If an instrument puts attempts in n_samples, the failure check would silently pass.
+    Refuse instead: an uncounted failure is the hack this check exists to stop."""
+    cfg = {"model": "E2B", "split": "seen"}
+    if cfg_n_requests is not None:
+        cfg["n_requests"] = cfg_n_requests
+    m = primary_metric(_panel(validity=_v(n_samples=8, harness_config=cfg)))
+    assert not m and any("n_requests" in r for r in m.refusals)
 
 
 def test_several_runs_aggregate_and_every_one_must_meet_the_ceiling():

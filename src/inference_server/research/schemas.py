@@ -75,6 +75,7 @@ class Validity:
     harness: str                      # which instrument produced this
     harness_config: dict[str, Any]    # every knob that could change the answer
     workload_regime: str              # cache_hit_heavy | cache_miss_heavy | mixed | synthetic
+    # SUCCESSFUL requests only; attempts go in harness_config['n_requests'] (primary_metric).
     n_samples: int
     run_group: str                    # arms of one experiment share this; set once per session
     run_id: str = field(default_factory=lambda: _new_id("run"))

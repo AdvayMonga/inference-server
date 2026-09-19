@@ -464,13 +464,19 @@ def primary_metric(panels: Vitals | list[Vitals], *,
                 met = met and p.ttft_p95 < ceiling
 
         # ttft_p95 is computed over SUCCESSFUL requests only, so failing a request would
-        # improve it — a reward hack. A failed request is a first token that never arrived:
-        # rank it above every real one and ask whether the p95 position lands on a failure.
-        n_req = p.validity.harness_config.get("n_requests")
-        if isinstance(n_req, int) and n_req > p.validity.n_samples:
-            failed = n_req - p.validity.n_samples
-            caveats.append(f"{rid}: {failed} of {n_req} requests produced no first token")
-            if int(0.95 * (n_req - 1)) >= p.validity.n_samples:
+        # improve it — a reward hack. A failed request is a first token that never arrived, so
+        # it ranks above every real one. Nearest-rank p95 over ALL requests is finite only if
+        # at least ceil(0.95 * n) of them got a first token. Integer arithmetic, not 0.95 * n:
+        # the floor-interpolation index let 1 failure in 8 through. Closed HERE only — the
+        # gates still read ttft_p95 as the instruments compute it (kb-20260918-4f4c85b7).
+        n_req, n_ok = p.validity.harness_config.get("n_requests"), p.validity.n_samples
+        if not isinstance(n_req, int) or n_req < n_ok:
+            refusals.append(f"{rid}: harness_config['n_requests'] is {n_req!r} against "
+                            f"n_samples={n_ok}, so failed requests cannot be counted — and an "
+                            f"uncounted failure would flatter the ceiling")
+        elif n_req > n_ok:
+            caveats.append(f"{rid}: {n_req - n_ok} of {n_req} requests produced no first token")
+            if n_ok < (95 * n_req + 99) // 100:
                 met = False
 
     if len(ceilings) > 1:
