@@ -9,7 +9,7 @@
 <body>
 
 <h1>Inference Server — Architecture Map</h1>
-<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-17.</p>
+<p class="lead">Click any block in the diagram below to dive into a detailed page for that subsystem. Last updated 2026-09-18.</p>
 
 <div class="nav">
   <strong>Detail pages:</strong>
@@ -205,7 +205,7 @@
   <tr><td>KV Cache</td><td>Remember attention state so we don't recompute prompt prefixes.</td><td><a href="arch-cache.html">arch-cache.html</a></td></tr>
   <tr><td>Tokenizer</td><td>Stateless text ↔ tokens with the Gemma chat template.</td><td>covered in HTTP &amp; Server</td></tr>
   <tr><td>Metrics tracker</td><td>Sliding-window TTFT / TPOT / throughput with percentiles.</td><td>covered in HTTP &amp; Server</td></tr>
-  <tr><td>Telemetry rows</td><td>One SQLite row per request — conditions at arrival, spans, outcome — for the loop to re-slice. Off unless <code>TELEMETRY_DIR</code> is set.</td><td><a href="arch-scheduler.html#telemetry">arch-scheduler.html</a></td></tr>
+  <tr><td>Telemetry rows</td><td>One SQLite row per request — conditions at arrival, the decode-time batch width it really ran in, spans, outcome — for the loop to re-slice. Off unless <code>TELEMETRY_DIR</code> is set.</td><td><a href="arch-scheduler.html#telemetry">arch-scheduler.html</a></td></tr>
   <tr><td>Load generator</td><td>Out-of-process traffic generator for sweeps and stress runs.</td><td><a href="arch-server.html#loadgen">arch-server.html</a></td></tr>
   <tr><td>Monitoring</td><td>Prometheus scrape and Grafana dashboard. No UI is served by the engine.</td><td><a href="arch-server.html#clients">arch-server.html</a></td></tr>
   <tr><td>OpenAI shim</td><td>/v1/completions, /v1/chat/completions and /v1/models over the same scheduler; optional X-Session-Id / X-Turn-Index / X-Trace-Id headers pin the session for the harness, X-Trace-Id echoed.</td><td><a href="arch-server.html#openai">arch-server.html</a></td></tr>
@@ -307,7 +307,7 @@ described on the detail pages; it is not re-planned here.</p>
 <table>
   <tr><th>Phase</th><th>What it builds</th><th>Status</th></tr>
   <tr><td>0 — Decide</td><td>Model and size (a ~30 GB class makes cold start dramatic), substrate now that Modal credits are gone, KV bytes per token, per-class SLO ceilings (placeholders in <code>corpus/manifest.json</code>), loop authority in the adaptive phase</td><td><span class="badge b-todo">open</span></td></tr>
-  <tr><td>1 — Per-request telemetry</td><td><code>telemetry.py</code>: one row per request with conditions at arrival, spans and outcome; <code>trace_id</code> / <code>turn_index</code>; SQLite, one file per run; overhead-budget test (PR #18)</td><td><span class="badge b-done">done</span> <span class="badge b-defer">CUDA-event spans, block counters, KV high-water deferred</span></td></tr>
+  <tr><td>1 — Per-request telemetry</td><td><code>telemetry.py</code>: one row per request with conditions at arrival, spans, outcome and the decode-time batch width (<code>decode_batch_width_mean</code> / <code>_max</code>, added 2026-09-18 so the simulator's decode slope is fitted against the width a row decoded in, not the one it arrived into); <code>trace_id</code> / <code>turn_index</code>; SQLite, one file per run; overhead-budget test (PR #18)</td><td><span class="badge b-done">done</span> <span class="badge b-defer">CUDA-event spans, block counters, KV high-water deferred</span></td></tr>
   <tr><td>2 — Corpus and harness</td><td>Three frozen workload classes, seen / held-out, hashed <code>corpus_version</code> in the validity block; open-loop <code>replay_trace.py</code> joined to telemetry by <code>X-Trace-Id</code> (PRs #17, #21)</td><td><span class="badge b-done">corpus + replay</span> <span class="badge b-prog">total accounting, noise floor, held-out replication gate</span></td></tr>
   <tr><td>3 — Simulator</td><td>Pure <code>scheduling_policy.py</code> functions shared with the engine; discrete-event trace replay with a <code>TimingModel</code>; <code>loop simulate</code>; knowledge entries carry regime + validity range (PRs #19, #20, #22, #23)</td><td><span class="badge b-done">built</span> <span class="badge b-prog">timing model still the A100/E4B placeholder; hardware rank-correlation pending</span></td></tr>
   <tr><td>4 — Cold start</td><td>Snapshot/restore baseline, layer-ordered weight streaming with prefill overlap, graph-capture cache, cold TTFT decomposition, GPU-seconds per session: warm pool vs scale-to-zero vs snapshot</td><td><span class="badge b-todo">next, gated on Phase 0</span></td></tr>

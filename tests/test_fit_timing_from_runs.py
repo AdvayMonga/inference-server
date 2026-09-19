@@ -26,16 +26,23 @@ ENV = {"MODEL_NAME": "google/gemma-4-E4B-it", "MAX_BATCH_SIZE": "32", "PREFILL_M
 
 
 def _telemetry_row(i: int, ok: bool = True) -> dict:
-    """A RequestRecord-shaped row whose spans obey TRUTH, with a cache hit on every third."""
-    prompt, hit, active, steps = 40 + 17 * i, (24 if i % 3 == 0 else 0), i % 6, 5 + i % 9
+    """A RequestRecord-shaped row whose spans obey TRUTH, with a cache hit on every third.
+
+    `active_size` is pinned to 0 on every row deliberately: it is the ARRIVAL snapshot, so a fit
+    that reached for it again would hit a constant predictor and raise "singular fit" rather than
+    quietly returning a flat slope — which is the bug the decode width exists to close
+    (kb-20260917-c07eb94b).
+    """
+    prompt, hit, width, steps = 40 + 17 * i, (24 if i % 3 == 0 else 0), i % 6 + 1, 5 + i % 9
     prefill = TRUTH.prefill_s(prompt - hit, 0)
-    decode = steps * TRUTH.decode_step_s(active + 1, 0)
+    decode = steps * TRUTH.decode_step_s(width, 0)
     return {"trace_id": f"p-{i}", "session_id": "s", "turn_index": 0, "arrival_ts": float(i),
-            "pending_depth": 0, "active_size": active, "max_batch_size": 32,
+            "pending_depth": 0, "active_size": 0, "max_batch_size": 32,
             "kv_free_blocks": "", "kv_free_frac": "", "concurrent_sessions": 0,
             "prompt_tokens": prompt, "replica_age_s": 1.0, "config_id": "",
             "queue_wait_s": 0.001, "prefill_s": prefill, "decode_s": decode,
-            "decode_steps": steps, "cache_hit_tokens": hit, "preempted": 0,
+            "decode_steps": steps, "decode_batch_width_mean": width,
+            "decode_batch_width_max": width, "cache_hit_tokens": hit, "preempted": 0,
             "ttft_s": prefill + 0.001, "tpot_s": decode / steps, "total_s": 1.0,
             "tokens_out": steps + 1, "terminal_state": "ok" if ok else "expired"}
 
@@ -55,9 +62,31 @@ def test_fit_rows_apply_the_documented_mapping():
     assert len(rows) == 1, "only terminal_state == ok rows are evidence"
     r = rows[0]
     assert r["prompt_tokens"] == (40 + 51) - 24                 # uncached tokens
-    assert r["batch_size"] == 3 % 6 + 1                         # active_size + self
+    assert r["batch_size"] == 4      # decode_batch_width_mean, NOT the active_size 0 beside it
     assert r["prefill_s"] == pytest.approx(TRUTH.prefill_s(67, 0))
     assert r["decode_step_s"] == pytest.approx(TRUTH.decode_step_s(4, 0))
+
+
+def test_a_row_with_no_decode_width_contributes_no_decode_point():
+    """Rows from an engine older than 2026-09-18: dropped, never backfilled from active_size."""
+    old = _telemetry_row(3)
+    del old["decode_batch_width_mean"], old["decode_batch_width_max"]
+    (r,) = ft.fit_rows([old])
+    assert r["batch_size"] is None and r["decode_step_s"] is None
+    assert r["prefill_s"] is not None, "the prefill half of an old row is still evidence"
+
+
+def test_fit_with_no_decode_width_anywhere_is_an_error(tmp_path, capsys):
+    rows = []
+    for i in range(5):
+        r = _telemetry_row(i)
+        del r["decode_batch_width_mean"], r["decode_batch_width_max"]
+        rows.append(r)
+    runs = tmp_path / "runs"
+    _group(runs, "grp-old", rows, {"engine_env": ENV})
+    assert ft.main(["grp-old", "--runs-dir", str(runs), "--out", str(tmp_path / "t.json")]) == 1
+    assert "older than 2026-09-18" in capsys.readouterr().err
+    assert not (tmp_path / "t.json").exists()
 
 
 def test_fit_recovers_the_coefficients_and_writes_the_model(tmp_path, capsys):
