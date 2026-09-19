@@ -79,7 +79,9 @@ is a versioned change that invalidates comparison to prior iterations.
 > `session.primary_metric(panels, ceiling_ms=...)` → **GPU-seconds per session at a stated p95
 > TTFT ceiling** (notes/01). It divides `wall_s_from_process_start` — idle included, which is
 > what stops warm pooling being free — by `sessions_served`, and **refuses** rather than
-> substituting `wall_s` or assuming zero for a missing term. `research/` never imports torch, so
+> substituting `wall_s` or assuming zero for a missing term. A failed request counts as a first
+> token that never arrived, so dropping requests cannot flatter the ceiling (the first real run,
+> `kb-20260918-4f4c85b7`, read MET on the survivors while 2 of 8 had failed). `research/` never imports torch, so
 > device memory is measured by the instrument and passed in; `scripts/bench/serve_accounted.py`
 > is that seam for a server run.
 

@@ -1,0 +1,38 @@
+{
+  "created_at": 1789777496.26864,
+  "evidence": [
+    {
+      "run_id": "run-20260918-99883258"
+    }
+  ],
+  "id": "kb-20260918-4f4c85b7",
+  "mechanism": "Cost migrates to whatever the measured window omits, so the window has to start at process launch, and every term it cannot measure has to be named rather than read as zero.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "The project's primary metric, **GPU-seconds per session at a fixed p95 TTFT ceiling** (notes/01), could not be computed from anything in the repo: `Vitals.wall_s` starts at the first arrival, so model load, warm-up and idle sat outside every recorded number. notes/03 says what that invites: *\"if it is not in the accounting, the loop will eventually move cost into it.\"* notes/07 lists \"move cost off the measured window\" and \"burn an unmeasured resource\" among the six ways this loop would reward hack.\n\n**Now accounted** (`Vitals.accounting`, `research/accounting.py`; optional and None-default, so `PANEL_VERSION` did not move):\n\n| term | how | where it comes from |\n|---|---|---|\n| wall clock from process start | `perf_counter` stamped before `start_server`, closed after the server exits: load, warm-up, idle and shutdown are all inside it | the instrument (`replay_local.py`) |\n| serving window and idle | `serving_wall_s` (the replay window) is recorded beside it, so `idle_s` and `serving_fraction` are derived when read, not fixed by the instrument | the instrument |\n| sessions served | distinct `session_id`s with a successful response | the instrument |\n| peak host RSS | `ru_maxrss` in the server process (bytes on Darwin, KiB on Linux) | `serve_accounted.py` sidecar |\n| peak device memory | CUDA: `max_memory_allocated`, a true peak. MPS: `driver_allocated_memory` **sampled** every 0.25s, because MPS has no peak counter | sidecar; `research/` never imports torch |\n\n`session.primary_metric()` divides wall-from-process-start by sessions served. It **refuses** when a term is missing and never substitutes `wall_s`. The cost gate now reads `peak_host_rss_gb` (instruments filled it, but the gate never checked it) and total wall from process start (it fails only if that rises by more than 25% and more than 10s). An arm with no accounting judges exactly as before.\n\n**First real measurement** (`run-20260918-99883258`, M4 Pro MPS, E2B, `custom-mps`, cold_start/seen, one fresh server): wall from process start **46.9s**, of which serving **32.3s** and idle **14.5s** (serving fraction 0.69; ready in 14.2s); peak host RSS **14.8 GB**; peak MPS memory **11.1 GB** (sampled to 46.0s of the run, 177 samples); sessions served **6 of 8**. Primary metric **7.81 GPU-seconds per session at a 2000ms p95 TTFT ceiling, BROKEN**. The survivors' p95 was 464ms, but 2 of 8 requests returned `no_tokens`. The completed ones also stopped after 1 to 9 tokens against a `max_tokens` of 17 to 216 (one ran 185). That is an engine behaviour this entry does not diagnose.\n\n**The run found a hack the metric had been paying for.** `ttft_p95` is computed over successful requests only, so a failed request made it *better*. `primary_metric` now treats a failure as a first token that never arrived, and the ceiling breaks when the p95 position lands on one. Before that fix the same run read MET.\n\n**NOT accounted, and each gap is where cost will go next:**\n\n1. **Storage read bytes on macOS.** `ru_inblock` stayed 0 across a measured 2.3 GB safetensors read, and `proc_pid_rusage`'s `ri_diskio_bytesread` has no stdlib binding. The value is read from `/proc/self/io` on Linux (not yet exercised on a real Linux run) and is **named** in `unmeasured` on Darwin, never approximated.\n2. **MPS device memory past the sampler's coverage.** The sampler is a Python thread inside the server, and it is **GIL-starved while the engine computes**: 11 samples across 200 MPS matmuls in a scratch test, and in an earlier long run the sidecar stopped advancing at 84s of a ~13-minute run. Coverage (`sampled_to_uptime_s`) is recorded, and anything under 90% of the run is named in `unmeasured`. In this run coverage was 98%, only because generations were short. Fixing it properly needs an engine-side high-water mark, or a CUDA box where `max_memory_allocated` is exact.\n3. **Device memory on CUDA is implemented but untested.** No GPU was available (Modal archived, RunPod unfunded).\n4. **Time before the process exists**: container start, image pull, scheduler queueing on a rented venue. The clock starts at `Popen`. On a pod, cold start begins before that, so a venue launcher has to stamp the earlier start and pass it in.\n5. **The instrument's own cost**, and **host RSS across a SIGKILL**. The sidecar is rewritten on every sample because the engine's lifespan shutdown was measured outlasting `stop_server`'s 60s SIGTERM grace, and a SIGKILL runs no `finally`. A killed server's last second is still lost.\n6. **`gpu_cost_usd`** is still unfilled. GPU-seconds is the unit the metric needs, and a price is venue data this box does not have.\n\nOnly `replay_local.py` fills the block today. `coldstart_load.py` and `replay_corpus_runpod.py` do not, and their panels make `primary_metric` refuse, which is intended.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "accounting",
+    "metric",
+    "cold_start",
+    "harness",
+    "memory",
+    "antihacking",
+    "loop"
+  ],
+  "title": "Total accounting from process start, and the first primary-metric number",
+  "transfer_checked": null,
+  "triggers": [
+    "A CUDA run: max_memory_allocated makes device memory exact, and closes gap 3",
+    "A Linux run: /proc/self/io makes storage read bytes measurable, and closes gap 1",
+    "A venue launcher that stamps container/pod start: extends the clock back past Popen (gap 4)",
+    "An engine-side memory high-water mark (telemetry owner): removes the GIL-starved sampler (gap 2)",
+    "A cost-gate firing on wall-from-process-start: check the 25% / 10s thresholds against the noise band"
+  ],
+  "updated_at": 1789777496.268645,
+  "validity_range": {
+    "hardware": "Apple M4 Pro (MPS)",
+    "model": "gemma-4-e2b"
+  }
+}
