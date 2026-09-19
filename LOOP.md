@@ -80,8 +80,12 @@ is a versioned change that invalidates comparison to prior iterations.
 > TTFT ceiling** (notes/01). It divides `wall_s_from_process_start` — idle included, which is
 > what stops warm pooling being free — by `sessions_served`, and **refuses** rather than
 > substituting `wall_s` or assuming zero for a missing term. A failed request counts as a first
-> token that never arrived, so dropping requests cannot flatter the ceiling (the first real run,
-> `kb-20260918-4f4c85b7`, read MET on the survivors while 2 of 8 had failed). `research/` never imports torch, so
+> token that never arrived (nearest-rank p95 over all attempts), so dropping requests cannot
+> flatter the ceiling **in `primary_metric`**. **Open gap:** `ttft_p95` as the significance gate,
+> `within_slo` and `sweep_headline` read it is still computed over survivors only by
+> `bench_serving.py` and `replay_trace.py`, so a treatment that fails more requests can still
+> read as a `ttft_p95` win there. Check `n_samples` against `harness_config['n_requests']` on
+> both arms until the source fix (a `PANEL_VERSION` bump) lands. See `kb-20260918-4f4c85b7`. `research/` never imports torch, so
 > device memory is measured by the instrument and passed in; `scripts/bench/serve_accounted.py`
 > is that seam for a server run.
 
