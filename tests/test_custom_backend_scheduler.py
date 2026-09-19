@@ -149,3 +149,13 @@ async def test_concurrent_shared_prefix_hits_and_frees(backend):
     assert outs[0] == outs[1]  # identical prompts → identical greedy output
     assert backend.prefix_cache.hits > hits_before
     assert _free_counts(backend) == before, "blocks leaked after concurrent shared-prefix run"
+
+
+@pytest.mark.asyncio
+async def test_generation_stops_at_end_of_turn(backend):
+    """A chat answer ends on <turn|> (106); before the fix every request ran on to max_tokens."""
+    prompt = backend.tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Say hello."}], add_generation_prompt=True,
+        enable_thinking=False, return_dict=True)["input_ids"]
+    (out,) = await _run_through_scheduler(backend, [prompt], 32)
+    assert 0 < len(out) < 32 and 106 not in out, out

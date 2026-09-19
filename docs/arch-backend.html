@@ -10,7 +10,7 @@
 
 <div class="crumbs"><a href="architecture.html">← Architecture map</a> · Backend</div>
 <h1>Inference Backend</h1>
-<p class="lead">Owns the model. The only place in the system that knows what a tensor is. Everything above it talks in token IDs. Last updated 2026-09-06.</p>
+<p class="lead">Owns the model. The only place in the system that knows what a tensor is. Everything above it talks in token IDs. Last updated 2026-09-18.</p>
 
 <div class="nav">
   <a href="#interface">The interface</a>·
@@ -80,6 +80,8 @@
     <text class="small" x="620" y="388">don't break. They route through the same backend.</text>
   </g>
 </svg>
+
+<p><strong>Stop tokens (2026-09-18):</strong> <code>is_eos</code> answers from a set both torch backends build with <code>base.stop_token_ids()</code> — the model's <code>generation_config.json</code> <code>eos_token_id</code>, else <code>config.json</code>'s, else the tokenizer's — the same source HF <code>generate()</code> and vLLM use. For <code>gemma-4-*-it</code> that is <code>{1, 106, 50}</code>; the tokenizer alone gives only <code>1</code>, which is why the custom backend used to run every chat answer past <code>&lt;turn|&gt;</code> (106) to <code>max_tokens</code>.</p>
 
 <h2 id="prefill">Prefill primitives — what each one means</h2>
 

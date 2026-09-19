@@ -7,6 +7,21 @@ if TYPE_CHECKING:
     from inference_server.kv_cache.cache_manager import CacheManager
 
 
+def stop_token_ids(model_name: str, tokenizer) -> set[int]:
+    """Stop ids as HF generate() and vLLM read them: generation config, else model config, else tokenizer."""
+    from transformers import AutoConfig, GenerationConfig
+
+    try:
+        eos = GenerationConfig.from_pretrained(model_name).eos_token_id
+    except OSError:  # repo has no generation_config.json
+        eos = None
+    if eos is None:
+        eos = AutoConfig.from_pretrained(model_name).eos_token_id
+    if eos is None:
+        eos = tokenizer.eos_token_id
+    return {eos} if isinstance(eos, int) else set(eos)
+
+
 class InferenceBackend(ABC):
     """Interface for model backends. Server code only talks through this."""
 

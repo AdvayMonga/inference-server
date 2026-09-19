@@ -7,7 +7,7 @@ from typing import Generator
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from inference_server.backends.base import InferenceBackend
+from inference_server.backends.base import InferenceBackend, stop_token_ids
 from inference_server.kv_cache.hf_format import (
     blocks_to_dynamic_cache,
     dynamic_cache_to_per_layer_3d,
@@ -47,11 +47,7 @@ class TorchBackend(InferenceBackend):
             logger.info("Compiling model with torch.compile (first run will be slow)...")
             self.model = torch.compile(self.model)
 
-        eos = self.model.config.eos_token_id
-        if isinstance(eos, list):
-            self._eos_ids = set(eos)
-        else:
-            self._eos_ids = {eos}
+        self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
     def kv_shape_per_layer(self) -> list[tuple[int, int]]:
         """Probe the model's per-layer (n_kv_heads, head_dim). Works for any HF causal LM."""
