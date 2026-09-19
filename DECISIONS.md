@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-81 entries. Tags: `benchmark`(29), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(22), `graph`(19), `scheduler`(17), `compile`(15), `memory`(13), `loop`(13), `numerics`(10), `backpressure`(8), `cold-start`(8), `harness`(5), `validity`(5), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `batching`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1)
+82 entries. Tags: `benchmark`(30), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(22), `graph`(19), `scheduler`(17), `compile`(15), `memory`(13), `loop`(13), `numerics`(10), `backpressure`(8), `cold-start`(8), `validity`(6), `harness`(5), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `batching`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `telemetry`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,7 +12,7 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (12): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (44) — no `regime` field yet
+- **unassigned** (45) — no `regime` field yet
 
 ## Open (26)
 
@@ -612,9 +612,126 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (34)
+## Resolved (35)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-19] Custom backend ignored end-of-turn: every custom-* request ran to max_tokens (fixed)
+*tags: `correctness`, `custom-backend`, `stop-tokens`, `validity`, `benchmark`, `telemetry`* · `kb-20260918-5906bc13`
+
+**Bug.** `CustomTorchBackend.load_model` built its stop set from `tokenizer.eos_token_id`, which
+for `google/gemma-4-*-it` is only `<eos>` (1). The model's own `generation_config.json` says
+`eos_token_id: [1, 106, 50]` — `<eos>`, `<turn|>` (end of turn) and `<|tool_response>` —
+and `config.json` says `[1, 106]`. Gemma's instruct model ends an answer with `<turn|>`, so the
+custom backend never stopped: every request ran to `max_tokens`, the tail being a run of `106`s
+that decode to `""`. The scheduler's `is_eos` and the backend's own `generate`/`stream` loops all
+consult the same set, so every path was affected. The HF backend read `config.json` (`[1, 106]`)
+and was not.
+
+**Fix** (branch `fix/custom-backend-stops-at-end-of-turn`, engine commit `bb85b10`).
+`backends/base.py::stop_token_ids` reads the stop ids the way HF `generate()` and vLLM do —
+generation config, else model config, else tokenizer — and both torch backends use it. For
+`gemma-4-E2B-it` the set is now `{1, 106, 50}`. Regression test:
+`tests/test_stop_tokens.py::test_stop_set_includes_end_of_turn` (record `exp-20260918-ca98c450`); a heavy
+end-to-end test `tests/test_custom_backend_scheduler.py::test_generation_stops_at_end_of_turn`
+fails at `origin/main` (106 in the output) and passes with the fix. Parity untouched (forward
+pass unchanged).
+
+**Size of the effect, on the exact workload the week's measurements used.** `corpus/cold_start/seen`
+encoded as the `/v1/completions` shim encodes it (plain `tokenizer.encode`, no chat template),
+greedy, corpus `max_tokens`, through `ContinuousBatchScheduler` on MPS / E2B:
+
+| max_tokens | tokens out before | tokens out after | `106`s emitted before |
+|---|---|---|---|
+| 42 | 42 | 6 | 36 |
+| 32 | 32 | 1 | 31 |
+| 40 | 40 | 9 | 31 |
+| 185 | 185 | 185 | 0 |
+| 54 | 54 | 1 | 53 |
+| 17 | 17 | 9 | 8 |
+| 216 | 216 | 0 | 216 |
+| 40 | 40 | 9 | 31 |
+| **626** | **626** | **220** | **406** |
+
+**65% of every decode step on this class was generating `<turn|>` after the answer had ended.**
+In every row the after-fix output is a prefix of the before output (the answer is identical; only
+the tail is gone). This matches the engine telemetry of the PR #38 run exactly (all 8 `ok` at
+exactly `max_tokens`) and the client-visible counts from the same run (6 of 42, 1 of 54): the
+client's "`no_tokens`" requests are the `216` row, which answers with nothing, and the `32` row,
+whose one token decodes to an empty string. The client's `no_tokens` is therefore mostly *correct*;
+the engine was the side that was wrong.
+
+## Measurements this invalidates
+
+Every serving measurement on a `custom-*` backend whose model emits `<turn|>` — in practice
+every run that went through the shim, i.e. `scripts/bench/replay_trace.py` /
+`replay_local.py` (`BACKEND=custom-mps` by default) and anything chat-shaped. Wasted tail
+generation inflated GPU-seconds per session, decode steps, TPOT (a wider batch for longer), batch
+occupancy (`active_mean`), and — through queueing behind rows that should have left — TTFT at
+narrow `MAX_BATCH_SIZE`. Named:
+
+- **Noise floor band** `kb-20260917-aa6b0f4d` / `knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`
+  (run_group `grp-null-coldstart-mps`). Its "626 output tokens" is the sum of `max_tokens`; its
+  "2 `no_tokens` (two short prompts make E2B emit EOS immediately)" was really `<turn|>`
+  followed by running to `max_tokens`. The band is the null spread of a workload ~2.8x longer in
+  decode than the real one; it must be re-measured before it gates anything.
+- **Simulator validation** `kb-20260917-c07eb94b` (PR #35, run_groups `grp-fit-coldheld-mps`,
+  `grp-simval-coldstart-mps`) and the fitted `knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json`.
+  Fit rows and hardware panels both ran every request to `max_tokens`. The hardware p95 TTFTs at
+  `MAX_BATCH_SIZE` 1-2 (10-20 s) are dominated by queueing behind rows that were decoding
+  `<turn|>`; the rho values (0.966 TPOT, 0.628 TTFT) are measured against a workload the
+  corpus did not describe.
+- **Its re-run, PR #40** (in review, rho 0.628 -> 0.745): same harness, backend and box —
+  same contamination. The batch-width telemetry it adds is unaffected as code; its fit and rho
+  are not.
+- **Total accounting, PR #38** (in review, `run-20260918-99883258`): its engine-side figure
+  (5.86 GPU-s per session) counts the wasted tail; its client-side BROKEN verdict rests on
+  `no_tokens` that are, per the table above, mostly real empty answers.
+
+## The June A100 head-to-head (1151 vs 2628 tok/s) — checked, not assumed
+
+It **did run on the custom backend**: `benchmarks/README.md` ("custom — our engine
+(`bench_load_sweep_modal.py`, `custom-cuda`)"), `scripts/archive/modal/bench/bench_load_sweep_modal.py`
+(`create_backend("custom-cuda")`), and the 1151 figure is `sweep_custom_cuda_batched_a100_e4b_compile.csv`
+N=32 (1150.9 tok/s, TPOT 23.8 ms, TTFT 107 ms). **But its workload did not exercise this bug the
+same way**: both engines were fed the same 8 raw token-id prompts, `[50000+i] + range(100, 160)`,
+with no chat template and no tokenizer, greedy, `max_tokens=100`; vLLM with default
+`SamplingParams` (stops at the generation config's `[1, 106, 50]`, `ignore_eos=False`).
+
+What the CSVs can show (tokens per request = `tok_s x window / reqs`, window in
+`[15 s, 15 s + one request]`):
+
+| sweep | tokens/request, custom | tokens/request, vLLM |
+|---|---|---|
+| A10G / E2B, N=1..32 | 88-113 | 92-108 |
+| A100 / E2B, N=1..32 | 91-111 | 97-104 |
+| A100 / E4B (1151 run), N=1..32 | 60-74 | 64-86 |
+
+- **E2B: like for like.** Both engines ran ~100 tokens a request. Re-run locally (MPS, E2B,
+  greedy) on those exact 8 prompts, the model repeats token `159` for all 100 steps and never
+  emits 1, 106 or 50 — so the stop set cannot have mattered.
+- **E4B (the headline): probably like for like on length, not proven.** Both engines ended
+  requests well short of 100 (request counts exceed what 100-token requests could fit in the
+  window), so E4B emits `<eos>` (1) on some of these prompts, which the custom backend did catch.
+  The custom range sits at or below vLLM's, which argues against the custom engine having run
+  systematically longer. It cannot rule out an individual prompt that vLLM ended at 106 or 50
+  and the custom engine continued: the CSVs hold aggregates only and E4B is not in the local
+  cache to replay. Do not cite the 2.3x (or 4.0x) gap as affected by this bug, and do not cite
+  it as proven unaffected either; the check is a short local E4B run of those 8 prompts under both stop sets.
+- **Aside, same arithmetic:** the HF baseline on A100/E4B (`sweep_cuda_a100_e4b.csv`, the "125
+  tok/s / 9x over naive HF" row) averaged ~21-53 tokens a request at N>=4 against ~60-86 for the other
+  two. The 9x is not output-length-matched either; that is not this bug (the HF backend already
+  stopped at 106), just the same kind of mismatch.
+- The September open-loop `serving_a100_e4b*.csv` sweeps (`bench_serving_modal.py`, custom-cuda)
+  also used raw token-id prompts; same status as the E4B row: not shown affected, not shown clean.
+
+**Revisit when:** a new model family whose generation config lacks its turn terminator; E4B is cached or a GPU is funded: replay the June 8 token prompts on E4B under {1} vs {1,106,50} to close the head-to-head question; any serving measurement predating commit bb85b10 on a custom-* backend is cited as evidence
+
+**Evidence:** exp-20260918-ca98c450, branch fix/custom-backend-stops-at-end-of-turn, commit bb85b10, run-20260918-99883258, grp-null-coldstart-mps, grp-simval-coldstart-mps, grp-fit-coldheld-mps
+
+**Valid over:** `{"backend": ["custom-cuda", "custom-mps", "custom-cpu"], "model": ["google/gemma-4-E2B-it", "google/gemma-4-E4B-it"]}`
+
+**Mechanism:** The stop set came from the tokenizer (<eos> only) instead of the generation config, so the instruct model's <turn|> never ended a request.
 
 ### [2026-09-18] Noise floor: harness null variance on M4 Pro / E2B, cold_start replay (calibration)
 *tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`* · `kb-20260917-aa6b0f4d`
