@@ -144,9 +144,15 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def start_server(env: dict[str, str], port: int, log_path: Path) -> subprocess.Popen:
-    """uvicorn in a subprocess, engine env applied, stdout+stderr to `log_path`."""
-    cmd = [sys.executable, "-m", "uvicorn", "inference_server.server:app",
+def start_server(env: dict[str, str], port: int, log_path: Path,
+                 entry: list[str] | None = None) -> subprocess.Popen:
+    """uvicorn in a subprocess, engine env applied, stdout+stderr to `log_path`.
+
+    `entry` replaces the `-m uvicorn ...` part for a caller that needs the server started a
+    different way — `replay_local.py` passes `serve_accounted.py`, which is the same app plus a
+    resource sidecar. Default unchanged, so the pod path starts exactly the process it always did.
+    """
+    cmd = [sys.executable, *(entry or ["-m", "uvicorn", "inference_server.server:app"]),
            "--host", "127.0.0.1", "--port", str(port), "--log-level", "info"]
     full = {**os.environ, **env, "PYTHONPATH": str(REPO / "src")}
     log = open(log_path, "w")

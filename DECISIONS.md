@@ -3,18 +3,18 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-82 entries. Tags: `benchmark`(30), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(23), `modal`(23), `graph`(19), `scheduler`(18), `compile`(15), `loop`(14), `memory`(13), `numerics`(10), `cold-start`(9), `backpressure`(8), `harness`(6), `validity`(6), `venue`(5), `triton`(4), `roofline`(4), `batching`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `telemetry`(1)
+83 entries. Tags: `benchmark`(30), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(23), `modal`(23), `graph`(19), `scheduler`(18), `compile`(15), `loop`(15), `memory`(14), `numerics`(10), `cold-start`(9), `backpressure`(8), `harness`(7), `validity`(6), `venue`(5), `triton`(4), `roofline`(4), `batching`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `telemetry`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (13): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-9fc68282`
+- **cold_start** (14): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (44) — no `regime` field yet
 
-## Open (26)
+## Open (27)
 
 Live — being worked, or waiting on a trigger.
 
@@ -159,6 +159,67 @@ The un-suffixed `google-gemma-4-e2b-it-apple-m4-pro-mps.json` is PR #35's, and i
 **Mechanism:** Regressing decode cost on the width a row actually decoded in, rather than the width it arrived into, steepens the fitted slope 13x and puts every mbs=2 config within 4% of hardware. What remains is a one-row step ~2x too slow, inflated by an unweighted fit and a missing context-length term, which mis-orders only the MAX_BATCH_SIZE=1 configs.
 
 **Supersedes:** `kb-20260917-c07eb94b`
+
+### [2026-09-19] Total accounting from process start, and the first primary-metric number
+*tags: `accounting`, `antihacking`, `client-bug`, `cold_start`, `harness`, `loop`, `memory`, `metric`, `ttft`* · `kb-20260918-4f4c85b7`
+
+The project's primary metric, **GPU-seconds per session at a fixed p95 TTFT ceiling** (notes/01), could not be computed from anything in the repo: `Vitals.wall_s` starts at the first arrival, so model load, warm-up and idle sat outside every recorded number. notes/03 says what that invites: *"if it is not in the accounting, the loop will eventually move cost into it."* notes/07 lists "move cost off the measured window" and "burn an unmeasured resource" among the six ways this loop would reward hack.
+
+**Now accounted** (`Vitals.accounting`, `research/accounting.py`; optional and None-default, so `PANEL_VERSION` did not move):
+
+| term | how | where it comes from |
+|---|---|---|
+| wall clock from process start | `perf_counter` stamped before `start_server`, closed after the server exits: load, warm-up, idle and shutdown are all inside it | the instrument (`replay_local.py`) |
+| serving window and idle | `serving_wall_s` (the replay window) is recorded beside it, so `idle_s` and `serving_fraction` are derived when read, not fixed by the instrument | the instrument |
+| sessions served | distinct `session_id`s the CLIENT saw succeed (affected by the client bug below) | the instrument |
+| peak host RSS | `ru_maxrss` in the server process (bytes on Darwin, KiB on Linux) | `serve_accounted.py` sidecar |
+| peak device memory | CUDA: `max_memory_allocated`, a true peak. MPS: `driver_allocated_memory` **sampled** every 0.25s, because MPS has no peak counter | sidecar; `research/` never imports torch |
+
+`session.primary_metric()` divides wall-from-process-start by sessions served. It **refuses** when a term is missing and never substitutes `wall_s`. It also refuses when `harness_config['n_requests']` is missing or smaller than `n_samples`, because without attempts it cannot count failures. The cost gate now reads `peak_host_rss_gb` (instruments filled it, but the gate never checked it) and total wall from process start. An arm with no accounting judges exactly as before.
+
+**First real measurement** (`run-20260918-99883258`, M4 Pro MPS, E2B, `custom-mps`, cold_start/seen, one fresh server):
+
+| term | value |
+|---|---|
+| wall from process start | **46.9s** (ready in 14.2s) |
+| serving / idle | 32.3s / 14.5s (serving fraction 0.69) |
+| peak host RSS | **14.8 GB** |
+| peak MPS memory | **11.1 GB** (sampled to 46.0s of the run, 177 samples) |
+| sessions served (client's view) | 6 of 8 |
+
+The panel reads **7.81 GPU-seconds per session at a 2000ms p95 TTFT ceiling, BROKEN**. **Do not quote that verdict as an engine result.** It is BROKEN only because the client recorded 2 of 8 requests as `no_tokens`, and the engine's own telemetry for this run contradicts the client. All 8 trace ids finished `terminal_state=ok`, and each emitted exactly its `max_tokens` (42, 32, 40, 185, 54, 17, 216, 40). The two "failures" had engine-side TTFTs of 152 and 281ms. The client also undercounted tokens on the requests it did accept (6 against 42, 9 against 40, 1 against 54), so this panel's `out_tokens`, TPOT and tok/s are wrong as well. This matches a replay-client bug the batch-width agent found independently (1-2 of 8 lost per validation run, 5-6 of 8 per fit run; PR #35's panels show the same pattern). The bug is **not yet diagnosed or fixed**. If the engine's rows were admissible, the numbers would be 8 sessions, **5.86 GPU-s per session**, and a maximum engine TTFT of 522ms, so MET. They are not admissible: notes/03 puts the clock outside the system, and engine self-report is never evidence. Re-measure once the client is fixed. The accounting terms above (wall, RSS, device memory) do not depend on the client's token count and stand.
+
+**The failure-counting rule, and where it does NOT apply.** `ttft_p95` is computed over successful requests only, so failing a request makes it *better*. `primary_metric` now ranks a failure as a first token that never arrived, and breaks the ceiling when fewer than ceil(0.95 * n) requests got one (nearest-rank p95). That is exact at small n: 1 failure of 8 or of 9 breaks it, while 1 of 20 does not. An earlier floor-interpolation version let 1 of 8 through. The rule is correct, and a misreporting client has to be fixed in the client, not by softening the rule. Where failures are present, the rule is exact about the failures but uses the survivors' `ttft_p95` for everything else. The panel does not carry the per-request distribution, so a mix of failures and slow survivors can pass when the true all-request p95 does not.
+
+**OPEN GAP: the hack is closed in `primary_metric` only.** `ttft_p95`, as the merge-authorising gates read it, is still computed over survivors and **still exploitable**. A treatment that fails more requests and serves the rest faster reads as a significant `ttft_p95` win through:
+- `compare.significance()` / `significance_replicated()`, and therefore `gates.significance_gate`
+- `session.within_slo()` and `session.sweep_headline()`
+- the instruments that fill the field: `scripts/bench/bench_serving.py` (`RateResult.summary`) and `scripts/bench/replay_trace.py` (`ReplayResult.summary`)
+
+Fixing it at the source changes what the `ttft_p95` panel field means. Under LOOP.md's rule that is a `PANEL_VERSION` bump, and it collides with the noise bands in `knowledge/noise/`, which were measured on the old meaning and are keyed without panel version. So it gets its own PR. Until then, no `ttft_p95` verdict from the gate should be trusted without checking `n_samples` against `harness_config['n_requests']` on both arms.
+
+**NOT accounted, and each gap is where cost will go next:**
+
+1. **Storage read bytes on macOS.** `ru_inblock` stayed 0 across a measured 2.3 GB safetensors read, and `proc_pid_rusage`'s `ri_diskio_bytesread` has no stdlib binding. The value is read from `/proc/self/io` on Linux (not yet exercised on a real Linux run) and is **named** in `unmeasured` on Darwin, never approximated.
+2. **MPS device memory past the sampler's coverage.** The sampler is a Python thread inside the server, and it is **GIL-starved while the engine computes**: 11 samples across 200 MPS matmuls in a scratch test, and in an earlier long run the sidecar stopped advancing at 84s of a ~13-minute run. Coverage (`sampled_to_uptime_s`) is recorded, and anything under 90% of the run is named in `unmeasured`. **Known limitation, accepted on review: a memory regression after the coverage cutoff passes the cost gate with only a footnote.** The gate compares the sampled peaks, and a spike the sampler never saw is invisible to it. The real fix is an engine-side high-water mark, or CUDA, where `max_memory_allocated` is exact.
+3. **Device memory on CUDA is implemented but untested.** No GPU was available.
+4. **Time before the process exists**: container start, image pull, scheduler queueing on a rented venue. The clock starts at `Popen`. On a pod, cold start begins before that, so a venue launcher has to stamp the earlier start and pass it in.
+5. **The instrument's own cost**, and **the last second of a SIGKILLed server**. The sidecar is rewritten on every sample because the engine's lifespan shutdown was measured outlasting `stop_server`'s 60s SIGTERM grace.
+6. **`gpu_cost_usd`** is still unfilled. GPU-seconds is the unit the metric needs, and a price is venue data this box does not have.
+
+**Provisional thresholds.** The cost gate's wall-clock rule (fail only on +25% **and** +10s) is a pair of round numbers, not a measurement. It is provisional until a wall-clock-from-launch noise band exists. The same holds for the 2 GB host-RSS threshold.
+
+Only `replay_local.py` fills the block today. `coldstart_load.py` and `replay_corpus_runpod.py` do not, and their panels make `primary_metric` refuse, which is intended.
+
+**Revisit when:** The replay client's no_tokens / token-undercount bug is fixed: re-run cold_start and replace the 7.81 BROKEN number; The ttft_p95 source fix lands (PANEL_VERSION bump, noise bands re-measured): close the OPEN GAP; A wall-clock-from-launch noise band exists: replace the provisional 25% / 10s cost-gate thresholds; A CUDA run: max_memory_allocated makes device memory exact, and closes gaps 2 and 3; A Linux run: /proc/self/io makes storage read bytes measurable, and closes gap 1; A venue launcher that stamps container/pod start: extends the clock back past Popen (gap 4); An engine-side memory high-water mark (telemetry owner): removes the GIL-starved sampler (gap 2)
+
+**Evidence:** run-20260918-99883258
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"hardware": "Apple M4 Pro (MPS)", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Cost migrates to whatever the measured window omits, so the window has to start at process launch, and every term it cannot measure has to be named rather than read as zero.
 
 ### [2026-09-18] Router locality-vs-load is one normalised weight, with session affinity as a separable term; no curve measured yet
 *tags: `control-plane`, `router`, `prefix-cache`, `locality`, `session-affinity`, `simulator`, `staleness`* · `kb-20260917-0c9ba6de`
