@@ -19,7 +19,7 @@
   "gates": {},
   "hypothesis_id": "no-behaviour-change",
   "id": "exp-20260918-db207b90",
-  "no_behaviour_change": "Observability only: adds decode_batch_width_mean/_max to the telemetry row, accumulated by three int ops per row per decode step on ScheduledRequest; no scheduling, admission, sampling or KV decision reads them. Decode step +0.4us at width 8 (41.18->41.59us, fake backend) against a ~165ms real step; overhead-budget path 1.39->1.59us/request (budget 200us).",
+  "no_behaviour_change": "Observability only: adds decode_batch_width_mean/_max to the telemetry row, accumulated by three int ops per row per decode step on ScheduledRequest; no scheduling, admission, sampling or KV decision reads them. Hot-path cost is bounded in CI by tests/test_telemetry.py::test_decode_step_budget_with_width_accumulators (2000 _decode_step calls at width 8, accumulators asserted exact, mean step < 2ms); the per-request path by test_overhead_budget (< 200us).",
   "notes": "",
   "regression_test": "",
   "source": "loop",
