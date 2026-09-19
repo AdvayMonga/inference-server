@@ -1236,7 +1236,7 @@ The win needs enough queries to amortise the K/V load AND a head_dim small enoug
 
 **Why not merged: no trustworthy end-to-end evidence.** Three A/B attempts, three different confounds (see the loop entry). The only clean run showed prefill p95 *worse* (259 -> 457 ms), and that run was itself invalid because CUDA-graph capture defeats the toggle. Isolated kernel wins do not entitle a merge.
 
-Branch `perf/tiled-prefill-attention` holds the work.
+The work is archived as the tag `archive/perf-tiled-prefill-attention` (the branch was deleted 2026-09-18 in a branch cleanup; the tag keeps every commit reachable).
 
 **RESOLVED (iteration 4).** A clean A/B — prefill graph OFF so the toggle actually takes effect, arms interleaved in one container, cold cache per arm, TPOT declared as a sanity metric (held at 84.9 vs 85.9 ms) — gives:
 
