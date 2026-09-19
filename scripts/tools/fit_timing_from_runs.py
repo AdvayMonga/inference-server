@@ -19,20 +19,23 @@ Row mapping, from `telemetry.RequestRecord` to what `simulator.fit_timing_model`
                                          (the simulator passes UNCACHED tokens as the first
                                           prefill_s argument; a prefix hit shrinks the work)
     decode_step_s  <- decode_s / decode_steps   (rows with decode_steps > 0)
-    batch_size     <- active_size + 1    (see the caveat below)
+    batch_size     <- decode_batch_width_mean   (see below)
 
 `batch_prompt_tokens` and `total_kv_tokens` are not in the telemetry row, so their coefficients
 fit to 0. That is the v1 model: cost linear in the request's own size and in batch width.
 
-The batch_size caveat, which bounds what this fit can claim. `active_size` is snapshotted ONCE,
-at enqueue, before the request is admitted, and is never updated — so it is the batch width this
-request ARRIVED into, not the width it decoded in. A request that arrives alone and then decodes
-for 200 steps inside a batch of 30 contributes the row (batch_size=1, decode_step_s measured at
-~30 rows wide). "+1" corrects only for the row's own slot. Under steady load the two are close
-and the decode slope is usable; under a ramp the predictor is biased low and the fitted slope is
-too flat. Fixing it needs a per-step width in the telemetry row (an engine change, not done here)
-— until then, prefer rate scales that hold a steady width, and read the decode slope as a
-lower bound.
+What `batch_size` is, exactly. `decode_batch_width_mean` is the mean batch width over the
+request's OWN decode steps, accumulated one step at a time by the scheduler. It is the right
+regressor and not an approximation: the model is `decode_step_s = a + b*batch_size`, and the
+row's y is itself a mean over those same steps, so mean(a + b*W) = a + b*mean(W) exactly, however
+much W varied. What a mean does hide is how much W varied, so the fit also reports the spread
+from `decode_batch_width_max` — a fit whose rows all averaged over wide swings is then visible
+rather than silent.
+
+Rows written by an engine older than 2026-09-18 do not carry the field. They are dropped from the
+decode fit rather than falling back to `active_size`: that is the ARRIVAL snapshot, and using it
+here flattened the fitted decode slope by ~40x — 1.5 ms/row against a real ~50-100 ms/row on this
+row-by-row backend (kb-20260917-c07eb94b). Do not reintroduce the fallback.
 
 Validation (--validate): for each hardware panel's (class, split, rate_scale), simulate the same
 trace under a SimConfig built from the panel's own `harness_config["engine_env"]` when it has one
@@ -98,19 +101,25 @@ def _num(v: Any) -> float | None:
 
 
 def fit_rows(telemetry: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The docstring's mapping, one fit row per successful telemetry row."""
+    """The docstring's mapping, one fit row per successful telemetry row.
+
+    A row with no `decode_batch_width_mean` contributes no decode point: there is no honest
+    substitute for it, and `active_size` is the wrong number (see the module docstring).
+    """
     out = []
     for r in telemetry:
         if r.get("terminal_state") != "ok":
             continue
-        prefill = _num(r.get("prefill_s"))
         decode_s, steps = _num(r.get("decode_s")), int(_num(r.get("decode_steps")) or 0)
+        width = _num(r.get("decode_batch_width_mean"))
         row: dict[str, Any] = {
             "prompt_tokens": int(_num(r["prompt_tokens"]) or 0)
                              - int(_num(r.get("cache_hit_tokens")) or 0),
-            "prefill_s": prefill,
-            "batch_size": int(_num(r["active_size"]) or 0) + 1,
-            "decode_step_s": (decode_s / steps if decode_s is not None and steps > 0 else None),
+            "prefill_s": _num(r.get("prefill_s")),
+            "batch_size": width,
+            "decode_width_max": _num(r.get("decode_batch_width_max")),
+            "decode_step_s": (decode_s / steps
+                              if decode_s is not None and steps > 0 and width else None),
         }
         out.append(row)
     return out
@@ -249,18 +258,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[error] no ok telemetry rows under {Path(args.runs_dir) / args.run_group}",
               file=sys.stderr)
         return 1
+    decode_rows = [r for r in rows if r["decode_step_s"] is not None]
+    if not decode_rows:
+        print(f"[error] {len(rows)} ok rows, none with decode_batch_width_mean — these were "
+              f"written by an engine older than 2026-09-18. Re-run the instrument; there is no "
+              f"fallback, because active_size is the arrival snapshot, not the decode width.",
+              file=sys.stderr)
+        return 1
     timing = fit_timing_model(rows, model=model, hardware=hardware, engine_sha=sha,
                               fitted_from=args.run_group)
     out.parent.mkdir(parents=True, exist_ok=True)
     timing.to_json(out)
     n_pre = sum(r["prefill_s"] is not None for r in rows)
-    n_dec = sum(r["decode_step_s"] is not None for r in rows)
+    n_dec = len(decode_rows)
     print(f"-- fit from {len(rows)} ok rows ({n_pre} prefill, {n_dec} decode) in "
           f"run_group={args.run_group} --")
     a, b, c = timing.prefill
     print(f"prefill_s     = {a:.6f} + {b:.3e} * prompt_tokens + {c:.3e} * batch_prompt_tokens")
     a, b, c = timing.decode
     print(f"decode_step_s = {a:.6f} + {b:.3e} * batch_size + {c:.3e} * total_kv_tokens")
+
+    # Width spread: the mean is an exact regressor, but a fit whose rows each averaged over a
+    # wide swing has less leverage on b than the row count suggests. Say so, do not hide it.
+    widths = sorted(r["batch_size"] for r in decode_rows)
+    varied = sum(1 for r in decode_rows if (r["decode_width_max"] or 0) > r["batch_size"] + 0.5)
+    print(f"decode width: mean over rows {sum(widths) / len(widths):.2f}, "
+          f"range {widths[0]:.2f}-{widths[-1]:.2f}, "
+          f"{varied}/{n_dec} row(s) whose max exceeded their mean by > 0.5")
     rel = out.relative_to(REPO) if out.is_relative_to(REPO) else out
     print(f"wrote {rel} (model={model}, hardware={hardware}, sha={sha})")
     print(f"validate with: python scripts/tools/fit_timing_from_runs.py {args.run_group} "

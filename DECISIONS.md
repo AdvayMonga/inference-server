@@ -3,133 +3,223 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-82 entries. Tags: `benchmark`(30), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `modal`(23), `decode`(22), `graph`(19), `scheduler`(17), `compile`(15), `memory`(13), `loop`(13), `numerics`(10), `backpressure`(8), `cold-start`(8), `validity`(6), `harness`(5), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `batching`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `telemetry`(1)
+84 entries. Tags: `benchmark`(31), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(23), `modal`(23), `graph`(19), `scheduler`(18), `compile`(15), `loop`(15), `memory`(14), `numerics`(10), `cold-start`(9), `backpressure`(8), `harness`(7), `validity`(7), `venue`(5), `triton`(4), `roofline`(4), `batching`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `telemetry`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (12): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`
+- **cold_start** (14): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
 
-## Open (26)
+## Open (27)
 
 Live — being worked, or waiting on a trigger.
 
-### [2026-09-18] Simulator vs hardware, first rank check (MPS/E2B): TPOT ranks, p95 TTFT does not
-*tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `measurement-gap`* · `kb-20260917-c07eb94b`
+### [2026-09-19] Simulator vs hardware rank check after the decode-width fix (MPS/E2B): p95 TTFT now ranks (rho 0.745)
+*tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `telemetry`* · `kb-20260918-9fc68282`
 
-**Verdict: the simulator ranks TPOT correctly and does NOT reliably rank p95 TTFT.**
-Spearman rho over nine configs, simulator vs the same configs on real hardware:
+**Verdict: with the decode width fixed, the simulator ranks p95 TTFT on MPS/E2B. It passes by a
+thin margin, and every remaining miss is at MAX_BATCH_SIZE=1.**
 
 | metric | rho | n | verdict |
 |---|---|---|---|
-| `tpot_p50` | **0.966** | 9 | **passes** — far above the two-tailed a=0.05 critical rho of 0.683 at n=9 |
-| `ttft_p95` | **0.628** | 9 | **fails** — below that critical value, i.e. not distinguishable from chance ordering |
+| `ttft_p95` | **0.745** | 9 | **passes**, above the two-tailed a=0.05 critical rho of 0.683 at n=9 (was 0.628) |
+| `tpot_p50` | **0.966** | 9 | passes (unchanged) |
 
-This is the check notes/04 calls "the part that makes it trustworthy", run for the first time.
-It was run against **MPS / E2B on an Apple M4 Pro**, not the A100 / E4B the simulator will
-eventually be used to predict. A pass here would have meant the plumbing and the ranking logic
-work; it would not have licensed a tier-1 conclusion about CUDA. Half of it did not even pass.
+Same fit configs and the same nine validation configs as `kb-20260917-c07eb94b`
+(`configs_timing_fit.json`, `configs_sim_validation.json`), same corpus_version, same backend
+(custom-mps), same box. Nothing was added, dropped or substituted.
 
-## How it was run
+## What changed
 
-- **Fit** (`grp-fit-coldheld-mps`, 26 ok telemetry rows): `cold_start/heldout` at rate x1, x2,
-  x4 plus one `long_context/heldout` at MAX_BATCH_SIZE=1 with a 3s deadline, so a few long
-  prompts prefill alone and give the slope some leverage. Held out from the validation set by
-  the corpus's own seen/heldout split.
-- **Validate** (`grp-simval-coldstart-mps`, 9 panels): `cold_start/seen` under nine engine
-  configs spanning MAX_BATCH_SIZE 1/2/8, rate_scale 0.5/1/4, fcfs vs fair, and a 5s vs 30s
-  admission deadline. Each config gets its own server process; the panel carries its own
-  `engine_env`, and `fit_timing_from_runs --validate` simulates each panel under that.
-- Fitted model: `prefill_s = 0.157 + 1.51e-3 * prompt_tokens`,
-  `decode_step_s = 0.165 + 1.49e-3 * batch_size` (`knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json`).
+Telemetry now records the batch width a request actually decoded in:
+`decode_batch_width_mean` / `decode_batch_width_max`, accumulated per step in
+`scheduler._decode_step`. Before this, `fit_timing_from_runs` read `active_size`, which is the
+width at arrival. The fit now regresses on the mean width. That mean is exact for a linear model:
+the row's `decode_step_s` is itself a mean over the same steps.
 
-**Disclosure on refitting.** One earlier fit was made and discarded: from `grp-fit-mps-e2b`
-(`steady_interactive/seen` and `long_context/seen` at MAX_BATCH_SIZE=8). Those classes saturate
-this box — 128 of 136 and 36 of 40 requests were shed at the admission deadline — and the eight
-survivors' rows were structurally invalid inputs, not merely noisy: `prefill_s` of 40s (one
-request waiting behind seven other prefills in the same K=8 wave) and `decode_step_s` of 98s.
-It was discarded on the rows, **before any rank correlation was computed on it**. No fit was
-tuned against the rho, and no config was dropped from the nine.
+**The only fit (one fit, no refits):** `grp-20260918-b015e2`, 26 ok telemetry rows (the same
+8+8+8+2 shape as PR #35's `grp-fit-coldheld-mps`). Decode widths per row ranged 1.00-7.52, and
+20 of 26 rows had a max more than 0.5 above their mean. A row that never decoded has `decode_batch_width_mean` None and `decode_batch_width_max` 0. The 0 is a safe sentinel, because any real decode step has width >= 1.
 
-## Per-config pairs
+| | prefill_s | decode_step_s |
+|---|---|---|
+| old (PR #35, `active_size`) | 0.157 + 1.51e-3 * tokens | 0.165 + **1.49e-3** * W |
+| **new (current)** | 0.104 + 1.45e-3 * tokens | 0.092 + **1.95e-2** * W |
+
+The slope is 13x steeper. It is still below the "~50-100 ms/row" that `c07eb94b` estimated, and
+that estimate was the one-row forward time, not the per-row increment. The rows themselves say
+the increment on this box is ~20-30 ms/row: about 100 ms/step at W=2 and 255 ms/step at W=7.5.
+hardware `tpot_p50` at MAX_BATCH_SIZE=1 is 50-58 ms.
+
+## Attribution: the fix, not the draw
+
+Each hardware point is a single run. So both models were rank-checked against both hardware
+draws. No new fits were made for this:
+
+| model \ hardware | PR #35 draw (`grp-simval-coldstart-mps`) | this draw (`grp-20260918-97253b`) |
+|---|---|---|
+| old (`active_size`) | 0.628 fail | 0.611 fail |
+| **new (decode width)** | **0.778 pass** | **0.745 pass** |
+
+The new hardware draw does not pass on its own, and the new model passes on PR #35's panels too.
+The gain comes from the input fix.
+
+## Per-config pairs (new model, this draw)
 
 | config | hw ttft_p95 (ms) | sim | sim/hw | hw tpot_p50 (ms) | sim | sim/hw |
 |---|---|---|---|---|---|---|
-| `mbs8-x05` | 435 | 431 | 0.99x | 118.6 | 178.6 | 1.51x |
-| `mbs8-x1` | 460 | 540 | 1.17x | 155.2 | 184.2 | 1.19x |
-| `mbs8-x4` | 587 | 563 | 0.96x | 279.6 | 186.1 | 0.67x |
-| `mbs1-deadline5-x4` | 4732 | 171 | 0.04x | 49.6 | 166.6 | 3.36x |
-| `mbs2-x1` | 10061 | 17932 | 1.78x | 96.3 | 168.1 | 1.74x |
-| `mbs2-fair-x4` | 17521 | 20248 | 1.16x | 96.7 | 168.1 | 1.74x |
-| `mbs2-x4` | 17746 | 20248 | 1.14x | 100.3 | 168.1 | 1.67x |
-| `mbs1-x4` | 18376 | 11698 | 0.64x | 56.6 | 166.6 | 2.94x |
-| `mbs1-x1` | 20472 | 9207 | 0.45x | 55.7 | 166.6 | 2.99x |
+| `mbs8-x05` | 387 | 347 | 0.90x | 120.8 | 143.6 | 1.19x |
+| `mbs8-x1` | 642 | 347 | 0.54x | 185.7 | 164.5 | 0.89x |
+| `mbs8-x4` | 552 | 470 | 0.85x | 278.2 | 220.4 | 0.79x |
+| `mbs1-deadline5-x4` | 4743 | 117 | 0.02x | 50.5 | 111.3 | 2.20x |
+| `mbs2-x1` | 11995 | 12469 | 1.04x | 105.0 | 130.8 | 1.25x |
+| `mbs2-fair-x4` | 17553 | 17529 | 1.00x | 95.8 | 130.8 | 1.37x |
+| `mbs2-x4` | 18110 | 17529 | 0.97x | 98.9 | 130.8 | 1.32x |
+| `mbs1-x4` | 19329 | 7551 | 0.39x | 57.8 | 111.3 | 1.92x |
+| `mbs1-x1` | 22611 | 29203 | 1.29x | 57.1 | 111.3 | 1.95x |
 
-## Why TTFT fails, concretely
+The mbs=2 configs went from 1.14-1.78x to 0.97-1.04x. That is where the old flat slope did its
+damage.
 
-The fitted decode step is **flat in batch width**: 165 ms base + 1.5 ms per extra row. On this
-engine that is wrong by one to two orders of magnitude — `CustomTorchBackend.decode_step_batched`
-runs **one forward per row**, so the real step cost is roughly linear with a per-row slope near
-the single-row forward time (~50-100 ms here). The fit cannot see that, because
-`fit_timing_from_runs` maps `batch_size <- active_size + 1` and `active_size` is snapshotted
-**once, at enqueue, before admission**, and never updated. That caveat is already written in the
-script's docstring as "read the decode slope as a lower bound"; this is the first measurement of
-what it costs.
+## What is still wrong (one mechanism, two causes)
 
-The consequence is visible in the table. The three MAX_BATCH_SIZE=8 configs, where nothing
-queues, are predicted within 0.96-1.17x. Everything whose TTFT is dominated by *waiting behind
-other rows decoding* is wrong, and wrong in different directions: the mbs=1 configs are
-under-predicted (0.45x, 0.64x) because the simulator's narrow batch is not slow enough, and the
-mbs=2 configs are over-predicted (1.14-1.78x). That inverts their order, which is exactly what
-a rank correlation measures. Dropping the single worst config (`mbs1-deadline5-x4`, where the
-simulator sheds so aggressively it predicts 171 ms against 4,732 ms measured) does not rescue
-it: rho goes 0.628 -> 0.611.
+Every remaining big miss is at MAX_BATCH_SIZE=1, and it has one mechanism. The model's one-row
+decode step is **111 ms, against ~57 ms on hardware**. At x1 that makes the simulator 1.29x slow.
+At x4 its slower decode makes it shed at the admission deadline, far more than hardware does:
+4/8 expired at `mbs1-x4` against 1/8 in the engine's telemetry, and 6/8 at `mbs1-deadline5-x4`
+against 3/8. Its p95 is therefore taken over fewer, earlier survivors. That gives 0.39x and
+0.02x. The intercept is inflated by two things, and **neither is the batch-width bug**:
 
-**The fix is an engine change, not a model tweak:** record the batch width a request actually
-decoded in (a per-step counter on the telemetry row), then refit. Until then a tier-1 rejection
-that hinges on TTFT is not supported by this evidence.
+1. **The fit is unweighted.** Each telemetry row is one point, whatever its step count. One
+   `long_context` row decoded a single step at 289 ms and carries the same weight as a
+   488-step row.
+2. **There is no context-length term.** The only W=1 rows are the two `long_context` solo prompts
+   (899 and 1497 tokens), which decode slower than short cold_start prompts. `total_kv_tokens`
+   is not in the telemetry row, so its coefficient fits to 0 and the intercept absorbs the
+   difference.
 
-## What passed, and what that is worth
+Neither was changed here. Fixing either one is a new fit, and it must be judged on a fresh
+validation draw, not this one.
 
-`tpot_p50` at rho 0.966 is a real result: the simulator orders the nine configs by decode health
-the way hardware does. It is worth less than it looks, though — the *absolute* values are off by
-up to 3.4x and the spread is compressed (simulator 167-186 ms across all nine; hardware 50-280
-ms). So the simulator can say "this config decodes better than that one" and cannot say by how
-much. That is precisely the asymmetry notes/04 asks for (reject, never confirm), so it is the
-right shape of result.
+## How much the margin is worth
 
-## Two things worth keeping
+At n=9 one adjacent-rank swap moves rho by ~0.017. 0.745 is ~3.7 swaps above 0.683, and 0.778
+is ~5.7. The three mbs=2/x4-class configs sit within the cold_start band on hardware
+(+-25.8% on `ttft_p95`, `kb-20260917-aa6b0f4d`), so their relative order is partly luck. This
+is two single-run draws, **not replicated arms**, the same limitation PR #35 recorded.
 
-- **The noise band and the rank check agree where they overlap.** fcfs vs fair at
-  MAX_BATCH_SIZE=2, x4 measured 17,746 vs 17,521 ms — a 1.3% difference, comfortably inside the
-  cold_start band's +-25.8% on `ttft_p95` (`kb-20260917-aa6b0f4d`). The simulator ties those two
-  configs exactly. Both instruments say the same thing: at eight distinct sessions, fairness has
-  nothing to do.
-- **Each hardware point is ONE run**, not a replicated arm. With a +-25.8% band on `ttft_p95`,
-  a single run per config is enough to order 435 ms against 20,472 ms and is NOT enough to order
-  17,521 against 17,746. The rank correlation inherits that: the three mbs=2/x4 configs are
-  within noise of each other on hardware, so their relative order is partly luck.
+## Caveats carried
 
-## Proposed staleness rule (notes/04 asks for a threshold and never names one)
+- **Every request ran to `max_tokens` (found after this run).** On `custom-*` backends the stop
+  set is built from `tokenizer.eos_token_id` = 1 alone, while the model's generation config says
+  `[1, 106, 50]`. Gemma ends its answer with `<turn|>` (106), which the custom backend ignores.
+  So this validation and PR #35's were both measured with no early stop. **The comparison is
+  still valid:** both timing models were scored against hardware measured the same way. But the
+  absolute timings, the fitted coefficients, and the widths rows decoded in will all move once
+  the stop set is fixed, because rows will finish earlier and batches will thin out. Re-run the
+  fit and the rank check after that fix lands. That fix is a separate PR.
+- Single runs per config, not replicated arms.
+- MPS on an Apple M4 Pro, E2B. This says nothing about A100/E4B.
+- The box was not quiesced: `diagnosticd` and an iOS simulator ran during the sweep (1-min load
+  average up to ~20). An earlier attempt was aborted, with no data kept, because another session
+  was running its own MPS benchmark on the same box.
+- Servers ran with `HF_HUB_OFFLINE=1`, after a Hub timeout during tokenizer load killed a run. The
+  tokenizer loads identically either way (checked: same class, vocab and ids).
+- **Pre-existing harness quirk, not investigated:** the client records `no_tokens` (no stream
+  chunk with non-empty text) for requests the engine's telemetry says finished `ok` with 20-215
+  tokens. It happens in PR #35's panels in the same shape. It may be a symptom of the stop-set bug above: tokens emitted after an ignored `<turn|>` could decode to empty text. That is untested; re-check it once the stop fix lands. Engine-ok requests lost this way:
+  1-2 of 8 in each validation run, beyond genuine deadline expiries, and 5-6 of 8 in each
+  `cold_start/heldout` fit run. So `hw ttft_p95` is computed over the client-visible subset.
+  Both draws share it, so the comparison stays like for like. The fit reads engine telemetry and
+  is unaffected. This is worth its own entry once someone knows the cause.
 
-A simulator is fit to rank a metric on a machine when its rho over >= 6 spanning configs clears
-the two-tailed a=0.05 critical value for that n (0.683 at n=9). Tier-1 rejections that hinge on
-a metric below that line are suspended until a refit clears it. On MPS/E2B today: `tpot_p50`
-cleared, `ttft_p95` did not.
+## Staleness rule (from `c07eb94b`), applied
 
-**Revisit when:** telemetry gains a per-step batch width (then refit and re-run this check); GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward; a tier-1 hypothesis turns on ttft_p95 — it is not supported until rho clears 0.683
+`ttft_p95` and `tpot_p50` both clear 0.683 on MPS/E2B. Tier-1 rejections that hinge on either are
+no longer suspended on this machine. Treat a `ttft_p95` rejection that turns on MAX_BATCH_SIZE=1
+behaviour, or on deadline shedding, as unsupported: that is exactly where the model is still
+wrong.
 
-**Evidence:** grp-simval-coldstart-mps, grp-fit-coldheld-mps, grp-fit-mps-e2b, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260917-50f769fe, run-20260917-7c85e56c, run-20260917-8556ab5b, run-20260917-c562f6f2, run-20260917-3f6fb56e, run-20260917-1d3206a4, run-20260917-14ca8656, run-20260917-42ead64e, run-20260917-9c3752a6
+**Current timing model:** `knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json`.
+The un-suffixed `google-gemma-4-e2b-it-apple-m4-pro-mps.json` is PR #35's, and is kept as
+`c07eb94b`'s evidence.
+
+**Revisit when:** the custom backend's stop set is fixed to include <turn|> (106) and the generation config's other EOS ids: every request here ran to max_tokens, so refit and re-run this rank check; the fit weights rows by decode steps, or telemetry gains a context-length / KV term: refit, re-run on a FRESH validation draw; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit)
+
+**Evidence:** grp-20260918-b015e2, grp-20260918-97253b, grp-simval-coldstart-mps, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260918-fa2d0b9e, run-20260918-fafcceef, run-20260918-4c5b200e, run-20260918-e2834569, run-20260918-6e559a01, run-20260918-96e71474, run-20260918-d13f71b6, run-20260918-6533008a, run-20260918-af0a8b78, run-20260918-7cb96993, run-20260918-14c83e7e, run-20260918-cf4c3f56, run-20260918-191f8d21
 
 **Regime:** `cold_start`
 
 **Valid over:** `{"concurrency": [1, 8], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
 
-**Mechanism:** fit_timing_from_runs reads batch_size from active_size, which telemetry snapshots at enqueue and never updates, so the fitted decode step is flat in batch width (1.5ms/row on a 165ms base) against a row-by-row backend whose real slope is ~50-100ms/row; every TTFT dominated by waiting behind other rows' decode is therefore mis-ordered, while TPOT, which only needs the direction of that slope, still ranks.
+**Mechanism:** Regressing decode cost on the width a row actually decoded in, rather than the width it arrived into, steepens the fitted slope 13x and puts every mbs=2 config within 4% of hardware. What remains is a one-row step ~2x too slow, inflated by an unweighted fit and a missing context-length term, which mis-orders only the MAX_BATCH_SIZE=1 configs.
+
+**Supersedes:** `kb-20260917-c07eb94b`
+
+### [2026-09-19] Total accounting from process start, and the first primary-metric number
+*tags: `accounting`, `antihacking`, `client-bug`, `cold_start`, `harness`, `loop`, `memory`, `metric`, `ttft`* · `kb-20260918-4f4c85b7`
+
+The project's primary metric, **GPU-seconds per session at a fixed p95 TTFT ceiling** (notes/01), could not be computed from anything in the repo: `Vitals.wall_s` starts at the first arrival, so model load, warm-up and idle sat outside every recorded number. notes/03 says what that invites: *"if it is not in the accounting, the loop will eventually move cost into it."* notes/07 lists "move cost off the measured window" and "burn an unmeasured resource" among the six ways this loop would reward hack.
+
+**Now accounted** (`Vitals.accounting`, `research/accounting.py`; optional and None-default, so `PANEL_VERSION` did not move):
+
+| term | how | where it comes from |
+|---|---|---|
+| wall clock from process start | `perf_counter` stamped before `start_server`, closed after the server exits: load, warm-up, idle and shutdown are all inside it | the instrument (`replay_local.py`) |
+| serving window and idle | `serving_wall_s` (the replay window) is recorded beside it, so `idle_s` and `serving_fraction` are derived when read, not fixed by the instrument | the instrument |
+| sessions served | distinct `session_id`s the CLIENT saw succeed (affected by the client bug below) | the instrument |
+| peak host RSS | `ru_maxrss` in the server process (bytes on Darwin, KiB on Linux) | `serve_accounted.py` sidecar |
+| peak device memory | CUDA: `max_memory_allocated`, a true peak. MPS: `driver_allocated_memory` **sampled** every 0.25s, because MPS has no peak counter | sidecar; `research/` never imports torch |
+
+`session.primary_metric()` divides wall-from-process-start by sessions served. It **refuses** when a term is missing and never substitutes `wall_s`. It also refuses when `harness_config['n_requests']` is missing or smaller than `n_samples`, because without attempts it cannot count failures. The cost gate now reads `peak_host_rss_gb` (instruments filled it, but the gate never checked it) and total wall from process start. An arm with no accounting judges exactly as before.
+
+**First real measurement** (`run-20260918-99883258`, M4 Pro MPS, E2B, `custom-mps`, cold_start/seen, one fresh server):
+
+| term | value |
+|---|---|
+| wall from process start | **46.9s** (ready in 14.2s) |
+| serving / idle | 32.3s / 14.5s (serving fraction 0.69) |
+| peak host RSS | **14.8 GB** |
+| peak MPS memory | **11.1 GB** (sampled to 46.0s of the run, 177 samples) |
+| sessions served (client's view) | 6 of 8 |
+
+The panel reads **7.81 GPU-seconds per session at a 2000ms p95 TTFT ceiling, BROKEN**. **Do not quote that verdict as an engine result.** It is BROKEN only because the client recorded 2 of 8 requests as `no_tokens`, and the engine's own telemetry for this run contradicts the client. All 8 trace ids finished `terminal_state=ok`, and each emitted exactly its `max_tokens` (42, 32, 40, 185, 54, 17, 216, 40). The two "failures" had engine-side TTFTs of 152 and 281ms. The client also undercounted tokens on the requests it did accept (6 against 42, 9 against 40, 1 against 54), so this panel's `out_tokens`, TPOT and tok/s are wrong as well. This matches a replay-client bug the batch-width agent found independently (1-2 of 8 lost per validation run, 5-6 of 8 per fit run; PR #35's panels show the same pattern). The bug is **not yet diagnosed or fixed**. If the engine's rows were admissible, the numbers would be 8 sessions, **5.86 GPU-s per session**, and a maximum engine TTFT of 522ms, so MET. They are not admissible: notes/03 puts the clock outside the system, and engine self-report is never evidence. Re-measure once the client is fixed. The accounting terms above (wall, RSS, device memory) do not depend on the client's token count and stand.
+
+**The failure-counting rule, and where it does NOT apply.** `ttft_p95` is computed over successful requests only, so failing a request makes it *better*. `primary_metric` now ranks a failure as a first token that never arrived, and breaks the ceiling when fewer than ceil(0.95 * n) requests got one (nearest-rank p95). That is exact at small n: 1 failure of 8 or of 9 breaks it, while 1 of 20 does not. An earlier floor-interpolation version let 1 of 8 through. The rule is correct, and a misreporting client has to be fixed in the client, not by softening the rule. Where failures are present, the rule is exact about the failures but uses the survivors' `ttft_p95` for everything else. The panel does not carry the per-request distribution, so a mix of failures and slow survivors can pass when the true all-request p95 does not.
+
+**OPEN GAP: the hack is closed in `primary_metric` only.** `ttft_p95`, as the merge-authorising gates read it, is still computed over survivors and **still exploitable**. A treatment that fails more requests and serves the rest faster reads as a significant `ttft_p95` win through:
+- `compare.significance()` / `significance_replicated()`, and therefore `gates.significance_gate`
+- `session.within_slo()` and `session.sweep_headline()`
+- the instruments that fill the field: `scripts/bench/bench_serving.py` (`RateResult.summary`) and `scripts/bench/replay_trace.py` (`ReplayResult.summary`)
+
+Fixing it at the source changes what the `ttft_p95` panel field means. Under LOOP.md's rule that is a `PANEL_VERSION` bump, and it collides with the noise bands in `knowledge/noise/`, which were measured on the old meaning and are keyed without panel version. So it gets its own PR. Until then, no `ttft_p95` verdict from the gate should be trusted without checking `n_samples` against `harness_config['n_requests']` on both arms.
+
+**NOT accounted, and each gap is where cost will go next:**
+
+1. **Storage read bytes on macOS.** `ru_inblock` stayed 0 across a measured 2.3 GB safetensors read, and `proc_pid_rusage`'s `ri_diskio_bytesread` has no stdlib binding. The value is read from `/proc/self/io` on Linux (not yet exercised on a real Linux run) and is **named** in `unmeasured` on Darwin, never approximated.
+2. **MPS device memory past the sampler's coverage.** The sampler is a Python thread inside the server, and it is **GIL-starved while the engine computes**: 11 samples across 200 MPS matmuls in a scratch test, and in an earlier long run the sidecar stopped advancing at 84s of a ~13-minute run. Coverage (`sampled_to_uptime_s`) is recorded, and anything under 90% of the run is named in `unmeasured`. **Known limitation, accepted on review: a memory regression after the coverage cutoff passes the cost gate with only a footnote.** The gate compares the sampled peaks, and a spike the sampler never saw is invisible to it. The real fix is an engine-side high-water mark, or CUDA, where `max_memory_allocated` is exact.
+3. **Device memory on CUDA is implemented but untested.** No GPU was available.
+4. **Time before the process exists**: container start, image pull, scheduler queueing on a rented venue. The clock starts at `Popen`. On a pod, cold start begins before that, so a venue launcher has to stamp the earlier start and pass it in.
+5. **The instrument's own cost**, and **the last second of a SIGKILLed server**. The sidecar is rewritten on every sample because the engine's lifespan shutdown was measured outlasting `stop_server`'s 60s SIGTERM grace.
+6. **`gpu_cost_usd`** is still unfilled. GPU-seconds is the unit the metric needs, and a price is venue data this box does not have.
+
+**Provisional thresholds.** The cost gate's wall-clock rule (fail only on +25% **and** +10s) is a pair of round numbers, not a measurement. It is provisional until a wall-clock-from-launch noise band exists. The same holds for the 2 GB host-RSS threshold.
+
+Only `replay_local.py` fills the block today. `coldstart_load.py` and `replay_corpus_runpod.py` do not, and their panels make `primary_metric` refuse, which is intended.
+
+**Revisit when:** The replay client's no_tokens / token-undercount bug is fixed: re-run cold_start and replace the 7.81 BROKEN number; The ttft_p95 source fix lands (PANEL_VERSION bump, noise bands re-measured): close the OPEN GAP; A wall-clock-from-launch noise band exists: replace the provisional 25% / 10s cost-gate thresholds; A CUDA run: max_memory_allocated makes device memory exact, and closes gaps 2 and 3; A Linux run: /proc/self/io makes storage read bytes measurable, and closes gap 1; A venue launcher that stamps container/pod start: extends the clock back past Popen (gap 4); An engine-side memory high-water mark (telemetry owner): removes the GIL-starved sampler (gap 2)
+
+**Evidence:** run-20260918-99883258
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"hardware": "Apple M4 Pro (MPS)", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Cost migrates to whatever the measured window omits, so the window has to start at process launch, and every term it cannot measure has to be named rather than read as zero.
 
 ### [2026-09-18] Router locality-vs-load is one normalised weight, with session affinity as a separable term; no curve measured yet
 *tags: `control-plane`, `router`, `prefix-cache`, `locality`, `session-affinity`, `simulator`, `staleness`* · `kb-20260917-0c9ba6de`
@@ -612,7 +702,7 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (35)
+## Resolved (36)
 
 Settled. Kept because the reasoning still constrains new work.
 
@@ -732,6 +822,123 @@ What the CSVs can show (tokens per request = `tok_s x window / reqs`, window in
 **Valid over:** `{"backend": ["custom-cuda", "custom-mps", "custom-cpu"], "model": ["google/gemma-4-E2B-it", "google/gemma-4-E4B-it"]}`
 
 **Mechanism:** The stop set came from the tokenizer (<eos> only) instead of the generation config, so the instruct model's <turn|> never ended a request.
+
+### [2026-09-18] Simulator vs hardware, first rank check (MPS/E2B): TPOT ranks, p95 TTFT does not
+*tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `measurement-gap`* · `kb-20260917-c07eb94b`
+
+**Superseded by `kb-20260918-9fc68282` (2026-09-18).** The engine now records the decode-time batch width, and the refit ranks `ttft_p95` at rho 0.745 on a fresh draw and 0.778 on this entry's own hardware panels. Both are above 0.683. What follows is the original PR #35 measurement, kept as the record of why that fix was made.
+
+**Verdict: the simulator ranks TPOT correctly and does NOT reliably rank p95 TTFT.**
+Spearman rho over nine configs, simulator vs the same configs on real hardware:
+
+| metric | rho | n | verdict |
+|---|---|---|---|
+| `tpot_p50` | **0.966** | 9 | **passes** — far above the two-tailed a=0.05 critical rho of 0.683 at n=9 |
+| `ttft_p95` | **0.628** | 9 | **fails** — below that critical value, i.e. not distinguishable from chance ordering |
+
+This is the check notes/04 calls "the part that makes it trustworthy", run for the first time.
+It was run against **MPS / E2B on an Apple M4 Pro**, not the A100 / E4B the simulator will
+eventually be used to predict. A pass here would have meant the plumbing and the ranking logic
+work; it would not have licensed a tier-1 conclusion about CUDA. Half of it did not even pass.
+
+## How it was run
+
+- **Fit** (`grp-fit-coldheld-mps`, 26 ok telemetry rows): `cold_start/heldout` at rate x1, x2,
+  x4 plus one `long_context/heldout` at MAX_BATCH_SIZE=1 with a 3s deadline, so a few long
+  prompts prefill alone and give the slope some leverage. Held out from the validation set by
+  the corpus's own seen/heldout split.
+- **Validate** (`grp-simval-coldstart-mps`, 9 panels): `cold_start/seen` under nine engine
+  configs spanning MAX_BATCH_SIZE 1/2/8, rate_scale 0.5/1/4, fcfs vs fair, and a 5s vs 30s
+  admission deadline. Each config gets its own server process; the panel carries its own
+  `engine_env`, and `fit_timing_from_runs --validate` simulates each panel under that.
+- Fitted model: `prefill_s = 0.157 + 1.51e-3 * prompt_tokens`,
+  `decode_step_s = 0.165 + 1.49e-3 * batch_size` (`knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json`).
+
+**Disclosure on refitting.** One earlier fit was made and discarded: from `grp-fit-mps-e2b`
+(`steady_interactive/seen` and `long_context/seen` at MAX_BATCH_SIZE=8). Those classes saturate
+this box — 128 of 136 and 36 of 40 requests were shed at the admission deadline — and the eight
+survivors' rows were structurally invalid inputs, not merely noisy: `prefill_s` of 40s (one
+request waiting behind seven other prefills in the same K=8 wave) and `decode_step_s` of 98s.
+It was discarded on the rows, **before any rank correlation was computed on it**. No fit was
+tuned against the rho, and no config was dropped from the nine.
+
+## Per-config pairs
+
+| config | hw ttft_p95 (ms) | sim | sim/hw | hw tpot_p50 (ms) | sim | sim/hw |
+|---|---|---|---|---|---|---|
+| `mbs8-x05` | 435 | 431 | 0.99x | 118.6 | 178.6 | 1.51x |
+| `mbs8-x1` | 460 | 540 | 1.17x | 155.2 | 184.2 | 1.19x |
+| `mbs8-x4` | 587 | 563 | 0.96x | 279.6 | 186.1 | 0.67x |
+| `mbs1-deadline5-x4` | 4732 | 171 | 0.04x | 49.6 | 166.6 | 3.36x |
+| `mbs2-x1` | 10061 | 17932 | 1.78x | 96.3 | 168.1 | 1.74x |
+| `mbs2-fair-x4` | 17521 | 20248 | 1.16x | 96.7 | 168.1 | 1.74x |
+| `mbs2-x4` | 17746 | 20248 | 1.14x | 100.3 | 168.1 | 1.67x |
+| `mbs1-x4` | 18376 | 11698 | 0.64x | 56.6 | 166.6 | 2.94x |
+| `mbs1-x1` | 20472 | 9207 | 0.45x | 55.7 | 166.6 | 2.99x |
+
+## Why TTFT fails, concretely
+
+The fitted decode step is **flat in batch width**: 165 ms base + 1.5 ms per extra row. On this
+engine that is wrong by one to two orders of magnitude — `CustomTorchBackend.decode_step_batched`
+runs **one forward per row**, so the real step cost is roughly linear with a per-row slope near
+the single-row forward time (~50-100 ms here). The fit cannot see that, because
+`fit_timing_from_runs` maps `batch_size <- active_size + 1` and `active_size` is snapshotted
+**once, at enqueue, before admission**, and never updated. That caveat is already written in the
+script's docstring as "read the decode slope as a lower bound"; this is the first measurement of
+what it costs.
+
+The consequence is visible in the table. The three MAX_BATCH_SIZE=8 configs, where nothing
+queues, are predicted within 0.96-1.17x. Everything whose TTFT is dominated by *waiting behind
+other rows decoding* is wrong, and wrong in different directions: the mbs=1 configs are
+under-predicted (0.45x, 0.64x) because the simulator's narrow batch is not slow enough, and the
+mbs=2 configs are over-predicted (1.14-1.78x). That inverts their order, which is exactly what
+a rank correlation measures. Dropping the single worst config (`mbs1-deadline5-x4`, where the
+simulator sheds so aggressively it predicts 171 ms against 4,732 ms measured) does not rescue
+it: rho goes 0.628 -> 0.611.
+
+**The fix is an engine change, not a model tweak:** record the batch width a request actually
+decoded in (a per-step counter on the telemetry row), then refit. Until then a tier-1 rejection
+that hinges on TTFT is not supported by this evidence.
+
+## What passed, and what that is worth
+
+`tpot_p50` at rho 0.966 is a real result: the simulator orders the nine configs by decode health
+the way hardware does. It is worth less than it looks, though — the *absolute* values are off by
+up to 3.4x and the spread is compressed (simulator 167-186 ms across all nine; hardware 50-280
+ms). So the simulator can say "this config decodes better than that one" and cannot say by how
+much. That is precisely the asymmetry notes/04 asks for (reject, never confirm), so it is the
+right shape of result.
+
+## Two things worth keeping
+
+- **The noise band and the rank check agree where they overlap.** fcfs vs fair at
+  MAX_BATCH_SIZE=2, x4 measured 17,746 vs 17,521 ms — a 1.3% difference, comfortably inside the
+  cold_start band's +-25.8% on `ttft_p95` (`kb-20260917-aa6b0f4d`). The simulator ties those two
+  configs exactly. Both instruments say the same thing: at eight distinct sessions, fairness has
+  nothing to do.
+- **Each hardware point is ONE run**, not a replicated arm. With a +-25.8% band on `ttft_p95`,
+  a single run per config is enough to order 435 ms against 20,472 ms and is NOT enough to order
+  17,521 against 17,746. The rank correlation inherits that: the three mbs=2/x4 configs are
+  within noise of each other on hardware, so their relative order is partly luck.
+
+## Proposed staleness rule (notes/04 asks for a threshold and never names one)
+
+A simulator is fit to rank a metric on a machine when its rho over >= 6 spanning configs clears
+the two-tailed a=0.05 critical value for that n (0.683 at n=9). Tier-1 rejections that hinge on
+a metric below that line are suspended until a refit clears it. On MPS/E2B today: `tpot_p50`
+cleared, `ttft_p95` did not.
+
+**Revisit when:** telemetry gains a per-step batch width (then refit and re-run this check); GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward; a tier-1 hypothesis turns on ttft_p95 — it is not supported until rho clears 0.683
+
+**Evidence:** grp-simval-coldstart-mps, grp-fit-coldheld-mps, grp-fit-mps-e2b, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260917-50f769fe, run-20260917-7c85e56c, run-20260917-8556ab5b, run-20260917-c562f6f2, run-20260917-3f6fb56e, run-20260917-1d3206a4, run-20260917-14ca8656, run-20260917-42ead64e, run-20260917-9c3752a6
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"concurrency": [1, 8], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
+
+**Mechanism:** fit_timing_from_runs reads batch_size from active_size, which telemetry snapshots at enqueue and never updates, so the fitted decode step is flat in batch width (1.5ms/row on a 165ms base) against a row-by-row backend whose real slope is ~50-100ms/row; every TTFT dominated by waiting behind other rows' decode is therefore mis-ordered, while TPOT, which only needs the direction of that slope, still ranks.
+
+**Superseded by:** `kb-20260918-9fc68282`
 
 ### [2026-09-18] Noise floor: harness null variance on M4 Pro / E2B, cold_start replay (calibration)
 *tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`* · `kb-20260917-aa6b0f4d`

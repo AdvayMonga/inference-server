@@ -89,6 +89,19 @@ after it.
 | fixes a bug | `regression_test` + `engine_sha_base` | hand-write it; model on `experiments/exp-20260908-9497648e.json`. The gate **re-runs** the test, so confirm it fails with the fix reverted. |
 | changes no behaviour | a no-claim record | `python -m inference_server.research.loop no-claim --why "..." --sha <sha>` — renames, dead imports, comments, type hints. |
 
+### What the cost gate checks
+
+The fifth gate asks whether the win was paid for somewhere no other gate looks. It compares
+four terms, and only when **both** arms carry one — startup (`graph_capture_s`), peak device
+memory, peak host RSS, and total wall clock from the server **process's start**
+(`accounting.wall_s_from_process_start`, which includes model load and idle time). Wall clock
+must rise by both 25% and 10 seconds to fail it; the others by 60s / 2GB / 2GB.
+
+An arm with no accounting block still passes, and the gate's reason says it could not see cost
+moved outside the measured window — so every experiment recorded before this existed judges
+exactly as it did before. Instruments that fill the block: `replay_local.py` (which launches
+`serve_accounted.py` so the server reports its own resources). See LOOP.md step 0.
+
 A "faster" claim must also clear the **noise band** for its situation: the measured run-to-run
 spread of the same harness, workload class, model and hardware with nothing changed, stored in
 `knowledge/noise/` and applied automatically by `loop judge`. A delta inside the band is

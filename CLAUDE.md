@@ -76,6 +76,16 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/tools/venue_smoke.py -
   `RESEARCH_DEVICE_STATE` by the venue. Clock locking is root-only, so container venues always
   record `clocks_locked=false`; `compare.py` refuses a locked arm against an unlocked one.
   See `research/determinism.py` and `knowledge/kb-20260917-9d1a1f0b.json`.
+- **Total accounting, and the primary metric.** Every panel carries an `accounting` block
+  (`research/accounting.py`): wall clock from the server **process's start** — model load, idle
+  and shutdown included, not from the first request — plus sessions served, peak host RSS, peak
+  device memory and storage reads, with everything this box could not measure written as None
+  and NAMED in `unmeasured`. A zero reads as free, and the loop eventually moves cost into
+  whatever reads as free. `session.primary_metric()` divides that by sessions to give the
+  project's primary metric, **GPU-seconds per session at a stated p95 TTFT ceiling**, and
+  refuses rather than substituting the serving window for a missing term. The cost gate reads
+  the same block. `research/` never imports torch: the instrument measures the device and passes
+  the number in (`scripts/bench/serve_accounted.py`).
 - **Merging engine changes requires an experiment.** `scripts/premerge_check.py` refuses a merge
   that touches `src/inference_server/` without an `experiments/*.json` whose five gates are
   green — or a correctness-fix or no-claim record (see CONTRIBUTING.md). Docs, tests,
@@ -224,7 +234,7 @@ Cheap, and everything downstream depends on it.
 ### Phase 2 — corpus and harness (PRs #17, #21)
 
 - ✅ `corpus/`: three classes (`cold_start`, `steady_interactive`, `long_context`), each split `seen` / `heldout`, hashed into a `corpus_version` that rides in the validity block and `compare.py` refuses across. `scripts/bench/replay_trace.py` replays a trace open-loop on the client's own clock, posting through the shim with `X-Session-Id` / `X-Turn-Index` / `X-Trace-Id` so its CSV row joins the telemetry row.
-- ⏳ **Total accounting** from process start (the panel has peak host/device memory; process-start-to-first-token is not yet in it).
+- ✅ **Total accounting** from process start: `Vitals.accounting` (`research/accounting.py`), filled by `replay_local.py` via `serve_accounted.py`; `session.primary_metric()` computes GPU-seconds per session at the p95 TTFT ceiling; the cost gate reads it. **Not accounted:** storage read bytes on macOS, MPS device memory past the sampler's coverage (see `knowledge/`).
 - ⏳ **Noise floor** procedure per class per hardware, banded and filed in `knowledge/`; the A100 bimodality quantified rather than remembered.
 - ⏳ **Held-out replication in the merge gate.** ≥3 runs per arm is enforced today; a confirmed win replaying on `heldout` before merge is not.
 
