@@ -62,7 +62,26 @@ is a versioned change that invalidates comparison to prior iterations.
 `pct_of_memory_roof` · `ridge_batch` (from `roofline.py`)
 
 ### Resources
-`peak_gpu_mem_gb` · `peak_host_rss_gb` · `wall_s` · `gpu_cost_usd`
+`peak_gpu_mem_gb` · `peak_host_rss_gb` · `wall_s` · `gpu_cost_usd` · `accounting`
+
+> **Total accounting** (notes/03). `wall_s` is the SERVING window — it starts at the first
+> arrival, so model load, warm-up and idle are outside it, which is exactly where cost hides.
+> The `accounting` block is the whole run: `wall_s_from_process_start` (stamped by the
+> instrument before it launches the server, ended after the server exits), `serving_wall_s` and
+> the `idle_s` derivable from the pair, `sessions_served`, `peak_host_rss_gb`,
+> `peak_device_mem_gb` with the `device_mem_source` that produced it, `storage_read_bytes`, and
+> `unmeasured` — a term → reason map for everything this box could NOT measure. An unmeasured
+> term is written as None and NAMED, never as a zero: a zero reads as free, and notes/07 says a
+> loop eventually moves cost into whatever reads as free. Optional with a None default, so
+> panels written before it existed still load and `PANEL_VERSION` does not move.
+>
+> This is what makes the project's **primary metric** computable:
+> `session.primary_metric(panels, ceiling_ms=...)` → **GPU-seconds per session at a stated p95
+> TTFT ceiling** (notes/01). It divides `wall_s_from_process_start` — idle included, which is
+> what stops warm pooling being free — by `sessions_served`, and **refuses** rather than
+> substituting `wall_s` or assuming zero for a missing term. `research/` never imports torch, so
+> device memory is measured by the instrument and passed in; `scripts/bench/serve_accounted.py`
+> is that seam for a server run.
 
 ### Validity block — the panel is INVALID without it
 | field | catches |
@@ -257,7 +276,15 @@ another machine.
    than a licence.
 4. **Correctness** — fast suite green; parity gates **width-matched**, never across batch shapes;
    no new `total_iteration_errors`.
-5. **Cost** — startup, memory and $ regressions declared, not just latency.
+5. **Cost** — startup, memory and $ regressions declared, not just latency. Four terms, each
+   checked only when **both** arms carry it, so a panel that does not measure one judges exactly
+   as it did before: `graph_capture_s`, `peak_gpu_mem_gb`, `peak_host_rss_gb` (populated by
+   instruments since step 0 but unread by this gate until the accounting landed), and total
+   `wall_s_from_process_start` from the accounting block — the term that catches a win inside
+   the serving window paid for before it. Wall clock is deliberately conservative: it must rise
+   by both 25% **and** 10s to fail, because a gate that fires spuriously is worse than one that
+   fires late. With no accounting block the gate passes and **says** it could not see whether
+   cost moved outside the measured window.
 
 ## Step 6 — RECORD (always, both outcomes)
 
