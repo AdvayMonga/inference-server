@@ -22,7 +22,7 @@ from typing import Generator
 
 import torch
 
-from inference_server.backends.base import InferenceBackend
+from inference_server.backends.base import InferenceBackend, stop_token_ids
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -249,8 +249,7 @@ class CustomTorchBackend(InferenceBackend):
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         self.model = GemmaForCausalLM.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
-        eos = self.tokenizer.eos_token_id
-        self._eos_ids = {eos} if isinstance(eos, int) else set(eos)
+        self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
         # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
