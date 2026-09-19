@@ -43,7 +43,7 @@ the row's `decode_step_s` is itself a mean over the same steps.
 
 **The only fit (one fit, no refits):** `grp-20260918-b015e2`, 26 ok telemetry rows (the same
 8+8+8+2 shape as PR #35's `grp-fit-coldheld-mps`). Decode widths per row ranged 1.00-7.52, and
-20 of 26 rows had a max more than 0.5 above their mean.
+20 of 26 rows had a max more than 0.5 above their mean. A row that never decoded has `decode_batch_width_mean` None and `decode_batch_width_max` 0. The 0 is a safe sentinel, because any real decode step has width >= 1.
 
 | | prefill_s | decode_step_s |
 |---|---|---|
@@ -114,6 +114,14 @@ is two single-run draws, **not replicated arms**, the same limitation PR #35 rec
 
 ## Caveats carried
 
+- **Every request ran to `max_tokens` (found after this run).** On `custom-*` backends the stop
+  set is built from `tokenizer.eos_token_id` = 1 alone, while the model's generation config says
+  `[1, 106, 50]`. Gemma ends its answer with `<turn|>` (106), which the custom backend ignores.
+  So this validation and PR #35's were both measured with no early stop. **The comparison is
+  still valid:** both timing models were scored against hardware measured the same way. But the
+  absolute timings, the fitted coefficients, and the widths rows decoded in will all move once
+  the stop set is fixed, because rows will finish earlier and batches will thin out. Re-run the
+  fit and the rank check after that fix lands. That fix is a separate PR.
 - Single runs per config, not replicated arms.
 - MPS on an Apple M4 Pro, E2B. This says nothing about A100/E4B.
 - The box was not quiesced: `diagnosticd` and an iOS simulator ran during the sweep (1-min load
@@ -123,7 +131,7 @@ is two single-run draws, **not replicated arms**, the same limitation PR #35 rec
   tokenizer loads identically either way (checked: same class, vocab and ids).
 - **Pre-existing harness quirk, not investigated:** the client records `no_tokens` (no stream
   chunk with non-empty text) for requests the engine's telemetry says finished `ok` with 20-215
-  tokens. It happens in PR #35's panels in the same shape. Engine-ok requests lost this way:
+  tokens. It happens in PR #35's panels in the same shape. It may be a symptom of the stop-set bug above: tokens emitted after an ignored `<turn|>` could decode to empty text. That is untested; re-check it once the stop fix lands. Engine-ok requests lost this way:
   1-2 of 8 in each validation run, beyond genuine deadline expiries, and 5-6 of 8 in each
   `cold_start/heldout` fit run. So `hw ttft_p95` is computed over the client-visible subset.
   Both draws share it, so the comparison stays like for like. The fit reads engine telemetry and
@@ -140,7 +148,7 @@ wrong.
 The un-suffixed `google-gemma-4-e2b-it-apple-m4-pro-mps.json` is PR #35's, and is kept as
 `c07eb94b`'s evidence.
 
-**Revisit when:** the fit weights rows by decode steps, or telemetry gains a context-length / KV term: refit, re-run on a FRESH validation draw; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit)
+**Revisit when:** the custom backend's stop set is fixed to include <turn|> (106) and the generation config's other EOS ids: every request here ran to max_tokens, so refit and re-run this rank check; the fit weights rows by decode steps, or telemetry gains a context-length / KV term: refit, re-run on a FRESH validation draw; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit)
 
 **Evidence:** grp-20260918-b015e2, grp-20260918-97253b, grp-simval-coldstart-mps, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260918-fa2d0b9e, run-20260918-fafcceef, run-20260918-4c5b200e, run-20260918-e2834569, run-20260918-6e559a01, run-20260918-96e71474, run-20260918-d13f71b6, run-20260918-6533008a, run-20260918-af0a8b78, run-20260918-7cb96993, run-20260918-14c83e7e, run-20260918-cf4c3f56, run-20260918-191f8d21
 
