@@ -463,6 +463,16 @@ def primary_metric(panels: Vitals | list[Vitals], *,
             if ceiling is not None:
                 met = met and p.ttft_p95 < ceiling
 
+        # ttft_p95 is computed over SUCCESSFUL requests only, so failing a request would
+        # improve it — a reward hack. A failed request is a first token that never arrived:
+        # rank it above every real one and ask whether the p95 position lands on a failure.
+        n_req = p.validity.harness_config.get("n_requests")
+        if isinstance(n_req, int) and n_req > p.validity.n_samples:
+            failed = n_req - p.validity.n_samples
+            caveats.append(f"{rid}: {failed} of {n_req} requests produced no first token")
+            if int(0.95 * (n_req - 1)) >= p.validity.n_samples:
+                met = False
+
     if len(ceilings) > 1:
         refusals.append(f"panels state different ceilings {sorted(ceilings)}; one metric needs "
                         f"one SLO")

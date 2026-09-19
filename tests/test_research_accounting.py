@@ -40,9 +40,10 @@ _DEFAULT = object()      # "the usual accounting"; None means a panel that carri
 
 
 def _panel(acc: Accounting | None = _DEFAULT, **over) -> Vitals:
+    validity = over.pop("validity", None) or _v()
     d = dict(ttft_p95=1400.0, slo_ttft_ms=2000.0, tpot_p95=40.0, wall_s=12.0)
     d.update(over)
-    p = Vitals(validity=over.pop("validity", None) or _v(), **d)
+    p = Vitals(validity=validity, **d)
     acc = _acc() if acc is _DEFAULT else acc
     if acc is not None:
         acc.apply(p)
@@ -166,6 +167,21 @@ def test_unmeasured_terms_travel_with_the_number_as_caveats():
     m = primary_metric(_panel())
     assert m and any("storage_read_bytes" in c for c in m.caveats)
     assert "CAVEAT" in m.format()
+
+
+def test_failed_requests_count_against_the_ceiling_not_for_it():
+    """ttft_p95 is over successful requests only, so dropping requests would flatter it. Measured
+    on MPS: 2 of 8 cold_start requests returned no tokens while the survivors' p95 read 464ms."""
+    v = _v(n_samples=6, harness_config={"model": "E2B", "split": "seen", "n_requests": 8})
+    m = primary_metric(_panel(validity=v))
+    assert m and m.ceiling_met is False
+    assert any("2 of 8 requests produced no first token" in c for c in m.caveats)
+
+
+def test_a_failure_below_the_p95_position_does_not_break_the_ceiling():
+    v = _v(n_samples=99, harness_config={"model": "E2B", "split": "seen", "n_requests": 100})
+    m = primary_metric(_panel(validity=v))
+    assert m.ceiling_met is True and any("1 of 100" in c for c in m.caveats)
 
 
 def test_several_runs_aggregate_and_every_one_must_meet_the_ceiling():
