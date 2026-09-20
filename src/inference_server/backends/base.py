@@ -1,25 +1,45 @@
 """Abstract base class defining the contract all inference backends must follow."""
 
+import logging
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Generator
 
 if TYPE_CHECKING:
     from inference_server.kv_cache.cache_manager import CacheManager
 
+logger = logging.getLogger(__name__)
+
 
 def stop_token_ids(model_name: str, tokenizer) -> set[int]:
     """Stop ids as HF generate() and vLLM read them: generation config, else model config, else tokenizer."""
     from transformers import AutoConfig, GenerationConfig
 
+    skipped = None  # why the generation config did not supply the stop set
     try:
         eos = GenerationConfig.from_pretrained(model_name).eos_token_id
-    except OSError:  # repo has no generation_config.json
-        eos = None
+        if eos is None:
+            skipped = "it carries no eos_token_id"
+    except OSError as exc:
+        # Every hub failure arrives here as a bare OSError: transformers flattens
+        # "the repo has no generation_config.json" and "we could not reach the repo"
+        # (network error, or HF_HUB_OFFLINE with a cold cache) to the same type, and
+        # huggingface_hub's LocalEntryNotFoundError / HfHubHTTPError / OfflineModeIsEnabled
+        # are all OSError subclasses. So report the message instead of guessing which it was.
+        eos, skipped = None, f"{type(exc).__name__}: {exc}"
+
+    source = "generation config"
     if eos is None:
-        eos = AutoConfig.from_pretrained(model_name).eos_token_id
+        eos, source = AutoConfig.from_pretrained(model_name).eos_token_id, "model config"
     if eos is None:
-        eos = tokenizer.eos_token_id
-    return {eos} if isinstance(eos, int) else set(eos)
+        eos, source = tokenizer.eos_token_id, "tokenizer"
+    ids = {eos} if isinstance(eos, int) else set(eos)
+    if skipped is not None:
+        logger.warning(
+            "stop set for %s read from the %s (%s); the generation config was skipped: %s. "
+            "A stop set missing the model's end-of-turn token runs every request to max_tokens.",
+            model_name, source, sorted(ids), skipped,
+        )
+    return ids
 
 
 class InferenceBackend(ABC):

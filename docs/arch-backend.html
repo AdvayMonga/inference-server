@@ -83,6 +83,8 @@
 
 <p><strong>Stop tokens (2026-09-18):</strong> <code>is_eos</code> answers from a set both torch backends build with <code>base.stop_token_ids()</code> — the model's <code>generation_config.json</code> <code>eos_token_id</code>, else <code>config.json</code>'s, else the tokenizer's — the same source HF <code>generate()</code> and vLLM use. For <code>gemma-4-*-it</code> that is <code>{1, 106, 50}</code>; the tokenizer alone gives only <code>1</code>, which is why the custom backend used to run every chat answer past <code>&lt;turn|&gt;</code> (106) to <code>max_tokens</code>.</p>
 
+<p><strong>When the preferred source is unreadable (2026-09-19):</strong> every hub failure reaches <code>stop_token_ids()</code> as a plain <code>OSError</code> — a repo that genuinely has no <code>generation_config.json</code>, but equally a network error or <code>HF_HUB_OFFLINE=1</code> against a cold cache, since <code>LocalEntryNotFoundError</code>, <code>HfHubHTTPError</code>, <code>RepositoryNotFoundError</code> and <code>OfflineModeIsEnabled</code> are all <code>OSError</code> subclasses. It still falls back — refusing to serve over a missing optional file would be worse — but now logs a warning naming the source it fell back to, the ids that source produced, and the exception that skipped the preferred one, so a degraded stop set shows up in the server log instead of silently inflating every measurement.</p>
+
 <h2 id="prefill">Prefill primitives — what each one means</h2>
 
 <svg viewBox="0 0 1140 460" role="img" aria-label="Prefill steps">
