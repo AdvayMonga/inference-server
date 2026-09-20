@@ -410,10 +410,13 @@ class KnowledgeEntry:
     # What we currently CANNOT find out, which is orthogonal to `status` (what we believe).
     # The entry that suspends `ttft_p95` at tier 1 — the simulator ranks it at rho 0.644 against
     # a 0.683 critical value because it has no termination model — is `open`: live, and waiting
-    # on a trigger. Scope is the entry's own `regime` and `validity_range`; these two say WHICH
-    # panel fields and WHICH falsification tiers are untrustworthy, so a suspension blocks the
-    # hypotheses it actually covers instead of the whole entry's subject area. An over-blocking
-    # gate gets routed around, which is worse than no gate.
+    # on a trigger. These two say WHICH panel fields and WHICH falsification tiers are
+    # untrustworthy, so a suspension blocks the hypotheses it covers instead of the whole entry's
+    # subject area; an over-blocking gate gets routed around, which is worse than no gate.
+    # ENFORCEMENT IS METRIC + TIER ONLY: `regime` and `validity_range` are shown by format_scope()
+    # and never checked, because a Hypothesis carries no regime to intersect against. Correct
+    # while a suspension describes the INSTRUMENT (a missing termination model is not hardware-
+    # specific); a hardware-specific one would over-block every machine and needs Hypothesis.regime.
     # Lifted by SUPERSEDING the entry, never by editing these away — see kb.suspensions().
     suspended_metrics: list[str] = field(default_factory=list)   # Vitals fields not measurable
     suspended_tiers: list[int] = field(default_factory=list)     # 1..4; empty means every tier

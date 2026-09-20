@@ -52,10 +52,18 @@ the two are orthogonal. `kb-20260919-94acfdb8` is `open` — live, waiting on a 
 same time suspends `ttft_p95` at tier 1, because the simulator ranks that metric at rho 0.644
 against a 0.683 critical value and therefore cannot falsify a p95-TTFT hypothesis without a GPU.
 
-A suspension is **scoped**, and deliberately reuses the scoping the entry already has: which
-metrics and which tiers come from these two fields, *where* comes from the entry's `regime` and
-`validity_range`. Suspending a whole entry would block everything its subject touches, get worked
-around, and a gate people route around is worse than no gate.
+A suspension is **scoped to a metric and a tier**, never to a whole entry — that would block
+everything its subject touches, get worked around, and a gate people route around is worse than
+no gate.
+
+Metric and tier are also *all* the gate enforces. An entry's `regime` and `validity_range` are
+printed next to a block so a reader can see where the finding came from, but `suspends()` does
+**not** check them: a `Hypothesis` carries no regime to check against. That is the right
+behaviour for every suspension we hold today, because each describes the **instrument** — the
+simulator has no termination model on any hardware — so blocking that metric-tier pair
+everywhere is exactly right. A suspension that is genuinely hardware-specific ("this kernel
+misbehaves only on Blackwell") would instead over-block every machine, and wants a
+`Hypothesis.regime` field before it can be scoped honestly. Not built: no such suspension exists.
 
 `loop screen` checks live suspensions against **every** entry, not only the ones `related()`
 surfaces: a suspension is a property of the instrument, not of the subject, so a prefix-cache
