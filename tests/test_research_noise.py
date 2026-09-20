@@ -7,12 +7,15 @@ arithmetic and, more importantly, the wiring: a delta the t-test calls significa
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from inference_server.research import harness as H
 from inference_server.research.compare import significance_replicated
 from inference_server.research.gates import judge, significance_gate
 from inference_server.research.noise import (
+    MetricBand,
     NoiseBand,
     band_for,
     band_from_arms,
@@ -192,3 +195,24 @@ def test_judgement_names_inconclusive_separately_from_noise():
     j = judge(HYP, base, treat, run_tests=False, band=band)
     assert not j.passed and j.verdict == "inconclusive"
     assert judge(HYP, base, treat, run_tests=False).verdict == "confirmed"
+
+
+def test_a_raw_route_band_does_not_gate_a_chat_route_run(tmp_path):
+    """Same corpus bytes, same class, same box — but the chat route makes the model generate 3x
+    the tokens (kb-20260919-6ef4e6bf), so the raw band describes a workload that is not this one.
+    No band is the safe answer: the gate then behaves as it did before bands existed."""
+    band = NoiseBand(harness="replay_trace", workload_class="cold_start", model="m",
+                     hardware="M4", prompt_format="raw",
+                     metrics={"ttft_p95": MetricBand(n=5, mean=100.0, sd=5.0, cv=0.05,
+                                                     min=95.0, max=105.0,
+                                                     min_max_ratio=1.11)})
+    band.to_json(tmp_path / f"{band.key().replace('|', '-')}.json")
+    common = dict(harness="replay_trace", workload_class="cold_start", model="m",
+                  hardware="M4", directory=tmp_path)
+    assert find_band(prompt_format="raw", **common) is not None
+    assert find_band(prompt_format="chat", **common) is None
+    # A band file written before the field existed loads as "raw", which is what it was.
+    legacy = json.loads((tmp_path / f"{band.key().replace('|', '-')}.json").read_text())
+    legacy.pop("prompt_format")
+    (tmp_path / "legacy.json").write_text(json.dumps(legacy))
+    assert NoiseBand.load(tmp_path / "legacy.json").prompt_format == "raw"

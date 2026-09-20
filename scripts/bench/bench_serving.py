@@ -61,22 +61,52 @@ class Sample:
     out_tokens: int = 0
     error: str | None = None
     trace_id: str | None = None   # the X-Trace-Id the server echoed; joins to telemetry rows
+    # What the server actually encoded, read from the stream's usage chunk. On the chat route
+    # that is the TEMPLATED length, which is how a replay checks its own chat_template
+    # fingerprint against the tokenizer that really served it (research/chat_template.verify).
+    prompt_tokens: int | None = None
+    # The server's own completion count. It is NOT `out_tokens`: the shim emits no SSE chunk for
+    # a token that decodes to the empty string, so a client streaming the response sees fewer
+    # tokens than the engine generated (uniformly one fewer per chat-route request on
+    # gemma-4-E2B-it, whose first thinking-block token decodes to ""). Recorded beside the
+    # client's count rather than replacing it — out_tokens is what TTFT/TPOT were measured over.
+    server_out_tokens: int | None = None
+
+
+# The two surfaces a corpus prompt can be sent through, and how each one names a token of text.
+# `raw` posts the prompt's bytes and is spec-correct but, against an instruct model, is answered
+# with an immediate end-of-turn (kb-20260919-6ef4e6bf). `chat` wraps it in the model's template.
+_ROUTES = {
+    "raw": ("/v1/completions", lambda p: {"prompt": p}, lambda c: c.get("text")),
+    "chat": ("/v1/chat/completions",
+             lambda p: {"messages": [{"role": "user", "content": p}]},
+             lambda c: (c.get("delta") or {}).get("content")),
+}
 
 
 async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *,
-                      headers: dict | None = None, sampling: dict | None = None) -> Sample:
-    """One streaming /v1/completions call. TTFT = first token chunk; TPOT = mean ITL.
-    `headers` (X-Session-Id / X-Turn-Index / X-Trace-Id) and `sampling` (temperature, top_p,
-    top_k) are optional; None keeps the plain temperature-0 request."""
-    body = {"prompt": prompt, "max_tokens": max_tokens, "stream": True, "temperature": 0.0,
+                      headers: dict | None = None, sampling: dict | None = None,
+                      prompt_format: str = "raw") -> Sample:
+    """One streaming completion call. TTFT = first token chunk; TPOT = mean ITL.
+
+    `prompt_format` picks the surface: "raw" -> /v1/completions (unchanged, the default so no
+    existing caller moves), "chat" -> /v1/chat/completions, which applies the model's chat
+    template. `headers` (X-Session-Id / X-Turn-Index / X-Trace-Id) and `sampling` (temperature,
+    top_p, top_k) are optional; None keeps the plain temperature-0 request. Both routes accept
+    the same three sampling fields, top_k included — it is not OpenAI-standard, and the shim
+    carries it on both surfaces precisely so a trace replays identically through either.
+    """
+    path, make_body, token_text = _ROUTES[prompt_format]
+    body = {**make_body(prompt), "max_tokens": max_tokens, "stream": True, "temperature": 0.0,
             **(sampling or {})}
     t0 = time.perf_counter()
     ttft = None
     first_tok_t = last_tok_t = None
     n = 0
     trace_id = None
+    prompt_tokens = server_out_tokens = None
     try:
-        async with client.stream("POST", "/v1/completions", json=body, headers=headers,
+        async with client.stream("POST", path, json=body, headers=headers,
                                  timeout=httpx.Timeout(120.0)) as r:
             trace_id = r.headers.get("x-trace-id")
             if r.status_code != 200:
@@ -89,19 +119,24 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *
                     break
                 obj = json.loads(payload)
                 choices = obj.get("choices")
-                if choices and choices[0].get("text"):   # a token chunk (usage chunk has choices=[])
+                if choices and token_text(choices[0]):   # a token chunk (usage chunk: choices=[])
                     now = time.perf_counter()
                     if ttft is None:
                         ttft = now - t0
                         first_tok_t = now
                     last_tok_t = now
                     n += 1
+                elif obj.get("usage"):
+                    prompt_tokens = obj["usage"].get("prompt_tokens")
+                    server_out_tokens = obj["usage"].get("completion_tokens")
     except Exception as e:
         return Sample(error=type(e).__name__, trace_id=trace_id)
     if ttft is None:
-        return Sample(error="no_tokens", trace_id=trace_id)
+        return Sample(error="no_tokens", trace_id=trace_id, prompt_tokens=prompt_tokens,
+                      server_out_tokens=server_out_tokens)
     tpot = (last_tok_t - first_tok_t) / (n - 1) if n > 1 else 0.0
-    return Sample(ttft_s=ttft, tpot_s=tpot, out_tokens=n, trace_id=trace_id)
+    return Sample(ttft_s=ttft, tpot_s=tpot, out_tokens=n, trace_id=trace_id,
+                  prompt_tokens=prompt_tokens, server_out_tokens=server_out_tokens)
 
 
 @dataclass

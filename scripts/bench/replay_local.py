@@ -171,13 +171,15 @@ class RunSpec:
     cls: str = "cold_start"
     split: str = "seen"
     rate_scale: float = 1.0
+    prompt_format: str = rt.DEFAULT_PROMPT_FORMAT          # chat route unless pinned to raw
     env: dict[str, str] = field(default_factory=dict)      # overrides on ENGINE_BASE
 
     def engine_env(self) -> dict[str, str]:
         return {**ENGINE_BASE, **{k: str(v) for k, v in self.env.items()}}
 
 
-def null_plan(cls: str, split: str, replicates: int, rate_scale: float) -> list[RunSpec]:
+def null_plan(cls: str, split: str, replicates: int, rate_scale: float,
+              prompt_format: str = rt.DEFAULT_PROMPT_FORMAT) -> list[RunSpec]:
     """ABBA over two arms of the SAME config — a true null. `session.arms_for` requires the
     alternation, and it is also what stops a monotonic warm-up drift landing on one arm."""
     arms = ["baseline", "treatment"]
@@ -186,7 +188,7 @@ def null_plan(cls: str, split: str, replicates: int, rate_scale: float) -> list[
         pair = arms if i % 2 == 0 else arms[::-1]          # AB BA AB BA ...
         for arm in pair:
             plan.append(RunSpec(label=f"null-{arm}-{i}", arm=arm, cls=cls, split=split,
-                                rate_scale=rate_scale))
+                                rate_scale=rate_scale, prompt_format=prompt_format))
     return plan
 
 
@@ -197,6 +199,7 @@ def configs_plan(path: Path) -> list[RunSpec]:
         out.append(RunSpec(label=raw["label"], arm=raw.get("arm", raw["label"]),
                            cls=raw.get("class", "cold_start"), split=raw.get("split", "seen"),
                            rate_scale=float(raw.get("rate_scale", 1.0)),
+                           prompt_format=raw.get("prompt_format", rt.DEFAULT_PROMPT_FORMAT),
                            env={k: str(v) for k, v in (raw.get("env") or {}).items()}))
     return out
 
@@ -231,13 +234,14 @@ def split_from_telemetry(rows: list[dict[str, Any]], prefix: str) -> dict[str, f
     }
 
 
-async def warmup(client, n: int) -> int:
+async def warmup(client, n: int, prompt_format: str = rt.DEFAULT_PROMPT_FORMAT) -> int:
     from bench_serving import one_request
     done = 0
     for i in range(n):
         s = await one_request(client, WARMUP_PROMPT, 4,
                               headers={"X-Session-Id": f"warmup-{i}", "X-Turn-Index": "0",
-                                       "X-Trace-Id": f"warmup-{i}"})
+                                       "X-Trace-Id": f"warmup-{i}"},
+                              prompt_format=prompt_format)
         done += s.error is None
     return done
 
@@ -247,21 +251,23 @@ async def replay_once(base_url: str, spec: RunSpec, *, warmup_n: int, drain_time
     prefix = rt.new_trace_prefix(spec.cls, spec.split)
     async with make_client(base_url) as client:
         if warmup_n:
-            await warmup(client, warmup_n)
+            await warmup(client, warmup_n, spec.prompt_format)
         res = await rt.run_replay(client, trace, rate_scale=spec.rate_scale,
-                                  drain_timeout_s=drain_timeout_s, trace_prefix=prefix)
+                                  drain_timeout_s=drain_timeout_s, trace_prefix=prefix,
+                                  prompt_format=spec.prompt_format)
         sched = await rt.fetch_stats(client, "/scheduler/stats")
         cache = flatten_cache_stats(await rt.fetch_stats(client, "/cache/stats"))
-    return manifest, res, sched, cache, prefix
+    return manifest, res, sched, cache, prefix, trace
 
 
-def build_panel(spec: RunSpec, env: dict[str, str], manifest, res, sched, cache, prefix,
+def build_panel(spec: RunSpec, env: dict[str, str], manifest, res, sched, cache, prefix, trace,
                 telemetry: list[dict[str, Any]], hardware: str,
                 accounting: Accounting | None = None) -> Vitals:
     cls = manifest.classes[spec.cls]
     panel = rt.build_panel(res, cls, corpus_version=manifest.corpus_version, split=spec.split,
                            rate_scale=spec.rate_scale, scheduler_stats=sched, cache_stats=cache,
-                           trace_prefix=prefix)
+                           trace_prefix=prefix, prompt_format=spec.prompt_format,
+                           model_name=env["MODEL_NAME"], trace=trace)
     for k, v in split_from_telemetry(telemetry, prefix).items():
         setattr(panel, k, v)
     hc = panel.validity.harness_config
@@ -362,7 +368,7 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
         stop_server(proc)                 # SIGTERM, so the lifespan flushes the telemetry rows
     wall_from_launch_s = time.perf_counter() - t0
 
-    manifest, res, sched, cache, prefix = out
+    manifest, res, sched, cache, prefix, trace = out
     telemetry = read_telemetry(telemetry_dir)
     summary = res.summary(manifest.classes[spec.cls])
     rt.print_summary(manifest.classes[spec.cls], summary)
@@ -374,8 +380,8 @@ def run_one(spec: RunSpec, *, runs_dir: Path, group_dir: Path, hardware: str,
         sidecar, wall_from_launch_s=wall_from_launch_s, serving_wall_s=res.wall_s,
         sessions=len({r.session_id for r in res.rows if r.error is None}))
     print(accounting.summary(), flush=True)
-    panel = build_panel(spec, env, manifest, res, sched, cache, prefix, telemetry, hardware,
-                        accounting=accounting)
+    panel = build_panel(spec, env, manifest, res, sched, cache, prefix, trace, telemetry,
+                        hardware, accounting=accounting)
     print(primary_metric(panel).format(), flush=True)
     path = H.emit(panel, label=spec.label, runs_dir=runs_dir)
     rt.write_rows(path.with_suffix(".csv"), res.rows)
@@ -404,6 +410,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="null experiment: N replicates of the SAME config per arm, ABBA")
     ap.add_argument("--configs", help="JSON list of run specs; one run per config")
     ap.add_argument("--rate-scale", type=float, default=1.0)
+    ap.add_argument("--prompt-format", default=rt.DEFAULT_PROMPT_FORMAT, choices=("chat", "raw"),
+                    help="chat (default): post through /v1/chat/completions so the model's chat "
+                         "template is applied; raw: /v1/completions, the trace bytes as-is")
     ap.add_argument("--warmup", type=int, default=0,
                     help="discarded warm-up requests per run; 0 (default) keeps a cold_start "
                          "replay describing a genuinely cold replica")
@@ -415,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
     if bool(args.null) == bool(args.configs):
         ap.error("pass exactly one of --null N or --configs FILE")
 
-    plan = (null_plan(args.cls, args.split, args.null, args.rate_scale) if args.null
+    plan = (null_plan(args.cls, args.split, args.null, args.rate_scale, args.prompt_format)
+            if args.null
             else configs_plan(Path(args.configs)))
     hardware = hardware_name()
     stamp_device_state(hardware)

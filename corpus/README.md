@@ -16,15 +16,31 @@ session id is disjoint between the splits, but both draw base content from the s
 per-request preamble plus the arrival schedule and lengths. Expanding the bank is the real fix,
 and is a new corpus version.
 
-`replay_trace.py` posts to `/v1/completions` with `session_id` / `turn_index` as the
-`X-Session-Id` / `X-Turn-Index` headers, so a turn 1 reaches the engine on the same session as
-its turn 0, and `X-Trace-Id=<class>-<split>-<nonce>-<index>`, which is the key its per-request
-CSV row shares with the engine's telemetry row; the nonce is minted per invocation (two replays
-against one server process write into one telemetry file) and recorded in the panel's
-`harness_config.trace_prefix`, so a run's rows are joined by prefix. `sampling` is sent as-is
-(temperature, top_p, top_k).
-A turn's prompt still carries the full conversation so far: the engine has no conversation
-store, and prefix sharing is what makes the repeated prefix cheap.
+`replay_trace.py` posts each prompt to `/v1/chat/completions` as a single user message, so the
+model's own chat template is applied **server-side** (`--prompt-format raw` restores the old
+`/v1/completions` path). The traces store plain prompt text and stay model-independent: baking
+Gemma's template into the corpus would invalidate every trace the moment Phase 0 picks a
+different model. It is not a cosmetic choice — sent raw, `gemma-4-E2B-it` answers most of these
+prompts with an immediate end-of-turn token, which is why `cold_start/seen` generated 220 tokens
+of its 626-token budget and six of eight `cold_start/heldout` prompts generated nothing at all
+(`kb-20260919-6ef4e6bf`). What templating costs is a variable that is not in the trace — which
+template, applied with which options — so a chat-route panel carries a verified `chat_template`
+fingerprint in its validity block, and `compare.py` refuses across a changed one, across
+`harness_config.prompt_format`, and a noise band no longer gates a run from the other route.
+
+Correlation is unchanged on either route: `session_id` / `turn_index` ride as the `X-Session-Id`
+/ `X-Turn-Index` headers, so a turn 1 reaches the engine on the same session as its turn 0, and
+`X-Trace-Id=<class>-<split>-<nonce>-<index>` is the key its per-request CSV row shares with the
+engine's telemetry row; the nonce is minted per invocation (two replays against one server
+process write into one telemetry file) and recorded in the panel's `harness_config.trace_prefix`,
+so a run's rows are joined by prefix. `sampling` is sent as-is (temperature, top_p, top_k) —
+`top_k` is not an OpenAI-standard field and the chat route carries it exactly as the raw one does.
+
+A turn's prompt still carries the full conversation so far, as ONE user message, and that stays
+true under templating: the engine has no conversation store, prefix sharing is what makes the
+repeated prefix cheap, and an honest two-message rendering would need the assistant's reply from
+turn 0 — which the corpus does not record and could not record without tying itself to one
+model's outputs.
 
 | class | shape | placeholder SLO |
 |---|---|---|

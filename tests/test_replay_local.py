@@ -126,7 +126,8 @@ def _panel(label: str, **env):
     prefix = "cold_start-seen-abc"
     return rl.build_panel(spec, spec.engine_env(), MANIFEST, _result(),
                           {"active_high_water": 3, "wave_sizes": {1: 4}},
-                          {"hit_rate": 0.0, "lookups": 4}, prefix, _telemetry(prefix), HARDWARE)
+                          {"hit_rate": 0.0, "lookups": 4}, prefix, None,
+                          _telemetry(prefix), HARDWARE)
 
 
 def test_panel_carries_the_arm_label_and_the_ttft_split():

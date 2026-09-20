@@ -93,6 +93,11 @@ class Validity:
     # a controlled variable, and two identical A100 draws already measured 2.31x apart.
     device_state: dict[str, Any] | None = None
     clocks_locked: bool | None = None
+    # Templating provenance, from research/chat_template.py. A prompt posted to the chat route is
+    # wrapped by whatever template the tokenizer ships, so the tokens the model sees are NOT the
+    # trace's bytes and `corpus_version` alone stops identifying the workload. Same None-default
+    # precedent as the fields above: an added field cannot change a measurement already taken.
+    chat_template: dict[str, Any] | None = None
 
     REGIMES = ("cache_hit_heavy", "cache_miss_heavy", "mixed", "synthetic")
 

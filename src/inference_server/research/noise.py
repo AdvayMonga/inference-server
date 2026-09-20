@@ -17,8 +17,11 @@ simulator's fitted coefficients — and consulted by `compare.significance_repli
 The band is a PROPERTY OF A HARNESS ON ONE MACHINE FOR ONE WORKLOAD CLASS. A band measured on
 cold_start says nothing about steady_interactive, and one measured on an M4 Pro says nothing
 about an A100. `find_band` therefore matches on all of (harness, workload_class, model,
-hardware) and refuses to fall back to a near-miss: an absent band means the gate behaves
-exactly as it did before, which is the safe direction.
+hardware, prompt_format) and refuses to fall back to a near-miss: an absent band means the gate
+behaves exactly as it did before, which is the safe direction. `prompt_format` joined that key on
+2026-09-19: replaying a trace through the chat route instead of the raw one changes what the
+model generates by 3x without changing a byte of the trace, so a raw-route band does not describe
+a chat-route run and must not gate one.
 
 Stdlib only — the loop CI lane installs nothing else.
 """
@@ -90,6 +93,11 @@ class NoiseBand:
     workload_class: str
     model: str
     hardware: str
+    # Which surface the replay posted to. Every band measured before 2026-09-19 was measured on
+    # /v1/completions, so "raw" is the right default for a stored band that predates the field —
+    # and the right reason for it NOT to gate a chat-route run, whose workload is a different one
+    # (220 generated tokens vs 626 on cold_start/seen; kb-20260919-6ef4e6bf).
+    prompt_format: str = "raw"
     corpus_version: str | None = None
     engine_sha: str = ""
     run_group: str = ""
@@ -101,10 +109,12 @@ class NoiseBand:
     notes: str = ""
 
     def key(self) -> str:
-        return f"{self.harness}|{self.workload_class}|{self.model}|{self.hardware}"
+        return (f"{self.harness}|{self.workload_class}|{self.model}|{self.hardware}"
+                f"|{self.prompt_format}")
 
     def identity(self) -> str:
-        return (f"{self.harness}/{self.workload_class} on {self.hardware} with {self.model}"
+        return (f"{self.harness}/{self.workload_class} on {self.hardware} with {self.model} "
+                f"({self.prompt_format} prompts)"
                 f"{f', corpus {self.corpus_version[:12]}' if self.corpus_version else ''}")
 
     def inside(self, metric: str, pct: float, sigmas: float = BAND_SIGMAS) -> bool | None:
@@ -202,6 +212,7 @@ def band_from_arms(
         workload_class=ref.validity.workload_class or str(hc.get("workload_class") or ""),
         model=str(hc.get("model") or ""),
         hardware=str((ref.validity.device_state or {}).get("gpu_name") or hc.get("hardware") or ""),
+        prompt_format=str(hc.get("prompt_format") or "raw"),
         corpus_version=ref.validity.corpus_version,
         engine_sha=ref.validity.engine_sha,
         run_group=ref.validity.run_group,
@@ -228,6 +239,7 @@ def find_band(
     workload_class: str,
     model: str,
     hardware: str,
+    prompt_format: str = "raw",
     corpus_version: str | None = None,
     directory: Path = BAND_DIR,
 ) -> NoiseBand | None:
@@ -239,8 +251,8 @@ def find_band(
     effects anyone wants to claim.
     """
     for b in load_bands(directory):
-        if (b.harness, b.workload_class, b.model, b.hardware) != \
-                (harness, workload_class, model, hardware):
+        if (b.harness, b.workload_class, b.model, b.hardware, b.prompt_format) != \
+                (harness, workload_class, model, hardware, prompt_format):
             continue
         if corpus_version and b.corpus_version and corpus_version != b.corpus_version:
             continue
@@ -256,6 +268,7 @@ def band_for(panel: Vitals, directory: Path = BAND_DIR) -> NoiseBand | None:
         workload_class=panel.validity.workload_class or str(hc.get("workload_class") or ""),
         model=str(hc.get("model") or ""),
         hardware=str((panel.validity.device_state or {}).get("gpu_name") or hc.get("hardware") or ""),
+        prompt_format=str(hc.get("prompt_format") or "raw"),
         corpus_version=panel.validity.corpus_version,
         directory=directory,
     )

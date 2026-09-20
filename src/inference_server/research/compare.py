@@ -34,7 +34,18 @@ CONFIG_KEYS_THAT_MATTER = (
     # different schedulers. Panels written before these keys existed carry None on both sides,
     # so adding them refuses nothing that used to compare.
     "max_queue_size", "scheduling_policy",
+    # Which route the replay posted to. `raw` sends the trace's bytes to /v1/completions; `chat`
+    # wraps them in the model's chat template via /v1/chat/completions. The trace files are
+    # byte-identical either way, so `corpus_version` does NOT move — but the token sequence the
+    # model sees does, and on gemma-4-E2B-it that is the difference between 220 generated tokens
+    # and 626 (kb-20260919-6ef4e6bf). Every panel written before this key existed carries None
+    # here, which is what makes a pre-templating panel refuse against a post-templating one.
+    "prompt_format",
 )
+
+# Fields of `validity.chat_template` that change the tokens the model is shown. `probe_tokens`
+# catches a tokenizer or transformers upgrade that renders an unchanged template differently.
+CHAT_TEMPLATE_KEYS = ("tokenizer", "chat_template_sha256", "enable_thinking", "probe_tokens")
 
 
 @dataclass
@@ -81,6 +92,22 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
         av, bv = a.validity.harness_config.get(key), b.validity.harness_config.get(key)
         if av != bv:
             reasons.append(f"harness_config[{key}]: {av!r} vs {bv!r}")
+
+    # Chat templating. Refused on the same terms as corpus_version: only when both panels carry
+    # a fingerprint, so a raw-route or pre-templating panel is unaffected. A template revision
+    # must show up here rather than as unexplained drift in the numbers.
+    ta, tb = a.validity.chat_template or {}, b.validity.chat_template or {}
+    if ta and tb:
+        for key in CHAT_TEMPLATE_KEYS:
+            av, bv = ta.get(key), tb.get(key)
+            if av is not None and bv is not None and av != bv:
+                reasons.append(f"chat_template[{key}]: {str(av)[:12]} vs {str(bv)[:12]}: the "
+                               f"model was shown differently-wrapped prompts")
+    for panel, name in ((ta, "baseline"), (tb, "treatment")):
+        if panel.get("verified") is False:
+            reasons.append(f"{name} chat_template failed verification against the server that "
+                           f"served it ({panel.get('verify_detail', 'no detail')}): the panel's "
+                           f"templating stamp describes a different tokenizer")
 
     # The machine. Clock state is a comparability key because an unlocked run's boost and
     # thermal behaviour is an uncontrolled variable — that is one of the two live explanations
