@@ -27,11 +27,13 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-# openai_shim.chat_completions calls Tokenizer.encode_messages(messages) positionally, so it
-# takes that method's `thinking` default. Recorded rather than assumed: it decides whether the
-# template injects a `<|think|>` system turn, which on gemma-4-E2B-it is the difference between
-# a corpus that terminates early and one where every request runs to max_tokens.
-SHIM_ENABLE_THINKING = True
+# What openai_shim.chat_completions passes to Tokenizer.encode_messages. Recorded rather than
+# assumed: it decides whether the template injects a `<|think|>` system turn, which on
+# gemma-4-E2B-it is the difference between a corpus that terminates early and one where every
+# request runs to max_tokens. False since the shim stopped inheriting encode_messages' True
+# default (kb-20260919-9ea56f98); panels either side of that are not comparable, and the
+# fingerprint is what makes compare.py say so.
+SHIM_ENABLE_THINKING = False
 
 _CACHE: dict[str, Any] = {}
 

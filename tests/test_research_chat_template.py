@@ -23,7 +23,7 @@ class FakeTokenizer:
     chat_template = "{{ messages }}"
 
     def apply_chat_template(self, messages, *, enable_thinking=True, **kw):
-        n = len(messages[0]["content"]) + OVERHEAD + (0 if enable_thinking else 2)
+        n = len(messages[0]["content"]) + OVERHEAD + (2 if enable_thinking else 0)
         return {"input_ids": list(range(n))}
 
 
@@ -44,7 +44,7 @@ def test_fingerprint_identifies_the_template_and_the_options_it_was_applied_with
     assert fp["tokenizer"] == MODEL
     assert fp["chat_template_sha256"] == \
         hashlib.sha256(FakeTokenizer.chat_template.encode()).hexdigest()
-    assert fp["enable_thinking"] is True         # the shim's default, recorded not assumed
+    assert fp["enable_thinking"] is False        # what the shim passes, recorded not assumed
     assert fp["probe_tokens"] == len("probe") + OVERHEAD
     assert fp["verified"] is None                # nothing has been checked yet
 
@@ -53,7 +53,7 @@ def test_enable_thinking_moves_the_fingerprint_because_it_moves_the_tokens():
     """On gemma-4 it injects a <|think|> system turn, which is the difference between a corpus
     that terminates early and one where every request runs to max_tokens."""
     _seed()
-    a, b = CT.fingerprint(MODEL), CT.fingerprint(MODEL, enable_thinking=False)
+    a, b = CT.fingerprint(MODEL, enable_thinking=True), CT.fingerprint(MODEL)
     assert a["chat_template_sha256"] == b["chat_template_sha256"]   # same template string
     assert a["probe_tokens"] != b["probe_tokens"]                   # different rendered tokens
     assert not comparable(_panel(a), _panel(b), same_group_required=False)

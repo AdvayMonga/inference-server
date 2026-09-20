@@ -41,9 +41,10 @@
     "transformers or the model card is upgraded: the template hash moves and compare.py refuses across it \u2014 re-measure rather than explaining the drift",
     "the noise band is re-measured: it must be measured with --prompt-format chat, the default; the 2026-09-19 band (kb-20260919-0a58befd) was measured on the raw route and no longer applies (kb-20260919-e610af2a)",
     "the simulator's rank check is re-run: the decode-width leverage this restores is what kb-20260919-94acfdb8's second trigger was waiting for",
-    "anyone proposes judging a batching or scheduling change on cold_start: the signal is back, but it is 8 requests at width <= 5 \u2014 still a thin class, and steady_interactive and long_context are still the wrong size for this box"
+    "anyone proposes judging a batching or scheduling change on cold_start: the signal is back, but it is 8 requests at width <= 5 \u2014 still a thin class, and steady_interactive and long_context are still the wrong size for this box",
+    "2026-09-19: re-measured after the shim stopped inheriting enable_thinking=true (kb-20260919-5db5aafa). The leverage this entry restored SURVIVES \u2014 cold_start/seen 8 rows over 2.14-4.62 (Sxx 5.81), heldout 8 rows over 2.02-4.00 (Sxx 4.71) \u2014 but every token count in the table above was measured with thinking ON and the fingerprint now says false, so compare.py refuses across it."
   ],
-  "updated_at": 1789867354.5638232,
+  "updated_at": 1789869800.0,
   "validity_range": {
     "concurrency": [
       1,

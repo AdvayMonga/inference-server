@@ -33,7 +33,7 @@ class FakeTokenizer:
     chat_template = "{{ messages }}"
 
     def apply_chat_template(self, messages, *, enable_thinking=True, **kw):
-        n = len(messages[0]["content"]) + TEMPLATE_OVERHEAD + (0 if enable_thinking else 2)
+        n = len(messages[0]["content"]) + TEMPLATE_OVERHEAD + (2 if enable_thinking else 0)
         return {"input_ids": list(range(n))}
 
 
@@ -299,7 +299,7 @@ def test_replay_posts_to_the_chat_route_by_default_and_says_so_in_the_panel(monk
                            scheduler_stats={}, cache_stats={}, model_name=MODEL, trace=trace)
     assert panel.validity.harness_config["prompt_format"] == "chat"
     fp = panel.validity.chat_template
-    assert fp["tokenizer"] == MODEL and fp["enable_thinking"] is True
+    assert fp["tokenizer"] == MODEL and fp["enable_thinking"] is False
     assert fp["probe_tokens"] == len("probe") + TEMPLATE_OVERHEAD
     assert fp["verified"] is True, "the stamp was checked against the server that served the run"
 

@@ -209,7 +209,12 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
 
     messages = [m.model_dump() for m in body.messages]
     try:
-        token_ids = await loop.run_in_executor(None, tokenizer.encode_messages, messages)
+        # thinking=False, chosen rather than inherited. A compatibility shim must not switch the
+        # model into a mode no caller asked for: encode_messages defaults to True, which renders
+        # a <|think|> system turn ahead of the user turn and made gemma-4-E2B-it open every
+        # answer with a preamble and run every corpus request to max_tokens (kb-20260919-9ea56f98).
+        token_ids = await loop.run_in_executor(
+            None, lambda: tokenizer.encode_messages(messages, thinking=False))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
