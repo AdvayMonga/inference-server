@@ -6,20 +6,28 @@ stdlib-only pure code — the one sanctioned engine import in research/.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
+from dataclasses import asdict
 
 import pytest
 
 from inference_server.research import loop
 from inference_server.research.compare import comparable
 from inference_server.research import harness as H
-from inference_server.research.corpus import TraceRequest, WorkloadClass, load_trace
+from inference_server.research.corpus import (
+    CORPUS_DIR,
+    TraceRequest,
+    WorkloadClass,
+    load_trace,
+)
 from inference_server.research.schemas import Vitals
 from inference_server.research.simulator import (
     PLACEHOLDER_A100_E4B,
     SimConfig,
     TimingModel,
+    decode_limit,
     fit_timing_model,
     rank_correlation,
     simulate,
@@ -309,3 +317,78 @@ def test_screen_points_cheap_tiers_at_the_simulator(tmp_path, capsys):
     p.write_text(json.dumps([hyp]))
     assert loop.main(["screen", str(p)]) == 0
     assert "loop simulate" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- termination
+
+# sha256 over {rows, summary} for every committed (class, split) at two batch sizes, measured at
+# 3aed53b, BEFORE TraceRequest gained `expected_output_tokens`. No committed trace populates the
+# field, so `decode_limit` returns `max_tokens` and every one of these must still match: this is
+# the guarantee that the seam moved no stored panel. It is a golden, not a property — if a corpus
+# ever ships the field, the affected entries change and must be re-measured deliberately.
+PRE_TERMINATION_GOLDEN = {
+    "cold_start/heldout/mbs2": "cae8df6b839ed332bcfef522f7601b69b36cf7958611a770ae34a7b22b730db1",
+    "cold_start/heldout/mbs8": "cae8df6b839ed332bcfef522f7601b69b36cf7958611a770ae34a7b22b730db1",
+    "cold_start/seen/mbs2": "4b4804e32b702707745dddd4faf95db4d78f2c4f87a81a95deb03b0cc3e3e584",
+    "cold_start/seen/mbs8": "4b4804e32b702707745dddd4faf95db4d78f2c4f87a81a95deb03b0cc3e3e584",
+    "long_context/heldout/mbs2": "0914ca37dbfa53f9d087d902fd95affe7ac0137431e4872a0cdfcd4e94ac4044",
+    "long_context/heldout/mbs8": "9de2ae019f2800a7585ef0a63197141cbfb5072bfde56bb30f20a5b686ae15d9",
+    "long_context/seen/mbs2": "69e09473b67c352a6254bde157aab395d3eb5b0603b9c69ae0edad869201a76b",
+    "long_context/seen/mbs8": "550948de4f6f027069da6b1d65b1c8d2ea3060d10c0ca253be1ab8b9efbeb049",
+    "steady_interactive/heldout/mbs2": "917299b66a0d117e81a118adc5075fee6e20b3550f340a8c592e3a93de5c6518",
+    "steady_interactive/heldout/mbs8": "690773e629be2b9c001ee1da72cbd77c02545aa9ab8839852b03dd3c52a6d117",
+    "steady_interactive/seen/mbs2": "0966b315fd1f0f11746d0960353701ae50dbc812e0c3a60ac9483c16424357dd",
+    "steady_interactive/seen/mbs8": "ae75a01fcbe9ffe7130f55d446628f9bf29bf0c0064eeb6173681005e85d16e3",
+}
+
+
+@pytest.mark.parametrize("key", sorted(PRE_TERMINATION_GOLDEN))
+def test_committed_corpus_simulates_byte_identically_to_before_the_field(key):
+    name, split, mbs = key.rsplit("/", 2)
+    m, trace = load_trace(name, split, CORPUS_DIR)
+    assert all(r.expected_output_tokens is None for r in trace), "no corpus populates it yet"
+    res = simulate(trace, SimConfig(max_batch_size=int(mbs[3:])), PLACEHOLDER_A100_E4B)
+    blob = json.dumps({"rows": [asdict(r) for r in res.rows],
+                       "summary": res.summary(m.classes[name])}, sort_keys=True)
+    assert hashlib.sha256(blob.encode()).hexdigest() == PRE_TERMINATION_GOLDEN[key]
+
+
+def test_absent_expected_output_tokens_means_run_to_budget():
+    assert decode_limit(req(0.0, max_tokens=7)) == 7
+    res = simulate([req(0.0, max_tokens=7)], SimConfig(), FAST)
+    assert res.rows[0].out_tokens == 7
+
+
+def test_expected_output_tokens_stops_the_request_early():
+    """The engine's stop token, modelled: decode ends at the shorter of budget and observed."""
+    short = req(0.0, max_tokens=50)
+    short.expected_output_tokens = 6
+    res = simulate([short], SimConfig(), FAST)
+    assert res.rows[0].out_tokens == 6 and res.rows[0].error is None
+    assert res.decode_steps == 5, "1 token from prefill, 5 decode steps"
+
+
+def test_the_budget_still_caps_an_over_long_expectation():
+    over = req(0.0, max_tokens=4)
+    over.expected_output_tokens = 999
+    assert decode_limit(over) == 4
+    assert simulate([over], SimConfig(), FAST).rows[0].out_tokens == 4
+    zero = req(0.0, max_tokens=4)
+    zero.expected_output_tokens = 0            # a request that emitted only its stop token
+    assert decode_limit(zero) == 1
+    assert simulate([zero], SimConfig(), FAST).rows[0].out_tokens == 1
+
+
+def test_early_termination_frees_the_batch_slot_and_its_full_reservation():
+    """The mechanism kb-20260919-94acfdb8 names: phantom rows holding a narrow batch. The
+    reservation released is the budget, not the length emitted — as scheduler._evict_row does."""
+    trace = [req(0.0, prompt="x" * 64, max_tokens=40), req(0.0, prompt="y" * 64, max_tokens=40)]
+    trace[0].expected_output_tokens = 2
+    res = simulate(trace, SimConfig(max_batch_size=1, block_size=16), FAST)
+    first, second = res.rows
+    assert first.out_tokens == 2 and second.out_tokens == 40
+    # 16 prompt + 40 budget = 56 tokens = 4 blocks, for both rows, whichever way they ended
+    assert res.pool_free_end == 4096 and res.pool_free_min == 4096 - 4
+    slow = simulate([req(0.0, prompt="x" * 64, max_tokens=40), trace[1]],
+                    SimConfig(max_batch_size=1, block_size=16), FAST)
+    assert second.queue_ms < slow.rows[1].queue_ms, "the phantom row is what invented the wait"

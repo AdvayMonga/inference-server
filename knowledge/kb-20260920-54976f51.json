@@ -1,0 +1,48 @@
+{
+  "created_at": 1789877479.859532,
+  "evidence": [
+    {
+      "url": "tests/test_research_simulator.py::PRE_TERMINATION_GOLDEN"
+    },
+    {
+      "url": "src/inference_server/research/simulator.py::decode_limit"
+    },
+    {
+      "url": "src/inference_server/research/corpus.py::TraceRequest"
+    }
+  ],
+  "id": "kb-20260920-54976f51",
+  "mechanism": "simulate() decodes to decode_limit(), which is max_tokens unless the trace carries expected_output_tokens; no committed trace carries it, so behaviour is unchanged and the simulator still charges decode work for requests the engine has finished.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "**The simulator can now terminate a request early; nothing tells it to yet, and nothing here\nlifts `kb-20260919-94acfdb8`'s `ttft_p95` suspension.** This entry exists to record the seam and,\nmore importantly, the recipe for populating it \u2014 it is the handoff to whoever rebuilds the corpus\nafter Phase 0.\n\n## What landed\n\n`TraceRequest` gains `expected_output_tokens: int | None = None`, alongside the\n`expected_output_hash` it already carried. `simulator.decode_limit(t)` returns `t.max_tokens` when\nthe field is absent and `max(1, min(t.max_tokens, t.expected_output_tokens))` when it is present;\n`simulate()` decodes to that limit instead of to `max_tokens`.\n\nThree things it deliberately does NOT do:\n\n- **No fitted length distribution, no sampling, no pluggable length model.** There is nothing to\n  fit. `kb-20260919-5db5aafa` measured 17 of 18 admitted `cold_start` requests truncating against\n  their budgets, so observed output length on this corpus IS the budget. A distribution fitted\n  from it would be a fit to an artifact, and the resulting agreement with hardware would be the\n  fourth instance of this project's recurring failure \u2014 two systems agreeing because they share a\n  defect.\n- **It does not touch the KV gate.** Admission still reserves `prompt_tokens + max_tokens`, not\n  the expected length, because `scheduler._admit_pending` reserves the budget a request MIGHT\n  need and `_evict_row` releases that same amount however the request ended. A simulator that\n  reserved the expected length would admit more than the engine can and could bless a policy the\n  engine cannot run. Early termination frees the slot and the full reservation SOONER; it never\n  makes the reservation smaller.\n- **It does not change any stored panel.** `TraceRequest.to_dict()` omits the field when unset, so\n  a trace written without it is byte-for-byte what it was before the field existed and\n  `corpus_version` `659ea3b61303` does not move. Proved twice: `build_corpus.py` still reproduces\n  the committed corpus hash for hash, and a golden of `{rows, summary}` sha256 over all six\n  committed (class, split) pairs at `max_batch_size` 2 and 8, captured at `3aed53b` BEFORE the\n  field existed, is pinned in `tests/test_research_simulator.py` and matches on all twelve.\n\n## What it would take to populate the field, concretely\n\nThe data already exists on every replay. `replay_trace.Row.server_out_tokens` is the engine's own\ncompletion count from the usage chunk \u2014 exactly this quantity \u2014 and it is already written to\n`runs/<run_id>.csv`. What is missing is a corpus in which that number is ever less than\n`max_tokens`. So, in order:\n\n1. **Cut a corpus whose `max_tokens` budgets exceed a templated answer's length.** Today\n   `cold_start/seen` is `42, 32, 40, 185, 54, 17, 216, 40`; a templated E2B instruct answer to\n   \"Why is the sky blue?\" does not finish in 42 tokens. This is a `build_corpus.py` change to\n   `prompt_bank.MAX_TOKENS_RANGE` and a NEW `corpus_version`, never an edit\n   (`kb-20260919-5db5aafa`'s third trigger says the same thing).\n2. **Replay it once as a reference run** at temperature 0 on the chosen model, through the chat\n   route, and write each request's `server_out_tokens` back into its trace line as\n   `expected_output_tokens`. That write is itself another new `corpus_version`.\n3. **Re-run the fit and the rank check** (`fit_timing_from_runs.py <group> --validate`) and file\n   the result. Only a passing rank check on a populated corpus can SUPERSEDE\n   `kb-20260919-94acfdb8` and lift the `ttft_p95` suspension.\n\n## The cost of step 2, which is not free and should be decided, not assumed\n\n`expected_output_tokens` is a **property of one model on one engine sha**, not of the workload.\n`build_corpus.py`'s docstring already refused to store turn 0's assistant reply for exactly this\nreason \u2014 \"cannot store without tying the trace to one model's outputs\" \u2014 and putting a length in\nthe trace ties it the same way, just more cheaply. Two ways out, and this entry does not pick one\nbecause Phase 0 has not picked a model:\n\n- **(a) In the trace, as built here.** Simple, hashes into `corpus_version`, and a model change\n  correctly invalidates the corpus rather than silently producing wrong lengths. The cost is that\n  the corpus is no longer model-neutral, and a second model needs a second corpus.\n- **(b) In a side file** keyed by `(corpus_version, model, engine_sha)`, loaded next to the trace.\n  Keeps the corpus model-neutral and lets several models share one workload, at the cost of a\n  second artifact with its own staleness rule and a second thing `compare.py` must refuse across.\n\n(a) is cheaper and is what the seam supports. (b) is what a multi-model Phase 0 would want. The\nseam does not foreclose (b): a loader for the side file would set the same field on the same\ndataclass, and `decode_limit` would not change.\n\n## Second-order, and worth knowing before the rank check is re-run\n\nPopulating the field will fix the step COUNT and the batch WIDTH, which is the mechanism\n`kb-20260919-94acfdb8` blames for the 12.7-16.4x `ttft_p95` errors at `MAX_BATCH_SIZE=2`. It will\nnot fix the per-step COST. The fitted `TimingModel`'s `total_kv_tokens` coefficient is 0 by\nconstruction \u2014 `fit_timing_from_runs.py` says so: the regressor is not in the telemetry row \u2014 so\nthe simulator's decode cost is `a + b*batch_size` and is blind to KV length. The known ~1.1-2.2x\nper-step overcharge at width 1 (PR #40, unchanged) is therefore untouched by this work. Expect\n`ttft_p95` to improve a lot and `tpot_p50` to improve little or not at all. If a re-run shows\n`tpot_p50` jumping too, suspect the measurement, not the fix.\n",
+  "superseded_by": null,
+  "supersedes": null,
+  "suspended_metrics": [],
+  "suspended_tiers": [],
+  "tags": [
+    "simulator",
+    "corpus",
+    "loop",
+    "harness",
+    "validity",
+    "decode",
+    "cold-start"
+  ],
+  "title": "The simulator has a termination seam but no data to fill it: expected_output_tokens is wired end to end and None everywhere, and the ttft_p95 suspension stands",
+  "transfer_checked": null,
+  "triggers": [
+    "a new corpus version is cut with budgets that a templated answer fits inside: replay it once at temperature 0 and write server_out_tokens into expected_output_tokens, then re-run fit_timing_from_runs.py --validate. That is the only route to superseding kb-20260919-94acfdb8",
+    "anyone proposes fitting a length DISTRIBUTION instead: today's observed lengths ARE the budgets (kb-20260919-5db5aafa, 17 of 18 truncated), so such a fit fits an artifact and any agreement it buys is two systems sharing one defect",
+    "Phase 0 picks a model: decide (a) length in the trace or (b) a side file keyed by (corpus_version, model, engine_sha). The seam supports both; (a) is what is built",
+    "anyone makes the simulator's KV reservation use the expected length instead of max_tokens: that is wrong, the engine reserves the budget (scheduler._admit_pending) and releases it in full however the request ended",
+    "the rank check is re-run on a populated corpus: expect ttft_p95 to move and tpot_p50 not to, because the TimingModel's total_kv_tokens coefficient is 0 by construction. tpot_p50 improving too is a reason to distrust the measurement",
+    "the simulator gains preemption, chunked prefill or cache-held blocks (the v1 exclusions): each interacts with when a row leaves the batch, so re-check this seam then"
+  ],
+  "updated_at": 1789877479.859547,
+  "validity_range": {
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "hardware": "Apple M4 Pro (MPS)",
+    "model": "google/gemma-4-E2B-it"
+  }
+}

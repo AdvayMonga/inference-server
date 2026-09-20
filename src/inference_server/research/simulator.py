@@ -13,6 +13,11 @@ so `rank_correlation` is the validation primitive; the hardware validation itsel
 and is deferred. Simulated panels carry `harness="simulator"` and are refused by compare.py
 against hardware panels, which is correct.
 
+A request decodes for `decode_limit()` steps: the trace's `expected_output_tokens` when it has
+one, otherwise `max_tokens`. No corpus populates that field yet, so today every request still
+runs to its budget — which is exactly the gap kb-20260919-94acfdb8 blames for the failed p95 TTFT
+rank check. The seam is here; the data is not. See that entry's triggers for what populates it.
+
 NOT modelled in v1: preemption, chunked prefill, prefix-cache eviction, and cache-held blocks
 counting against the pool. `prefill_mode` is "monolithic" (serial, the engine default) or
 "batched" (one wave, the custom backend). Prefill stalls decode in both, as in the engine. The
@@ -184,6 +189,7 @@ class _Req:
     trace: TraceRequest
     arrival: float                  # sim clock (trace arrival / rate_scale)
     prompt_tokens: int
+    limit: int                      # decode budget: min(max_tokens, expected_output_tokens)
     matched_tokens: int = 0
     blocks: int = 0
     admit: float | None = None
@@ -302,6 +308,16 @@ class SimResult:
 
 # ------------------------------------------------------------------ the loop
 
+def decode_limit(t: TraceRequest) -> int:
+    """How many tokens a request actually emits: its budget, unless the trace says it stopped
+    earlier. `expected_output_tokens` is None in every corpus committed so far, and then this is
+    `max_tokens` — the run-to-budget behaviour of every panel measured before the field existed.
+    See kb-20260919-94acfdb8: populating it is what the rank check waits on."""
+    if t.expected_output_tokens is None:
+        return t.max_tokens
+    return max(1, min(t.max_tokens, t.expected_output_tokens))
+
+
 class _PrefixCache:
     """PrefixCache.lookup semantics on text: longest block-aligned prefix already stored."""
 
@@ -336,7 +352,8 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
     """
     order = sorted(range(len(requests)), key=lambda i: requests[i].arrival_s)
     reqs = [_Req(i, requests[i].session_id, 0, seq, requests[i],
-                 requests[i].arrival_s / cfg.rate_scale, n_tokens(requests[i].prompt))
+                 requests[i].arrival_s / cfg.rate_scale, n_tokens(requests[i].prompt),
+                 decode_limit(requests[i]))
             for seq, i in enumerate(order)]
     res = SimResult(cfg=cfg, timing=timing)
     cache = _PrefixCache(cfg.block_size)
@@ -379,6 +396,9 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
         for r in ranked:
             if len(active) + len(wave) >= cfg.max_batch_size:
                 break
+            # max_tokens, NOT r.limit: the engine reserves the budget it might need, not the
+            # length it turns out to emit (scheduler._admit_pending reserves token_ids +
+            # max_tokens and releases the same amount at finish, however the request ended).
             r.blocks = math.ceil((r.prompt_tokens + r.trace.max_tokens) / cfg.block_size)
             if r.blocks > cfg.kv_blocks:
                 pending.remove(r)
@@ -417,11 +437,11 @@ def simulate(requests: list[TraceRequest], cfg: SimConfig, timing: TimingModel,
             res.active_sum += len(active)
             res.active_high_water = max(res.active_high_water, len(active))
             for r in active:
-                if r.generated < r.trace.max_tokens:
+                if r.generated < r.limit:
                     r.generated += 1
                 if cfg.policy == "fair":
                     fair_charge(counters, r.session_id, 1)
-            for r in [a for a in active if a.generated >= a.trace.max_tokens]:
+            for r in [a for a in active if a.generated >= a.limit]:
                 active.remove(r)
                 free_blocks += r.blocks
                 r.finish = now

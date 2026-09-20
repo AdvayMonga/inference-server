@@ -40,9 +40,16 @@ class TraceRequest:
     sampling: dict[str, Any] = field(default_factory=lambda: {"temperature": 0.0, "top_p": 1.0,
                                                                "top_k": 0})
     expected_output_hash: str | None = None    # filled by a reference run; the correctness oracle
+    expected_output_tokens: int | None = None  # ditto; the termination oracle. None = not measured
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        """`expected_output_tokens` is omitted when unset, so a trace written without it is byte-
+        identical to one written before the field existed and the corpus_version does not move.
+        `expected_output_hash` keeps serialising its null: it is already in every committed trace."""
+        d = asdict(self)
+        if d["expected_output_tokens"] is None:
+            del d["expected_output_tokens"]
+        return d
 
 
 @dataclass
