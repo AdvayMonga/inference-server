@@ -1,0 +1,27 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "1fc7855"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "9bf2bd3"
+    }
+  ],
+  "branch": "fix/shim-explicit-thinking",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "1fc7855",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "hyp-shim-inherits-thinking-default",
+  "id": "exp-20260919-02ad3c91",
+  "notes": "Correctness fix, not a performance change. openai_shim.chat_completions called Tokenizer.encode_messages(messages) positionally and so inherited that method's thinking=True default, rendering <bos><|turn>system <|think|> <turn|> ahead of the user turn on every /v1/chat/completions request. No caller asked for that mode and no record chose it; the chat route now passes thinking=False explicitly. The assertion is the measurement: the regression test pins the rendered prompt, asserting no <|think|> block and a plain user turn. Verified failing at 1fc7855 in a detached worktree with this test file copied in (AssertionError: '<|think|>' is contained here: <bos><|turn>system / <|think|> / <turn|> / <|turn>user) and passing at 9bf2bd3. research/chat_template.py's SHIM_ENABLE_THINKING follows the call site because its whole job is recording what the shim passes; that is a research-package file and exempt from this gate. Behaviour does change, which is why this is not a no-claim record: the model now answers without a thinking preamble, and the measured effect on the corpus is in kb-20260919-5db5aafa.",
+  "regression_test": "tests/test_openai_shim.py::test_chat_route_renders_a_plain_user_turn_and_no_thinking_block",
+  "source": "loop",
+  "started_at": 1789869274.5,
+  "verdict": "confirmed"
+}
