@@ -4,28 +4,28 @@
     "treatment"
   ],
   "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
-  "engine_sha": "e835425",
-  "entry_id": "kb-20260917-aa6b0f4d",
+  "engine_sha": "03f600e",
+  "entry_id": "kb-20260919-0a58befd",
   "hardware": "Apple M4 Pro (MPS)",
   "harness": "replay_trace",
   "metrics": {
     "active_high_water": {
       "cv": 0.0,
-      "max": 5.0,
-      "mean": 5.0,
-      "min": 5.0,
+      "max": 3.0,
+      "mean": 3.0,
+      "min": 3.0,
       "min_max_ratio": 1.0,
       "n": 10,
       "sd": 0.0
     },
     "active_mean": {
-      "cv": 0.0086,
-      "max": 2.24,
-      "mean": 2.207,
-      "min": 2.18,
-      "min_max_ratio": 1.0275,
+      "cv": 0.0,
+      "max": 1.14,
+      "mean": 1.14,
+      "min": 1.14,
+      "min_max_ratio": 1.0,
       "n": 10,
-      "sd": 0.0189
+      "sd": 0.0
     },
     "cache_hit_rate": {
       "cv": 0.0,
@@ -37,13 +37,13 @@
       "sd": 0.0
     },
     "decode_steps": {
-      "cv": 0.008,
-      "max": 283.0,
-      "mean": 280.1,
-      "min": 276.0,
-      "min_max_ratio": 1.0254,
+      "cv": 0.0,
+      "max": 192.0,
+      "mean": 192.0,
+      "min": 192.0,
+      "min_max_ratio": 1.0,
       "n": 10,
-      "sd": 2.2336
+      "sd": 0.0
     },
     "pool_utilization": {
       "cv": 0.0,
@@ -55,111 +55,111 @@
       "sd": 0.0
     },
     "tok_s_within_slo": {
-      "cv": 0.0071,
-      "max": 7.5,
-      "mean": 7.45,
-      "min": 7.4,
-      "min_max_ratio": 1.0135,
+      "cv": 0.0075,
+      "max": 13.3,
+      "mean": 13.19,
+      "min": 13.0,
+      "min_max_ratio": 1.0231,
       "n": 10,
-      "sd": 0.0527
+      "sd": 0.0994
     },
     "tpot_p50": {
-      "cv": 0.0239,
-      "max": 158.66,
-      "mean": 151.328,
-      "min": 147.56,
-      "min_max_ratio": 1.0752,
+      "cv": 0.0433,
+      "max": 109.11,
+      "mean": 99.464,
+      "min": 95.0,
+      "min_max_ratio": 1.1485,
       "n": 10,
-      "sd": 3.6217
+      "sd": 4.3066
     },
     "tpot_p95": {
-      "cv": 0.047,
-      "max": 214.6,
-      "mean": 199.42,
-      "min": 188.86,
-      "min_max_ratio": 1.1363,
+      "cv": 0.0192,
+      "max": 148.44,
+      "mean": 142.952,
+      "min": 140.22,
+      "min_max_ratio": 1.0586,
       "n": 10,
-      "sd": 9.3775
+      "sd": 2.7417
     },
     "ttft_p50": {
-      "cv": 0.1889,
-      "max": 334.5,
-      "mean": 256.63,
-      "min": 175.7,
-      "min_max_ratio": 1.9038,
+      "cv": 0.0547,
+      "max": 201.6,
+      "mean": 191.14,
+      "min": 170.4,
+      "min_max_ratio": 1.1831,
       "n": 10,
-      "sd": 48.4847
+      "sd": 10.4625
     },
     "ttft_p95": {
-      "cv": 0.1288,
-      "max": 599.5,
-      "mean": 486.02,
-      "min": 410.1,
-      "min_max_ratio": 1.4618,
+      "cv": 0.0256,
+      "max": 444.6,
+      "mean": 428.48,
+      "min": 411.1,
+      "min_max_ratio": 1.0815,
       "n": 10,
-      "sd": 62.6194
+      "sd": 10.987
     },
     "ttft_prefill_p50": {
-      "cv": 0.0338,
-      "max": 128.13,
-      "mean": 121.78,
-      "min": 115.27,
-      "min_max_ratio": 1.1116,
+      "cv": 0.0677,
+      "max": 149.04,
+      "mean": 126.609,
+      "min": 117.25,
+      "min_max_ratio": 1.2711,
       "n": 10,
-      "sd": 4.1193
+      "sd": 8.5697
     },
     "ttft_prefill_p95": {
-      "cv": 0.2677,
-      "max": 506.04,
-      "mean": 364.189,
-      "min": 234.02,
-      "min_max_ratio": 2.1624,
+      "cv": 0.0126,
+      "max": 242.37,
+      "mean": 235.545,
+      "min": 233.37,
+      "min_max_ratio": 1.0386,
       "n": 10,
-      "sd": 97.508
+      "sd": 2.9666
     },
     "ttft_queue_p50": {
-      "cv": 0.4469,
-      "max": 52.53,
-      "mean": 33.778,
-      "min": 8.84,
-      "min_max_ratio": 5.9423,
+      "cv": 0.4977,
+      "max": 38.22,
+      "mean": 24.969,
+      "min": 2.86,
+      "min_max_ratio": 13.3636,
       "n": 10,
-      "sd": 15.0942
+      "sd": 12.4271
     },
     "ttft_queue_p95": {
-      "cv": 0.3684,
-      "max": 150.09,
-      "mean": 95.666,
-      "min": 42.23,
-      "min_max_ratio": 3.5541,
+      "cv": 0.1541,
+      "max": 89.8,
+      "mean": 76.7,
+      "min": 51.51,
+      "min_max_ratio": 1.7434,
       "n": 10,
-      "sd": 35.243
+      "sd": 11.8194
     },
     "wall_s": {
-      "cv": 0.0078,
-      "max": 29.72,
-      "mean": 29.358,
-      "min": 29.12,
-      "min_max_ratio": 1.0206,
+      "cv": 0.0069,
+      "max": 16.83,
+      "mean": 16.611,
+      "min": 16.45,
+      "min_max_ratio": 1.0231,
       "n": 10,
-      "sd": 0.2282
+      "sd": 0.1147
     }
   },
   "model": "google/gemma-4-E2B-it",
   "n_runs": 10,
-  "notes": "12 runs, 6 per arm ABBA, byte-identical config; each arm's first run dropped. cold_start only \u2014 steady_interactive on this box is in deep overload and has no band.",
-  "run_group": "grp-null-coldstart-mps",
+  "notes": "re-measured on the fixed engine (PR #41, stop set includes <turn|>); supersedes the e835425 band in knowledge/noise/superseded/",
+  "run_group": "grp-20260919-0774d4",
   "run_ids": [
-    "run-20260917-953f1e80",
-    "run-20260917-6a701351",
-    "run-20260917-35dbe2c6",
-    "run-20260917-5401a20b",
-    "run-20260917-95f2f1c0",
-    "run-20260917-16cdf4b2",
-    "run-20260917-6236f1a5",
-    "run-20260917-2dfa8031",
-    "run-20260917-f6b0feb2",
-    "run-20260917-020cb034"
+    "run-20260919-1d266856",
+    "run-20260919-1ea36c17",
+    "run-20260919-841b634b",
+    "run-20260919-35d53311",
+    "run-20260919-b01f6df2",
+    "run-20260919-5e1f683a",
+    "run-20260919-b867f61c",
+    "run-20260919-b6a957e6",
+    "run-20260919-d6bf16c5",
+    "run-20260919-d3597026"
   ],
   "workload_class": "cold_start"
 }

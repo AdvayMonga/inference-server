@@ -3,13 +3,13 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-84 entries. Tags: `benchmark`(31), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(23), `modal`(23), `graph`(19), `scheduler`(18), `compile`(15), `loop`(15), `memory`(14), `numerics`(10), `cold-start`(9), `backpressure`(8), `harness`(7), `validity`(7), `venue`(5), `triton`(4), `roofline`(4), `batching`(4), `benchmarking`(4), `quantization`(3), `gates`(3), `attention`(3), `observability`(3), `attribution`(3), `variance`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `telemetry`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1)
+85 entries. Tags: `benchmark`(32), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(23), `modal`(23), `graph`(19), `scheduler`(18), `loop`(16), `compile`(15), `memory`(14), `numerics`(10), `cold-start`(10), `backpressure`(8), `harness`(8), `validity`(8), `venue`(5), `triton`(4), `roofline`(4), `gates`(4), `batching`(4), `benchmarking`(4), `variance`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `telemetry`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `simulator`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `corpus`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (14): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`
+- **cold_start** (15): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`
 - **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
@@ -706,6 +706,196 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 Settled. Kept because the reasoning still constrains new work.
 
+### [2026-09-20] Noise floor re-measured after the end-of-turn stop fix: the cold_start band is 5x tighter on p95 TTFT, and the null no longer false-positives
+*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`, `corpus`* · `kb-20260919-0a58befd`
+
+**The 2026-09-17 band was measured on a workload that no longer exists.** `kb-20260918-5906bc13`
+(PR #41) fixed the custom backend's stop set — it read `tokenizer.eos_token_id` (`<eos>` only)
+and ignored Gemma's `<turn|>` (106), so every `custom-*` request ran to `max_tokens`. On
+`corpus/cold_start/seen` that was **626 generated tokens where the corpus asks for 220**: 65% of
+all decode work was a tail that decodes to `""`. `kb-20260917-aa6b0f4d` said in its own triggers
+that it had to be re-measured before it gated anything. This is that re-measurement.
+
+Procedure repeated unchanged: `scripts/bench/replay_local.py --class cold_start --null 6`,
+**twelve runs, six per arm, ABBA-interleaved, byte-identical config in both arms**, one fresh
+server process per run (so no replicate inherits the previous one's prefix cache). Engine
+`BACKEND=custom-mps`, `google/gemma-4-E2B-it`, MAX_BATCH_SIZE=8, PREFILL_MODE=batched, 4096 KV
+blocks, fcfs, 30s admission deadline, Apple M4 Pro, `HF_HUB_OFFLINE=1`. Run group
+`grp-20260919-0774d4`, engine `03f600e`, corpus `659ea3b61303` — the same corpus version as the
+old band, so the two are comparable metric by metric.
+
+## The new band, next to the old one
+
+Ten runs, each arm's first dropped as warmup, exactly as `significance_replicated` does. Both
+columns are the ±2sd gating width.
+
+| metric | old band (e835425) | **new band (03f600e)** | old mean | **new mean** | new cv | new max/min |
+|---|---|---|---|---|---|---|
+| `ttft_p50` | ±37.78% | **±10.94%** | 256.63 | **191.14** | 5% | 1.18x |
+| `ttft_p95` | ±25.76% | **±5.12%** | 486.02 | **428.48** | 3% | 1.08x |
+| `ttft_queue_p50` | ±89.38% | **±99.54%** | 33.78 | **24.97** | 50% | 13.36x |
+| `ttft_queue_p95` | ±73.68% | **±30.82%** | 95.67 | **76.70** | 15% | 1.74x |
+| `ttft_prefill_p50` | ±6.76% | **±13.54%** | 121.78 | **126.61** | 7% | 1.27x |
+| `ttft_prefill_p95` | ±53.54% | **±2.52%** | 364.19 | **235.55** | 1% | 1.04x |
+| `tpot_p50` | ±4.78% | **±8.66%** | 151.33 | **99.46** | 4% | 1.15x |
+| `tpot_p95` | ±9.40% | **±3.84%** | 199.42 | **142.95** | 2% | 1.06x |
+| `tok_s_within_slo` | ±1.42% | **±1.50%** | 7.45 | **13.19** | 1% | 1.02x |
+| `wall_s` | ±1.56% | **±1.38%** | 29.36 | **16.61** | 1% | 1.02x |
+| `active_mean` | ±1.72% | **±0%** | 2.207 | **1.14** | 0% | 1.00x |
+| `active_high_water` | ±0% | **±0%** | 5 | **3** | 0% | 1.00x |
+| `decode_steps` | ±1.60% | **±0%** | 280.1 | **192** | 0% | 1.00x |
+| `cache_hit_rate` | ±0% | ±0% | 0 | 0 | 0% | — |
+| `pool_utilization` | ±0% | ±0% | 0.0049 | 0.0049 | 0% | 1.00x |
+
+Machine-readable at
+`knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`. The old
+file is kept at `knowledge/noise/superseded/...-e835425.json`; `load_bands` globs
+`knowledge/noise/*.json` and does not recurse, so the superseded band is out of `find_band`'s
+reach and exactly one band is live. `BAND_SIGMAS` is unchanged at 2 (see below).
+
+## The null no longer produces a false positive
+
+The old null's headline result was that, judged as a real A/B, it returned a **t-significant
++2.7% win on `tpot_p50` comparing a config against itself** — the failure the band exists to
+catch. Judged the same way (`significance_replicated` over the same twelve panels, 5v5 after
+warmup):
+
+| metric | old: t-test alone | new: t-test alone | new: with the band |
+|---|---|---|---|
+| `ttft_p50` | noise | noise, −1.2%, \|t\|=0.33 | noise |
+| `ttft_p95` | noise, \|t\|=0.69 | noise, −0.6%, \|t\|=0.36 | noise |
+| `ttft_queue_p95` | noise, \|t\|=1.08 | noise, −6.2%, \|t\|=0.63 | noise |
+| `ttft_prefill_p95` | noise, \|t\|=0.61 | noise, −0.2%, \|t\|=0.21 | noise |
+| `tpot_p50` | **significant, \|t\|=2.06, +2.7%** | noise, +2.5%, \|t\|=0.88 | noise |
+| `tpot_p95` | — | noise, −1.1%, \|t\|=0.92 | noise |
+| `wall_s` | — | noise, −0.4%, \|t\|=0.90 | noise |
+| `tok_s_within_slo` | — | noise, +0.5%, \|t\|=0.95 | noise |
+| `decode_steps` | — | noise, +0.0%, \|t\|=0.00 | noise |
+
+**No metric separates the arms on the t-test alone.** The largest effect is the same one as
+before — `tpot_p50`, at +2.5% against the old +2.7% — but its |t| fell from 2.06 to 0.88,
+because the per-arm spread it is divided by is now much smaller and, crucially, *similar between
+arms* (sd 3.3/5.2 ms on a 99 ms mean). The old run's false positive was one arm drawing a tight
+sample and the other a wide one out of a fat tail; with the wasted decode gone the tail is gone
+with it.
+
+**This weakens, rather than confirms, the evidence for `BAND_SIGMAS=2`.** The multiplier was
+calibrated from exactly one observed false positive, and that false positive is now known to
+have come from a contaminated workload. This re-measurement produces none, so it offers nothing
+to calibrate against — it neither supports 2 nor argues for another number. Per the task's
+instruction the constant is left alone, and this is said rather than quietly fixed: **the band
+width is now the only thing standing between a clean t-test and a merge, and its multiplier
+rests on a measurement that has since been invalidated.** The honest next step is a second null
+in a regime that actually batches (see the corpus finding below), not a re-derivation from this
+one.
+
+## What moved, and why
+
+- **Everything that scales with decode work fell by roughly the 2.8x the stop fix predicted.**
+  `wall_s` 29.36 → 16.61s, `decode_steps` 280.1 → **exactly 192 in all twelve runs**,
+  `tpot_p50` 151 → 99 ms, and `tok_s_within_slo` 7.45 → 13.19 tok/s. Generated tokens are
+  **220 in every run**, byte-identical per request (`6, 1, 9, 185, 1, 9, 0, 9`), against the
+  corpus's 626-token `max_tokens` budget — the number `kb-20260918-5906bc13` predicted offline,
+  now confirmed through the full server path.
+- **The tail metrics stopped being tails.** `ttft_prefill_p95` went from the worst-behaved
+  number in the panel (2.16x, cv 27%) to the best (1.04x, cv 1%), and `ttft_p95` from 1.46x to
+  1.08x. The mechanism is batch occupancy: `active_high_water` fell 5 → 3 and `active_mean`
+  2.21 → 1.14. Before the fix, five to eight rows stayed resident emitting `<turn|>` and
+  contended for the same MPS queue; a prefill landing behind them waited on whatever that
+  contention happened to be. Now requests barely overlap, so prefill costs what prefill costs.
+  **A TTFT claim on this box no longer needs to clear 25% — it needs to clear ~5%.** That is the
+  practical gain: the harness can now see effects it could not before.
+- **Two metrics got *worse*, and both for the same reason.** `tpot_p50` (±4.78% → ±8.66%) and
+  `ttft_prefill_p50` (±6.76% → ±13.54%) are *medians over six surviving requests*, and the
+  surviving requests are now tiny: five of the eight emit 9 tokens or fewer. A median over a
+  handful of 1-to-9-token requests moves on which one lands where; the old workload's 40-to-216
+  token requests averaged that away. This is the same effect `kb-20260917-aa6b0f4d` identified
+  for percentiles at n=6, now reaching the *p50s* because the requests shrank.
+- **`ttft_queue_p50` is still the worst number in the panel** — 13.36x, cv 50%, a ±99.5% band.
+  It spans 2.86 to 38.22 ms. At this concurrency queueing is jitter, not signal, and that has
+  not changed; it has, if anything, got worse in relative terms because the absolute queue wait
+  shrank while its jitter did not.
+- **Dropping the warmup run barely matters now.** With all twelve runs the band is `ttft_p95`
+  ±9.36% (against ±5.12%) and `ttft_prefill_p95` ±4.64% (against ±2.52%), and `tpot_p50` is
+  actually *tighter* with the warmup in (±7.86% vs ±8.66%). On the old data the drop removed one
+  sample from a fat tail (`ttft_p95` 2.16x → 1.46x); here it removes a genuine but small warm-up
+  effect — run 1 is the only run with `ttft_p95` above 445 ms (490.2) and the only one with
+  `ttft_prefill_p95` above 243 ms (252.2). The rule still earns its place, for a third reason now.
+
+## Per-run series (order as measured)
+
+| # | arm | ttft_p50 | ttft_p95 | ttft_queue_p95 | ttft_prefill_p95 | tpot_p50 | tpot_p95 |
+|---|---|---|---|---|---|---|---|
+| 1 | baseline | 195.3 | 490.2 | 49.85 | 252.20 | 99.33 | 150.24 |
+| 2 | treatment | 184.8 | 434.1 | 57.98 | 237.03 | 98.47 | 144.60 |
+| 3 | treatment | 198.8 | 441.9 | 84.26 | 233.75 | 109.11 | 140.22 |
+| 4 | baseline | 197.0 | 428.9 | 89.80 | 242.37 | 95.97 | 148.44 |
+| 5 | baseline | 192.5 | 424.7 | 82.97 | 234.71 | 99.56 | 145.20 |
+| 6 | treatment | 200.1 | 411.7 | 70.68 | 234.92 | 96.64 | 146.35 |
+| 7 | treatment | 196.1 | 444.6 | 83.61 | 235.36 | 99.99 | 141.54 |
+| 8 | baseline | 201.6 | 434.6 | 84.05 | 233.43 | 103.23 | 141.11 |
+| 9 | baseline | 193.3 | 429.9 | 76.13 | 233.41 | 95.00 | 142.69 |
+| 10 | treatment | 184.5 | 426.6 | 81.27 | 239.29 | 101.52 | 141.15 |
+| 11 | treatment | 170.4 | 411.1 | 51.51 | 233.37 | 96.11 | 141.49 |
+| 12 | baseline | 177.1 | 430.8 | 62.72 | 234.84 | 97.51 | 141.33 |
+
+Every run: 8 `ok` in the engine's telemetry, 6 client-visible, 2 `no_tokens` — identical in all
+twelve. Per `kb-20260918-5906bc13` those two are **correct**: one request answers with nothing
+(0 tokens) and one emits a single token that decodes to `""`. The client is right and the engine
+used to be wrong; nothing here is a client bug.
+
+## The corpus finding: `cold_start/seen` now barely batches
+
+This is the part that matters beyond the band. With the tail gone, the class is 8 requests over
+10.4 s generating **220 tokens, 185 of them in a single request**. The other seven produce 0, 1,
+1, 6, 9, 9, 9. Peak batch width across the whole replay is **3**, mean **1.14**. Twelve runs
+produced `decode_steps` = 192 and `active_mean` = 1.14 with **zero variance** — the schedule is
+now deterministic, because there is essentially nothing to schedule.
+
+`cold_start` was always meant to be sparse, and it still measures what it was built for: a cold
+replica's first thirty seconds, prefill-dominated, which is Phase 4's regime. But **it can no
+longer discriminate scheduling or batching policy**, and it is the class the simulator's rank
+check runs on. Anything that depends on rows contending — batch width, fairness, preemption,
+queueing — has almost no signal left in it. `ttft_queue_p95` is 77 ms of a 428 ms p95, and its
+own band is ±31%.
+
+That is a statement about the **corpus**, not a failure of this measurement, and it is why
+`concurrency` in this entry's `validity_range` narrowed from `[1, 5]` to `[1, 3]`. No new class
+is invented here (out of scope for this PR). What the loop needs, when it next wants a band or a
+rank check that turns on batching, is a class whose requests actually coexist on this box —
+`steady_interactive` is the opposite problem (4 rps into a ~13 tok/s box, deep overload, most
+requests shed at the deadline) and `long_context` sheds too. Neither has a band. A class sized
+for ~3-8 concurrent rows on an M4 Pro does not exist.
+
+## What this band does NOT cover
+
+Unchanged in kind from the old entry, with the bounds moved:
+
+- **Not a band for `steady_interactive` or `long_context`.** Neither has one, and both run this
+  box into overload.
+- **Not a band for A100/E4B.** `kb-20260905-1b1a2520` remains the (much wider, differently
+  measured) calibration there.
+- **A very-low-concurrency band**: `active_high_water` was 3 in every run, down from 5. It says
+  even less about real batch widths than the old one did.
+- **`find_band` matches harness, class, model and hardware together with no fallback**, so this
+  applies to `replay_trace` / `cold_start` / E2B / M4 Pro / corpus `659ea3b61303` and nothing
+  else.
+- The box was not quiesced (VS Code and its language servers were running; 1-min load average
+  ~5 at the start). No other MPS workload ran during the sweep — the whole sweep was serialised
+  for that reason.
+
+**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; the corpus gains a class that actually batches on this box: cold_start/seen now generates 220 tokens over 8 requests at a peak batch width of 3, so this band describes an almost-unbatched workload; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (still calibrated from the 2026-09-17 null alone; this re-measurement produced no false positive to calibrate against)
+
+**Evidence:** grp-20260919-0774d4, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260919-1d266856, run-20260919-1ea36c17, run-20260919-841b634b, run-20260919-35d53311, run-20260919-b01f6df2, run-20260919-5e1f683a, run-20260919-b867f61c, run-20260919-b6a957e6, run-20260919-d6bf16c5, run-20260919-d3597026
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"concurrency": [1, 3], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
+
+**Mechanism:** Two thirds of the old band's spread came from decode work the engine should never have done: 406 of 626 tokens were <turn|> after the answer ended, so five to eight rows stayed resident and contended for the same MPS queue. With the tail gone the peak batch width falls from 5 to 3, requests overlap far less, and the tail metrics stop being percentiles over a contended queue.
+
+**Supersedes:** `kb-20260917-aa6b0f4d`
+
 ### [2026-09-19] Custom backend ignored end-of-turn: every custom-* request ran to max_tokens (fixed)
 *tags: `correctness`, `custom-backend`, `stop-tokens`, `validity`, `benchmark`, `telemetry`* · `kb-20260918-5906bc13`
 
@@ -973,146 +1163,6 @@ cleared, `ttft_p95` did not.
 **Mechanism:** fit_timing_from_runs reads batch_size from active_size, which telemetry snapshots at enqueue and never updates, so the fitted decode step is flat in batch width (1.5ms/row on a 165ms base) against a row-by-row backend whose real slope is ~50-100ms/row; every TTFT dominated by waiting behind other rows' decode is therefore mis-ordered, while TPOT, which only needs the direction of that slope, still ranks.
 
 **Superseded by:** `kb-20260918-9fc68282`
-
-### [2026-09-18] Noise floor: harness null variance on M4 Pro / E2B, cold_start replay (calibration)
-*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`* · `kb-20260917-aa6b0f4d`
-
-**The first null experiment this project has run.** `LOOP.md` step 5 and
-notes/03 both require one — "run baseline against baseline, same config, same node, interleaved
-arms; that variance is the band; any delta inside it is filed inconclusive, never a win" — and
-until now the variance budget was prose in `kb-20260905-1b1a2520` that a human had to remember
-to apply.
-
-Twelve runs, six per arm, ABBA-interleaved, **byte-identical config in both arms**
-(`scripts/bench/replay_local.py --class cold_start --null 6`, run_group
-`grp-null-coldstart-mps`). One fresh server process per run, so no replicate inherits the
-previous one's warm prefix cache. Engine: `BACKEND=custom-mps`, `google/gemma-4-E2B-it`,
-MAX_BATCH_SIZE=8, PREFILL_MODE=batched, 4096 KV blocks, fcfs, 30s admission deadline, on an
-Apple M4 Pro. Workload: `corpus/cold_start/seen` (8 requests over 10.4s, 626 output tokens),
-replayed open-loop at x1. Every run: 6 ok, 2 `no_tokens` (two short prompts make E2B emit EOS
-immediately — deterministic, identical in all twelve).
-
-## The band (10 runs; each arm's first run dropped as warmup, as `significance_replicated` does)
-
-| metric | mean | sd | cv | min | max | max/min | band (+-2sd) |
-|---|---|---|---|---|---|---|---|
-| active_high_water | 5 | 0 | 0% | 5 | 5 | 1.00x | 0% |
-| active_mean | 2.207 | 0.0189 | 1% | 2.18 | 2.24 | 1.03x | 1.72% |
-| cache_hit_rate | 0 | 0 | 0% | 0 | 0 | 0.00x | 0% |
-| decode_steps | 280.1 | 2.2336 | 1% | 276 | 283 | 1.03x | 1.6% |
-| pool_utilization | 0.0049 | 0 | 0% | 0.0049 | 0.0049 | 1.00x | 0% |
-| tok_s_within_slo | 7.45 | 0.0527 | 1% | 7.4 | 7.5 | 1.01x | 1.42% |
-| tpot_p50 | 151.328 | 3.6217 | 2% | 147.56 | 158.66 | 1.08x | 4.78% |
-| tpot_p95 | 199.42 | 9.3775 | 5% | 188.86 | 214.6 | 1.14x | 9.4% |
-| ttft_p50 | 256.63 | 48.4847 | 19% | 175.7 | 334.5 | 1.90x | 37.78% |
-| ttft_p95 | 486.02 | 62.6194 | 13% | 410.1 | 599.5 | 1.46x | 25.76% |
-| ttft_prefill_p50 | 121.78 | 4.1193 | 3% | 115.27 | 128.13 | 1.11x | 6.76% |
-| ttft_prefill_p95 | 364.189 | 97.508 | 27% | 234.02 | 506.04 | 2.16x | 53.54% |
-| ttft_queue_p50 | 33.778 | 15.0942 | 45% | 8.84 | 52.53 | 5.94x | 89.38% |
-| ttft_queue_p95 | 95.666 | 35.243 | 37% | 42.23 | 150.09 | 3.55x | 73.68% |
-| wall_s | 29.358 | 0.2282 | 1% | 29.12 | 29.72 | 1.02x | 1.56% |
-
-Machine-readable at `knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`. The gating width is **two null standard
-deviations**, not one: a single run of either arm can land that far from the mean, so a
-difference that size is not distinguishable from having drawn two runs of the same config.
-`compare.significance_replicated` reports a delta inside it as **`inconclusive`**, and
-`session.judge_group` looks the band up from the baseline arm's own validity block, so it
-applies without anyone remembering.
-
-## The null confirmed a win, which is the point
-
-Judged as if it were a real A/B (`judge_group` over the same twelve panels), this null
-experiment returns:
-
-| metric | t-test alone | with the band |
-|---|---|---|
-| `ttft_p95` | noise, \|t\|=0.69 | noise |
-| `ttft_queue_p95` | noise, \|t\|=1.08 | noise |
-| `ttft_prefill_p95` | noise, \|t\|=0.61 | noise |
-| `tpot_p50` | **significant, \|t\|=2.06, +2.7%** | **inconclusive** (band ±4.78%) |
-
-Five runs an arm, one config, one machine, one afternoon — and the significance gate as it stood
-this morning would have recorded a confirmed +2.7% TPOT effect. That is the failure the band
-exists to stop, caught on the first null rather than on a merge. It is also why the width is
-2 sd: at 1 sd (the literal "inside the measured cv" reading) the band is 2.39% and this false
-positive slips through by three tenths of a percent.
-
-**The 2 sd multiplier is provisional and the weakest part of this work.** The reasoning behind
-it is general — a single run of either arm can land ~2 sd from the mean, so a difference that
-size is not distinguishable from having drawn two runs of one config — but the number is
-calibrated from **n=1**: this one null experiment, on `cold_start`, on this one box, from one
-observed false positive on one metric. `BAND_SIGMAS` is project-wide only because there is
-nothing else yet to key it on, and it is not covered by this entry's `validity_range`, which
-scopes the band rather than the multiplier. Two ways a second null could show it wrong: a
-saturated regime may have a fatter-than-Gaussian tail, where 2 sd under-covers; and a metric
-whose null is tight (`wall_s`, cv 1%) may warrant a smaller multiplier than one that is not
-(`ttft_queue_p50`, cv 45%), which one scalar cannot express. If a second null on another regime
-or another machine disagrees, the fix is probably a per-metric multiplier stored in the band
-rather than a different global constant — `inside(metric, pct, sigmas=...)` already takes an
-override, so a caller can disagree without editing the constant.
-
-## What it says
-
-- **Latency percentiles are the noisy ones; throughput and occupancy are not.** `ttft_p50`
-  moves 1.90x (cv 19%) and `ttft_p95` 1.46x (cv 13%) with nothing changed, while `wall_s`,
-  `tok_s_within_slo`, `active_mean` and `decode_steps` all sit inside 1.04x. A TTFT claim on
-  this box below ~15-20% is not a claim.
-- **The queue half of TTFT is the worst-behaved number in the panel**: `ttft_queue_p50` spans
-  5.94x (cv 45%) and `ttft_queue_p95` 3.55x. Queueing at this concurrency is jitter, not
-  signal. `ttft_prefill_p50`, by contrast, is the steadiest thing here at 1.11x — so the
-  *split* is trustworthy even where the total is not, which is exactly why the panel carries it.
-- **TPOT is tight: `tpot_p50` 1.08x (cv 2%), `tpot_p95` 1.14x (cv 5%).** A decode change worth
-  having will be visible here. This is the opposite of the A100/E4B calibration, where
-  `tpot_p50` spread 1.46x.
-- **Dropping the warmup run matters, and not the way it was assumed to.** With all twelve runs
-  the band widens to `ttft_p95` 2.16x / cv 24% and `ttft_prefill_p95` 3.51x / cv 42%. But the
-  single worst run was the *second* (`ttft_p95` 885ms, `ttft_prefill_p95` 821ms), not the
-  first — so the drop is not removing a monotonic warm-up ramp, it is removing one sample from
-  a fat tail. The rule still helps; the reason recorded for it on A100 does not hold here.
-
-## Per-run series (order as measured)
-
-| # | arm | ttft_p50 | ttft_p95 | ttft_queue_p95 | ttft_prefill_p95 | tpot_p50 | tpot_p95 |
-|---|---|---|---|---|---|---|---|
-| 1 | baseline | 174.0 | 568.2 | 75.26 | 243.88 | 150.75 | 212.56 |
-| 2 | treatment | 427.3 | 885.4 | 104.11 | 821.46 | 153.63 | 194.37 |
-| 3 | treatment | 175.7 | 484.8 | 100.94 | 234.02 | 158.66 | 199.93 |
-| 4 | baseline | 282.8 | 564.2 | 86.84 | 506.04 | 150.72 | 195.31 |
-| 5 | baseline | 252.3 | 426.0 | 110.39 | 390.82 | 152.46 | 214.6 |
-| 6 | treatment | 334.5 | 442.8 | 99.56 | 392.48 | 152.88 | 198.07 |
-| 7 | treatment | 268.8 | 522.1 | 111.4 | 476.27 | 152.82 | 191.8 |
-| 8 | baseline | 239.1 | 410.1 | 43.21 | 378.94 | 148.05 | 192.11 |
-| 9 | baseline | 291.0 | 444.5 | 42.23 | 406.29 | 147.56 | 188.86 |
-| 10 | treatment | 272.5 | 451.3 | 75.91 | 382.11 | 148.01 | 192.44 |
-| 11 | treatment | 269.1 | 599.5 | 150.09 | 238.24 | 154.37 | 213.93 |
-| 12 | baseline | 180.5 | 514.9 | 136.09 | 236.68 | 147.75 | 207.15 |
-
-## What this band does NOT cover
-
-It is `replay_trace` / `cold_start` / E2B / M4 Pro / corpus `659ea3b61303` and
-nothing else — `find_band` matches all of those together and has no nearest-entry fallback.
-In particular:
-
-- **It is not a band for `steady_interactive`.** That class asks for 4 rps and 13,787 output
-  tokens; this box serves roughly 10 tok/s, so the replay runs in deep overload with most
-  requests shed at the admission deadline. A saturated class has a different (and almost
-  certainly wider) null spread, and it still has no measured band.
-- **It is not a band for A100/E4B.** `kb-20260905-1b1a2520` remains the calibration there, and
-  it is far wider (`ttft_p95` 6.52x) — but it was measured from three runs of a different
-  harness, and should be re-measured as a proper null through `replay_local`'s procedure when
-  GPU budget returns.
-- **It is a low-concurrency band**: `active_high_water` was 5 in every run. Nothing here speaks
-  to the spread at the batch widths the project actually targets.
-
-**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (it is calibrated from this experiment alone; the fix is likely a per-metric multiplier, not a new constant)
-
-**Evidence:** grp-null-coldstart-mps, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260917-9d0303be, run-20260917-d8085cf4, run-20260917-16cdf4b2, run-20260917-953f1e80, run-20260917-6a701351, run-20260917-6236f1a5, run-20260917-2dfa8031, run-20260917-35dbe2c6, run-20260917-5401a20b, run-20260917-f6b0feb2, run-20260917-020cb034, run-20260917-95f2f1c0
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"concurrency": [1, 5], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
-
-**Mechanism:** Percentile estimators over 6 successful requests are dominated by which request lands where in the queue; the totals (wall_s, tokens) average that out and the per-step costs (tpot, prefill_p50) never see it, so the panel's spread is concentrated in exactly the tail metrics an A/B most wants to quote.
 
 ### [2026-09-17] The staleness rule was shaped for same-sha experiments, so every two-commit A/B was forced onto a blanket escape hatch
 *tags: `loop`, `harness`, `gates`* · `kb-20260917-93eb1bac`
@@ -1827,3 +1877,153 @@ length-grouping both attack padding waste, and there is none at K=1. Kept behind
 **Valid over:** `{"arrival_rate_rps": [1, 6], "hardware": "A100-80GB", "model": "gemma-4-e4b"}`
 
 **Mechanism:** MAX_BATCH_SIZE=256 admits every arrival immediately, so 83-91% of prefill waves are K=1 and there is no padding for grouping to remove.
+
+## Obsolete (1)
+
+Superseded. Kept only so old commits remain readable.
+
+### [2026-09-18] Noise floor: harness null variance on M4 Pro / E2B, cold_start replay (calibration)
+*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`* · `kb-20260917-aa6b0f4d`
+
+**The first null experiment this project has run.** `LOOP.md` step 5 and
+notes/03 both require one — "run baseline against baseline, same config, same node, interleaved
+arms; that variance is the band; any delta inside it is filed inconclusive, never a win" — and
+until now the variance budget was prose in `kb-20260905-1b1a2520` that a human had to remember
+to apply.
+
+Twelve runs, six per arm, ABBA-interleaved, **byte-identical config in both arms**
+(`scripts/bench/replay_local.py --class cold_start --null 6`, run_group
+`grp-null-coldstart-mps`). One fresh server process per run, so no replicate inherits the
+previous one's warm prefix cache. Engine: `BACKEND=custom-mps`, `google/gemma-4-E2B-it`,
+MAX_BATCH_SIZE=8, PREFILL_MODE=batched, 4096 KV blocks, fcfs, 30s admission deadline, on an
+Apple M4 Pro. Workload: `corpus/cold_start/seen` (8 requests over 10.4s, 626 output tokens),
+replayed open-loop at x1. Every run: 6 ok, 2 `no_tokens` (two short prompts make E2B emit EOS
+immediately — deterministic, identical in all twelve).
+
+## The band (10 runs; each arm's first run dropped as warmup, as `significance_replicated` does)
+
+| metric | mean | sd | cv | min | max | max/min | band (+-2sd) |
+|---|---|---|---|---|---|---|---|
+| active_high_water | 5 | 0 | 0% | 5 | 5 | 1.00x | 0% |
+| active_mean | 2.207 | 0.0189 | 1% | 2.18 | 2.24 | 1.03x | 1.72% |
+| cache_hit_rate | 0 | 0 | 0% | 0 | 0 | 0.00x | 0% |
+| decode_steps | 280.1 | 2.2336 | 1% | 276 | 283 | 1.03x | 1.6% |
+| pool_utilization | 0.0049 | 0 | 0% | 0.0049 | 0.0049 | 1.00x | 0% |
+| tok_s_within_slo | 7.45 | 0.0527 | 1% | 7.4 | 7.5 | 1.01x | 1.42% |
+| tpot_p50 | 151.328 | 3.6217 | 2% | 147.56 | 158.66 | 1.08x | 4.78% |
+| tpot_p95 | 199.42 | 9.3775 | 5% | 188.86 | 214.6 | 1.14x | 9.4% |
+| ttft_p50 | 256.63 | 48.4847 | 19% | 175.7 | 334.5 | 1.90x | 37.78% |
+| ttft_p95 | 486.02 | 62.6194 | 13% | 410.1 | 599.5 | 1.46x | 25.76% |
+| ttft_prefill_p50 | 121.78 | 4.1193 | 3% | 115.27 | 128.13 | 1.11x | 6.76% |
+| ttft_prefill_p95 | 364.189 | 97.508 | 27% | 234.02 | 506.04 | 2.16x | 53.54% |
+| ttft_queue_p50 | 33.778 | 15.0942 | 45% | 8.84 | 52.53 | 5.94x | 89.38% |
+| ttft_queue_p95 | 95.666 | 35.243 | 37% | 42.23 | 150.09 | 3.55x | 73.68% |
+| wall_s | 29.358 | 0.2282 | 1% | 29.12 | 29.72 | 1.02x | 1.56% |
+
+Machine-readable at `knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`. The gating width is **two null standard
+deviations**, not one: a single run of either arm can land that far from the mean, so a
+difference that size is not distinguishable from having drawn two runs of the same config.
+`compare.significance_replicated` reports a delta inside it as **`inconclusive`**, and
+`session.judge_group` looks the band up from the baseline arm's own validity block, so it
+applies without anyone remembering.
+
+## The null confirmed a win, which is the point
+
+Judged as if it were a real A/B (`judge_group` over the same twelve panels), this null
+experiment returns:
+
+| metric | t-test alone | with the band |
+|---|---|---|
+| `ttft_p95` | noise, \|t\|=0.69 | noise |
+| `ttft_queue_p95` | noise, \|t\|=1.08 | noise |
+| `ttft_prefill_p95` | noise, \|t\|=0.61 | noise |
+| `tpot_p50` | **significant, \|t\|=2.06, +2.7%** | **inconclusive** (band ±4.78%) |
+
+Five runs an arm, one config, one machine, one afternoon — and the significance gate as it stood
+this morning would have recorded a confirmed +2.7% TPOT effect. That is the failure the band
+exists to stop, caught on the first null rather than on a merge. It is also why the width is
+2 sd: at 1 sd (the literal "inside the measured cv" reading) the band is 2.39% and this false
+positive slips through by three tenths of a percent.
+
+**The 2 sd multiplier is provisional and the weakest part of this work.** The reasoning behind
+it is general — a single run of either arm can land ~2 sd from the mean, so a difference that
+size is not distinguishable from having drawn two runs of one config — but the number is
+calibrated from **n=1**: this one null experiment, on `cold_start`, on this one box, from one
+observed false positive on one metric. `BAND_SIGMAS` is project-wide only because there is
+nothing else yet to key it on, and it is not covered by this entry's `validity_range`, which
+scopes the band rather than the multiplier. Two ways a second null could show it wrong: a
+saturated regime may have a fatter-than-Gaussian tail, where 2 sd under-covers; and a metric
+whose null is tight (`wall_s`, cv 1%) may warrant a smaller multiplier than one that is not
+(`ttft_queue_p50`, cv 45%), which one scalar cannot express. If a second null on another regime
+or another machine disagrees, the fix is probably a per-metric multiplier stored in the band
+rather than a different global constant — `inside(metric, pct, sigmas=...)` already takes an
+override, so a caller can disagree without editing the constant.
+
+## What it says
+
+- **Latency percentiles are the noisy ones; throughput and occupancy are not.** `ttft_p50`
+  moves 1.90x (cv 19%) and `ttft_p95` 1.46x (cv 13%) with nothing changed, while `wall_s`,
+  `tok_s_within_slo`, `active_mean` and `decode_steps` all sit inside 1.04x. A TTFT claim on
+  this box below ~15-20% is not a claim.
+- **The queue half of TTFT is the worst-behaved number in the panel**: `ttft_queue_p50` spans
+  5.94x (cv 45%) and `ttft_queue_p95` 3.55x. Queueing at this concurrency is jitter, not
+  signal. `ttft_prefill_p50`, by contrast, is the steadiest thing here at 1.11x — so the
+  *split* is trustworthy even where the total is not, which is exactly why the panel carries it.
+- **TPOT is tight: `tpot_p50` 1.08x (cv 2%), `tpot_p95` 1.14x (cv 5%).** A decode change worth
+  having will be visible here. This is the opposite of the A100/E4B calibration, where
+  `tpot_p50` spread 1.46x.
+- **Dropping the warmup run matters, and not the way it was assumed to.** With all twelve runs
+  the band widens to `ttft_p95` 2.16x / cv 24% and `ttft_prefill_p95` 3.51x / cv 42%. But the
+  single worst run was the *second* (`ttft_p95` 885ms, `ttft_prefill_p95` 821ms), not the
+  first — so the drop is not removing a monotonic warm-up ramp, it is removing one sample from
+  a fat tail. The rule still helps; the reason recorded for it on A100 does not hold here.
+
+## Per-run series (order as measured)
+
+| # | arm | ttft_p50 | ttft_p95 | ttft_queue_p95 | ttft_prefill_p95 | tpot_p50 | tpot_p95 |
+|---|---|---|---|---|---|---|---|
+| 1 | baseline | 174.0 | 568.2 | 75.26 | 243.88 | 150.75 | 212.56 |
+| 2 | treatment | 427.3 | 885.4 | 104.11 | 821.46 | 153.63 | 194.37 |
+| 3 | treatment | 175.7 | 484.8 | 100.94 | 234.02 | 158.66 | 199.93 |
+| 4 | baseline | 282.8 | 564.2 | 86.84 | 506.04 | 150.72 | 195.31 |
+| 5 | baseline | 252.3 | 426.0 | 110.39 | 390.82 | 152.46 | 214.6 |
+| 6 | treatment | 334.5 | 442.8 | 99.56 | 392.48 | 152.88 | 198.07 |
+| 7 | treatment | 268.8 | 522.1 | 111.4 | 476.27 | 152.82 | 191.8 |
+| 8 | baseline | 239.1 | 410.1 | 43.21 | 378.94 | 148.05 | 192.11 |
+| 9 | baseline | 291.0 | 444.5 | 42.23 | 406.29 | 147.56 | 188.86 |
+| 10 | treatment | 272.5 | 451.3 | 75.91 | 382.11 | 148.01 | 192.44 |
+| 11 | treatment | 269.1 | 599.5 | 150.09 | 238.24 | 154.37 | 213.93 |
+| 12 | baseline | 180.5 | 514.9 | 136.09 | 236.68 | 147.75 | 207.15 |
+
+## What this band does NOT cover
+
+It is `replay_trace` / `cold_start` / E2B / M4 Pro / corpus `659ea3b61303` and
+nothing else — `find_band` matches all of those together and has no nearest-entry fallback.
+In particular:
+
+- **It is not a band for `steady_interactive`.** That class asks for 4 rps and 13,787 output
+  tokens; this box serves roughly 10 tok/s, so the replay runs in deep overload with most
+  requests shed at the admission deadline. A saturated class has a different (and almost
+  certainly wider) null spread, and it still has no measured band.
+- **It is not a band for A100/E4B.** `kb-20260905-1b1a2520` remains the calibration there, and
+  it is far wider (`ttft_p95` 6.52x) — but it was measured from three runs of a different
+  harness, and should be re-measured as a proper null through `replay_local`'s procedure when
+  GPU budget returns.
+- **It is a low-concurrency band**: `active_high_water` was 5 in every run. Nothing here speaks
+  to the spread at the batch widths the project actually targets.
+
+---
+
+**SUPERSEDED 2026-09-19 by `kb-20260919-0a58befd`.** Every run above was measured before the end-of-turn stop fix (`kb-20260918-5906bc13`, PR #41), so the workload was `cold_start/seen` generating 626 tokens instead of the 220 the corpus asks for — 65% of the decode work was a `<turn|>` tail that decodes to `""`. The band it produced is the null spread of a workload that no longer exists and must not gate anything. The band file moved to `knowledge/noise/superseded/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps-e835425.json`, out of `find_band`'s glob, so the live band is the re-measured one. Kept because the reasoning behind `BAND_SIGMAS=2` is still the only calibration the project has: the false positive that justified it happened here.
+
+**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (it is calibrated from this experiment alone; the fix is likely a per-metric multiplier, not a new constant)
+
+**Evidence:** grp-null-coldstart-mps, knowledge/noise/superseded/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps-e835425.json, run-20260917-9d0303be, run-20260917-d8085cf4, run-20260917-16cdf4b2, run-20260917-953f1e80, run-20260917-6a701351, run-20260917-6236f1a5, run-20260917-2dfa8031, run-20260917-35dbe2c6, run-20260917-5401a20b, run-20260917-f6b0feb2, run-20260917-020cb034, run-20260917-95f2f1c0
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"concurrency": [1, 5], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
+
+**Mechanism:** Percentile estimators over 6 successful requests are dominated by which request lands where in the queue; the totals (wall_s, tokens) average that out and the per-step costs (tpot, prefill_p50) never see it, so the panel's spread is concentrated in exactly the tail metrics an A/B most wants to quote.
+
+**Superseded by:** `kb-20260919-0a58befd`
