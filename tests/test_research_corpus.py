@@ -76,6 +76,7 @@ def test_every_prompt_has_a_unique_first_block_except_follow_up_turns():
         assert r.arrival_s > by_session[r.session_id].arrival_s
     assert all(r.sampling["temperature"] == 0.0 for r in trace), "temperature 0 for equivalence"
     assert all(r.expected_output_hash is None for r in trace), "null until a reference run"
+    assert all(r.expected_output_tokens is None for r in trace), "absent until a reference run"
 
 
 # ---------------------------------------------------------------- the rules
@@ -135,9 +136,29 @@ def test_build_is_deterministic_in_the_seed(tmp_path):
 
 def test_trace_round_trip(tmp_path):
     reqs = [TraceRequest(0.0, "s-0", 0, "hello", 16),
-            TraceRequest(1.5, "s-0", 1, "hello\n\nFollow-up: more", 16, expected_output_hash="ab")]
+            TraceRequest(1.5, "s-0", 1, "hello\n\nFollow-up: more", 16, expected_output_hash="ab"),
+            TraceRequest(2.0, "s-1", 0, "bye", 16, expected_output_tokens=9)]
     write_trace(tmp_path / "t.jsonl", reqs)
     assert read_trace(tmp_path / "t.jsonl") == reqs
+
+
+def test_unset_expected_output_tokens_is_not_serialised(tmp_path):
+    """The field must be invisible until something measures it, or writing any trace would move
+    the corpus_version and orphan every panel already measured against it."""
+    plain = TraceRequest(0.0, "s-0", 0, "hello", 16)
+    assert "expected_output_tokens" not in plain.to_dict()
+    assert "expected_output_hash" in plain.to_dict(), "the older field still writes its null"
+    write_trace(tmp_path / "t.jsonl", [plain])
+    line = json.loads((tmp_path / "t.jsonl").read_text())
+    assert set(line) == {"arrival_s", "expected_output_hash", "max_tokens", "prompt",
+                         "sampling", "session_id", "turn_index"}
+    assert read_trace(tmp_path / "t.jsonl")[0].expected_output_tokens is None
+
+
+def test_a_trace_that_carries_the_field_writes_and_reads_it(tmp_path):
+    write_trace(tmp_path / "t.jsonl", [TraceRequest(0.0, "s", 0, "hi", 16,
+                                                    expected_output_tokens=3)])
+    assert json.loads((tmp_path / "t.jsonl").read_text())["expected_output_tokens"] == 3
 
 
 def test_class_slo_judgement():

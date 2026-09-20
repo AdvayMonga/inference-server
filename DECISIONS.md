@@ -3,13 +3,13 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-92 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(24), `modal`(23), `loop`(22), `graph`(19), `scheduler`(19), `compile`(15), `cold-start`(15), `memory`(14), `harness`(14), `validity`(14), `numerics`(10), `backpressure`(8), `batching`(7), `corpus`(7), `gates`(6), `variance`(5), `venue`(5), `simulator`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `telemetry`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
+93 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `modal`(23), `loop`(23), `graph`(19), `scheduler`(19), `cold-start`(16), `compile`(15), `harness`(15), `validity`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `batching`(7), `gates`(6), `simulator`(6), `variance`(5), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `telemetry`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (21): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`
+- **cold_start** (22): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`
 - **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
@@ -20,175 +20,9 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (30)
+## Open (31)
 
 Live — being worked, or waiting on a trigger.
-
-### [2026-09-20] long_context/heldout admits 2 of 40 once its requests actually decode
-*tags: `corpus`, `long_context`, `admission`, `scheduling`, `harness`* · `kb-20260920-bf1ed4f3`
-
-**The `fit-long-heldout-solo` config now sheds 95% of its trace, and the cause is that PR #46
-made the corpus work.**
-
-Measured on both arms of PR #47 (`1fc7855` and `9bf2bd3`) — identical on each, so it is invariant
-to that fix and predates it: **2 of 40 requests admitted, 38 expired.** Before PR #46 all 14
-admitted requests generated zero tokens, so the slot turned over instantly and admission looked
-healthy.
-
-Mechanism: the config is `MAX_BATCH_SIZE=1` with `MAX_QUEUE_WAIT_S=3.0`
-(`scripts/bench/configs_timing_fit.json`). Once prompts are templated and requests genuinely
-generate, a single long-context request holds the only slot for 30-40 s. Everything queued behind
-it ages past the 3 s admission deadline and is shed. The two that survive generate 272 and
-416-432 tokens.
-
-**This is the engine behaving correctly** — a one-slot server with a three-second deadline SHOULD
-shed a queue behind a 35-second occupant. What is wrong is reading the resulting panel as a
-measurement of long-context serving. It is a measurement of admission control.
-
-**For its one documented purpose the config still works.** It exists to contribute width-1 decode
-rows to the timing-model regression, which is what PR #40 used it for, and it contributes two
-real ones again (it generated none at all between PR #46 and PR #47). On its own it is still
-singular, Sxx = 0.
-
-**What it can no longer support:** any latency percentile from this class. `ttft_p95` over two
-surviving requests is not a percentile. Nor can the class say anything about eviction policy or
-KV pressure, which is the reason `corpus/manifest.json` says it exists.
-
-Evidence is the two PR #47 arms; the admitted count is identical in both, which is what rules this fix out as the cause.
-
-**Revisit when:** anyone reads a latency percentile off a long_context/heldout panel: it is computed over ~2 surviving requests and is not a percentile; anyone uses long_context to study eviction or KV pressure, which corpus/manifest.json says it is for: as configured it measures admission control instead; the corpus is rebuilt after the Phase 0 model decision: size this class's deadline and slot count against the decode time its prompts actually take, or it will shed itself again; fit-long-heldout-solo stops contributing its two W=1 decode rows: that is the only job it currently does for the timing fit; MAX_BATCH_SIZE or MAX_QUEUE_WAIT_S changes for this config: re-measure the admitted count before trusting any panel from it
-
-**Evidence:** grp-20260919-e370cf, grp-20260919-46afc4, kb-20260919-5db5aafa
-
-**Regime:** `long_context`
-
-**Valid over:** `{"config": "MAX_BATCH_SIZE=1, MAX_QUEUE_WAIT_S=3.0", "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
-
-**Mechanism:** MAX_BATCH_SIZE=1 with MAX_QUEUE_WAIT_S=3.0: one long-context request holds the only slot for 30-40s of decode, so every queued request ages past the 3s admission deadline and is shed. Masked until PR #46 because untemplated prompts generated zero tokens and the slot turned over instantly.
-
-### [2026-09-20] The shim now chooses thinking=False, and the counterfactual that justified it does not replicate: one early stop in eighteen, because the corpus's budgets are shorter than the answers
-*tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `cold-start`, `simulator`* · `kb-20260919-5db5aafa`
-
-**The shim's `enable_thinking` is now chosen rather than inherited — and the counterfactual that
-justified choosing it does not replicate through the real chat route.** Both halves matter; the
-second is the one worth remembering.
-
-`openai_shim.chat_completions` called `Tokenizer.encode_messages(messages)` positionally and so
-took that method's `thinking=True` default (`kb-20260919-9ea56f98`). It now passes
-`thinking=False` explicitly. `research/chat_template.SHIM_ENABLE_THINKING` follows, so the
-fingerprint keeps describing what the shim actually does and `compare.py` refuses across the
-change. Correctness-fix record `exp-20260919-02ad3c91`; the regression test pins the rendered
-prompt (`<bos><|turn>user\nhi<turn|>\n<|turn>model\n`, no `<|think|>` block) and fails at the
-base sha.
-
-## Measured, one session, both arms on the same box
-
-Engine `1fc7855` (before) vs `9bf2bd3` (after), `google/gemma-4-E2B-it`, `BACKEND=custom-mps`,
-4096 KV blocks, fcfs, Apple M4 Pro, `HF_HUB_OFFLINE=1`, one fresh server process per run, rate
-scale x1, `--prompt-format chat` both arms. `cold_start` at `MAX_BATCH_SIZE=8` / 30 s deadline,
-`long_context/heldout` at `MAX_BATCH_SIZE=1` / 3 s deadline (the `fit-long-heldout-solo` config).
-Prompts shrink by exactly 7 tokens per request, which is the `<|think|>` turn leaving.
-
-| | cold `seen` before | **after** | cold `heldout` before | **after** | long `heldout` before | **after** |
-|---|---|---|---|---|---|---|
-| tokens generated / budget | 626 / 626 | **626 / 626** | 728 / 728 | **714 / 728** | 704 / 704 | **688 / 704** |
-| **requests ending early** | 0 of 8 | **0 of 8** | 0 of 8 | **1 of 8** | 0 of 2 | **1 of 2** |
-| `active_mean` | 2.19 | 2.22 | 2.32 | 2.28 | 1.00 | 1.00 |
-| `active_high_water` | 5 | 5 | 4 | 4 | 1 | 1 |
-| `decode_steps` | 282 | 279 | 310 | 310 | 702 | 687 |
-| `ttft_p95` (ms) | 647.2 | 525.9 | 527.3 | 408.4 | 5035.3 | 4957.1 |
-| `tpot_p50` (ms) | 120.01 | 119.70 | 126.41 | 135.62 | 93.32 | 93.72 |
-| terminal states | 8 ok | 8 ok | 8 ok | 8 ok | 2 ok, 38 expired | 2 ok, 38 expired |
-
-Per request, `cold_start/heldout`: `29, 214, 50, 32, 136, 22, 215, 30` before against
-`29, 214, 50, 32, 136, **8**, 215, 30` after. That single `8 of 22` is the entire behavioural
-difference the corpus can see. `cold_start/seen` is byte-for-byte the same eight budgets on both
-arms.
-
-## The counterfactual did not replicate, and the reason is a route, not a flag
-
-`kb-20260919-9ea56f98` recorded thinking-OFF as keeping 96-98% of token volume **and** restoring
-"genuine early stops (8 of 22, 26 of 29, 27 of 40, 53 of 54)" — four early stops across sixteen
-cold_start requests. Through the actual fixed shim there is **one**: the `8 of 22`. The other
-three (`26 of 29`, `27 of 40`, `53 of 54`) do not appear.
-
-That entry says how its thinking-OFF arm was measured: "by rendering the template client-side and
-posting the rendered text to `/v1/completions`, minus its leading `<bos>`; the engine re-adds
-one." The raw route re-encodes a *string* with `Tokenizer.encode`, which is not guaranteed to
-reproduce `apply_chat_template`'s ids. So that arm varied the route as well as the flag, and the
-extra early stops belong to the route. **The counterfactual was a two-variable measurement
-reported as one**, which is the same class of mistake the entry it lives in was written to catch.
-The present entry is a one-variable measurement: same route, same client, same box, same session,
-only `enable_thinking` moves.
-
-## What actually stops the corpus terminating
-
-The budgets. `cold_start/seen` is `42, 32, 40, 185, 54, 17, 216, 40`; `heldout` is
-`29, 214, 50, 32, 136, 22, 215, 30`. A templated instruct model asked "Why is the sky blue?"
-does not finish in 42 tokens, so the request truncates whether or not a thinking preamble is in
-front of it. Thinking ON made truncation a *certainty*; thinking OFF makes it merely the usual
-case — 17 of 18 admitted requests across all three runs. **The corpus still does not exercise
-early termination**, and the fix does not give it back. Only a corpus whose budgets are generous
-relative to the answers would, which is a `build_corpus.py` job and a new `corpus_version`.
-
-**This therefore does NOT satisfy `kb-20260919-94acfdb8`'s termination-model trigger and does not
-lift its `ttft_p95` suspension.** The hazard that entry names is unchanged in kind: an engine that
-always decodes to the cap agrees with a simulator that always decodes to the cap for reasons that
-have nothing to do with the simulator being right. Before the fix the engine was made degenerate
-by a shim default; after it the corpus is degenerate by construction. A trigger has been appended
-there rather than anything lifted.
-
-## The decode-batch-width leverage survives
-
-This was the thing at risk: `kb-20260919-bfd8f9b0` restored the timing fit's regressor by moving
-the corpus onto the chat route, and a fix that shortened every request could have taken it away.
-It did not.
-
-| arm | decode rows | width range | Sxx |
-|---|---|---|---|
-| cold `seen` before | 8 | 2.02 - 4.50 | 5.57 |
-| **cold `seen` after** | **8** | **2.14 - 4.62** | **5.81** |
-| cold `heldout` before | 8 | 2.03 - 4.00 | 4.28 |
-| **cold `heldout` after** | **8** | **2.02 - 4.00** | **4.71** |
-
-Both splits keep eight decode rows and gain a little spread. Nothing about the refit is blocked
-by this change.
-
-## `long_context/heldout`, re-measured for the first time since PR #46
-
-`kb-20260919-94acfdb8` recorded this config (`fit-long-heldout-solo`, `MAX_BATCH_SIZE=1`, 3 s
-deadline) admitting 14 of 40 requests on the raw route and generating **zero** tokens on every
-one. On the chat route, both arms: **2 admitted, 38 expired**, and the two that run generate 272
-and 416-432 tokens. The admitted count fell because a request that actually decodes holds the
-single batch slot for 30-40 s, so everything behind it ages past the 3 s deadline — that is PR
-#46's doing, not this fix's, and it is the first measurement of it.
-
-For the fit this is a partial restoration: the config contributes **2 rows at width 1.00** again,
-which is exactly the role PR #40 used it for, rather than the zero usable rows
-`kb-20260919-94acfdb8` found. On its own it is still singular (Sxx = 0); it is leverage only in
-combination with the `cold_start` runs.
-
-## Caveats
-
-- Single runs per arm, not replicated. The early-stop and token counts are exact integers and
-  greedy sampling makes them deterministic, so they are not noise; the latency columns are, and
-  `ttft_p95` moving 647 -> 526 ms should not be read as a win.
-- There is still no noise band for the chat route (`kb-20260919-e610af2a`), and the band that
-  exists is a raw-route band.
-- MPS on an Apple M4 Pro, E2B, `corpus_version` `659ea3b61303`. Says nothing about A100/E4B.
-- The box was not quiesced. The two sweeps were serialised; no second MPS workload ran.
-
-**Revisit when:** anyone cites kb-20260919-9ea56f98's thinking-OFF column (612/626, 2 early stops per split): it was measured through /v1/completions with a client-rendered prompt, so it varied the route as well as the flag. The one-variable number is here: 626/626 and 714/728, one early stop in sixteen; the simulator is given a termination model: this fix does NOT provide one and does NOT lift kb-20260919-94acfdb8's ttft_p95 suspension. The corpus still truncates 17 of 18 admitted requests, now because its budgets are small rather than because the shim switched modes; a new corpus version is cut: give cold_start budgets that a templated E2B answer actually fits inside, or the class can never exercise early termination whatever the shim does; the model changes (Phase 0): both the seven-token cost of the <|think|> turn and the answer lengths move, and every number here with them; the timing model is refitted: the decode-width leverage survived this fix (8 rows, 2.02-4.62), and long_context/heldout at MAX_BATCH_SIZE=1 again contributes its two W=1 rows; anyone wants a thinking mode on the chat route: it is a deliberate False at the call site, not an oversight. Reintroduce it as a request field with a default of False, never as an inherited default
-
-**Evidence:** exp-20260919-02ad3c91, grp-20260919-e370cf, grp-20260919-46afc4, run-20260919-bc3ac0f7, run-20260919-70857a9a, run-20260919-b8acf11c, run-20260919-096f5055, run-20260919-a2657edd, run-20260919-b744c161
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"concurrency": [1, 5], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
-
-**Mechanism:** The shim now passes thinking=False, so the prompt loses the seven-token <|think|> system turn and the model stops opening with a preamble. That removes the preamble's guarantee of hitting max_tokens, but it does not create early termination, because the corpus's budgets (17-216 tokens, median 40 on cold_start) are shorter than a templated instruct model's answer to its own prompts. Only one request in eighteen has a budget its answer fits inside.
-
-**Supersedes:** `kb-20260919-9ea56f98`
 
 ### [2026-09-20] Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 *tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `telemetry`, `simulator`, `corpus`* · `kb-20260919-94acfdb8`
@@ -369,7 +203,7 @@ fails is suspended. So, on MPS/E2B, as of this entry:
   the simulator sheds 6 of 8, so its p95 is still taken over different survivor sets on the two
   sides. That was already true in PR #40.
 
-**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19 HAZARD, not progress: under the chat route's inherited enable_thinking=True every request runs to max_tokens (kb-20260919-9ea56f98), so the missing termination model stops showing up. That is the ENGINE becoming degenerate, not the simulator being fixed. Re-running the fit or rank check in this state proves only that two systems share one defect. This does NOT satisfy the termination-model trigger and must NOT lift this suspension.; 2026-09-19, AFTER the shim fix (kb-20260919-5db5aafa): enable_thinking=false is live and the engine is no longer degenerate by shim default — but the corpus still truncates 17 of 18 admitted cold_start requests, now because its max_tokens budgets (17-216) are shorter than a templated E2B answer. So the termination-model trigger above is STILL NOT SATISFIED and this suspension is NOT lifted. Satisfying it needs the simulator to model termination and a fresh rank check, or a corpus whose budgets leave room to stop. Also re-measured: long_context/heldout at MAX_BATCH_SIZE=1 / 3s now admits 2 of 40 (not 14) on the chat route, and the two that run DO generate (272 and 416 tokens), so the config contributes its two W=1 decode rows again.
+**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19 HAZARD, not progress: under the chat route's inherited enable_thinking=True every request runs to max_tokens (kb-20260919-9ea56f98), so the missing termination model stops showing up. That is the ENGINE becoming degenerate, not the simulator being fixed. Re-running the fit or rank check in this state proves only that two systems share one defect. This does NOT satisfy the termination-model trigger and must NOT lift this suspension.; 2026-09-19, AFTER the shim fix (kb-20260919-5db5aafa): enable_thinking=false is live and the engine is no longer degenerate by shim default — but the corpus still truncates 17 of 18 admitted cold_start requests, now because its max_tokens budgets (17-216) are shorter than a templated E2B answer. So the termination-model trigger above is STILL NOT SATISFIED and this suspension is NOT lifted. Satisfying it needs the simulator to model termination and a fresh rank check, or a corpus whose budgets leave room to stop. Also re-measured: long_context/heldout at MAX_BATCH_SIZE=1 / 3s now admits 2 of 40 (not 14) on the chat route, and the two that run DO generate (272 and 416 tokens), so the config contributes its two W=1 decode rows again.; 2026-09-20, the termination SEAM landed (kb-20260920-54976f51) and this suspension STANDS. simulate() now decodes to min(max_tokens, expected_output_tokens), but no committed trace carries that field, so simulator output over the whole corpus is byte-identical to this entry's measurements (pinned as a golden in tests/test_research_simulator.py). Option (a) of 'what would have to change' is half done: the simulator can consume an observed length; the corpus does not record one. Re-running the rank check in this state would measure nothing. Lifting this still needs a corpus whose budgets leave room to stop, a reference run to populate expected_output_tokens, and a PASSING rank check in a SUPERSEDING entry.
 
 **Evidence:** grp-20260919-759868, grp-20260919-958ec6, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, run-20260919-cf74cdb6, run-20260919-5f9579fd, run-20260919-e134030f, run-20260919-446f0ca7, run-20260919-29bd8871, run-20260919-feec3826, run-20260919-45a592ba, run-20260919-f6108c0a, run-20260919-4155e1d9, run-20260919-1f26a4da, run-20260919-b940da1a, run-20260919-678d77c4
 
@@ -382,6 +216,267 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 **Mechanism:** The simulator decodes every request to trace.max_tokens and has no early-termination model. Until PR #41 the engine did the same thing, so the two agreed by sharing one bug; with the engine stopping at <turn|> the simulator now charges 626 tokens of decode where the engine does 220, holding phantom rows in narrow batches and inventing queueing that hardware does not have.
 
 **Supersedes:** `kb-20260918-9fc68282`
+
+### [2026-09-20] The simulator has a termination seam but no data to fill it: expected_output_tokens is wired end to end and None everywhere, and the ttft_p95 suspension stands
+*tags: `simulator`, `corpus`, `loop`, `harness`, `validity`, `decode`, `cold-start`* · `kb-20260920-54976f51`
+
+**The simulator can now terminate a request early; nothing tells it to yet, and nothing here
+lifts `kb-20260919-94acfdb8`'s `ttft_p95` suspension.** This entry exists to record the seam and,
+more importantly, the recipe for populating it — it is the handoff to whoever rebuilds the corpus
+after Phase 0.
+
+## What landed
+
+`TraceRequest` gains `expected_output_tokens: int | None = None`, alongside the
+`expected_output_hash` it already carried. `simulator.decode_limit(t)` returns `t.max_tokens` when
+the field is absent and `max(1, min(t.max_tokens, t.expected_output_tokens))` when it is present;
+`simulate()` decodes to that limit instead of to `max_tokens`.
+
+Three things it deliberately does NOT do:
+
+- **No fitted length distribution, no sampling, no pluggable length model.** There is nothing to
+  fit. `kb-20260919-5db5aafa` measured 17 of 18 admitted `cold_start` requests truncating against
+  their budgets, so observed output length on this corpus IS the budget. A distribution fitted
+  from it would be a fit to an artifact, and the resulting agreement with hardware would be the
+  fourth instance of this project's recurring failure — two systems agreeing because they share a
+  defect.
+- **It does not touch the KV gate.** Admission still reserves `prompt_tokens + max_tokens`, not
+  the expected length, because `scheduler._admit_pending` reserves the budget a request MIGHT
+  need and `_evict_row` releases that same amount however the request ended. A simulator that
+  reserved the expected length would admit more than the engine can and could bless a policy the
+  engine cannot run. Early termination frees the slot and the full reservation SOONER; it never
+  makes the reservation smaller.
+- **It does not change any stored panel.** `TraceRequest.to_dict()` omits the field when unset, so
+  a trace written without it is byte-for-byte what it was before the field existed and
+  `corpus_version` `659ea3b61303` does not move. Proved twice: `build_corpus.py` still reproduces
+  the committed corpus hash for hash, and a golden of `{rows, summary}` sha256 over all six
+  committed (class, split) pairs at `max_batch_size` 2 and 8, captured at `3aed53b` BEFORE the
+  field existed, is pinned in `tests/test_research_simulator.py` and matches on all twelve.
+
+## What it would take to populate the field, concretely
+
+The data already exists on every replay. `replay_trace.Row.server_out_tokens` is the engine's own
+completion count from the usage chunk — exactly this quantity — and it is already written to
+`runs/<run_id>.csv`. What is missing is a corpus in which that number is ever less than
+`max_tokens`. So, in order:
+
+1. **Cut a corpus whose `max_tokens` budgets exceed a templated answer's length.** Today
+   `cold_start/seen` is `42, 32, 40, 185, 54, 17, 216, 40`; a templated E2B instruct answer to
+   "Why is the sky blue?" does not finish in 42 tokens. This is a `build_corpus.py` change to
+   `prompt_bank.MAX_TOKENS_RANGE` and a NEW `corpus_version`, never an edit
+   (`kb-20260919-5db5aafa`'s third trigger says the same thing).
+2. **Replay it once as a reference run** at temperature 0 on the chosen model, through the chat
+   route, and write each request's `server_out_tokens` back into its trace line as
+   `expected_output_tokens`. That write is itself another new `corpus_version`.
+3. **Re-run the fit and the rank check** (`fit_timing_from_runs.py <group> --validate`) and file
+   the result. Only a passing rank check on a populated corpus can SUPERSEDE
+   `kb-20260919-94acfdb8` and lift the `ttft_p95` suspension.
+
+## The cost of step 2, which is not free and should be decided, not assumed
+
+`expected_output_tokens` is a **property of one model on one engine sha**, not of the workload.
+`build_corpus.py`'s docstring already refused to store turn 0's assistant reply for exactly this
+reason — "cannot store without tying the trace to one model's outputs" — and putting a length in
+the trace ties it the same way, just more cheaply. Two ways out, and this entry does not pick one
+because Phase 0 has not picked a model:
+
+- **(a) In the trace, as built here.** Simple, hashes into `corpus_version`, and a model change
+  correctly invalidates the corpus rather than silently producing wrong lengths. The cost is that
+  the corpus is no longer model-neutral, and a second model needs a second corpus.
+- **(b) In a side file** keyed by `(corpus_version, model, engine_sha)`, loaded next to the trace.
+  Keeps the corpus model-neutral and lets several models share one workload, at the cost of a
+  second artifact with its own staleness rule and a second thing `compare.py` must refuse across.
+
+(a) is cheaper and is what the seam supports. (b) is what a multi-model Phase 0 would want. The
+seam does not foreclose (b): a loader for the side file would set the same field on the same
+dataclass, and `decode_limit` would not change.
+
+## Second-order, and worth knowing before the rank check is re-run
+
+Populating the field will fix the step COUNT and the batch WIDTH, which is the mechanism
+`kb-20260919-94acfdb8` blames for the 12.7-16.4x `ttft_p95` errors at `MAX_BATCH_SIZE=2`. It will
+not fix the per-step COST. The fitted `TimingModel`'s `total_kv_tokens` coefficient is 0 by
+construction — `fit_timing_from_runs.py` says so: the regressor is not in the telemetry row — so
+the simulator's decode cost is `a + b*batch_size` and is blind to KV length. The known ~1.1-2.2x
+per-step overcharge at width 1 (PR #40, unchanged) is therefore untouched by this work. Expect
+`ttft_p95` to improve a lot and `tpot_p50` to improve little or not at all. If a re-run shows
+`tpot_p50` jumping too, suspect the measurement, not the fix.
+
+**Revisit when:** a new corpus version is cut with budgets that a templated answer fits inside: replay it once at temperature 0 and write server_out_tokens into expected_output_tokens, then re-run fit_timing_from_runs.py --validate. That is the only route to superseding kb-20260919-94acfdb8; anyone proposes fitting a length DISTRIBUTION instead: today's observed lengths ARE the budgets (kb-20260919-5db5aafa, 17 of 18 truncated), so such a fit fits an artifact and any agreement it buys is two systems sharing one defect; Phase 0 picks a model: decide (a) length in the trace or (b) a side file keyed by (corpus_version, model, engine_sha). The seam supports both; (a) is what is built; anyone makes the simulator's KV reservation use the expected length instead of max_tokens: that is wrong, the engine reserves the budget (scheduler._admit_pending) and releases it in full however the request ended; the rank check is re-run on a populated corpus: expect ttft_p95 to move and tpot_p50 not to, because the TimingModel's total_kv_tokens coefficient is 0 by construction. tpot_p50 improving too is a reason to distrust the measurement; the simulator gains preemption, chunked prefill or cache-held blocks (the v1 exclusions): each interacts with when a row leaves the batch, so re-check this seam then
+
+**Evidence:** tests/test_research_simulator.py::PRE_TERMINATION_GOLDEN, src/inference_server/research/simulator.py::decode_limit, src/inference_server/research/corpus.py::TraceRequest
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it"}`
+
+**Mechanism:** simulate() decodes to decode_limit(), which is max_tokens unless the trace carries expected_output_tokens; no committed trace carries it, so behaviour is unchanged and the simulator still charges decode work for requests the engine has finished.
+
+### [2026-09-20] long_context/heldout admits 2 of 40 once its requests actually decode
+*tags: `corpus`, `long_context`, `admission`, `scheduling`, `harness`* · `kb-20260920-bf1ed4f3`
+
+**The `fit-long-heldout-solo` config now sheds 95% of its trace, and the cause is that PR #46
+made the corpus work.**
+
+Measured on both arms of PR #47 (`1fc7855` and `9bf2bd3`) — identical on each, so it is invariant
+to that fix and predates it: **2 of 40 requests admitted, 38 expired.** Before PR #46 all 14
+admitted requests generated zero tokens, so the slot turned over instantly and admission looked
+healthy.
+
+Mechanism: the config is `MAX_BATCH_SIZE=1` with `MAX_QUEUE_WAIT_S=3.0`
+(`scripts/bench/configs_timing_fit.json`). Once prompts are templated and requests genuinely
+generate, a single long-context request holds the only slot for 30-40 s. Everything queued behind
+it ages past the 3 s admission deadline and is shed. The two that survive generate 272 and
+416-432 tokens.
+
+**This is the engine behaving correctly** — a one-slot server with a three-second deadline SHOULD
+shed a queue behind a 35-second occupant. What is wrong is reading the resulting panel as a
+measurement of long-context serving. It is a measurement of admission control.
+
+**For its one documented purpose the config still works.** It exists to contribute width-1 decode
+rows to the timing-model regression, which is what PR #40 used it for, and it contributes two
+real ones again (it generated none at all between PR #46 and PR #47). On its own it is still
+singular, Sxx = 0.
+
+**What it can no longer support:** any latency percentile from this class. `ttft_p95` over two
+surviving requests is not a percentile. Nor can the class say anything about eviction policy or
+KV pressure, which is the reason `corpus/manifest.json` says it exists.
+
+Evidence is the two PR #47 arms; the admitted count is identical in both, which is what rules this fix out as the cause.
+
+**Revisit when:** anyone reads a latency percentile off a long_context/heldout panel: it is computed over ~2 surviving requests and is not a percentile; anyone uses long_context to study eviction or KV pressure, which corpus/manifest.json says it is for: as configured it measures admission control instead; the corpus is rebuilt after the Phase 0 model decision: size this class's deadline and slot count against the decode time its prompts actually take, or it will shed itself again; fit-long-heldout-solo stops contributing its two W=1 decode rows: that is the only job it currently does for the timing fit; MAX_BATCH_SIZE or MAX_QUEUE_WAIT_S changes for this config: re-measure the admitted count before trusting any panel from it
+
+**Evidence:** grp-20260919-e370cf, grp-20260919-46afc4, kb-20260919-5db5aafa
+
+**Regime:** `long_context`
+
+**Valid over:** `{"config": "MAX_BATCH_SIZE=1, MAX_QUEUE_WAIT_S=3.0", "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
+
+**Mechanism:** MAX_BATCH_SIZE=1 with MAX_QUEUE_WAIT_S=3.0: one long-context request holds the only slot for 30-40s of decode, so every queued request ages past the 3s admission deadline and is shed. Masked until PR #46 because untemplated prompts generated zero tokens and the slot turned over instantly.
+
+### [2026-09-20] The shim now chooses thinking=False, and the counterfactual that justified it does not replicate: one early stop in eighteen, because the corpus's budgets are shorter than the answers
+*tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `cold-start`, `simulator`* · `kb-20260919-5db5aafa`
+
+**The shim's `enable_thinking` is now chosen rather than inherited — and the counterfactual that
+justified choosing it does not replicate through the real chat route.** Both halves matter; the
+second is the one worth remembering.
+
+`openai_shim.chat_completions` called `Tokenizer.encode_messages(messages)` positionally and so
+took that method's `thinking=True` default (`kb-20260919-9ea56f98`). It now passes
+`thinking=False` explicitly. `research/chat_template.SHIM_ENABLE_THINKING` follows, so the
+fingerprint keeps describing what the shim actually does and `compare.py` refuses across the
+change. Correctness-fix record `exp-20260919-02ad3c91`; the regression test pins the rendered
+prompt (`<bos><|turn>user\nhi<turn|>\n<|turn>model\n`, no `<|think|>` block) and fails at the
+base sha.
+
+## Measured, one session, both arms on the same box
+
+Engine `1fc7855` (before) vs `9bf2bd3` (after), `google/gemma-4-E2B-it`, `BACKEND=custom-mps`,
+4096 KV blocks, fcfs, Apple M4 Pro, `HF_HUB_OFFLINE=1`, one fresh server process per run, rate
+scale x1, `--prompt-format chat` both arms. `cold_start` at `MAX_BATCH_SIZE=8` / 30 s deadline,
+`long_context/heldout` at `MAX_BATCH_SIZE=1` / 3 s deadline (the `fit-long-heldout-solo` config).
+Prompts shrink by exactly 7 tokens per request, which is the `<|think|>` turn leaving.
+
+| | cold `seen` before | **after** | cold `heldout` before | **after** | long `heldout` before | **after** |
+|---|---|---|---|---|---|---|
+| tokens generated / budget | 626 / 626 | **626 / 626** | 728 / 728 | **714 / 728** | 704 / 704 | **688 / 704** |
+| **requests ending early** | 0 of 8 | **0 of 8** | 0 of 8 | **1 of 8** | 0 of 2 | **1 of 2** |
+| `active_mean` | 2.19 | 2.22 | 2.32 | 2.28 | 1.00 | 1.00 |
+| `active_high_water` | 5 | 5 | 4 | 4 | 1 | 1 |
+| `decode_steps` | 282 | 279 | 310 | 310 | 702 | 687 |
+| `ttft_p95` (ms) | 647.2 | 525.9 | 527.3 | 408.4 | 5035.3 | 4957.1 |
+| `tpot_p50` (ms) | 120.01 | 119.70 | 126.41 | 135.62 | 93.32 | 93.72 |
+| terminal states | 8 ok | 8 ok | 8 ok | 8 ok | 2 ok, 38 expired | 2 ok, 38 expired |
+
+Per request, `cold_start/heldout`: `29, 214, 50, 32, 136, 22, 215, 30` before against
+`29, 214, 50, 32, 136, **8**, 215, 30` after. That single `8 of 22` is the entire behavioural
+difference the corpus can see. `cold_start/seen` is byte-for-byte the same eight budgets on both
+arms.
+
+## The counterfactual did not replicate, and the reason is a route, not a flag
+
+`kb-20260919-9ea56f98` recorded thinking-OFF as keeping 96-98% of token volume **and** restoring
+"genuine early stops (8 of 22, 26 of 29, 27 of 40, 53 of 54)" — four early stops across sixteen
+cold_start requests. Through the actual fixed shim there is **one**: the `8 of 22`. The other
+three (`26 of 29`, `27 of 40`, `53 of 54`) do not appear.
+
+That entry says how its thinking-OFF arm was measured: "by rendering the template client-side and
+posting the rendered text to `/v1/completions`, minus its leading `<bos>`; the engine re-adds
+one." The raw route re-encodes a *string* with `Tokenizer.encode`, which is not guaranteed to
+reproduce `apply_chat_template`'s ids. So that arm varied the route as well as the flag, and the
+extra early stops belong to the route. **The counterfactual was a two-variable measurement
+reported as one**, which is the same class of mistake the entry it lives in was written to catch.
+The present entry is a one-variable measurement: same route, same client, same box, same session,
+only `enable_thinking` moves.
+
+## What actually stops the corpus terminating
+
+The budgets. `cold_start/seen` is `42, 32, 40, 185, 54, 17, 216, 40`; `heldout` is
+`29, 214, 50, 32, 136, 22, 215, 30`. A templated instruct model asked "Why is the sky blue?"
+does not finish in 42 tokens, so the request truncates whether or not a thinking preamble is in
+front of it. Thinking ON made truncation a *certainty*; thinking OFF makes it merely the usual
+case — 17 of 18 admitted requests across all three runs. **The corpus still does not exercise
+early termination**, and the fix does not give it back. Only a corpus whose budgets are generous
+relative to the answers would, which is a `build_corpus.py` job and a new `corpus_version`.
+
+**This therefore does NOT satisfy `kb-20260919-94acfdb8`'s termination-model trigger and does not
+lift its `ttft_p95` suspension.** The hazard that entry names is unchanged in kind: an engine that
+always decodes to the cap agrees with a simulator that always decodes to the cap for reasons that
+have nothing to do with the simulator being right. Before the fix the engine was made degenerate
+by a shim default; after it the corpus is degenerate by construction. A trigger has been appended
+there rather than anything lifted.
+
+## The decode-batch-width leverage survives
+
+This was the thing at risk: `kb-20260919-bfd8f9b0` restored the timing fit's regressor by moving
+the corpus onto the chat route, and a fix that shortened every request could have taken it away.
+It did not.
+
+| arm | decode rows | width range | Sxx |
+|---|---|---|---|
+| cold `seen` before | 8 | 2.02 - 4.50 | 5.57 |
+| **cold `seen` after** | **8** | **2.14 - 4.62** | **5.81** |
+| cold `heldout` before | 8 | 2.03 - 4.00 | 4.28 |
+| **cold `heldout` after** | **8** | **2.02 - 4.00** | **4.71** |
+
+Both splits keep eight decode rows and gain a little spread. Nothing about the refit is blocked
+by this change.
+
+## `long_context/heldout`, re-measured for the first time since PR #46
+
+`kb-20260919-94acfdb8` recorded this config (`fit-long-heldout-solo`, `MAX_BATCH_SIZE=1`, 3 s
+deadline) admitting 14 of 40 requests on the raw route and generating **zero** tokens on every
+one. On the chat route, both arms: **2 admitted, 38 expired**, and the two that run generate 272
+and 416-432 tokens. The admitted count fell because a request that actually decodes holds the
+single batch slot for 30-40 s, so everything behind it ages past the 3 s deadline — that is PR
+#46's doing, not this fix's, and it is the first measurement of it.
+
+For the fit this is a partial restoration: the config contributes **2 rows at width 1.00** again,
+which is exactly the role PR #40 used it for, rather than the zero usable rows
+`kb-20260919-94acfdb8` found. On its own it is still singular (Sxx = 0); it is leverage only in
+combination with the `cold_start` runs.
+
+## Caveats
+
+- Single runs per arm, not replicated. The early-stop and token counts are exact integers and
+  greedy sampling makes them deterministic, so they are not noise; the latency columns are, and
+  `ttft_p95` moving 647 -> 526 ms should not be read as a win.
+- There is still no noise band for the chat route (`kb-20260919-e610af2a`), and the band that
+  exists is a raw-route band.
+- MPS on an Apple M4 Pro, E2B, `corpus_version` `659ea3b61303`. Says nothing about A100/E4B.
+- The box was not quiesced. The two sweeps were serialised; no second MPS workload ran.
+
+**Revisit when:** anyone cites kb-20260919-9ea56f98's thinking-OFF column (612/626, 2 early stops per split): it was measured through /v1/completions with a client-rendered prompt, so it varied the route as well as the flag. The one-variable number is here: 626/626 and 714/728, one early stop in sixteen; the simulator is given a termination model: this fix does NOT provide one and does NOT lift kb-20260919-94acfdb8's ttft_p95 suspension. The corpus still truncates 17 of 18 admitted requests, now because its budgets are small rather than because the shim switched modes; a new corpus version is cut: give cold_start budgets that a templated E2B answer actually fits inside, or the class can never exercise early termination whatever the shim does; the model changes (Phase 0): both the seven-token cost of the <|think|> turn and the answer lengths move, and every number here with them; the timing model is refitted: the decode-width leverage survived this fix (8 rows, 2.02-4.62), and long_context/heldout at MAX_BATCH_SIZE=1 again contributes its two W=1 rows; anyone wants a thinking mode on the chat route: it is a deliberate False at the call site, not an oversight. Reintroduce it as a request field with a default of False, never as an inherited default
+
+**Evidence:** exp-20260919-02ad3c91, grp-20260919-e370cf, grp-20260919-46afc4, run-20260919-bc3ac0f7, run-20260919-70857a9a, run-20260919-b8acf11c, run-20260919-096f5055, run-20260919-a2657edd, run-20260919-b744c161
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"concurrency": [1, 5], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
+
+**Mechanism:** The shim now passes thinking=False, so the prompt loses the seven-token <|think|> system turn and the model stops opening with a preamble. That removes the preamble's guarantee of hitting max_tokens, but it does not create early termination, because the corpus's budgets (17-216 tokens, median 40 on cold_start) are shorter than a templated instruct model's answer to its own prompts. Only one request in eighteen has a budget its answer fits inside.
+
+**Supersedes:** `kb-20260919-9ea56f98`
 
 ### [2026-09-20] The cold_start noise band is now a raw-route band only: the default workload has no band, and the gate falls back to the t-test alone
 *tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `gates`, `cold-start`* · `kb-20260919-e610af2a`
