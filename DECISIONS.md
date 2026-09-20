@@ -284,9 +284,12 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 ## Caveats carried
 
 - Single runs per config, not replicated arms — same limitation as PR #35 and PR #40.
-- The nine hardware panels and the four fit runs were measured at engine `03f600e`; `origin/main`
-  moved to `89ed4c9` during this work, but that range touches only `knowledge/`, `benchmarks/`,
-  `pyproject.toml` and `scripts/`, no engine file, so the arms are not stale.
+- The nine hardware panels and the four fit runs were measured at engine `03f600e`. `origin/main`
+  moved twice during this work, to `89ed4c9` (PR #42, knowledge and scripts only) and then to
+  `52a7009` (PR #43). PR #43 does touch the engine — `backends/base.py::stop_token_ids` — but it
+  only adds a warning when the generation config could not be read; the returned stop set is
+  unchanged, and it merged with a no-claim record. The runs here were served with the correct
+  set: they stop at `<turn|>`, which is what generating 220 tokens of a 626-token budget means.
 - MPS on an Apple M4 Pro, E2B. Says nothing about A100/E4B.
 - The box was not quiesced (VS Code and language servers running). No second MPS workload ran
   during any sweep; all three sweeps were serialised for that reason.
