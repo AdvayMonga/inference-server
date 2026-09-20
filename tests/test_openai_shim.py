@@ -56,11 +56,21 @@ class FakeScheduler:
         req.token_queue.put_nowait(None)
 
 
-def _app(scheduler):
+class TemplatingTokenizer(FakeTokenizer):
+    """Renders gemma-4's shape, so a test can read the prompt the model would actually see."""
+    def encode_messages(self, messages, thinking=True):
+        if not messages:
+            raise ValueError("No messages provided")
+        head = "<bos>" + ("<|turn>system\n<|think|>\n<turn|>\n" if thinking else "")
+        turns = "".join(f"<|turn>{m['role']}\n{m['content']}<turn|>\n" for m in messages)
+        return self.encode(head + turns + "<|turn>model\n")
+
+
+def _app(scheduler, tokenizer=None):
     app = FastAPI()
     app.include_router(router)
     app.state.scheduler = scheduler
-    app.state.tokenizer = FakeTokenizer()
+    app.state.tokenizer = tokenizer or FakeTokenizer()
     app.state.model_name = "test-model"
     return app
 
@@ -159,6 +169,21 @@ def test_streaming_chat_completion():
     assert [p["choices"][0]["delta"]["content"] for p in parsed[1:4]] == ["a", "b", "c"]
     assert parsed[4]["choices"][0]["finish_reason"] == "stop"
     assert parsed[5]["usage"]["completion_tokens"] == 3
+
+
+def test_chat_route_renders_a_plain_user_turn_and_no_thinking_block():
+    """The rendered prompt, pinned. The route used to call encode_messages positionally and
+    inherit its thinking=True default, so the model saw a <|think|> system turn nobody asked
+    for and answered with a preamble that ran every request to max_tokens (kb-20260919-9ea56f98).
+    """
+    sched = FakeScheduler()
+    client = TestClient(_app(sched, TemplatingTokenizer()))
+    r = client.post("/v1/chat/completions", json={
+        "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5})
+    assert r.status_code == 200
+    rendered = "".join(chr(t) for t in sched.seen[0].token_ids)
+    assert "<|think|>" not in rendered
+    assert rendered == "<bos><|turn>user\nhi<turn|>\n<|turn>model\n"
 
 
 def test_chat_empty_messages_400():
