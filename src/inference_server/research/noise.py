@@ -17,11 +17,13 @@ simulator's fitted coefficients — and consulted by `compare.significance_repli
 The band is a PROPERTY OF A HARNESS ON ONE MACHINE FOR ONE WORKLOAD CLASS. A band measured on
 cold_start says nothing about steady_interactive, and one measured on an M4 Pro says nothing
 about an A100. `find_band` therefore matches on all of (harness, workload_class, model,
-hardware, prompt_format) and refuses to fall back to a near-miss: an absent band means the gate
-behaves exactly as it did before, which is the safe direction. `prompt_format` joined that key on
-2026-09-19: replaying a trace through the chat route instead of the raw one changes what the
-model generates by 3x without changing a byte of the trace, so a raw-route band does not describe
-a chat-route run and must not gate one.
+hardware, prompt_format, panel_version) and refuses to fall back to a near-miss: an absent band
+means the gate behaves exactly as it did before, which is the safe direction. `prompt_format`
+joined that key on 2026-09-19: replaying a trace through the chat route instead of the raw one
+changes what the model generates by 3x without changing a byte of the trace, so a raw-route band
+does not describe a chat-route run and must not gate one. `panel_version` joined it on
+2026-09-20, closing the same hole one level up: a band is a spread of particular METRICS, so
+when the definition of one of them moves the band stops describing anything measurable today.
 
 Stdlib only — the loop CI lane installs nothing else.
 """
@@ -29,12 +31,13 @@ Stdlib only — the loop CI lane installs nothing else.
 from __future__ import annotations
 
 import json
+import math
 import statistics
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from inference_server.research.schemas import REPO_ROOT, Vitals
+from inference_server.research.schemas import PANEL_VERSION, REPO_ROOT, Vitals
 
 BAND_DIR = REPO_ROOT / "knowledge" / "noise"
 
@@ -98,6 +101,13 @@ class NoiseBand:
     # and the right reason for it NOT to gate a chat-route run, whose workload is a different one
     # (220 generated tokens vs 626 on cold_start/seen; kb-20260919-6ef4e6bf).
     prompt_format: str = "raw"
+    # What the panel's numbers MEANT when the null was measured. A band is a statement about the
+    # spread of particular metrics, so a definition change to any of them retires it — under
+    # version 1 `ttft_p95` was taken over survivors, and a run that sheds now reports a number
+    # the old null never contained. 1 is the right default for every band stored before this
+    # field existed, and `find_band` defaults to the CURRENT version, so an old band simply stops
+    # matching instead of silently gating a run it does not describe.
+    panel_version: int = 1
     corpus_version: str | None = None
     engine_sha: str = ""
     run_group: str = ""
@@ -110,11 +120,11 @@ class NoiseBand:
 
     def key(self) -> str:
         return (f"{self.harness}|{self.workload_class}|{self.model}|{self.hardware}"
-                f"|{self.prompt_format}")
+                f"|{self.prompt_format}|v{self.panel_version}")
 
     def identity(self) -> str:
         return (f"{self.harness}/{self.workload_class} on {self.hardware} with {self.model} "
-                f"({self.prompt_format} prompts)"
+                f"({self.prompt_format} prompts, panel v{self.panel_version})"
                 f"{f', corpus {self.corpus_version[:12]}' if self.corpus_version else ''}")
 
     def inside(self, metric: str, pct: float, sigmas: float = BAND_SIGMAS) -> bool | None:
@@ -204,6 +214,8 @@ def band_from_arms(
         vals = [getattr(p, m, None) for p in ordered]
         if any(not isinstance(v, (int, float)) or isinstance(v, bool) for v in vals):
             continue                       # absent from some run: no band, rather than a wrong one
+        if any(not math.isfinite(v) for v in vals):
+            continue                       # a null run that did not serve measures no spread
         b = metric_band(vals)
         if b is not None:
             out[m] = b
@@ -213,6 +225,7 @@ def band_from_arms(
         model=str(hc.get("model") or ""),
         hardware=str((ref.validity.device_state or {}).get("gpu_name") or hc.get("hardware") or ""),
         prompt_format=str(hc.get("prompt_format") or "raw"),
+        panel_version=ref.panel_version,
         corpus_version=ref.validity.corpus_version,
         engine_sha=ref.validity.engine_sha,
         run_group=ref.validity.run_group,
@@ -240,6 +253,7 @@ def find_band(
     model: str,
     hardware: str,
     prompt_format: str = "raw",
+    panel_version: int = PANEL_VERSION,
     corpus_version: str | None = None,
     directory: Path = BAND_DIR,
 ) -> NoiseBand | None:
@@ -251,8 +265,9 @@ def find_band(
     effects anyone wants to claim.
     """
     for b in load_bands(directory):
-        if (b.harness, b.workload_class, b.model, b.hardware, b.prompt_format) != \
-                (harness, workload_class, model, hardware, prompt_format):
+        if (b.harness, b.workload_class, b.model, b.hardware, b.prompt_format,
+                b.panel_version) != \
+                (harness, workload_class, model, hardware, prompt_format, panel_version):
             continue
         if corpus_version and b.corpus_version and corpus_version != b.corpus_version:
             continue
@@ -269,6 +284,7 @@ def band_for(panel: Vitals, directory: Path = BAND_DIR) -> NoiseBand | None:
         model=str(hc.get("model") or ""),
         hardware=str((panel.validity.device_state or {}).get("gpu_name") or hc.get("hardware") or ""),
         prompt_format=str(hc.get("prompt_format") or "raw"),
+        panel_version=panel.panel_version,
         corpus_version=panel.validity.corpus_version,
         directory=directory,
     )

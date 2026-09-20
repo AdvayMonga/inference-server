@@ -45,7 +45,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bench_serving import _pct, one_request  # noqa: E402
+from bench_serving import one_request  # noqa: E402
 from inference_server.research import chat_template as CT  # noqa: E402
 from inference_server.research import harness as H  # noqa: E402
 from inference_server.research.corpus import (  # noqa: E402
@@ -87,24 +87,52 @@ class Row:
     server_out_tokens: int | None = None
 
 
+def _generated(row: Row) -> int:
+    """Tokens the ENGINE produced. The client's count is short by every token decoding to ""."""
+    return row.server_out_tokens if row.server_out_tokens is not None else row.out_tokens
+
+
+def _invisible(row: Row) -> int:
+    """Generated tokens this row's client never saw. Disclosure only — position is unknowable."""
+    if row.server_out_tokens is None:
+        return 0
+    return max(0, row.server_out_tokens - row.out_tokens)
+
+
 @dataclass
 class ReplayResult:
     rows: list[Row] = field(default_factory=list)
     wall_s: float = 0.0          # first arrival -> last completion, drain included
 
     def summary(self, cls: WorkloadClass) -> dict[str, Any]:
+        """The panel's numbers. TTFT percentiles are taken over ATTEMPTS, not over survivors.
+
+        A shed, expired or timed-out request is a first token that never arrived, so it ranks
+        worst instead of leaving the sample — otherwise a config improves its own p95 by refusing
+        the requests it would have been slowest on. `no_visible_tokens` rows are the one
+        exception: the server answered and the client could not see it, which is an instrument
+        failure, so they leave the denominator rather than counting as a shed.
+        """
         ok = [r for r in self.rows if r.error is None]
-        ttfts = sorted(r.ttft_ms for r in ok)
-        tpots = sorted(r.tpot_ms for r in ok if r.tpot_ms)
+        blind = [r for r in self.rows if r.error == "no_visible_tokens"]
+        n_attempted = len(self.rows) - len(blind)
+        ttfts = [r.ttft_ms for r in ok]
+        tpots = [r.tpot_ms for r in ok if r.tpot_ms]
         window = self.wall_s or 1e-9
-        p95_ttft = _pct(ttfts, 0.95)
-        p95_tpot = _pct(tpots, 0.95) if tpots else None
-        tok_s = sum(r.out_tokens for r in ok) / window
+        p95_ttft = H.pct_over_attempts(ttfts, 0.95, n_attempted)
+        # TPOT stays over served requests: a failure has no inter-token latency to be worse than,
+        # and a one-token success has none either, so "worst" is not defined here. The hack has
+        # nowhere to go anyway — the same shedding makes ttft_p95 infinite in the same panel.
+        p95_tpot = H.pct(tpots, 0.95) if tpots else None
+        tok_s = sum(_generated(r) for r in ok) / window
         return {
             "n_ok": len(ok), "n_err": len(self.rows) - len(ok),
+            "n_failed": n_attempted - len(ok), "n_blind": len(blind),
+            "invisible_tokens": sum(_invisible(r) for r in self.rows),
             "achieved_rps": round(len(ok) / window, 2), "tok_per_s": round(tok_s, 1),
-            "ttft_p50": round(_pct(ttfts, 0.50), 1), "ttft_p95": round(p95_ttft, 1),
-            "tpot_p50": round(_pct(tpots, 0.50), 2) if tpots else None,
+            "ttft_p50": round(H.pct_over_attempts(ttfts, 0.50, n_attempted), 1),
+            "ttft_p95": round(p95_ttft, 1),
+            "tpot_p50": round(H.pct(tpots, 0.50), 2) if tpots else None,
             "tpot_p95": round(p95_tpot, 2) if p95_tpot is not None else None,
             "within_slo": bool(ok) and cls.within_slo(p95_ttft, p95_tpot),
             "wall_s": round(self.wall_s, 2),
@@ -225,6 +253,7 @@ def build_panel(res: ReplayResult, cls: WorkloadClass, *, corpus_version: str, s
         slo_ttft_ms=cls.slo_ttft_ms, slo_tpot_ms=cls.slo_tpot_ms,
         ttft_p50=s["ttft_p50"], ttft_p95=s["ttft_p95"],
         tpot_p50=s["tpot_p50"], tpot_p95=s["tpot_p95"], wall_s=s["wall_s"],
+        n_failed=s["n_failed"], invisible_tokens=s["invisible_tokens"],
     )
 
 
@@ -238,7 +267,9 @@ def write_rows(path: Path, rows: list[Row]) -> None:
 def print_summary(cls: WorkloadClass, s: dict[str, Any]) -> None:
     tpot_slo = f", p95 TPOT < {cls.slo_tpot_ms:.0f}ms" if cls.slo_tpot_ms else ""
     print(f"\n  {cls.name}: SLO p95 TTFT < {cls.slo_ttft_ms:.0f}ms{tpot_slo}")
-    print(f"  ok={s['n_ok']} err={s['n_err']} {s['achieved_rps']} req/s {s['tok_per_s']} tok/s | "
+    print(f"  ok={s['n_ok']} failed={s['n_failed']} unobserved={s['n_blind']} "
+          f"(invisible tokens {s['invisible_tokens']})")
+    print(f"  {s['achieved_rps']} req/s {s['tok_per_s']} tok/s | "
           f"TTFT p50/p95 {s['ttft_p50']}/{s['ttft_p95']} ms | "
           f"TPOT p50/p95 {s['tpot_p50']}/{s['tpot_p95']} ms | "
           f"{'within SLO' if s['within_slo'] else 'SLO BROKEN'} | wall {s['wall_s']}s")

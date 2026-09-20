@@ -17,7 +17,16 @@ from typing import Any
 
 # Bump when the panel's meaning changes. Panels of different versions are NOT comparable —
 # compare.py enforces that rather than trusting anyone to remember.
-PANEL_VERSION = 1
+#
+# 2 (2026-09-20): two changes to what a latency number MEANS, spent as one bump because they are
+# the same defect seen from the client's two ends, and because a bump re-baselines everything.
+#   * `ttft_p50` / `ttft_p95` are nearest-rank over ATTEMPTS, not over survivors. A shed, expired
+#     or timed-out request is a first token that never arrived, so it ranks above every measured
+#     one; the percentile is `inf` when it lands among them. Under version 1 a config could
+#     improve its own p95 by refusing its slowest requests (kb-20260918-4f4c85b7's OPEN GAP).
+#   * `n_failed` and `invisible_tokens` say how many requests never answered and how many
+#     generated tokens the client could not see, so neither can be read off as zero.
+PANEL_VERSION = 2
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -75,7 +84,8 @@ class Validity:
     harness: str                      # which instrument produced this
     harness_config: dict[str, Any]    # every knob that could change the answer
     workload_regime: str              # cache_hit_heavy | cache_miss_heavy | mixed | synthetic
-    # SUCCESSFUL requests only; attempts go in harness_config['n_requests'] (primary_metric).
+    # Requests that produced a first token the client could time. Failures are counted by
+    # `Vitals.n_failed`, not by subtracting this from harness_config['n_requests'].
     n_samples: int
     run_group: str                    # arms of one experiment share this; set once per session
     run_id: str = field(default_factory=lambda: _new_id("run"))
@@ -143,6 +153,17 @@ class Vitals:
     tpot_p50: float | None = None
     tpot_p95: float | None = None
     saturation_knee_rate: float | None = None
+    # Requests that were fired but never answered: shed (429), expired, timed out, or answered
+    # with nothing at all. They are part of the DENOMINATOR the ttft percentiles above are taken
+    # over, so shedding the slowest requests raises ttft_p95 instead of lowering it. None means
+    # the instrument fires no requests (roofline, coldstart_load) and can count no failures.
+    n_failed: int | None = None
+    # Generated tokens the client could not see, summed over the run: the shim emits no SSE chunk
+    # for a token that decodes to "". Disclosure, not a correction — the client cannot know WHERE
+    # an invisible token fell, so a run with any of these may have timed its first VISIBLE token
+    # one decode step after the first generated one. Throughput counts the server's own
+    # completion_tokens; TTFT cannot be repaired client-side (kb-20260919-9ea56f98).
+    invisible_tokens: int | None = None
 
     # --- pressure & scheduling -----------------------------------------------------
     # wave_sizes alone killed two planned projects by showing 83-91% of waves are K=1.

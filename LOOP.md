@@ -40,9 +40,11 @@ is a versioned change that invalidates comparison to prior iterations.
 > that reduces its own data to one summary number has already decided what mattered, in the place
 > that is hardest to revisit. For ten iterations these two lived only in a printed table and were
 > `None` in every machine record, so the loop judged secondary metrics exclusively.
-| `ttft_p50`, `ttft_p95` | headline latency |
+| `ttft_p50`, `ttft_p95` | headline latency — ceiling-based nearest rank (`ceil(q*n)-1`) over ATTEMPTS since panel v2, so shedding cannot flatter it |
 | `ttft_queue_p50/p95`, `ttft_prefill_p50/p95` | **the split that rules out whole classes of fix** — measured 21ms queue vs 203ms prefill, which killed every scheduling lever at once |
 | `tpot_p50`, `tpot_p95` | decode health |
+| `n_failed` | requests fired that never answered: the denominator of the two TTFT percentiles |
+| `invisible_tokens` | generated tokens the client could not see (the shim emits no chunk for a token decoding to `""`). **0 on every measured run today**; non-zero means TTFT may be timing the second generated token |
 | `saturation_knee_rate` | where it breaks |
 
 ### Pressure and scheduling
@@ -80,12 +82,16 @@ is a versioned change that invalidates comparison to prior iterations.
 > TTFT ceiling** (notes/01). It divides `wall_s_from_process_start` — idle included, which is
 > what stops warm pooling being free — by `sessions_served`, and **refuses** rather than
 > substituting `wall_s` or assuming zero for a missing term. A failed request counts as a first
-> token that never arrived (nearest-rank p95 over all attempts), so dropping requests cannot
-> flatter the ceiling **in `primary_metric`**. **Open gap:** `ttft_p95` as the significance gate,
-> `within_slo` and `sweep_headline` read it is still computed over survivors only by
-> `bench_serving.py` and `replay_trace.py`, so a treatment that fails more requests can still
-> read as a `ttft_p95` win there. Check `n_samples` against `harness_config['n_requests']` on
-> both arms until the source fix (a `PANEL_VERSION` bump) lands. See `kb-20260918-4f4c85b7`. `research/` never imports torch, so
+> token that never arrived, so dropping requests cannot flatter the ceiling. **Since
+> `PANEL_VERSION` 2 that rule is in the panel field itself** (`kb-20260920-7f31c4ad`):
+> `ttft_p50` / `ttft_p95` are `ceil(q*n)-1` nearest rank over ATTEMPTS, a shed or expired request
+> ranks above every served one, and the percentile is `inf` once the tail falls among them — the
+> same condition as `primary_metric`'s `n_ok < ceil(0.95*n)`, which the two now share. So the
+> significance gate, `within_slo`, `sweep_headline` and `attribute` all inherit it instead of
+> each needing their own check. `n_failed` is the denominator and `invisible_tokens` says how
+> many generated tokens the client could not see. `tpot_*` and the `ttft_queue_*` /
+> `ttft_prefill_*` split stay over served requests, on purpose — read them beside `n_failed`.
+> See `kb-20260918-4f4c85b7`. `research/` never imports torch, so
 > device memory is measured by the instrument and passed in; `scripts/bench/serve_accounted.py`
 > is that seam for a server run.
 

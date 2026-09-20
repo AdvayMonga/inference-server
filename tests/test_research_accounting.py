@@ -43,7 +43,7 @@ _DEFAULT = object()      # "the usual accounting"; None means a panel that carri
 
 def _panel(acc: Accounting | None = _DEFAULT, **over) -> Vitals:
     validity = over.pop("validity", None) or _v()
-    d = dict(ttft_p95=1400.0, slo_ttft_ms=2000.0, tpot_p95=40.0, wall_s=12.0)
+    d = dict(ttft_p95=1400.0, slo_ttft_ms=2000.0, tpot_p95=40.0, wall_s=12.0, n_failed=0)
     d.update(over)
     p = Vitals(validity=validity, **d)
     acc = _acc() if acc is _DEFAULT else acc
@@ -173,7 +173,8 @@ def test_unmeasured_terms_travel_with_the_number_as_caveats():
 
 def _with_failures(n_requests: int, failed: int) -> Vitals:
     cfg = {"model": "E2B", "split": "seen", "n_requests": n_requests}
-    return _panel(validity=_v(n_samples=n_requests - failed, harness_config=cfg))
+    return _panel(n_failed=failed,
+                  validity=_v(n_samples=n_requests - failed, harness_config=cfg))
 
 
 def test_failed_requests_count_against_the_ceiling_not_for_it():
@@ -200,15 +201,12 @@ def test_one_failure_breaks_the_ceiling_exactly_when_it_reaches_the_p95_rank(
     assert any(f"{failed} of {n_requests}" in c for c in m.caveats)
 
 
-@pytest.mark.parametrize("cfg_n_requests", [None, 5])
-def test_it_refuses_when_attempts_are_unknown_or_fewer_than_successes(cfg_n_requests):
-    """If an instrument puts attempts in n_samples, the failure check would silently pass.
-    Refuse instead: an uncounted failure is the hack this check exists to stop."""
-    cfg = {"model": "E2B", "split": "seen"}
-    if cfg_n_requests is not None:
-        cfg["n_requests"] = cfg_n_requests
-    m = primary_metric(_panel(validity=_v(n_samples=8, harness_config=cfg)))
-    assert not m and any("n_requests" in r for r in m.refusals)
+@pytest.mark.parametrize("n_failed", [None, -1])
+def test_it_refuses_when_the_failure_count_is_unknown_or_impossible(n_failed):
+    """A panel that cannot say how many requests failed cannot be held to a ceiling: an
+    uncounted failure is the hack this check exists to stop."""
+    m = primary_metric(_panel(n_failed=n_failed))
+    assert not m and any("n_failed" in r for r in m.refusals)
 
 
 def test_several_runs_aggregate_and_every_one_must_meet_the_ceiling():

@@ -3,13 +3,13 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-93 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `modal`(23), `loop`(23), `graph`(19), `scheduler`(19), `cold-start`(16), `compile`(15), `harness`(15), `validity`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `batching`(7), `gates`(6), `simulator`(6), `variance`(5), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `telemetry`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
+94 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `cold-start`(17), `harness`(16), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
-- **cold_start** (22): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`
+- **cold_start** (23): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`, `kb-20260920-7f31c4ad`
 - **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
@@ -203,7 +203,7 @@ fails is suspended. So, on MPS/E2B, as of this entry:
   the simulator sheds 6 of 8, so its p95 is still taken over different survivor sets on the two
   sides. That was already true in PR #40.
 
-**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19 HAZARD, not progress: under the chat route's inherited enable_thinking=True every request runs to max_tokens (kb-20260919-9ea56f98), so the missing termination model stops showing up. That is the ENGINE becoming degenerate, not the simulator being fixed. Re-running the fit or rank check in this state proves only that two systems share one defect. This does NOT satisfy the termination-model trigger and must NOT lift this suspension.; 2026-09-19, AFTER the shim fix (kb-20260919-5db5aafa): enable_thinking=false is live and the engine is no longer degenerate by shim default — but the corpus still truncates 17 of 18 admitted cold_start requests, now because its max_tokens budgets (17-216) are shorter than a templated E2B answer. So the termination-model trigger above is STILL NOT SATISFIED and this suspension is NOT lifted. Satisfying it needs the simulator to model termination and a fresh rank check, or a corpus whose budgets leave room to stop. Also re-measured: long_context/heldout at MAX_BATCH_SIZE=1 / 3s now admits 2 of 40 (not 14) on the chat route, and the two that run DO generate (272 and 416 tokens), so the config contributes its two W=1 decode rows again.; 2026-09-20, the termination SEAM landed (kb-20260920-54976f51) and this suspension STANDS. simulate() now decodes to min(max_tokens, expected_output_tokens), but no committed trace carries that field, so simulator output over the whole corpus is byte-identical to this entry's measurements (pinned as a golden in tests/test_research_simulator.py). Option (a) of 'what would have to change' is half done: the simulator can consume an observed length; the corpus does not record one. Re-running the rank check in this state would measure nothing. Lifting this still needs a corpus whose budgets leave room to stop, a reference run to populate expected_output_tokens, and a PASSING rank check in a SUPERSEDING entry.
+**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19 HAZARD, not progress: under the chat route's inherited enable_thinking=True every request runs to max_tokens (kb-20260919-9ea56f98), so the missing termination model stops showing up. That is the ENGINE becoming degenerate, not the simulator being fixed. Re-running the fit or rank check in this state proves only that two systems share one defect. This does NOT satisfy the termination-model trigger and must NOT lift this suspension.; 2026-09-19, AFTER the shim fix (kb-20260919-5db5aafa): enable_thinking=false is live and the engine is no longer degenerate by shim default — but the corpus still truncates 17 of 18 admitted cold_start requests, now because its max_tokens budgets (17-216) are shorter than a templated E2B answer. So the termination-model trigger above is STILL NOT SATISFIED and this suspension is NOT lifted. Satisfying it needs the simulator to model termination and a fresh rank check, or a corpus whose budgets leave room to stop. Also re-measured: long_context/heldout at MAX_BATCH_SIZE=1 / 3s now admits 2 of 40 (not 14) on the chat route, and the two that run DO generate (272 and 416 tokens), so the config contributes its two W=1 decode rows again.; 2026-09-20, the termination SEAM landed (kb-20260920-54976f51) and this suspension STANDS. simulate() now decodes to min(max_tokens, expected_output_tokens), but no committed trace carries that field, so simulator output over the whole corpus is byte-identical to this entry's measurements (pinned as a golden in tests/test_research_simulator.py). Option (a) of 'what would have to change' is half done: the simulator can consume an observed length; the corpus does not record one. Re-running the rank check in this state would measure nothing. Lifting this still needs a corpus whose budgets leave room to stop, a reference run to populate expected_output_tokens, and a PASSING rank check in a SUPERSEDING entry.; 2026-09-20 (kb-20260920-7f31c4ad), NOT a lift: under PANEL_VERSION 2 both sides of this rank check count their shed requests in ttft_p95, and both use the same ceiling-based nearest-rank percentile — previously hardware used bench_serving's interpolated _pct and the simulator used H.pct's floor convention, so all nine pairs were compared under two definitions, and mbs1-deadline5-x4 (hw sheds 4 of 8, sim 6 of 8) compared two differently-censored samples. The rho of 0.644 is therefore a version-1 number. Re-measure the nine configs before quoting it again. Re-running the check is NOT grounds to lift this suspension: the mechanism is the missing termination model, which this change does not touch
 
 **Evidence:** grp-20260919-759868, grp-20260919-958ec6, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, run-20260919-cf74cdb6, run-20260919-5f9579fd, run-20260919-e134030f, run-20260919-446f0ca7, run-20260919-29bd8871, run-20260919-feec3826, run-20260919-45a592ba, run-20260919-f6108c0a, run-20260919-4155e1d9, run-20260919-1f26a4da, run-20260919-b940da1a, run-20260919-678d77c4
 
@@ -216,6 +216,112 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 **Mechanism:** The simulator decodes every request to trace.max_tokens and has no early-termination model. Until PR #41 the engine did the same thing, so the two agreed by sharing one bug; with the engine stopping at <turn|> the simulator now charges 626 tokens of decode where the engine does 220, holding phantom rows in narrow batches and inventing queueing that hardware does not have.
 
 **Supersedes:** `kb-20260918-9fc68282`
+
+### [2026-09-20] The cold_start noise band is now a raw-route band only: the default workload has no band, and the gate falls back to the t-test alone
+*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `gates`, `cold-start`* · `kb-20260919-e610af2a`
+
+**`kb-20260919-0a58befd`'s band was measured on `--prompt-format raw`, which is no longer what a
+`cold_start` replay does.** That band is not wrong; it is a band for a workload that is now the
+opt-in one. It is left in place and un-edited, because a raw replay is still reachable and the
+band still describes it exactly.
+
+The hazard is that `find_band` matched on `(harness, workload_class, model, hardware)` and had no
+way to see the route. It would therefore have applied a band measured on a workload generating
+220 tokens at peak batch width 3 to one generating 626 tokens at peak batch width 5 —
+`active_mean` 1.14 against 2.17, `tpot_p50` 93.7 ms against 117.6 ms, `wall_s` 16.4 s against
+28.7 s. Every metric in the band moved.
+
+`NoiseBand` now carries `prompt_format` in its key, defaulting to `"raw"` so that every band
+stored before today keeps the identity it was actually measured under. `find_band` compares it
+like the other four key fields, with no fallback. The consequence, stated plainly so nobody is
+surprised by it:
+
+> **There is currently no noise band for the default `cold_start` workload.** `significance_
+> replicated` therefore judges a `cold_start` A/B on the t-test alone, which is the documented
+> pre-band behaviour and the safe direction — but it is weaker than what the loop had yesterday,
+> and re-measuring the null on the chat route is the next thing anyone gating a merge on this
+> class should do. That is deliberately not done in this branch.
+
+What the new workload looks like, for whoever measures it: 8 requests over ~29 s, 626 generated
+tokens, every one of them ending at `max_tokens` (so `decode_steps` should again be near-constant
+across replicates, though at 285 rather than 192), peak batch width 5, mean 2.17, and no
+zero-token requests — so the `p50` metrics are medians over eight real requests rather than over
+six requests of which five emitted nine tokens or fewer. Two of the band's known weaknesses
+(`tpot_p50` +-8.66%, `ttft_prefill_p50` +-13.54%, both blamed on medians over tiny requests)
+should tighten; `ttft_p95` will likely widen, because requests now genuinely contend.
+
+**Revisit when:** BEFORE any A/B is judged on cold_start with the default (chat) route: re-measure the null with `replay_local.py --class cold_start --null 6`, which now defaults to chat; a merge is proposed whose evidence is a cold_start delta: check the panel's harness_config.prompt_format against the band's, because find_band will simply return None and the gate will not say why; the re-measured chat band lands: BAND_SIGMAS=2 is still calibrated from a single false positive on a workload since shown to be contaminated, and this is the second null that could calibrate it; the chat band is measured: measure it at or after the shim's explicit thinking=False (kb-20260919-5db5aafa). find_band keys on prompt_format but NOT on enable_thinking, so a chat band measured before that fix would be applied to a workload it does not describe. No such band exists yet, which is the only reason this is a trigger and not a hazard.; 2026-09-20 (kb-20260920-7f31c4ad): NoiseBand now keys on panel_version too, and every stored band reads as version 1, so this band is inert for the raw route as well as for the chat one. The re-measurement this entry asks for must therefore be a version-2 band; nothing else can gate a cold_start A/B
+
+**Evidence:** grp-20260919-2c36c0, run-20260919-a4f66edf, run-20260919-3177144a, run-20260919-08ac920d, run-20260919-e66c4739, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
+
+**Mechanism:** A band is a property of a harness on one machine for one workload class, and the route the replay posts to is part of the workload: the same trace bytes generate 220 tokens raw and 626 templated, at peak batch width 3 against 5.
+
+### [2026-09-19] Total accounting from process start, and the first primary-metric number
+*tags: `accounting`, `antihacking`, `client-bug`, `cold_start`, `harness`, `loop`, `memory`, `metric`, `ttft`* · `kb-20260918-4f4c85b7`
+
+The project's primary metric, **GPU-seconds per session at a fixed p95 TTFT ceiling** (notes/01), could not be computed from anything in the repo: `Vitals.wall_s` starts at the first arrival, so model load, warm-up and idle sat outside every recorded number. notes/03 says what that invites: *"if it is not in the accounting, the loop will eventually move cost into it."* notes/07 lists "move cost off the measured window" and "burn an unmeasured resource" among the six ways this loop would reward hack.
+
+**Now accounted** (`Vitals.accounting`, `research/accounting.py`; optional and None-default, so `PANEL_VERSION` did not move):
+
+| term | how | where it comes from |
+|---|---|---|
+| wall clock from process start | `perf_counter` stamped before `start_server`, closed after the server exits: load, warm-up, idle and shutdown are all inside it | the instrument (`replay_local.py`) |
+| serving window and idle | `serving_wall_s` (the replay window) is recorded beside it, so `idle_s` and `serving_fraction` are derived when read, not fixed by the instrument | the instrument |
+| sessions served | distinct `session_id`s the CLIENT saw succeed (affected by the client bug below) | the instrument |
+| peak host RSS | `ru_maxrss` in the server process (bytes on Darwin, KiB on Linux) | `serve_accounted.py` sidecar |
+| peak device memory | CUDA: `max_memory_allocated`, a true peak. MPS: `driver_allocated_memory` **sampled** every 0.25s, because MPS has no peak counter | sidecar; `research/` never imports torch |
+
+`session.primary_metric()` divides wall-from-process-start by sessions served. It **refuses** when a term is missing and never substitutes `wall_s`. It also refuses when `harness_config['n_requests']` is missing or smaller than `n_samples`, because without attempts it cannot count failures. The cost gate now reads `peak_host_rss_gb` (instruments filled it, but the gate never checked it) and total wall from process start. An arm with no accounting judges exactly as before.
+
+**First real measurement** (`run-20260918-99883258`, M4 Pro MPS, E2B, `custom-mps`, cold_start/seen, one fresh server):
+
+| term | value |
+|---|---|
+| wall from process start | **46.9s** (ready in 14.2s) |
+| serving / idle | 32.3s / 14.5s (serving fraction 0.69) |
+| peak host RSS | **14.8 GB** |
+| peak MPS memory | **11.1 GB** (sampled to 46.0s of the run, 177 samples) |
+| sessions served (client's view) | 6 of 8 |
+
+The panel reads **7.81 GPU-seconds per session at a 2000ms p95 TTFT ceiling, BROKEN**. **Do not quote that verdict as an engine result.** It is BROKEN only because the client recorded 2 of 8 requests as `no_tokens`, and the engine's own telemetry for this run contradicts the client. All 8 trace ids finished `terminal_state=ok`, and each emitted exactly its `max_tokens` (42, 32, 40, 185, 54, 17, 216, 40). The two "failures" had engine-side TTFTs of 152 and 281ms. The client also undercounted tokens on the requests it did accept (6 against 42, 9 against 40, 1 against 54), so this panel's `out_tokens`, TPOT and tok/s are wrong as well. This matches a replay-client bug the batch-width agent found independently (1-2 of 8 lost per validation run, 5-6 of 8 per fit run; PR #35's panels show the same pattern). The bug is **not yet diagnosed or fixed**. If the engine's rows were admissible, the numbers would be 8 sessions, **5.86 GPU-s per session**, and a maximum engine TTFT of 522ms, so MET. They are not admissible: notes/03 puts the clock outside the system, and engine self-report is never evidence. Re-measure once the client is fixed. The accounting terms above (wall, RSS, device memory) do not depend on the client's token count and stand.
+
+**The failure-counting rule, and where it does NOT apply.** `ttft_p95` is computed over successful requests only, so failing a request makes it *better*. `primary_metric` now ranks a failure as a first token that never arrived, and breaks the ceiling when fewer than ceil(0.95 * n) requests got one (nearest-rank p95). That is exact at small n: 1 failure of 8 or of 9 breaks it, while 1 of 20 does not. An earlier floor-interpolation version let 1 of 8 through. The rule is correct, and a misreporting client has to be fixed in the client, not by softening the rule. Where failures are present, the rule is exact about the failures but uses the survivors' `ttft_p95` for everything else. The panel does not carry the per-request distribution, so a mix of failures and slow survivors can pass when the true all-request p95 does not.
+
+**OPEN GAP — CLOSED 2026-09-20 by `kb-20260920-7f31c4ad` (PANEL_VERSION 2). The text below is left as written; read it as the statement of a hole that is now filled at the source, in `harness.pct_over_attempts`. This entry's own rule survives, reading `Vitals.n_failed` instead of `harness_config['n_requests']` minus `n_samples`, because the two now differ: a request the client could not SEE is no longer counted as a request the server failed to serve.**
+
+**OPEN GAP: the hack is closed in `primary_metric` only.** `ttft_p95`, as the merge-authorising gates read it, is still computed over survivors and **still exploitable**. A treatment that fails more requests and serves the rest faster reads as a significant `ttft_p95` win through:
+- `compare.significance()` / `significance_replicated()`, and therefore `gates.significance_gate`
+- `session.within_slo()` and `session.sweep_headline()`
+- the instruments that fill the field: `scripts/bench/bench_serving.py` (`RateResult.summary`) and `scripts/bench/replay_trace.py` (`ReplayResult.summary`)
+
+Fixing it at the source changes what the `ttft_p95` panel field means. Under LOOP.md's rule that is a `PANEL_VERSION` bump, and it collides with the noise bands in `knowledge/noise/`, which were measured on the old meaning and are keyed without panel version. So it gets its own PR. Until then, no `ttft_p95` verdict from the gate should be trusted without checking `n_samples` against `harness_config['n_requests']` on both arms.
+
+**NOT accounted, and each gap is where cost will go next:**
+
+1. **Storage read bytes on macOS.** `ru_inblock` stayed 0 across a measured 2.3 GB safetensors read, and `proc_pid_rusage`'s `ri_diskio_bytesread` has no stdlib binding. The value is read from `/proc/self/io` on Linux (not yet exercised on a real Linux run) and is **named** in `unmeasured` on Darwin, never approximated.
+2. **MPS device memory past the sampler's coverage.** The sampler is a Python thread inside the server, and it is **GIL-starved while the engine computes**: 11 samples across 200 MPS matmuls in a scratch test, and in an earlier long run the sidecar stopped advancing at 84s of a ~13-minute run. Coverage (`sampled_to_uptime_s`) is recorded, and anything under 90% of the run is named in `unmeasured`. **Known limitation, accepted on review: a memory regression after the coverage cutoff passes the cost gate with only a footnote.** The gate compares the sampled peaks, and a spike the sampler never saw is invisible to it. The real fix is an engine-side high-water mark, or CUDA, where `max_memory_allocated` is exact.
+3. **Device memory on CUDA is implemented but untested.** No GPU was available.
+4. **Time before the process exists**: container start, image pull, scheduler queueing on a rented venue. The clock starts at `Popen`. On a pod, cold start begins before that, so a venue launcher has to stamp the earlier start and pass it in.
+5. **The instrument's own cost**, and **the last second of a SIGKILLed server**. The sidecar is rewritten on every sample because the engine's lifespan shutdown was measured outlasting `stop_server`'s 60s SIGTERM grace.
+6. **`gpu_cost_usd`** is still unfilled. GPU-seconds is the unit the metric needs, and a price is venue data this box does not have.
+
+**Provisional thresholds.** The cost gate's wall-clock rule (fail only on +25% **and** +10s) is a pair of round numbers, not a measurement. It is provisional until a wall-clock-from-launch noise band exists. The same holds for the 2 GB host-RSS threshold.
+
+Only `replay_local.py` fills the block today. `coldstart_load.py` and `replay_corpus_runpod.py` do not, and their panels make `primary_metric` refuse, which is intended.
+
+**Revisit when:** The replay client's no_tokens / token-undercount bug is fixed: re-run cold_start and replace the 7.81 BROKEN number; A wall-clock-from-launch noise band exists: replace the provisional 25% / 10s cost-gate thresholds; A CUDA run: max_memory_allocated makes device memory exact, and closes gaps 2 and 3; A Linux run: /proc/self/io makes storage read bytes measurable, and closes gap 1; A venue launcher that stamps container/pod start: extends the clock back past Popen (gap 4); An engine-side memory high-water mark (telemetry owner): removes the GIL-starved sampler (gap 2); DONE 2026-09-20 (kb-20260920-7f31c4ad): the ttft_p95 source fix landed as PANEL_VERSION 2 and the noise bands were retired by keying them on the version. The remaining item from this entry is the FIRST one — the 7.81 BROKEN cold_start number was measured on a client that misreported, and has still not been re-measured
+
+**Evidence:** run-20260918-99883258
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"hardware": "Apple M4 Pro (MPS)", "model": "gemma-4-e2b"}`
+
+**Mechanism:** Cost migrates to whatever the measured window omits, so the window has to start at process launch, and every term it cannot measure has to be named rather than read as zero.
 
 ### [2026-09-20] The simulator has a termination seam but no data to fill it: expected_output_tokens is wired end to end and None everywhere, and the ttft_p95 suspension stands
 *tags: `simulator`, `corpus`, `loop`, `harness`, `validity`, `decode`, `cold-start`* · `kb-20260920-54976f51`
@@ -477,110 +583,6 @@ combination with the `cold_start` runs.
 **Mechanism:** The shim now passes thinking=False, so the prompt loses the seven-token <|think|> system turn and the model stops opening with a preamble. That removes the preamble's guarantee of hitting max_tokens, but it does not create early termination, because the corpus's budgets (17-216 tokens, median 40 on cold_start) are shorter than a templated instruct model's answer to its own prompts. Only one request in eighteen has a budget its answer fits inside.
 
 **Supersedes:** `kb-20260919-9ea56f98`
-
-### [2026-09-20] The cold_start noise band is now a raw-route band only: the default workload has no band, and the gate falls back to the t-test alone
-*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `gates`, `cold-start`* · `kb-20260919-e610af2a`
-
-**`kb-20260919-0a58befd`'s band was measured on `--prompt-format raw`, which is no longer what a
-`cold_start` replay does.** That band is not wrong; it is a band for a workload that is now the
-opt-in one. It is left in place and un-edited, because a raw replay is still reachable and the
-band still describes it exactly.
-
-The hazard is that `find_band` matched on `(harness, workload_class, model, hardware)` and had no
-way to see the route. It would therefore have applied a band measured on a workload generating
-220 tokens at peak batch width 3 to one generating 626 tokens at peak batch width 5 —
-`active_mean` 1.14 against 2.17, `tpot_p50` 93.7 ms against 117.6 ms, `wall_s` 16.4 s against
-28.7 s. Every metric in the band moved.
-
-`NoiseBand` now carries `prompt_format` in its key, defaulting to `"raw"` so that every band
-stored before today keeps the identity it was actually measured under. `find_band` compares it
-like the other four key fields, with no fallback. The consequence, stated plainly so nobody is
-surprised by it:
-
-> **There is currently no noise band for the default `cold_start` workload.** `significance_
-> replicated` therefore judges a `cold_start` A/B on the t-test alone, which is the documented
-> pre-band behaviour and the safe direction — but it is weaker than what the loop had yesterday,
-> and re-measuring the null on the chat route is the next thing anyone gating a merge on this
-> class should do. That is deliberately not done in this branch.
-
-What the new workload looks like, for whoever measures it: 8 requests over ~29 s, 626 generated
-tokens, every one of them ending at `max_tokens` (so `decode_steps` should again be near-constant
-across replicates, though at 285 rather than 192), peak batch width 5, mean 2.17, and no
-zero-token requests — so the `p50` metrics are medians over eight real requests rather than over
-six requests of which five emitted nine tokens or fewer. Two of the band's known weaknesses
-(`tpot_p50` +-8.66%, `ttft_prefill_p50` +-13.54%, both blamed on medians over tiny requests)
-should tighten; `ttft_p95` will likely widen, because requests now genuinely contend.
-
-**Revisit when:** BEFORE any A/B is judged on cold_start with the default (chat) route: re-measure the null with `replay_local.py --class cold_start --null 6`, which now defaults to chat; a merge is proposed whose evidence is a cold_start delta: check the panel's harness_config.prompt_format against the band's, because find_band will simply return None and the gate will not say why; the re-measured chat band lands: BAND_SIGMAS=2 is still calibrated from a single false positive on a workload since shown to be contaminated, and this is the second null that could calibrate it; the chat band is measured: measure it at or after the shim's explicit thinking=False (kb-20260919-5db5aafa). find_band keys on prompt_format but NOT on enable_thinking, so a chat band measured before that fix would be applied to a workload it does not describe. No such band exists yet, which is the only reason this is a trigger and not a hazard.
-
-**Evidence:** grp-20260919-2c36c0, run-20260919-a4f66edf, run-20260919-3177144a, run-20260919-08ac920d, run-20260919-e66c4739, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "workload_class": "cold_start"}`
-
-**Mechanism:** A band is a property of a harness on one machine for one workload class, and the route the replay posts to is part of the workload: the same trace bytes generate 220 tokens raw and 626 templated, at peak batch width 3 against 5.
-
-### [2026-09-19] Total accounting from process start, and the first primary-metric number
-*tags: `accounting`, `antihacking`, `client-bug`, `cold_start`, `harness`, `loop`, `memory`, `metric`, `ttft`* · `kb-20260918-4f4c85b7`
-
-The project's primary metric, **GPU-seconds per session at a fixed p95 TTFT ceiling** (notes/01), could not be computed from anything in the repo: `Vitals.wall_s` starts at the first arrival, so model load, warm-up and idle sat outside every recorded number. notes/03 says what that invites: *"if it is not in the accounting, the loop will eventually move cost into it."* notes/07 lists "move cost off the measured window" and "burn an unmeasured resource" among the six ways this loop would reward hack.
-
-**Now accounted** (`Vitals.accounting`, `research/accounting.py`; optional and None-default, so `PANEL_VERSION` did not move):
-
-| term | how | where it comes from |
-|---|---|---|
-| wall clock from process start | `perf_counter` stamped before `start_server`, closed after the server exits: load, warm-up, idle and shutdown are all inside it | the instrument (`replay_local.py`) |
-| serving window and idle | `serving_wall_s` (the replay window) is recorded beside it, so `idle_s` and `serving_fraction` are derived when read, not fixed by the instrument | the instrument |
-| sessions served | distinct `session_id`s the CLIENT saw succeed (affected by the client bug below) | the instrument |
-| peak host RSS | `ru_maxrss` in the server process (bytes on Darwin, KiB on Linux) | `serve_accounted.py` sidecar |
-| peak device memory | CUDA: `max_memory_allocated`, a true peak. MPS: `driver_allocated_memory` **sampled** every 0.25s, because MPS has no peak counter | sidecar; `research/` never imports torch |
-
-`session.primary_metric()` divides wall-from-process-start by sessions served. It **refuses** when a term is missing and never substitutes `wall_s`. It also refuses when `harness_config['n_requests']` is missing or smaller than `n_samples`, because without attempts it cannot count failures. The cost gate now reads `peak_host_rss_gb` (instruments filled it, but the gate never checked it) and total wall from process start. An arm with no accounting judges exactly as before.
-
-**First real measurement** (`run-20260918-99883258`, M4 Pro MPS, E2B, `custom-mps`, cold_start/seen, one fresh server):
-
-| term | value |
-|---|---|
-| wall from process start | **46.9s** (ready in 14.2s) |
-| serving / idle | 32.3s / 14.5s (serving fraction 0.69) |
-| peak host RSS | **14.8 GB** |
-| peak MPS memory | **11.1 GB** (sampled to 46.0s of the run, 177 samples) |
-| sessions served (client's view) | 6 of 8 |
-
-The panel reads **7.81 GPU-seconds per session at a 2000ms p95 TTFT ceiling, BROKEN**. **Do not quote that verdict as an engine result.** It is BROKEN only because the client recorded 2 of 8 requests as `no_tokens`, and the engine's own telemetry for this run contradicts the client. All 8 trace ids finished `terminal_state=ok`, and each emitted exactly its `max_tokens` (42, 32, 40, 185, 54, 17, 216, 40). The two "failures" had engine-side TTFTs of 152 and 281ms. The client also undercounted tokens on the requests it did accept (6 against 42, 9 against 40, 1 against 54), so this panel's `out_tokens`, TPOT and tok/s are wrong as well. This matches a replay-client bug the batch-width agent found independently (1-2 of 8 lost per validation run, 5-6 of 8 per fit run; PR #35's panels show the same pattern). The bug is **not yet diagnosed or fixed**. If the engine's rows were admissible, the numbers would be 8 sessions, **5.86 GPU-s per session**, and a maximum engine TTFT of 522ms, so MET. They are not admissible: notes/03 puts the clock outside the system, and engine self-report is never evidence. Re-measure once the client is fixed. The accounting terms above (wall, RSS, device memory) do not depend on the client's token count and stand.
-
-**The failure-counting rule, and where it does NOT apply.** `ttft_p95` is computed over successful requests only, so failing a request makes it *better*. `primary_metric` now ranks a failure as a first token that never arrived, and breaks the ceiling when fewer than ceil(0.95 * n) requests got one (nearest-rank p95). That is exact at small n: 1 failure of 8 or of 9 breaks it, while 1 of 20 does not. An earlier floor-interpolation version let 1 of 8 through. The rule is correct, and a misreporting client has to be fixed in the client, not by softening the rule. Where failures are present, the rule is exact about the failures but uses the survivors' `ttft_p95` for everything else. The panel does not carry the per-request distribution, so a mix of failures and slow survivors can pass when the true all-request p95 does not.
-
-**OPEN GAP: the hack is closed in `primary_metric` only.** `ttft_p95`, as the merge-authorising gates read it, is still computed over survivors and **still exploitable**. A treatment that fails more requests and serves the rest faster reads as a significant `ttft_p95` win through:
-- `compare.significance()` / `significance_replicated()`, and therefore `gates.significance_gate`
-- `session.within_slo()` and `session.sweep_headline()`
-- the instruments that fill the field: `scripts/bench/bench_serving.py` (`RateResult.summary`) and `scripts/bench/replay_trace.py` (`ReplayResult.summary`)
-
-Fixing it at the source changes what the `ttft_p95` panel field means. Under LOOP.md's rule that is a `PANEL_VERSION` bump, and it collides with the noise bands in `knowledge/noise/`, which were measured on the old meaning and are keyed without panel version. So it gets its own PR. Until then, no `ttft_p95` verdict from the gate should be trusted without checking `n_samples` against `harness_config['n_requests']` on both arms.
-
-**NOT accounted, and each gap is where cost will go next:**
-
-1. **Storage read bytes on macOS.** `ru_inblock` stayed 0 across a measured 2.3 GB safetensors read, and `proc_pid_rusage`'s `ri_diskio_bytesread` has no stdlib binding. The value is read from `/proc/self/io` on Linux (not yet exercised on a real Linux run) and is **named** in `unmeasured` on Darwin, never approximated.
-2. **MPS device memory past the sampler's coverage.** The sampler is a Python thread inside the server, and it is **GIL-starved while the engine computes**: 11 samples across 200 MPS matmuls in a scratch test, and in an earlier long run the sidecar stopped advancing at 84s of a ~13-minute run. Coverage (`sampled_to_uptime_s`) is recorded, and anything under 90% of the run is named in `unmeasured`. **Known limitation, accepted on review: a memory regression after the coverage cutoff passes the cost gate with only a footnote.** The gate compares the sampled peaks, and a spike the sampler never saw is invisible to it. The real fix is an engine-side high-water mark, or CUDA, where `max_memory_allocated` is exact.
-3. **Device memory on CUDA is implemented but untested.** No GPU was available.
-4. **Time before the process exists**: container start, image pull, scheduler queueing on a rented venue. The clock starts at `Popen`. On a pod, cold start begins before that, so a venue launcher has to stamp the earlier start and pass it in.
-5. **The instrument's own cost**, and **the last second of a SIGKILLed server**. The sidecar is rewritten on every sample because the engine's lifespan shutdown was measured outlasting `stop_server`'s 60s SIGTERM grace.
-6. **`gpu_cost_usd`** is still unfilled. GPU-seconds is the unit the metric needs, and a price is venue data this box does not have.
-
-**Provisional thresholds.** The cost gate's wall-clock rule (fail only on +25% **and** +10s) is a pair of round numbers, not a measurement. It is provisional until a wall-clock-from-launch noise band exists. The same holds for the 2 GB host-RSS threshold.
-
-Only `replay_local.py` fills the block today. `coldstart_load.py` and `replay_corpus_runpod.py` do not, and their panels make `primary_metric` refuse, which is intended.
-
-**Revisit when:** The replay client's no_tokens / token-undercount bug is fixed: re-run cold_start and replace the 7.81 BROKEN number; The ttft_p95 source fix lands (PANEL_VERSION bump, noise bands re-measured): close the OPEN GAP; A wall-clock-from-launch noise band exists: replace the provisional 25% / 10s cost-gate thresholds; A CUDA run: max_memory_allocated makes device memory exact, and closes gaps 2 and 3; A Linux run: /proc/self/io makes storage read bytes measurable, and closes gap 1; A venue launcher that stamps container/pod start: extends the clock back past Popen (gap 4); An engine-side memory high-water mark (telemetry owner): removes the GIL-starved sampler (gap 2)
-
-**Evidence:** run-20260918-99883258
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"hardware": "Apple M4 Pro (MPS)", "model": "gemma-4-e2b"}`
-
-**Mechanism:** Cost migrates to whatever the measured window omits, so the window has to start at process launch, and every term it cannot measure has to be named rather than read as zero.
 
 ### [2026-09-18] Router locality-vs-load is one normalised weight, with session affinity as a separable term; no curve measured yet
 *tags: `control-plane`, `router`, `prefix-cache`, `locality`, `session-affinity`, `simulator`, `staleness`* · `kb-20260917-0c9ba6de`
@@ -1063,9 +1065,462 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (39)
+## Resolved (40)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-20] PANEL_VERSION 2: failures rank worst in the TTFT percentiles, on a ceiling-based nearest rank; the client's blind spot is instrumented and measured dormant
+*tags: `antihacking`, `harness`, `loop`, `metric`, `ttft`, `validity`, `gates`, `telemetry`, `cold-start`, `simulator`, `variance`* · `kb-20260920-7f31c4ad`
+
+**Panel version 2. Two defects, one bump, and they are the same defect seen from the client's
+two ends.** Both were confirmed in the code before anything was changed, and one of them is not
+quite what the standing description said.
+
+## Defect 1: the latency metrics did not count the requests that never answered
+
+`ReplayResult.summary` (and `SimResult.summary`) took `ttft_p50` / `ttft_p95` over
+`[r for r in rows if r.error is None]`. A request shed with HTTP 429, expired at the admission
+deadline, or still open when the drain ended left the SAMPLE, not just the numerator. So a
+config improved its own p95 by refusing the requests it would have been slowest on — and the
+worse the request, the more the refusal paid. Concretely, on eight requests with TTFTs
+10..80 ms: serving all eight reads `ttft_p95` 80 ms; shedding the slowest four reads **40 ms**.
+
+This is `kb-20260918-4f4c85b7`'s **OPEN GAP**, named there and deferred to exactly this bump.
+`primary_metric` already closed it for itself in PR #36; the gates, `within_slo`,
+`sweep_headline` and `attribute` all read the field as the instruments computed it, and that is
+the surface a merge is actually authorised through.
+
+## Defect 2: the client can only see tokens the shim emits — mechanism real, currently unexercised
+
+`openai_shim._stream` / `_chat_stream` count a generated token (`n += 1`) and then
+`if text: yield ...`, so a token decoding to `""` lands in `usage.completion_tokens` and is
+never emitted as a chunk. `bench_serving.one_request` independently skips such a chunk anyway
+(`if choices and token_text(choices[0])` — `""` is falsy), so the undercount would survive a
+shim that started emitting empty deltas. Both halves are real and both are in the code today.
+
+Two consequences follow IF the engine emits such a token: the client's `out_tokens` undercounts,
+and — the one that matters — **TTFT is the time to the first VISIBLE chunk**, so if the first
+generated token is the invisible one, TTFT is late by a whole decode step.
+
+### Measured, on the current default: it does not happen
+
+**Under the shim's `enable_thinking=False` default (PR #47, already in this branch's history)
+the effect is absent.** Measured through the REAL shim rather than a vanilla HF decode, on
+`gemma-4-E2B-it` / MPS / `custom-mps`, `HF_HUB_OFFLINE=1`, all 8 `corpus/cold_start/seen`
+prompts, two requests each:
+
+| probe | question it answers | result |
+|---|---|---|
+| `max_tokens=1`, streamed | is the FIRST generated token invisible? (an invisible one would give zero content chunks and `completion_tokens=1`, i.e. `no_visible_tokens`) | **0 of 8** — every request returned one visible chunk |
+| full `max_tokens`, streamed | how many generated tokens were invisible in total? | **0 of 626** (`server_out_tokens == out_tokens` on all 8) |
+
+Per-request generated counts were 42, 32, 40, 185, 54, 17, 216, 40 — every request running to
+its exact budget, which matches `kb-20260918-4f4c85b7`'s engine-side rows.
+
+### What the earlier claim was, and why it is withdrawn
+
+`kb-20260919-9ea56f98` measured the undercount as "uniformly one per chat-route request", the
+token being the thinking-block opener. **That was measured under `enable_thinking=True`, which
+is the bug PR #47 fixed.** An earlier draft of this entry carried that number forward in the
+present tense and asserted that "every chat-route TTFT in every stored panel is one decode step
+late, ~50-90 ms". That assertion is **withdrawn**: it describes a configuration that is no
+longer the default, and the measurement above does not reproduce it.
+
+This is the fourth time in two days this project has carried a measurement across a
+configuration change that invalidated it — the June vLLM head-to-head, the pre-#41 stop bug, the
+thinking=True workload, and now this. The pattern is the reason the entry says so at length.
+
+### What survives, and why the instrumentation is still worth having
+
+The mechanism is unguarded: nothing in the engine or the client prevents an empty-decoding
+token, and the historical record shows it firing (`kb-20260918-4f4c85b7`: 2 of 8 `cold_start`
+requests read as `no_tokens` while the engine's rows said all 8 finished `ok`). So it is
+instrumented rather than assumed away: `invisible_tokens` is `0` on today's runs and would be
+non-zero the moment a model, template or shim change reintroduces it, and
+`no_visible_tokens` keeps such a request from being charged as a shed one. **Both are currently
+dormant, and `invisible_tokens == 0` is the assertion that they are.**
+
+### Why both defects are still one bump
+
+Had the empty-token effect been live, defect 1's fix alone would have charged those client
+artifacts as shed requests and made every `cold_start` panel report an SLO breach that did not
+happen. That hazard is what the classification closes. It is now a guard rather than a repair —
+but it is a guard that had to exist before the failure accounting could be trusted, and it
+changes what `tok_s_within_slo` counts, so it belongs in this version and not a later one.
+
+## What the panel now means
+
+| | version 1 | **version 2** |
+|---|---|---|
+| `ttft_p50`, `ttft_p95` | `floor(q*(n-1))` over requests that answered | **ceiling-based nearest rank over ATTEMPTS**; a failure ranks above every measured request; `inf` when the percentile lands among them |
+| `tpot_p50`, `tpot_p95` | over served requests | unchanged, deliberately — see below |
+| `tok_s_within_slo` | client-visible tokens / window | **engine `completion_tokens`** / window |
+| `n_failed` | — | requests fired that never answered: the denominator above |
+| `invisible_tokens` | — | generated tokens the client could not see, summed |
+| every percentile in the panel | replay interpolated (`bench_serving._pct`), simulator `floor(q*(n-1))` (`H.pct`) | **one convention**: `ceil(q*n)-1`, nearest rank, everywhere |
+
+`harness.pct_over_attempts(values, q, n_attempted)` is the whole rule, and it is identical to
+`pct` when nothing failed.
+
+### The percentile convention moved too, and had to
+
+The first draft of `pct_over_attempts` reused `pct`'s `floor(q * (n - 1))`, which is not the
+nearest rank its docstring claimed. At `n_attempted=8` with one failure it returned the slowest
+SURVIVOR instead of `inf`, and at `n_attempted=2` with one failure it returned the single
+survivor's TTFT although half the attempts never answered. `harness.rank_index` is now the
+textbook `ceil(q * n) - 1`, applied by `pct` and `pct_over_attempts` alike so the panel carries
+ONE convention.
+
+Two things settle it beyond taste. First, at n=8 — the size of the `cold_start` reference
+configs, so the regime actually run — it makes p95 the maximum rather than the second largest,
+which is the direction a tail metric gating a merge should err in. Second, and decisive:
+`primary_metric`'s failure rule is already `n_ok < ceil(0.95 * n)`, which is exactly the
+condition under which this index falls among the requests that never answered. The two rules
+were written independently, agreed on paper, and disagreed in code at n=8; they are now provably
+the same rule and a test pins them together. `kb-20260918-4f4c85b7` had already named the floor
+variant as the bug — *"an earlier floor-interpolation version let 1 failure in 8 through"* — and
+the first draft of this PR reintroduced it two entries later.
+
+Cost of fixing it here rather than later: none. Cost of fixing it later: a second
+`PANEL_VERSION` bump, which is the expense this one exists to avoid repeating.
+
+### The accounting choice, and the three things it rejected
+
+**Chosen: rank failures worst inside the percentile, over all attempts.** A shed request is a
+first token that never arrived, so it belongs at the top of the order, not outside the sample.
+The percentile stays finite and gains gradation while the failure rate is under `1-q` — shedding
+pushes the index up into the slow tail, so it makes the number monotonically WORSE — in steps,
+not continuously; a nearest-rank percentile is a step function and an extra failure sometimes
+lands on the same value — and goes to `inf` once the tail falls among requests never served.
+Nothing else in the panel has to change, and every existing consumer inherits the fix:
+`within_slo` (inf < ceiling is False), `primary_metric`, the significance gate, `attribute`.
+
+- **Rejected: charge each failure the SLO ceiling.** It makes a measurement depend on a
+  *configuration* value — and the class ceilings in `corpus/manifest.json` are placeholders
+  until Phase 0 — so editing a placeholder would silently rewrite stored numbers. It also makes
+  a failure exactly as bad as a marginal success, so shedding a request that would have taken
+  ten times the ceiling still pays. And it would make `ttft_p95` incomparable across classes.
+- **Rejected: refuse to emit a panel whose failure rate exceeds a threshold.** Shedding under
+  overload is a RESULT. `mbs1-deadline5-x4` sheds 4 of 8 by design and is one of the nine
+  configs in the simulator's rank check; a harness that throws that measurement away destroys
+  the data about the exact regime the project is studying, after it has already been paid for.
+- **Rejected: leave `ttft_p95` alone and add a separate shed gate.** It is the smallest diff and
+  the worst outcome: the flattering number stays in the field, and every future reader who does
+  `panel.ttft_p95` gets it. A gate can be routed around; a definition cannot.
+
+### What was deliberately NOT extended, and why
+
+**`tpot_*` stays over served requests.** A failed request has no inter-token latency for a
+failure to be "worse than", and neither does a one-token success, so the denominator is not
+well defined the way TTFT's is. The hack has nowhere to go: the same shedding drives `ttft_p95`
+in the same panel, and `within_slo` and `primary_metric` both fail on that.
+**Residual, stated rather than hidden:** an arm shedding under `1-q` of its requests still gets
+a `tpot_p95` over survivors while its `ttft_p95` merely shifts up rather than going infinite.
+Small, and the first honest place to look if a TPOT win ever arrives with a raised `n_failed`.
+
+**`ttft_queue_*` / `ttft_prefill_*` stay over served requests.** They are a decomposition of a
+TTFT that happened; a request that never started has no queue or prefill span to decompose.
+Read them beside `n_failed`.
+
+**`no_visible_tokens` leaves the denominator.** `one_request` now separates "the server
+generated nothing" (`no_tokens`, a real failure to serve) from "the server generated and the
+client is blind" (`no_visible_tokens`). The second is an INSTRUMENT failure, so charging it as a
+shed request would fabricate an SLO breach; it is excluded from both numerator and denominator
+and reported as `n_blind` in the printed summary, with its tokens in `invisible_tokens`.
+Exploiting that would require the engine to emit only empty-decoding tokens, which the parity
+fixture and the stop-token tests catch and which the panel records.
+
+## Blast radius of the bump
+
+- **Every stored `runs/*.json` panel is now incomparable.** `compare.comparable()` refuses on
+  `panel_version` first. `runs/` is gitignored, so nothing in the repo moves — but every panel a
+  working tree still holds is dead for comparison, including the 9 validation and 4 fit panels
+  behind `kb-20260919-94acfdb8` and the 10 null runs behind `kb-20260919-0a58befd`.
+- **Both stored noise bands are retired.** `NoiseBand` now carries `panel_version` in its key,
+  defaulting to `1` for every band written before the field existed, and `find_band` defaults to
+  the CURRENT version with no fallback. `knowledge/noise/replay-trace-cold-start-...json` and
+  its superseded predecessor therefore match nothing a current run produces. This closes a hole
+  that was live: before this change `find_band` compared five fields and none of them was the
+  panel version, so a band measured under the old accounting would have gated a run under the
+  new one. **The practical change is smaller than it sounds** — the live band was already inert
+  for the default workload, because it carries no `prompt_format` and so reads as a `raw` band
+  while `cold_start` now replays through the chat route (`kb-20260919-e610af2a`). What moves is
+  that it is now inert for `--prompt-format raw` replays too. `cold_start` still has no live
+  band and `significance_replicated` still judges it on the t-test alone, which remains the
+  documented pre-band behaviour and the safe direction.
+- **`primary_metric` reads `Vitals.n_failed` instead of `harness_config['n_requests']` minus
+  `n_samples`.** With `no_visible_tokens` rows leaving the denominator, that subtraction no
+  longer equals the failure count, and two disagreeing sources of one number is how this gets
+  re-broken. `n_requests` stays in `harness_config` as what it always was: attempts fired.
+- **What must be re-measured, in order:** (1) a `cold_start` chat-route null, which was already
+  the outstanding item from `kb-20260919-e610af2a` and now also needs to be a version-2 band;
+  (2) the nine-config simulator rank check, whose hardware and simulator `ttft_p95` values both
+  move — see below.
+
+## The conclusion that depended on the old accounting
+
+**`kb-20260919-94acfdb8`** — the entry that suspends tier-1 `ttft_p95`. Its own caveat says it:
+
+> `mbs1-deadline5-x4` now sheds 4 of 8 at the deadline in hardware (it shed 3 of 8 before) while
+> the simulator sheds 6 of 8, so its p95 is still taken over different survivor sets on the two
+> sides.
+
+Under version 2 there are no survivor sets: both sides count their sheds, and at 4 of 8 and 6 of
+8 both go infinite. The entry's `mbs1-deadline5-x4` row (hw 861.8 ms against sim 116.8 ms,
+0.14x — its single largest disagreement in the direction of the simulator being optimistic) was
+a comparison of two differently-censored samples, and the rho of 0.644 was computed with that
+pair in it. There is a second, quieter effect: hardware `ttft_p95` came from `bench_serving._pct`
+(interpolated) and the simulator's from `H.pct` (`floor(q*(n-1))`), so nine of the nine pairs
+were compared under two different percentile definitions — neither of them the textbook one.
+Version 2 puts the whole panel on `ceil(q*n)-1`.
+
+**The suspension is NOT lifted and its verdict is not overturned here.** Nothing was re-measured
+— no GPU, no hardware draw — and the mechanism the suspension rests on (the simulator has no
+termination model) is untouched by this PR. What changed is that its NUMBER is now known to have
+been computed two ways at once. A trigger is appended saying the rank check must be re-run under
+version 2, and that a re-run is not by itself grounds to lift anything.
+
+Nothing else was found to turn on the old accounting. The other candidates were checked and do
+not: `kb-20260919-0a58befd`'s band was a null experiment with `n_failed` 0 on every run, so its
+spreads are unaffected in kind (they are still retired, for version, not for correctness);
+`kb-20260919-6ef4e6bf` and `kb-20260919-9ea56f98` count tokens, not percentiles.
+
+## Tests that encoded the old behaviour
+
+- `test_research_accounting.py::test_it_refuses_when_attempts_are_unknown_or_fewer_than_successes`
+  pinned `primary_metric`'s `harness_config['n_requests']` route, including the refusal when
+  attempts are missing. Replaced by the `n_failed` equivalent; the six-case parametrisation of
+  "one failure breaks the ceiling exactly when it reaches the p95 rank" is unchanged in meaning
+  and still passes, which is the check that the two rules agree at small n.
+- `test_research_noise.py::test_a_raw_route_band_does_not_gate_a_chat_route_run` constructed a
+  band with the dataclass default, which is now `panel_version=1`; it asserts a lookup property,
+  so it had to be pinned to the current version to keep testing what it was testing.
+- No test asserted `ttft_p95` over survivors directly. `test_replay_trace.py`'s
+  drain-timeout test (2 ok, 1 error of 3) still passes because at n=3 the p95 index is 1, which
+  is still inside the served set — the old behaviour and the new one agree there.
+
+## Known rough edges, none of them load-bearing
+
+- `json.dumps(inf)` writes `Infinity`. Python reads it back exactly; **jq 1.7.1 silently
+  clamps it to 1.7976931348623157e+308** rather than erroring, which is worse than failing,
+  because a shell pipeline would then read a finite-looking 1.8e308 ms p95. Panels are read by
+  `Vitals.load`; anything piping one through jq must check `n_failed` instead.
+- `attribute.py` renders an infinite gap as `"over SLO by infms"`. Ugly, true, and ranked first,
+  which is the correct rank for a run that did not serve its workload.
+- `scripts/bench/bench_serving.py`'s own `RateResult.summary` (the Poisson sweep table, not a
+  panel) still takes its percentiles over survivors. Left alone on purpose: it emits no `Vitals`
+  and it is the driver for the published vLLM head-to-head, so moving its numbers without a
+  versioned record is the thing this bump exists to prevent. `one_request`, which both surfaces
+  share, IS fixed.
+- `replay_local.py` counts `sessions_served` as distinct sessions with a client-visible success,
+  so a fully-blind session is not counted. Unchanged, and now visible via `n_blind`.
+
+**Revisit when:** a noise band is measured on this box: it must be a version-2 band, and cold_start still has none (kb-20260919-e610af2a); the simulator rank check is re-run: both sides now count their sheds and both use nearest-rank percentiles, so kb-20260919-94acfdb8's nine pairs must be re-measured before its rho is quoted again — re-running it is NOT by itself grounds to lift its suspension; a treatment arrives with a tpot_p95 win and a raised n_failed: tpot_* is still taken over served requests, which is the one residual this change did not close; a panel with an infinite ttft_p95 has to leave this repo: json.dumps writes Infinity, which jq refuses; bench_serving.py's own Poisson sweep table is used for a judgement: its percentiles are still over survivors, unlike the panel's; invisible_tokens goes non-zero on any panel: the dormant mechanism has fired. Check the chat_template stamp and the shim's thinking default first (kb-20260919-9ea56f98), then whether TTFT is now timing the second generated token; the model, the chat template or the shim's enable_thinking default changes: re-run the max_tokens=1 probe in this entry before quoting any TTFT. It is 8 requests and one model load, and it is the check that was skipped four times already; openai_shim.py is changed to emit a chunk for a token that decodes to "": bench_serving.one_request must stop skipping falsy chunk text in the same change or the fix does nothing. Only worth doing if invisible_tokens ever goes non-zero
+
+**Evidence:** research/panel-failure-accounting, kb-20260918-4f4c85b7, kb-20260919-9ea56f98, tests/test_panel_failure_accounting.py, 8 cold_start/seen prompts through the real shim on MPS/E2B, enable_thinking=False: 0/8 first tokens invisible, 0/626 tokens invisible
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"harness": ["replay_trace", "simulator"]}`
+
+**Mechanism:** A percentile taken over survivors treats a refused request as a request that did not happen, so refusing the slowest requests is indistinguishable from serving them quickly. The companion defect — a client that counts only the chunks the shim emits, and so times its first VISIBLE token — is a real unguarded mechanism that is measured to be dormant under the current enable_thinking=False default.
+
+### [2026-09-20] Noise floor re-measured after the end-of-turn stop fix: the cold_start band is 5x tighter on p95 TTFT, and the null no longer false-positives
+*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`, `corpus`* · `kb-20260919-0a58befd`
+
+> **2026-09-19 amendment — this band is now a RAW-ROUTE band; see `kb-20260919-e610af2a`.**
+> `replay_trace.py` defaults to `/v1/chat/completions` as of `kb-20260919-bfd8f9b0`, which on the same
+> trace bytes generates 626 tokens instead of 220 at peak batch width 5 instead of 3.
+> `NoiseBand` gained `prompt_format` in its key (defaulting to `raw`, which is what this
+> band was measured under), so `find_band` no longer returns it for a default replay.
+> The numbers below are unchanged and remain correct for `--prompt-format raw`.
+
+**The 2026-09-17 band was measured on a workload that no longer exists.** `kb-20260918-5906bc13`
+(PR #41) fixed the custom backend's stop set — it read `tokenizer.eos_token_id` (`<eos>` only)
+and ignored Gemma's `<turn|>` (106), so every `custom-*` request ran to `max_tokens`. On
+`corpus/cold_start/seen` that was **626 generated tokens where the corpus asks for 220**: 65% of
+all decode work was a tail that decodes to `""`. `kb-20260917-aa6b0f4d` said in its own triggers
+that it had to be re-measured before it gated anything. This is that re-measurement.
+
+Procedure repeated unchanged: `scripts/bench/replay_local.py --class cold_start --null 6`,
+**twelve runs, six per arm, ABBA-interleaved, byte-identical config in both arms**, one fresh
+server process per run (so no replicate inherits the previous one's prefix cache). Engine
+`BACKEND=custom-mps`, `google/gemma-4-E2B-it`, MAX_BATCH_SIZE=8, PREFILL_MODE=batched, 4096 KV
+blocks, fcfs, 30s admission deadline, Apple M4 Pro, `HF_HUB_OFFLINE=1`. Run group
+`grp-20260919-0774d4`, engine `03f600e`, corpus `659ea3b61303` — the same corpus version as the
+old band, so the two are comparable metric by metric.
+
+## The new band, next to the old one
+
+Ten runs, each arm's first dropped as warmup, exactly as `significance_replicated` does. Both
+columns are the ±2sd gating width.
+
+| metric | old band (e835425) | **new band (03f600e)** | old mean | **new mean** | new cv | new max/min |
+|---|---|---|---|---|---|---|
+| `ttft_p50` | ±37.78% | **±10.94%** | 256.63 | **191.14** | 5% | 1.18x |
+| `ttft_p95` | ±25.76% | **±5.12%** | 486.02 | **428.48** | 3% | 1.08x |
+| `ttft_queue_p50` | ±89.38% | **±99.54%** | 33.78 | **24.97** | 50% | 13.36x |
+| `ttft_queue_p95` | ±73.68% | **±30.82%** | 95.67 | **76.70** | 15% | 1.74x |
+| `ttft_prefill_p50` | ±6.76% | **±13.54%** | 121.78 | **126.61** | 7% | 1.27x |
+| `ttft_prefill_p95` | ±53.54% | **±2.52%** | 364.19 | **235.55** | 1% | 1.04x |
+| `tpot_p50` | ±4.78% | **±8.66%** | 151.33 | **99.46** | 4% | 1.15x |
+| `tpot_p95` | ±9.40% | **±3.84%** | 199.42 | **142.95** | 2% | 1.06x |
+| `tok_s_within_slo` | ±1.42% | **±1.50%** | 7.45 | **13.19** | 1% | 1.02x |
+| `wall_s` | ±1.56% | **±1.38%** | 29.36 | **16.61** | 1% | 1.02x |
+| `active_mean` | ±1.72% | **±0%** | 2.207 | **1.14** | 0% | 1.00x |
+| `active_high_water` | ±0% | **±0%** | 5 | **3** | 0% | 1.00x |
+| `decode_steps` | ±1.60% | **±0%** | 280.1 | **192** | 0% | 1.00x |
+| `cache_hit_rate` | ±0% | ±0% | 0 | 0 | 0% | — |
+| `pool_utilization` | ±0% | ±0% | 0.0049 | 0.0049 | 0% | 1.00x |
+
+Machine-readable at
+`knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`. The old
+file is kept at `knowledge/noise/superseded/...-e835425.json`; `load_bands` globs
+`knowledge/noise/*.json` and does not recurse, so the superseded band is out of `find_band`'s
+reach and exactly one band is live. `BAND_SIGMAS` is unchanged at 2 (see below).
+
+## The null no longer produces a false positive
+
+The old null's headline result was that, judged as a real A/B, it returned a **t-significant
++2.7% win on `tpot_p50` comparing a config against itself** — the failure the band exists to
+catch. Judged the same way (`significance_replicated` over the same twelve panels, 5v5 after
+warmup):
+
+| metric | old: t-test alone | new: t-test alone | new: with the band |
+|---|---|---|---|
+| `ttft_p50` | noise | noise, −1.2%, \|t\|=0.33 | noise |
+| `ttft_p95` | noise, \|t\|=0.69 | noise, −0.6%, \|t\|=0.36 | noise |
+| `ttft_queue_p95` | noise, \|t\|=1.08 | noise, −6.2%, \|t\|=0.63 | noise |
+| `ttft_prefill_p95` | noise, \|t\|=0.61 | noise, −0.2%, \|t\|=0.21 | noise |
+| `tpot_p50` | **significant, \|t\|=2.06, +2.7%** | noise, +2.5%, \|t\|=0.88 | noise |
+| `tpot_p95` | — | noise, −1.1%, \|t\|=0.92 | noise |
+| `wall_s` | — | noise, −0.4%, \|t\|=0.90 | noise |
+| `tok_s_within_slo` | — | noise, +0.5%, \|t\|=0.95 | noise |
+| `decode_steps` | — | noise, +0.0%, \|t\|=0.00 | noise |
+
+**No metric separates the arms on the t-test alone.** The largest effect is the same one as
+before — `tpot_p50`, at +2.5% against the old +2.7% — but its |t| fell from 2.06 to 0.88,
+because the per-arm spread it is divided by is now much smaller and, crucially, *similar between
+arms* (sd 3.3/5.2 ms on a 99 ms mean). The old run's false positive was one arm drawing a tight
+sample and the other a wide one out of a fat tail; with the wasted decode gone the tail is gone
+with it.
+
+**This weakens, rather than confirms, the evidence for `BAND_SIGMAS=2`.** The multiplier was
+calibrated from exactly one observed false positive, and that false positive is now known to
+have come from a contaminated workload. This re-measurement produces none, so it offers nothing
+to calibrate against — it neither supports 2 nor argues for another number. Per the task's
+instruction the constant is left alone, and this is said rather than quietly fixed: **the band
+width is now the only thing standing between a clean t-test and a merge, and its multiplier
+rests on a measurement that has since been invalidated.** The honest next step is a second null
+in a regime that actually batches (see the corpus finding below), not a re-derivation from this
+one.
+
+## What moved, and why
+
+- **Everything that scales with decode work fell by roughly the 2.8x the stop fix predicted.**
+  `wall_s` 29.36 → 16.61s, `decode_steps` 280.1 → **exactly 192 in all twelve runs**,
+  `tpot_p50` 151 → 99 ms, and `tok_s_within_slo` 7.45 → 13.19 tok/s. Generated tokens are
+  **220 in every run**, byte-identical per request (`6, 1, 9, 185, 1, 9, 0, 9`), against the
+  corpus's 626-token `max_tokens` budget — the number `kb-20260918-5906bc13` predicted offline,
+  now confirmed through the full server path.
+- **The tail metrics stopped being tails.** `ttft_prefill_p95` went from the worst-behaved
+  number in the panel (2.16x, cv 27%) to the best (1.04x, cv 1%), and `ttft_p95` from 1.46x to
+  1.08x. The mechanism is batch occupancy: `active_high_water` fell 5 → 3 and `active_mean`
+  2.21 → 1.14. Before the fix, five to eight rows stayed resident emitting `<turn|>` and
+  contended for the same MPS queue; a prefill landing behind them waited on whatever that
+  contention happened to be. Now requests barely overlap, so prefill costs what prefill costs.
+  **A TTFT claim on this box no longer needs to clear 25% — it needs to clear ~5%.** That is the
+  practical gain: the harness can now see effects it could not before.
+- **Two metrics got *worse*, and both for the same reason.** `tpot_p50` (±4.78% → ±8.66%) and
+  `ttft_prefill_p50` (±6.76% → ±13.54%) are *medians over six surviving requests*, and the
+  surviving requests are now tiny: five of the eight emit 9 tokens or fewer. A median over a
+  handful of 1-to-9-token requests moves on which one lands where; the old workload's 40-to-216
+  token requests averaged that away. This is the same effect `kb-20260917-aa6b0f4d` identified
+  for percentiles at n=6, now reaching the *p50s* because the requests shrank.
+- **`ttft_queue_p50` is still the worst number in the panel** — 13.36x, cv 50%, a ±99.5% band.
+  It spans 2.86 to 38.22 ms. At this concurrency queueing is jitter, not signal, and that has
+  not changed; it has, if anything, got worse in relative terms because the absolute queue wait
+  shrank while its jitter did not.
+- **Dropping the warmup run barely matters now.** With all twelve runs the band is `ttft_p95`
+  ±9.36% (against ±5.12%) and `ttft_prefill_p95` ±4.64% (against ±2.52%), and `tpot_p50` is
+  actually *tighter* with the warmup in (±7.86% vs ±8.66%). On the old data the drop removed one
+  sample from a fat tail (`ttft_p95` 2.16x → 1.46x); here it removes a genuine but small warm-up
+  effect — run 1 is the only run with `ttft_p95` above 445 ms (490.2) and the only one with
+  `ttft_prefill_p95` above 243 ms (252.2). The rule still earns its place, for a third reason now.
+
+## Per-run series (order as measured)
+
+| # | arm | ttft_p50 | ttft_p95 | ttft_queue_p95 | ttft_prefill_p95 | tpot_p50 | tpot_p95 |
+|---|---|---|---|---|---|---|---|
+| 1 | baseline | 195.3 | 490.2 | 49.85 | 252.20 | 99.33 | 150.24 |
+| 2 | treatment | 184.8 | 434.1 | 57.98 | 237.03 | 98.47 | 144.60 |
+| 3 | treatment | 198.8 | 441.9 | 84.26 | 233.75 | 109.11 | 140.22 |
+| 4 | baseline | 197.0 | 428.9 | 89.80 | 242.37 | 95.97 | 148.44 |
+| 5 | baseline | 192.5 | 424.7 | 82.97 | 234.71 | 99.56 | 145.20 |
+| 6 | treatment | 200.1 | 411.7 | 70.68 | 234.92 | 96.64 | 146.35 |
+| 7 | treatment | 196.1 | 444.6 | 83.61 | 235.36 | 99.99 | 141.54 |
+| 8 | baseline | 201.6 | 434.6 | 84.05 | 233.43 | 103.23 | 141.11 |
+| 9 | baseline | 193.3 | 429.9 | 76.13 | 233.41 | 95.00 | 142.69 |
+| 10 | treatment | 184.5 | 426.6 | 81.27 | 239.29 | 101.52 | 141.15 |
+| 11 | treatment | 170.4 | 411.1 | 51.51 | 233.37 | 96.11 | 141.49 |
+| 12 | baseline | 177.1 | 430.8 | 62.72 | 234.84 | 97.51 | 141.33 |
+
+Every run: 8 `ok` in the engine's telemetry, 6 client-visible, 2 `no_tokens` — identical in all
+twelve. Per `kb-20260918-5906bc13` those two are **correct**: one request answers with nothing
+(0 tokens) and one emits a single token that decodes to `""`. The client is right and the engine
+used to be wrong; nothing here is a client bug.
+
+## The corpus finding: `cold_start/seen` now barely batches
+
+This is the part that matters beyond the band. With the tail gone, the class is 8 requests over
+10.4 s generating **220 tokens, 185 of them in a single request**. The other seven produce 0, 1,
+1, 6, 9, 9, 9. Peak batch width across the whole replay is **3**, mean **1.14**. Twelve runs
+produced `decode_steps` = 192 and `active_mean` = 1.14 with **zero variance** — the schedule is
+now deterministic, because there is essentially nothing to schedule.
+
+`cold_start` was always meant to be sparse, and it still measures what it was built for: a cold
+replica's first thirty seconds, prefill-dominated, which is Phase 4's regime. But **it can no
+longer discriminate scheduling or batching policy**, and it is the class the simulator's rank
+check runs on. Anything that depends on rows contending — batch width, fairness, preemption,
+queueing — has almost no signal left in it. `ttft_queue_p95` is 77 ms of a 428 ms p95, and its
+own band is ±31%.
+
+That is a statement about the **corpus**, not a failure of this measurement, and it is why
+`concurrency` in this entry's `validity_range` narrowed from `[1, 5]` to `[1, 3]`. No new class
+is invented here (out of scope for this PR). What the loop needs, when it next wants a band or a
+rank check that turns on batching, is a class whose requests actually coexist on this box —
+`steady_interactive` is the opposite problem (4 rps into a ~13 tok/s box, deep overload, most
+requests shed at the deadline) and `long_context` sheds too. Neither has a band. A class sized
+for ~3-8 concurrent rows on an M4 Pro does not exist.
+
+## What this band does NOT cover
+
+Unchanged in kind from the old entry, with the bounds moved:
+
+- **Not a band for `steady_interactive` or `long_context`.** Neither has one, and both run this
+  box into overload.
+- **Not a band for A100/E4B.** `kb-20260905-1b1a2520` remains the (much wider, differently
+  measured) calibration there.
+- **A very-low-concurrency band**: `active_high_water` was 3 in every run, down from 5. It says
+  even less about real batch widths than the old one did.
+- **`find_band` matches harness, class, model and hardware together with no fallback**, so this
+  applies to `replay_trace` / `cold_start` / E2B / M4 Pro / corpus `659ea3b61303` and nothing
+  else.
+- The box was not quiesced (VS Code and its language servers were running; 1-min load average
+  ~5 at the start). No other MPS workload ran during the sweep — the whole sweep was serialised
+  for that reason.
+
+**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; the corpus gains a class that actually batches on this box: cold_start/seen now generates 220 tokens over 8 requests at a peak batch width of 3, so this band describes an almost-unbatched workload; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (still calibrated from the 2026-09-17 null alone; this re-measurement produced no false positive to calibrate against); the default (chat) workload needs a band: this one does not apply to it, see kb-20260919-e610af2a; 2026-09-20 (kb-20260920-7f31c4ad): this band is a PANEL_VERSION 1 band and find_band now keys on the version, so it gates nothing. Its null runs had no failed requests, so its spreads are not wrong — they simply describe metrics whose definition has moved
+
+**Evidence:** grp-20260919-0774d4, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260919-1d266856, run-20260919-1ea36c17, run-20260919-841b634b, run-20260919-35d53311, run-20260919-b01f6df2, run-20260919-5e1f683a, run-20260919-b867f61c, run-20260919-b6a957e6, run-20260919-d6bf16c5, run-20260919-d3597026
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"concurrency": [1, 3], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "prompt_format": "raw", "workload_class": "cold_start"}`
+
+**Mechanism:** Two thirds of the old band's spread came from decode work the engine should never have done: 406 of 626 tokens were <turn|> after the answer ended, so five to eight rows stayed resident and contended for the same MPS queue. With the tail gone the peak batch width falls from 5 to 3, requests overlap far less, and the tail metrics stop being percentiles over a contended queue.
+
+**Supersedes:** `kb-20260917-aa6b0f4d`
 
 ### [2026-09-20] Server-side chat templating adds two invisible variables, not one: the template hash AND enable_thinking, which on gemma-4 removes early termination entirely
 *tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `gates`* · `kb-20260919-9ea56f98`
@@ -1259,203 +1714,6 @@ the prefix-cache hit the construction exists to produce.
 **Mechanism:** /v1/completions does not apply a chat template (spec-correct for that route), so gemma-4-E2B-it read every corpus prompt as a turn that was already over and emitted <turn|> first. Posting the same prompt bytes to /v1/chat/completions as a single user message makes the model see a real user turn, and it answers.
 
 **Supersedes:** `kb-20260919-6ef4e6bf`
-
-### [2026-09-20] Noise floor re-measured after the end-of-turn stop fix: the cold_start band is 5x tighter on p95 TTFT, and the null no longer false-positives
-*tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `cold-start`, `gates`, `corpus`* · `kb-20260919-0a58befd`
-
-> **2026-09-19 amendment — this band is now a RAW-ROUTE band; see `kb-20260919-e610af2a`.**
-> `replay_trace.py` defaults to `/v1/chat/completions` as of `kb-20260919-bfd8f9b0`, which on the same
-> trace bytes generates 626 tokens instead of 220 at peak batch width 5 instead of 3.
-> `NoiseBand` gained `prompt_format` in its key (defaulting to `raw`, which is what this
-> band was measured under), so `find_band` no longer returns it for a default replay.
-> The numbers below are unchanged and remain correct for `--prompt-format raw`.
-
-**The 2026-09-17 band was measured on a workload that no longer exists.** `kb-20260918-5906bc13`
-(PR #41) fixed the custom backend's stop set — it read `tokenizer.eos_token_id` (`<eos>` only)
-and ignored Gemma's `<turn|>` (106), so every `custom-*` request ran to `max_tokens`. On
-`corpus/cold_start/seen` that was **626 generated tokens where the corpus asks for 220**: 65% of
-all decode work was a tail that decodes to `""`. `kb-20260917-aa6b0f4d` said in its own triggers
-that it had to be re-measured before it gated anything. This is that re-measurement.
-
-Procedure repeated unchanged: `scripts/bench/replay_local.py --class cold_start --null 6`,
-**twelve runs, six per arm, ABBA-interleaved, byte-identical config in both arms**, one fresh
-server process per run (so no replicate inherits the previous one's prefix cache). Engine
-`BACKEND=custom-mps`, `google/gemma-4-E2B-it`, MAX_BATCH_SIZE=8, PREFILL_MODE=batched, 4096 KV
-blocks, fcfs, 30s admission deadline, Apple M4 Pro, `HF_HUB_OFFLINE=1`. Run group
-`grp-20260919-0774d4`, engine `03f600e`, corpus `659ea3b61303` — the same corpus version as the
-old band, so the two are comparable metric by metric.
-
-## The new band, next to the old one
-
-Ten runs, each arm's first dropped as warmup, exactly as `significance_replicated` does. Both
-columns are the ±2sd gating width.
-
-| metric | old band (e835425) | **new band (03f600e)** | old mean | **new mean** | new cv | new max/min |
-|---|---|---|---|---|---|---|
-| `ttft_p50` | ±37.78% | **±10.94%** | 256.63 | **191.14** | 5% | 1.18x |
-| `ttft_p95` | ±25.76% | **±5.12%** | 486.02 | **428.48** | 3% | 1.08x |
-| `ttft_queue_p50` | ±89.38% | **±99.54%** | 33.78 | **24.97** | 50% | 13.36x |
-| `ttft_queue_p95` | ±73.68% | **±30.82%** | 95.67 | **76.70** | 15% | 1.74x |
-| `ttft_prefill_p50` | ±6.76% | **±13.54%** | 121.78 | **126.61** | 7% | 1.27x |
-| `ttft_prefill_p95` | ±53.54% | **±2.52%** | 364.19 | **235.55** | 1% | 1.04x |
-| `tpot_p50` | ±4.78% | **±8.66%** | 151.33 | **99.46** | 4% | 1.15x |
-| `tpot_p95` | ±9.40% | **±3.84%** | 199.42 | **142.95** | 2% | 1.06x |
-| `tok_s_within_slo` | ±1.42% | **±1.50%** | 7.45 | **13.19** | 1% | 1.02x |
-| `wall_s` | ±1.56% | **±1.38%** | 29.36 | **16.61** | 1% | 1.02x |
-| `active_mean` | ±1.72% | **±0%** | 2.207 | **1.14** | 0% | 1.00x |
-| `active_high_water` | ±0% | **±0%** | 5 | **3** | 0% | 1.00x |
-| `decode_steps` | ±1.60% | **±0%** | 280.1 | **192** | 0% | 1.00x |
-| `cache_hit_rate` | ±0% | ±0% | 0 | 0 | 0% | — |
-| `pool_utilization` | ±0% | ±0% | 0.0049 | 0.0049 | 0% | 1.00x |
-
-Machine-readable at
-`knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json`. The old
-file is kept at `knowledge/noise/superseded/...-e835425.json`; `load_bands` globs
-`knowledge/noise/*.json` and does not recurse, so the superseded band is out of `find_band`'s
-reach and exactly one band is live. `BAND_SIGMAS` is unchanged at 2 (see below).
-
-## The null no longer produces a false positive
-
-The old null's headline result was that, judged as a real A/B, it returned a **t-significant
-+2.7% win on `tpot_p50` comparing a config against itself** — the failure the band exists to
-catch. Judged the same way (`significance_replicated` over the same twelve panels, 5v5 after
-warmup):
-
-| metric | old: t-test alone | new: t-test alone | new: with the band |
-|---|---|---|---|
-| `ttft_p50` | noise | noise, −1.2%, \|t\|=0.33 | noise |
-| `ttft_p95` | noise, \|t\|=0.69 | noise, −0.6%, \|t\|=0.36 | noise |
-| `ttft_queue_p95` | noise, \|t\|=1.08 | noise, −6.2%, \|t\|=0.63 | noise |
-| `ttft_prefill_p95` | noise, \|t\|=0.61 | noise, −0.2%, \|t\|=0.21 | noise |
-| `tpot_p50` | **significant, \|t\|=2.06, +2.7%** | noise, +2.5%, \|t\|=0.88 | noise |
-| `tpot_p95` | — | noise, −1.1%, \|t\|=0.92 | noise |
-| `wall_s` | — | noise, −0.4%, \|t\|=0.90 | noise |
-| `tok_s_within_slo` | — | noise, +0.5%, \|t\|=0.95 | noise |
-| `decode_steps` | — | noise, +0.0%, \|t\|=0.00 | noise |
-
-**No metric separates the arms on the t-test alone.** The largest effect is the same one as
-before — `tpot_p50`, at +2.5% against the old +2.7% — but its |t| fell from 2.06 to 0.88,
-because the per-arm spread it is divided by is now much smaller and, crucially, *similar between
-arms* (sd 3.3/5.2 ms on a 99 ms mean). The old run's false positive was one arm drawing a tight
-sample and the other a wide one out of a fat tail; with the wasted decode gone the tail is gone
-with it.
-
-**This weakens, rather than confirms, the evidence for `BAND_SIGMAS=2`.** The multiplier was
-calibrated from exactly one observed false positive, and that false positive is now known to
-have come from a contaminated workload. This re-measurement produces none, so it offers nothing
-to calibrate against — it neither supports 2 nor argues for another number. Per the task's
-instruction the constant is left alone, and this is said rather than quietly fixed: **the band
-width is now the only thing standing between a clean t-test and a merge, and its multiplier
-rests on a measurement that has since been invalidated.** The honest next step is a second null
-in a regime that actually batches (see the corpus finding below), not a re-derivation from this
-one.
-
-## What moved, and why
-
-- **Everything that scales with decode work fell by roughly the 2.8x the stop fix predicted.**
-  `wall_s` 29.36 → 16.61s, `decode_steps` 280.1 → **exactly 192 in all twelve runs**,
-  `tpot_p50` 151 → 99 ms, and `tok_s_within_slo` 7.45 → 13.19 tok/s. Generated tokens are
-  **220 in every run**, byte-identical per request (`6, 1, 9, 185, 1, 9, 0, 9`), against the
-  corpus's 626-token `max_tokens` budget — the number `kb-20260918-5906bc13` predicted offline,
-  now confirmed through the full server path.
-- **The tail metrics stopped being tails.** `ttft_prefill_p95` went from the worst-behaved
-  number in the panel (2.16x, cv 27%) to the best (1.04x, cv 1%), and `ttft_p95` from 1.46x to
-  1.08x. The mechanism is batch occupancy: `active_high_water` fell 5 → 3 and `active_mean`
-  2.21 → 1.14. Before the fix, five to eight rows stayed resident emitting `<turn|>` and
-  contended for the same MPS queue; a prefill landing behind them waited on whatever that
-  contention happened to be. Now requests barely overlap, so prefill costs what prefill costs.
-  **A TTFT claim on this box no longer needs to clear 25% — it needs to clear ~5%.** That is the
-  practical gain: the harness can now see effects it could not before.
-- **Two metrics got *worse*, and both for the same reason.** `tpot_p50` (±4.78% → ±8.66%) and
-  `ttft_prefill_p50` (±6.76% → ±13.54%) are *medians over six surviving requests*, and the
-  surviving requests are now tiny: five of the eight emit 9 tokens or fewer. A median over a
-  handful of 1-to-9-token requests moves on which one lands where; the old workload's 40-to-216
-  token requests averaged that away. This is the same effect `kb-20260917-aa6b0f4d` identified
-  for percentiles at n=6, now reaching the *p50s* because the requests shrank.
-- **`ttft_queue_p50` is still the worst number in the panel** — 13.36x, cv 50%, a ±99.5% band.
-  It spans 2.86 to 38.22 ms. At this concurrency queueing is jitter, not signal, and that has
-  not changed; it has, if anything, got worse in relative terms because the absolute queue wait
-  shrank while its jitter did not.
-- **Dropping the warmup run barely matters now.** With all twelve runs the band is `ttft_p95`
-  ±9.36% (against ±5.12%) and `ttft_prefill_p95` ±4.64% (against ±2.52%), and `tpot_p50` is
-  actually *tighter* with the warmup in (±7.86% vs ±8.66%). On the old data the drop removed one
-  sample from a fat tail (`ttft_p95` 2.16x → 1.46x); here it removes a genuine but small warm-up
-  effect — run 1 is the only run with `ttft_p95` above 445 ms (490.2) and the only one with
-  `ttft_prefill_p95` above 243 ms (252.2). The rule still earns its place, for a third reason now.
-
-## Per-run series (order as measured)
-
-| # | arm | ttft_p50 | ttft_p95 | ttft_queue_p95 | ttft_prefill_p95 | tpot_p50 | tpot_p95 |
-|---|---|---|---|---|---|---|---|
-| 1 | baseline | 195.3 | 490.2 | 49.85 | 252.20 | 99.33 | 150.24 |
-| 2 | treatment | 184.8 | 434.1 | 57.98 | 237.03 | 98.47 | 144.60 |
-| 3 | treatment | 198.8 | 441.9 | 84.26 | 233.75 | 109.11 | 140.22 |
-| 4 | baseline | 197.0 | 428.9 | 89.80 | 242.37 | 95.97 | 148.44 |
-| 5 | baseline | 192.5 | 424.7 | 82.97 | 234.71 | 99.56 | 145.20 |
-| 6 | treatment | 200.1 | 411.7 | 70.68 | 234.92 | 96.64 | 146.35 |
-| 7 | treatment | 196.1 | 444.6 | 83.61 | 235.36 | 99.99 | 141.54 |
-| 8 | baseline | 201.6 | 434.6 | 84.05 | 233.43 | 103.23 | 141.11 |
-| 9 | baseline | 193.3 | 429.9 | 76.13 | 233.41 | 95.00 | 142.69 |
-| 10 | treatment | 184.5 | 426.6 | 81.27 | 239.29 | 101.52 | 141.15 |
-| 11 | treatment | 170.4 | 411.1 | 51.51 | 233.37 | 96.11 | 141.49 |
-| 12 | baseline | 177.1 | 430.8 | 62.72 | 234.84 | 97.51 | 141.33 |
-
-Every run: 8 `ok` in the engine's telemetry, 6 client-visible, 2 `no_tokens` — identical in all
-twelve. Per `kb-20260918-5906bc13` those two are **correct**: one request answers with nothing
-(0 tokens) and one emits a single token that decodes to `""`. The client is right and the engine
-used to be wrong; nothing here is a client bug.
-
-## The corpus finding: `cold_start/seen` now barely batches
-
-This is the part that matters beyond the band. With the tail gone, the class is 8 requests over
-10.4 s generating **220 tokens, 185 of them in a single request**. The other seven produce 0, 1,
-1, 6, 9, 9, 9. Peak batch width across the whole replay is **3**, mean **1.14**. Twelve runs
-produced `decode_steps` = 192 and `active_mean` = 1.14 with **zero variance** — the schedule is
-now deterministic, because there is essentially nothing to schedule.
-
-`cold_start` was always meant to be sparse, and it still measures what it was built for: a cold
-replica's first thirty seconds, prefill-dominated, which is Phase 4's regime. But **it can no
-longer discriminate scheduling or batching policy**, and it is the class the simulator's rank
-check runs on. Anything that depends on rows contending — batch width, fairness, preemption,
-queueing — has almost no signal left in it. `ttft_queue_p95` is 77 ms of a 428 ms p95, and its
-own band is ±31%.
-
-That is a statement about the **corpus**, not a failure of this measurement, and it is why
-`concurrency` in this entry's `validity_range` narrowed from `[1, 5]` to `[1, 3]`. No new class
-is invented here (out of scope for this PR). What the loop needs, when it next wants a band or a
-rank check that turns on batching, is a class whose requests actually coexist on this box —
-`steady_interactive` is the opposite problem (4 rps into a ~13 tok/s box, deep overload, most
-requests shed at the deadline) and `long_context` sheds too. Neither has a band. A class sized
-for ~3-8 concurrent rows on an M4 Pro does not exist.
-
-## What this band does NOT cover
-
-Unchanged in kind from the old entry, with the bounds moved:
-
-- **Not a band for `steady_interactive` or `long_context`.** Neither has one, and both run this
-  box into overload.
-- **Not a band for A100/E4B.** `kb-20260905-1b1a2520` remains the (much wider, differently
-  measured) calibration there.
-- **A very-low-concurrency band**: `active_high_water` was 3 in every run, down from 5. It says
-  even less about real batch widths than the old one did.
-- **`find_band` matches harness, class, model and hardware together with no fallback**, so this
-  applies to `replay_trace` / `cold_start` / E2B / M4 Pro / corpus `659ea3b61303` and nothing
-  else.
-- The box was not quiesced (VS Code and its language servers were running; 1-min load average
-  ~5 at the start). No other MPS workload ran during the sweep — the whole sweep was serialised
-  for that reason.
-
-**Revisit when:** the harness, the engine config, the corpus or the machine changes; a band is wanted for steady_interactive or long_context on this box; GPU budget returns: re-measure the A100/E4B band as a proper null; the corpus gains a class that actually batches on this box: cold_start/seen now generates 220 tokens over 8 requests at a peak batch width of 3, so this band describes an almost-unbatched workload; a second null on another regime or machine disagrees with BAND_SIGMAS=2 (still calibrated from the 2026-09-17 null alone; this re-measurement produced no false positive to calibrate against); the default (chat) workload needs a band: this one does not apply to it, see kb-20260919-e610af2a
-
-**Evidence:** grp-20260919-0774d4, knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260919-1d266856, run-20260919-1ea36c17, run-20260919-841b634b, run-20260919-35d53311, run-20260919-b01f6df2, run-20260919-5e1f683a, run-20260919-b867f61c, run-20260919-b6a957e6, run-20260919-d6bf16c5, run-20260919-d3597026
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"concurrency": [1, 3], "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "harness": "replay_trace", "model": "google/gemma-4-E2B-it", "prompt_format": "raw", "workload_class": "cold_start"}`
-
-**Mechanism:** Two thirds of the old band's spread came from decode work the engine should never have done: 406 of 626 tokens were <turn|> after the answer ended, so five to eight rows stayed resident and contended for the same MPS queue. With the tail gone the peak batch width falls from 5 to 3, requests overlap far less, and the tail metrics stop being percentiles over a contended queue.
-
-**Supersedes:** `kb-20260917-aa6b0f4d`
 
 ### [2026-09-20] cold_start can no longer discriminate: most of its prompts generate zero tokens and the class never exceeds batch width 3
 *tags: `loop`, `corpus`, `benchmark`, `validity`, `cold-start`, `batching`, `simulator`* · `kb-20260919-6ef4e6bf`

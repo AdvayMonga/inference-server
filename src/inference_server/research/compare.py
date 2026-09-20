@@ -141,7 +141,7 @@ def comparable(a: Vitals, b: Vitals, *, same_group_required: bool = True) -> Com
 @dataclass
 class Significance:
     # significant | inconclusive | noise | insufficient_samples | not_comparable
-    # | non_numeric_metric
+    # | non_numeric_metric | unmeasurable
     #
     # `inconclusive` is the band verdict: the t-test separated the arms, but the effect is no
     # bigger than what this harness moves on its own with nothing changed. LOOP.md/notes-03:
@@ -205,6 +205,18 @@ def significance_replicated(
     if len(b) < min_runs or len(t) < min_runs:
         return Significance("insufficient_samples", metric, None, None, None, None,
                             f"{metric} missing from some runs")
+
+    # An infinite percentile means more than (1-q) of the requests never answered, so the tail
+    # falls among them (harness.pct_over_attempts). There is no number to test and no honest way
+    # to invent one: the arm did not serve the workload. Said here rather than letting inf reach
+    # the t-test, which returns nan and reads as "noise" — a wrong reason for the right refusal.
+    if not all(math.isfinite(v) for v in b + t):
+        arm = "baseline" if not all(math.isfinite(v) for v in b) else "treatment"
+        return Significance(
+            "unmeasurable", metric, None, None, None, None,
+            f"{metric} is infinite in the {arm} arm: enough requests never answered that the "
+            f"percentile lands among them. A shed request is a failure to serve, not an absence "
+            f"of data — there is no latency win to claim until the arm serves the workload")
 
     mb, mt = statistics.mean(b), statistics.mean(t)
     sb = statistics.stdev(b) if len(b) > 1 else 0.0

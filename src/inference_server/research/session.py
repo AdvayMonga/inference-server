@@ -11,6 +11,7 @@ surfaces cannot drift apart again.
 
 from __future__ import annotations
 
+import math
 import subprocess
 from dataclasses import asdict, dataclass
 from dataclasses import field as dc_field
@@ -399,7 +400,10 @@ class PrimaryMetric:
                  f"at a p95 TTFT ceiling of {self.ceiling_ms:.0f}ms [{verdict}]",
                  f"  {self.gpu_s:.1f} GPU-s (wall from process start, idle included) / "
                  f"{self.sessions} session(s) over {self.runs} run(s)",
-                 f"  measured p95 TTFT {self.ttft_p95_ms:.0f}ms"]
+                 (f"  measured p95 TTFT {self.ttft_p95_ms:.0f}ms" if
+                  math.isfinite(self.ttft_p95_ms) else
+                  "  measured p95 TTFT INFINITE — the tail falls among requests that never "
+                  "answered")]
         lines += [f"  CAVEAT: {c}" for c in self.caveats]
         return "\n".join(lines)
 
@@ -465,19 +469,20 @@ def primary_metric(panels: Vitals | list[Vitals], *,
             if ceiling is not None:
                 met = met and p.ttft_p95 < ceiling
 
-        # ttft_p95 is computed over SUCCESSFUL requests only, so failing a request would
-        # improve it — a reward hack. A failed request is a first token that never arrived, so
-        # it ranks above every real one. Nearest-rank p95 over ALL requests is finite only if
-        # at least ceil(0.95 * n) of them got a first token. Integer arithmetic, not 0.95 * n:
-        # the floor-interpolation index let 1 failure in 8 through. Closed HERE only — the
-        # gates still read ttft_p95 as the instruments compute it (kb-20260918-4f4c85b7).
-        n_req, n_ok = p.validity.harness_config.get("n_requests"), p.validity.n_samples
-        if not isinstance(n_req, int) or n_req < n_ok:
-            refusals.append(f"{rid}: harness_config['n_requests'] is {n_req!r} against "
-                            f"n_samples={n_ok}, so failed requests cannot be counted — and an "
-                            f"uncounted failure would flatter the ceiling")
-        elif n_req > n_ok:
-            caveats.append(f"{rid}: {n_req - n_ok} of {n_req} requests produced no first token")
+        # Failures rank above every served request, so dropping requests cannot flatter the
+        # ceiling. Since PANEL_VERSION 2 `ttft_p95` carries them too — nearest-rank over attempts,
+        # infinite once the tail falls among the failures — and the two are now provably the SAME
+        # rule: `n_ok >= ceil(0.95 * n)` is exactly the condition under which that percentile is
+        # finite (`harness.rank_index`), pinned by a test. Kept as a separate statement because it
+        # names the count in the caveats and because it survives a panel that carries no ttft_p95.
+        # Integer arithmetic, not 0.95 * n: floor interpolation let 1 failure in 8 past.
+        n_failed, n_ok = p.n_failed, p.validity.n_samples
+        if not isinstance(n_failed, int) or n_failed < 0:
+            refusals.append(f"{rid}: n_failed is {n_failed!r}, so failed requests cannot be "
+                            f"counted — and an uncounted failure would flatter the ceiling")
+        elif n_failed:
+            n_req = n_ok + n_failed
+            caveats.append(f"{rid}: {n_failed} of {n_req} requests produced no first token")
             if n_ok < (95 * n_req + 99) // 100:
                 met = False
 
