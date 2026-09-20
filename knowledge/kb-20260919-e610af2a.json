@@ -41,9 +41,10 @@
   "triggers": [
     "BEFORE any A/B is judged on cold_start with the default (chat) route: re-measure the null with `replay_local.py --class cold_start --null 6`, which now defaults to chat",
     "a merge is proposed whose evidence is a cold_start delta: check the panel's harness_config.prompt_format against the band's, because find_band will simply return None and the gate will not say why",
-    "the re-measured chat band lands: BAND_SIGMAS=2 is still calibrated from a single false positive on a workload since shown to be contaminated, and this is the second null that could calibrate it"
+    "the re-measured chat band lands: BAND_SIGMAS=2 is still calibrated from a single false positive on a workload since shown to be contaminated, and this is the second null that could calibrate it",
+    "the chat band is measured: measure it at or after the shim's explicit thinking=False (kb-20260919-5db5aafa). find_band keys on prompt_format but NOT on enable_thinking, so a chat band measured before that fix would be applied to a workload it does not describe. No such band exists yet, which is the only reason this is a trigger and not a hazard."
   ],
-  "updated_at": 1789867354.56413,
+  "updated_at": 1789869800.0,
   "validity_range": {
     "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
     "hardware": "Apple M4 Pro (MPS)",
