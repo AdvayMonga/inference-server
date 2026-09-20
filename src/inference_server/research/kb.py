@@ -76,6 +76,7 @@ def query(
     status: str | None = None,
     text: str | None = None,
     regime: str | None = None,
+    suspended: bool = False,
 ) -> list[KnowledgeEntry]:
     """What the hypothesis step calls before proposing anything: has this been tried?"""
     items = list(entries) if entries is not None else load_entries()
@@ -84,6 +85,8 @@ def query(
         items = [e for e in items if tagset & set(e.tags)]
     if status:
         items = [e for e in items if e.status == status]
+    if suspended:
+        items = suspensions(items)
     if regime:
         items = [e for e in items if e.regime == regime]
     if text:
@@ -92,6 +95,34 @@ def query(
                  if t in e.title.lower() or t in e.summary.lower()
                  or any(t in tag for tag in e.tags)]
     return items
+
+
+def suspensions(entries: Iterable[KnowledgeEntry] | None = None) -> list[KnowledgeEntry]:
+    """Entries whose suspension is still LIVE.
+
+    A suspension is lifted by superseding the entry — file the record that shows the instrument
+    measuring again, point `supersedes`/`superseded_by` at each other, and this stops returning
+    the old one. That is how the same suspension was already lifted once by hand
+    (kb-20260917-c07eb94b -> kb-20260918-9fc68282) and re-imposed
+    (-> kb-20260919-94acfdb8). Deleting the fields instead would leave no record that the gate
+    was ever there, which is the thing a loop with memory must not allow.
+    """
+    items = list(entries) if entries is not None else load_entries()
+    return [e for e in items
+            if e.suspended_metrics and e.superseded_by is None and e.status != "obsolete"]
+
+
+def suspends(entry: KnowledgeEntry, metric: str, tier: int) -> bool:
+    """Does this entry say `metric` cannot be measured at falsification tier `tier`?"""
+    return (metric in entry.suspended_metrics
+            and (not entry.suspended_tiers or tier in entry.suspended_tiers))
+
+
+def format_scope(entry: KnowledgeEntry) -> str:
+    """Where a suspension applies, from the fields that already say where an entry applies."""
+    parts = [f"regime={entry.regime}"] if entry.regime else []
+    parts += [f"{k}={v}" for k, v in sorted(entry.validity_range.items())]
+    return ", ".join(parts) or "unscoped — no regime or validity_range, so it applies everywhere"
 
 
 def _num(v: Any) -> bool:
@@ -239,6 +270,22 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
             refs = ", ".join(f"`{e.id}`" for e in sorted(group, key=lambda x: x.id))
             lines.append(f"- **{regime}** ({len(group)}): {refs}")
     lines.append("")
+    # Live suspensions go near the top, above every status section: a metric the loop cannot
+    # currently measure changes what is worth proposing, so it has to be visible before the
+    # findings are. `loop screen` enforces this list; this section is the human-readable copy.
+    live = suspensions(items)
+    live_ids = {e.id for e in live}
+    if live:
+        lines += ["## Active suspensions", "",
+                  "Metrics the loop currently **cannot measure** at the tiers named. `loop "
+                  "screen` blocks a hypothesis that predicts one of them. Lifted by superseding "
+                  "the entry with one that shows the instrument working again.", ""]
+        for e in sorted(live, key=lambda x: x.id):
+            tiers = (", ".join(f"tier {t}" for t in sorted(e.suspended_tiers))
+                     or "every tier")
+            lines.append(f"- `{', '.join(e.suspended_metrics)}` at {tiers} "
+                         f"({format_scope(e)}) — `{e.id}`: {e.title}")
+        lines.append("")
     for status in STATUS_ORDER:
         group = by_status.get(status) or []
         if not group:
@@ -257,6 +304,11 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
             if e.evidence:
                 ev = ", ".join(v for d in e.evidence for v in d.values())
                 lines += [f"**Evidence:** {ev}", ""]
+            if e.suspended_metrics:
+                tiers = ", ".join(str(t) for t in sorted(e.suspended_tiers)) or "all"
+                state = "LIVE" if e.id in live_ids else "lifted (superseded)"
+                lines += [f"**Suspends:** `{', '.join(e.suspended_metrics)}` at tier(s) {tiers} "
+                          f"— {state}", ""]
             if e.regime:
                 lines += [f"**Regime:** `{e.regime}`", ""]
             if e.validity_range:

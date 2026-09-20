@@ -7,6 +7,7 @@
     python -m inference_server.research.loop band --run-group <null run group>
     python -m inference_server.research.loop index
     python -m inference_server.research.loop kb --status rejected
+    python -m inference_server.research.loop kb --suspended     # what cannot be measured right now
     python -m inference_server.research.loop no-claim --why "drops an unused import"
 
 Step 2 (hypothesize) is deliberately NOT automated — it is the one place judgement belongs, and
@@ -25,9 +26,12 @@ from pathlib import Path
 from inference_server.research.attribute import attribute
 from inference_server.research.kb import (
     covers,
+    format_scope,
     related,
     load_entries,
     query,
+    suspends,
+    suspensions,
     write_index,
 )
 from inference_server.research.schemas import Hypothesis, Vitals
@@ -55,7 +59,12 @@ def cmd_attribute(args) -> int:
 
 
 def cmd_screen(args) -> int:
-    """Order hypotheses cheapest-falsification-first and flag known dead ends."""
+    """Order hypotheses cheapest-falsification-first, flag known dead ends, block suspensions.
+
+    Exit 1 if any hypothesis predicts a metric a live suspension says this tier cannot measure.
+    Unlike the `related()` flags, which are keyword-scored and therefore advisory, a suspension
+    is declared and exact (metric + tier), so it is safe to make it a verdict.
+    """
     raw = json.loads(Path(args.hypotheses).read_text())
     hyps = [Hypothesis(**h) for h in (raw if isinstance(raw, list) else [raw])]
     entries = load_entries()
@@ -63,18 +72,35 @@ def cmd_screen(args) -> int:
     for h in hyps:
         h.validate()
 
+    # Checked against EVERY entry, not just the ones `related()` surfaces: a suspension is a
+    # property of the instrument, not of the subject. A prefix-cache hypothesis that predicts
+    # p95 TTFT at tier 1 shares no words with "the simulator has no termination model", and it
+    # is exactly as unfalsifiable at that tier as a scheduling one.
+    live = suspensions(entries)
+    n_stopped = 0
+
     for h in sorted(hyps, key=lambda x: x.falsification_tier):
         hits = related(h.statement, entries, tags=h.tags)
         blocking = [e for _, e in hits if e.status in ("rejected", "resolved")]
-        flag = "  <-- READ THE RELATED ENTRIES FIRST" if blocking else ""
+        stopped = [e for e in live if suspends(e, h.predicted_metric, h.falsification_tier)]
+        flag = ("  <-- SUSPENDED: THIS TIER CANNOT MEASURE THAT METRIC" if stopped
+                else "  <-- READ THE RELATED ENTRIES FIRST" if blocking else "")
+        n_stopped += bool(stopped)
         print(f"tier {h.falsification_tier} ({TIER_NAMES[h.falsification_tier]}){flag}")
-        if h.falsification_tier <= 2:
+        if h.falsification_tier <= 2 and not stopped:
             print("  policy hypothesis? `loop simulate --class <cls> --config '{...}'` falsifies "
                   "scheduling / admission / KV-sizing changes without a GPU")
         print(f"  {h.id}  {h.statement}")
         print(f"  predicts {h.predicted_metric} {h.predicted_direction} by "
               f"{h.predicted_magnitude}")
         print(f"  falsify with: {h.falsification_test}")
+        for e in stopped:
+            print(f"    !! SUSPENDED {h.predicted_metric} at tier {h.falsification_tier}: "
+                  f"[{e.status}] {e.id}: {e.title[:60]}")
+            print(f"       scope: {format_scope(e)}")
+            print(f"       a result from this tier is NOT evidence about {h.predicted_metric}. "
+                  f"Use a tier this entry does not suspend, predict a metric it does not, or "
+                  f"lift it: fix the instrument and supersede the entry.")
         for score, e in hits:
             print(f"    ~{score:5.1f} [{e.status}] {e.id}: {e.title[:66]}")
         if not hits:
@@ -88,6 +114,10 @@ def cmd_screen(args) -> int:
             print(f"    ! settled entries not cited in kb_check: {', '.join(uncited[:3])}")
         print()
     print("Run the cheapest tier first; never enter tier N+1 while tier N could still falsify.")
+    if n_stopped:
+        print(f"{n_stopped} of {len(hyps)} hypotheses are SUSPENDED: the loop currently cannot "
+              f"falsify them at the tier they name. Do not run them.")
+        return 1
     return 0
 
 
@@ -227,14 +257,19 @@ def parse_situation(spec: str | None) -> dict:
 
 
 def cmd_kb(args) -> int:
-    hits = query(status=args.status, tags=args.tags or (), text=args.text, regime=args.regime)
+    hits = query(status=args.status, tags=args.tags or (), text=args.text, regime=args.regime,
+                 suspended=args.suspended)
     if args.situation:
         hits = [e for e in hits if covers(e, args.situation)]
+    live = {e.id for e in suspensions()}
     for e in hits:
         # An entry with no validity_range is unscoped — it covers() everything by construction,
         # which is not the same as having been verified for this situation.
         scope = "" if e.validity_range or not args.situation else "  [unscoped]"
         print(f"{e.status:9} {e.id}  {e.title}{scope}")
+        if e.id in live:
+            tiers = ", ".join(str(t) for t in sorted(e.suspended_tiers)) or "all"
+            print(f"           SUSPENDS {', '.join(e.suspended_metrics)} at tier(s) {tiers}")
         if args.verbose:
             print(f"           tags: {', '.join(e.tags)}")
     print(f"\n{len(hits)} entr{'y' if len(hits) == 1 else 'ies'}")
@@ -250,7 +285,8 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("panel"); a.add_argument("--out")
     a.set_defaults(fn=cmd_attribute)
 
-    s = sub.add_parser("screen", help="order hypotheses cheapest-first, flag dead ends (step 3)")
+    s = sub.add_parser("screen", help="order hypotheses cheapest-first, flag dead ends (step 3); "
+                                      "exit 1 if one predicts a suspended metric")
     s.add_argument("hypotheses"); s.set_defaults(fn=cmd_screen)
 
     m = sub.add_parser("simulate", help="tier-1: replay a corpus class through the simulator, "
@@ -295,6 +331,9 @@ def main(argv: list[str] | None = None) -> int:
     k.add_argument("--text"); k.add_argument("-v", "--verbose", action="store_true")
     k.add_argument("--regime",
                    help="only entries for this regime (cold_start, steady_interactive, long_context)")
+    k.add_argument("--suspended", action="store_true",
+                   help="only entries whose suspension is live: a metric the loop cannot "
+                        "currently measure at the tiers named")
     k.add_argument("--situation", type=parse_situation,
                    help="key=value[,key=value]; keep entries whose validity_range covers it")
     k.set_defaults(fn=cmd_kb)
