@@ -771,10 +771,10 @@ narrow `MAX_BATCH_SIZE`. Named:
   `MAX_BATCH_SIZE` 1-2 (10-20 s) are dominated by queueing behind rows that were decoding
   `<turn|>`; the rho values (0.966 TPOT, 0.628 TTFT) are measured against a workload the
   corpus did not describe.
-- **Its re-run, PR #40** (in review, rho 0.628 -> 0.745): same harness, backend and box —
+- **Its re-run, PR #40** (merged as `dc30cef`, rho 0.628 -> 0.745): same harness, backend and box —
   same contamination. The batch-width telemetry it adds is unaffected as code; its fit and rho
   are not.
-- **Total accounting, PR #38** (in review, `run-20260918-99883258`): its engine-side figure
+- **Total accounting, PR #38** (merged as `94e9780`, `run-20260918-99883258`): its engine-side figure
   (5.86 GPU-s per session) counts the wasted tail; its client-side BROKEN verdict rests on
   `no_tokens` that are, per the table above, mostly real empty answers.
 
