@@ -1,0 +1,58 @@
+{
+  "created_at": 1789867333.633419,
+  "evidence": [
+    {
+      "run_group": "grp-20260919-2c36c0"
+    },
+    {
+      "run_id": "run-20260919-a4f66edf"
+    },
+    {
+      "run_id": "run-20260919-3177144a"
+    },
+    {
+      "run_id": "run-20260919-08ac920d"
+    },
+    {
+      "run_id": "run-20260919-e66c4739"
+    }
+  ],
+  "id": "kb-20260919-bfd8f9b0",
+  "mechanism": "/v1/completions does not apply a chat template (spec-correct for that route), so gemma-4-E2B-it read every corpus prompt as a turn that was already over and emitted <turn|> first. Posting the same prompt bytes to /v1/chat/completions as a single user message makes the model see a real user turn, and it answers.",
+  "regime": "cold_start",
+  "status": "resolved",
+  "summary": "**`cold_start` discriminates again.** `kb-20260919-6ef4e6bf` found the class generating 220\ntokens of a 626-token budget, with six of eight `heldout` prompts generating nothing at all, and\nnamed the cause: corpus prompts posted raw to `/v1/completions`, which deliberately does not\napply a chat template. `replay_trace.py` now posts each prompt to `/v1/chat/completions` as a\nsingle user message instead. Nothing about the corpus changed \u2014 the trace files are byte-identical\nand `corpus_version` is still `659ea3b61303`.\n\n## Measured, both routes, one session\n\n`run_group=grp-20260919-2c36c0`, engine `8826256`, clean tree, `google/gemma-4-E2B-it`,\n`BACKEND=custom-mps`, `MAX_BATCH_SIZE=8`, `PREFILL_MODE=batched`, 4096 KV blocks, fcfs, 30 s\nadmission deadline, Apple M4 Pro, `HF_HUB_OFFLINE=1`, one fresh server process per run, rate\nscale x1. Four runs: each split through each route.\n\n| `cold_start` | raw `seen` | **chat `seen`** | raw `heldout` | **chat `heldout`** |\n|---|---|---|---|---|\n| `max_tokens` budget | 626 | 626 | 728 | 728 |\n| **tokens the engine generated** | 220 | **626** | 216 | **728** |\n| tokens the client saw | 219 | 618 | 216 | 720 |\n| **requests generating 0 tokens** | 2 | **0** | 6 | **0** |\n| client-visible successes | 6/8 | **8/8** | 2/8 | **8/8** |\n| `active_mean` | 1.14 | **2.17** | 1.00 | **2.35** |\n| `active_high_water` | 3 | **5** | 1 | **4** |\n| `decode_steps` | 192 | 285 | 215 | 307 |\n| `ttft_p95` (ms) | 435 | 803 | 318 | 534 |\n| `tpot_p50` (ms) | 93.7 | 117.6 | 60.4 | 129.4 |\n| `wall_s` | 16.4 | 28.7 | 25.1 | 32.9 |\n\nPer request, `seen`: raw `6, 0, 9, 185, 1, 9, 0, 9` against chat `42, 32, 40, 185, 54, 17, 216,\n40`. `heldout`: raw `1, 0, 0, 0, 0, 0, 215, 0` against chat `29, 214, 50, 32, 136, 22, 215, 30`.\nThe raw column reproduces `kb-20260919-6ef4e6bf` exactly, on a different day and a different\nengine sha, which is worth saying: that finding replicated.\n\n## The timing fit has leverage again\n\nThis is the part that unblocks the roadmap. `fit_timing_from_runs.py` fits\n`decode_step_s = a + b*batch_size` over the per-request `decode_batch_width_mean` telemetry\ncolumn, and refused with `ValueError: singular fit` because the regressor was constant.\n\n| arm | decode rows | width range | Sxx | fit |\n|---|---|---|---|---|\n| raw `seen` | 5 | 1.00 \u2013 2.00 | 1.04 | non-singular but thin |\n| **raw `heldout`** | **1** | \u2014 | **0** | **SINGULAR** (the reported failure) |\n| **chat `seen`** | **8** | **1.90 \u2013 4.44** | **5.57** | non-singular |\n| **chat `heldout`** | **8** | **2.06 \u2013 4.00** | **4.17** | non-singular |\n| chat, both splits | 16 | 1.90 \u2013 4.44 | 10.04 | non-singular |\n\nThe two chat splits fit independently to **0.0283** and **0.0243** s per resident row \u2014 they\nagree to 15% without being told to, which is a replication signal, not just an absence of a\ncrash. **The leverage for a refit is there.** The refit itself is deliberately NOT done here: it\nshould be run over `configs_timing_fit.json` as a proper fit group with replicates, not over a\nfour-run demonstration, and the rank check that validates it is its own piece of work\n(`kb-20260919-94acfdb8`).\n\n## What this does NOT fix, carried forward from `kb-20260919-6ef4e6bf`\n\nThat entry is marked `superseded_by` this one for the defect it named, but it is left `resolved`\nrather than `obsolete` because its other finding stands untouched and unaddressed:\n\n- `steady_interactive` asks 4 rps and ~13,800 output tokens of a box that serves ~13\u201322 tok/s.\n  Deep overload; most requests still shed at the admission deadline. No noise band.\n- `long_context` sheds 26 of 40 at a 3 s deadline. Templating will make the 14 that run actually\n  generate, which is an improvement, but it was not measured here.\n- `cold_start` is still only 8 requests. It now peaks at width 5 instead of 3, which is enough\n  for a timing fit and enough to see a batching effect, but it is a thin class and this entry\n  does not claim otherwise. **A class purpose-built for ~3\u20138 sustained concurrent rows on this\n  box still does not exist**, and building one is still the right piece of work.\n\n## Why server-side rather than baked into the trace\n\nTemplating at build time would put Gemma's `<|turn>user ... <turn|><|turn>model` into every\nstored prompt and tie the whole corpus to one model. Phase 0 is actively considering a ~30 GB\nmodel swap, which would then invalidate every trace and every panel measured against them.\nServer-side templating keeps the corpus a statement about *what was asked*; the route and the\ntemplate are a statement about *what language it was asked in*, which belongs to the harness.\nThe cost of that split \u2014 an invisible variable \u2014 is closed by `kb-20260919-9ea56f98`.\n\nMulti-turn stays prompt concatenation (turn 1 = turn 0's prompt plus the follow-up, as ONE user\nmessage). An honest `[user, assistant, user]` rendering needs turn 0's assistant reply, which the\ncorpus does not store and could not store without tying itself to one model's outputs; Gemma's\ntemplate also rejects two consecutive user turns, so the reply cannot simply be dropped.\nConcatenation additionally keeps turn 0's templated prompt a literal prefix of turn 1's, which is\nthe prefix-cache hit the construction exists to produce.\n",
+  "superseded_by": null,
+  "supersedes": "kb-20260919-6ef4e6bf",
+  "tags": [
+    "loop",
+    "corpus",
+    "benchmark",
+    "harness",
+    "validity",
+    "cold-start",
+    "batching",
+    "simulator"
+  ],
+  "title": "Replaying corpus prompts through the chat route fixes cold_start: 2.8x the tokens, no zero-token requests, batch width back to 4-5, and the timing fit is no longer singular",
+  "transfer_checked": null,
+  "triggers": [
+    "the model changes (Phase 0): the chat template changes with it, every token count here moves, and the chat_template fingerprint in the panels will say so",
+    "transformers or the model card is upgraded: the template hash moves and compare.py refuses across it \u2014 re-measure rather than explaining the drift",
+    "the noise band is re-measured: it must be measured with --prompt-format chat, the default; the 2026-09-19 band (kb-20260919-0a58befd) was measured on the raw route and no longer applies (kb-20260919-e610af2a)",
+    "the simulator's rank check is re-run: the decode-width leverage this restores is what kb-20260919-94acfdb8's second trigger was waiting for",
+    "anyone proposes judging a batching or scheduling change on cold_start: the signal is back, but it is 8 requests at width <= 5 \u2014 still a thin class, and steady_interactive and long_context are still the wrong size for this box"
+  ],
+  "updated_at": 1789867354.5638232,
+  "validity_range": {
+    "concurrency": [
+      1,
+      5
+    ],
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "hardware": "Apple M4 Pro (MPS)",
+    "model": "google/gemma-4-E2B-it",
+    "prompt_format": "chat",
+    "workload_class": "cold_start"
+  }
+}

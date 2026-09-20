@@ -82,9 +82,11 @@
     "a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40",
     "replicated validation arms become affordable: rho from single-run draws is partly luck at n=9",
     "GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about",
-    "the engine's decode path changes from row-by-row to a real batched forward (refit)"
+    "the engine's decode path changes from row-by-row to a real batched forward (refit)",
+    "2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) \u2014 cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run",
+    "2026-09-19: under the chat route's enable_thinking=True default every request runs to max_tokens, so output length IS the trace's max_tokens and the missing termination model may no longer bite (kb-20260919-9ea56f98)"
   ],
-  "updated_at": 1789864699.927673,
+  "updated_at": 1789867354.565505,
   "validity_range": {
     "concurrency": [
       1,
