@@ -3,14 +3,14 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-91 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(24), `modal`(23), `loop`(22), `graph`(19), `scheduler`(19), `compile`(15), `cold-start`(15), `memory`(14), `validity`(14), `harness`(13), `numerics`(10), `backpressure`(8), `batching`(7), `gates`(6), `corpus`(6), `variance`(5), `venue`(5), `simulator`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `telemetry`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `tpot`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `admission`(1), `config`(1), `scheduling`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1)
+92 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `prefill`(25), `cache`(24), `decode`(24), `modal`(23), `loop`(22), `graph`(19), `scheduler`(19), `compile`(15), `cold-start`(15), `memory`(14), `harness`(14), `validity`(14), `numerics`(10), `backpressure`(8), `batching`(7), `corpus`(7), `gates`(6), `variance`(5), `venue`(5), `simulator`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `telemetry`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `antihacking`(1), `client-bug`(1), `cold_start`(1), `metric`(1), `ttft`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
 - **cold_start** (21): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`
-- **long_context** (4): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`
+- **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
 
@@ -20,9 +20,51 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (29)
+## Open (30)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-20] long_context/heldout admits 2 of 40 once its requests actually decode
+*tags: `corpus`, `long_context`, `admission`, `scheduling`, `harness`* · `kb-20260920-bf1ed4f3`
+
+**The `fit-long-heldout-solo` config now sheds 95% of its trace, and the cause is that PR #46
+made the corpus work.**
+
+Measured on both arms of PR #47 (`1fc7855` and `9bf2bd3`) — identical on each, so it is invariant
+to that fix and predates it: **2 of 40 requests admitted, 38 expired.** Before PR #46 all 14
+admitted requests generated zero tokens, so the slot turned over instantly and admission looked
+healthy.
+
+Mechanism: the config is `MAX_BATCH_SIZE=1` with `MAX_QUEUE_WAIT_S=3.0`
+(`scripts/bench/configs_timing_fit.json`). Once prompts are templated and requests genuinely
+generate, a single long-context request holds the only slot for 30-40 s. Everything queued behind
+it ages past the 3 s admission deadline and is shed. The two that survive generate 272 and
+416-432 tokens.
+
+**This is the engine behaving correctly** — a one-slot server with a three-second deadline SHOULD
+shed a queue behind a 35-second occupant. What is wrong is reading the resulting panel as a
+measurement of long-context serving. It is a measurement of admission control.
+
+**For its one documented purpose the config still works.** It exists to contribute width-1 decode
+rows to the timing-model regression, which is what PR #40 used it for, and it contributes two
+real ones again (it generated none at all between PR #46 and PR #47). On its own it is still
+singular, Sxx = 0.
+
+**What it can no longer support:** any latency percentile from this class. `ttft_p95` over two
+surviving requests is not a percentile. Nor can the class say anything about eviction policy or
+KV pressure, which is the reason `corpus/manifest.json` says it exists.
+
+Evidence is the two PR #47 arms; the admitted count is identical in both, which is what rules this fix out as the cause.
+
+**Revisit when:** anyone reads a latency percentile off a long_context/heldout panel: it is computed over ~2 surviving requests and is not a percentile; anyone uses long_context to study eviction or KV pressure, which corpus/manifest.json says it is for: as configured it measures admission control instead; the corpus is rebuilt after the Phase 0 model decision: size this class's deadline and slot count against the decode time its prompts actually take, or it will shed itself again; fit-long-heldout-solo stops contributing its two W=1 decode rows: that is the only job it currently does for the timing fit; MAX_BATCH_SIZE or MAX_QUEUE_WAIT_S changes for this config: re-measure the admitted count before trusting any panel from it
+
+**Evidence:** grp-20260919-e370cf, grp-20260919-46afc4, kb-20260919-5db5aafa
+
+**Regime:** `long_context`
+
+**Valid over:** `{"config": "MAX_BATCH_SIZE=1, MAX_QUEUE_WAIT_S=3.0", "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
+
+**Mechanism:** MAX_BATCH_SIZE=1 with MAX_QUEUE_WAIT_S=3.0: one long-context request holds the only slot for 30-40s of decode, so every queued request ages past the 3s admission deadline and is shed. Masked until PR #46 because untemplated prompts generated zero tokens and the slot turned over instantly.
 
 ### [2026-09-20] The shim now chooses thinking=False, and the counterfactual that justified it does not replicate: one early stop in eighteen, because the corpus's budgets are shorter than the answers
 *tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `cold-start`, `simulator`* · `kb-20260919-5db5aafa`

@@ -1,0 +1,45 @@
+{
+  "id": "kb-20260920-bf1ed4f3",
+  "title": "long_context/heldout admits 2 of 40 once its requests actually decode",
+  "status": "open",
+  "summary": "**The `fit-long-heldout-solo` config now sheds 95% of its trace, and the cause is that PR #46\nmade the corpus work.**\n\nMeasured on both arms of PR #47 (`1fc7855` and `9bf2bd3`) — identical on each, so it is invariant\nto that fix and predates it: **2 of 40 requests admitted, 38 expired.** Before PR #46 all 14\nadmitted requests generated zero tokens, so the slot turned over instantly and admission looked\nhealthy.\n\nMechanism: the config is `MAX_BATCH_SIZE=1` with `MAX_QUEUE_WAIT_S=3.0`\n(`scripts/bench/configs_timing_fit.json`). Once prompts are templated and requests genuinely\ngenerate, a single long-context request holds the only slot for 30-40 s. Everything queued behind\nit ages past the 3 s admission deadline and is shed. The two that survive generate 272 and\n416-432 tokens.\n\n**This is the engine behaving correctly** — a one-slot server with a three-second deadline SHOULD\nshed a queue behind a 35-second occupant. What is wrong is reading the resulting panel as a\nmeasurement of long-context serving. It is a measurement of admission control.\n\n**For its one documented purpose the config still works.** It exists to contribute width-1 decode\nrows to the timing-model regression, which is what PR #40 used it for, and it contributes two\nreal ones again (it generated none at all between PR #46 and PR #47). On its own it is still\nsingular, Sxx = 0.\n\n**What it can no longer support:** any latency percentile from this class. `ttft_p95` over two\nsurviving requests is not a percentile. Nor can the class say anything about eviction policy or\nKV pressure, which is the reason `corpus/manifest.json` says it exists.\n\nEvidence is the two PR #47 arms; the admitted count is identical in both, which is what rules this fix out as the cause.",
+  "mechanism": "MAX_BATCH_SIZE=1 with MAX_QUEUE_WAIT_S=3.0: one long-context request holds the only slot for 30-40s of decode, so every queued request ages past the 3s admission deadline and is shed. Masked until PR #46 because untemplated prompts generated zero tokens and the slot turned over instantly.",
+  "evidence": [
+    {
+      "run_group": "grp-20260919-e370cf"
+    },
+    {
+      "run_group": "grp-20260919-46afc4"
+    },
+    {
+      "knowledge_id": "kb-20260919-5db5aafa"
+    }
+  ],
+  "regime": "long_context",
+  "validity_range": {
+    "hardware": "Apple M4 Pro (MPS)",
+    "model": "google/gemma-4-E2B-it",
+    "prompt_format": "chat",
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "config": "MAX_BATCH_SIZE=1, MAX_QUEUE_WAIT_S=3.0"
+  },
+  "tags": [
+    "corpus",
+    "long_context",
+    "admission",
+    "scheduling",
+    "harness"
+  ],
+  "triggers": [
+    "anyone reads a latency percentile off a long_context/heldout panel: it is computed over ~2 surviving requests and is not a percentile",
+    "anyone uses long_context to study eviction or KV pressure, which corpus/manifest.json says it is for: as configured it measures admission control instead",
+    "the corpus is rebuilt after the Phase 0 model decision: size this class's deadline and slot count against the decode time its prompts actually take, or it will shed itself again",
+    "fit-long-heldout-solo stops contributing its two W=1 decode rows: that is the only job it currently does for the timing fit",
+    "MAX_BATCH_SIZE or MAX_QUEUE_WAIT_S changes for this config: re-measure the admitted count before trusting any panel from it"
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "transfer_checked": null,
+  "created_at": 1789877198.34823,
+  "updated_at": 1789877198.34823
+}
