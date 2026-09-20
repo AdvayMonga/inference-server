@@ -11,8 +11,18 @@ preamble so the PrefixCache miss path is exercised (what load_test.py --workload
 Seen and held-out differ in every full prompt string, but they draw from the same small bank, so
 base content recurs across splits (long_context has two base documents); a larger bank is the
 real fix and is a new corpus version. Some sessions get a second turn whose prompt extends the
-first, so turn_index > 0 is the one place a prefix hit is legitimately available. Multi-turn is
-simulated by prompt concatenation: the replayer does not send session_id, the shim mints its own.
+first, so turn_index > 0 is the one place a prefix hit is legitimately available.
+
+Multi-turn is simulated by prompt CONCATENATION, and stays that way now that `replay_trace.py`
+posts through the chat route: turn 1 becomes one user message containing turn 0's prompt plus the
+follow-up. The alternative — a real [user, assistant, user] conversation — needs turn 0's
+assistant reply, which the corpus does not have and cannot store without tying the trace to one
+model's outputs (and Gemma's template rejects two consecutive user turns, so the reply cannot
+simply be omitted). Concatenation keeps turn 0's prompt TEXT a literal prefix of turn 1's, so the
+shared run of tokens still hits the prefix cache, which is what this construction exists to
+produce. The RENDERED turns are not prefixes of one another: turn 0 closes with its own end-of-
+turn and model-role tokens where turn 1 simply continues the user message. The replayer sends the
+trace's own session_id as X-Session-Id, so both turns land on one engine session.
 """
 
 from __future__ import annotations

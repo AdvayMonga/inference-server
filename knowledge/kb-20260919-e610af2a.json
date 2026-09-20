@@ -1,0 +1,54 @@
+{
+  "created_at": 1789867333.634048,
+  "evidence": [
+    {
+      "run_group": "grp-20260919-2c36c0"
+    },
+    {
+      "run_id": "run-20260919-a4f66edf"
+    },
+    {
+      "run_id": "run-20260919-3177144a"
+    },
+    {
+      "run_id": "run-20260919-08ac920d"
+    },
+    {
+      "run_id": "run-20260919-e66c4739"
+    },
+    {
+      "band": "knowledge/noise/replay-trace-cold-start-google-gemma-4-e2b-it-apple-m4-pro-mps.json"
+    }
+  ],
+  "id": "kb-20260919-e610af2a",
+  "mechanism": "A band is a property of a harness on one machine for one workload class, and the route the replay posts to is part of the workload: the same trace bytes generate 220 tokens raw and 626 templated, at peak batch width 3 against 5.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "**`kb-20260919-0a58befd`'s band was measured on `--prompt-format raw`, which is no longer what a\n`cold_start` replay does.** That band is not wrong; it is a band for a workload that is now the\nopt-in one. It is left in place and un-edited, because a raw replay is still reachable and the\nband still describes it exactly.\n\nThe hazard is that `find_band` matched on `(harness, workload_class, model, hardware)` and had no\nway to see the route. It would therefore have applied a band measured on a workload generating\n220 tokens at peak batch width 3 to one generating 626 tokens at peak batch width 5 \u2014\n`active_mean` 1.14 against 2.17, `tpot_p50` 93.7 ms against 117.6 ms, `wall_s` 16.4 s against\n28.7 s. Every metric in the band moved.\n\n`NoiseBand` now carries `prompt_format` in its key, defaulting to `\"raw\"` so that every band\nstored before today keeps the identity it was actually measured under. `find_band` compares it\nlike the other four key fields, with no fallback. The consequence, stated plainly so nobody is\nsurprised by it:\n\n> **There is currently no noise band for the default `cold_start` workload.** `significance_\n> replicated` therefore judges a `cold_start` A/B on the t-test alone, which is the documented\n> pre-band behaviour and the safe direction \u2014 but it is weaker than what the loop had yesterday,\n> and re-measuring the null on the chat route is the next thing anyone gating a merge on this\n> class should do. That is deliberately not done in this branch.\n\nWhat the new workload looks like, for whoever measures it: 8 requests over ~29 s, 626 generated\ntokens, every one of them ending at `max_tokens` (so `decode_steps` should again be near-constant\nacross replicates, though at 285 rather than 192), peak batch width 5, mean 2.17, and no\nzero-token requests \u2014 so the `p50` metrics are medians over eight real requests rather than over\nsix requests of which five emitted nine tokens or fewer. Two of the band's known weaknesses\n(`tpot_p50` +-8.66%, `ttft_prefill_p50` +-13.54%, both blamed on medians over tiny requests)\nshould tighten; `ttft_p95` will likely widen, because requests now genuinely contend.\n",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "loop",
+    "benchmark",
+    "variance",
+    "validity",
+    "harness",
+    "gates",
+    "cold-start"
+  ],
+  "title": "The cold_start noise band is now a raw-route band only: the default workload has no band, and the gate falls back to the t-test alone",
+  "transfer_checked": null,
+  "triggers": [
+    "BEFORE any A/B is judged on cold_start with the default (chat) route: re-measure the null with `replay_local.py --class cold_start --null 6`, which now defaults to chat",
+    "a merge is proposed whose evidence is a cold_start delta: check the panel's harness_config.prompt_format against the band's, because find_band will simply return None and the gate will not say why",
+    "the re-measured chat band lands: BAND_SIGMAS=2 is still calibrated from a single false positive on a workload since shown to be contaminated, and this is the second null that could calibrate it"
+  ],
+  "updated_at": 1789867354.56413,
+  "validity_range": {
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "hardware": "Apple M4 Pro (MPS)",
+    "harness": "replay_trace",
+    "model": "google/gemma-4-E2B-it",
+    "workload_class": "cold_start"
+  }
+}

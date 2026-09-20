@@ -103,6 +103,7 @@ def build_validity(
     stderr_value: float | None = None,
     concurrency_observed: int | None = None,
     notes: str = "",
+    chat_template: dict[str, Any] | None = None,
 ) -> Validity:
     device_state, clocks_locked = device_state_from_env()
     return Validity(
@@ -118,6 +119,7 @@ def build_validity(
         notes=notes,
         device_state=device_state,
         clocks_locked=clocks_locked,
+        chat_template=chat_template,
     )
 
 

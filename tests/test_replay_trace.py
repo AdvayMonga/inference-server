@@ -14,6 +14,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
+from inference_server.research import chat_template as CT
 from inference_server.research import harness as H
 from inference_server.research.compare import comparable
 from inference_server.research.corpus import TraceRequest, WorkloadClass
@@ -23,6 +24,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "bench"))
 import replay_trace as rt  # noqa: E402
 
 CLS = WorkloadClass("steady_interactive", "", 200.0, 50.0, 4.0, "a", "b")
+MODEL = "fake/instruct-model"
+TEMPLATE_OVERHEAD = 7        # tokens the mock's "chat template" adds around the prompt
+
+
+class FakeTokenizer:
+    """1 char = 1 token, plus a fixed template wrapper — the mock server's arithmetic."""
+    chat_template = "{{ messages }}"
+
+    def apply_chat_template(self, messages, *, enable_thinking=True, **kw):
+        n = len(messages[0]["content"]) + TEMPLATE_OVERHEAD + (0 if enable_thinking else 2)
+        return {"input_ids": list(range(n))}
+
+
+def _fake_tokenizer(monkeypatch, tokenizer=None):
+    monkeypatch.setitem(CT._CACHE, MODEL, FakeTokenizer() if tokenizer is None else tokenizer)
 
 
 def _trace(n: int, gap: float) -> list[TraceRequest]:
@@ -35,21 +51,45 @@ def _app(ttft_s: float = 0.0, itl_s: float = 0.0, n_tokens: int = 5,
     app.state.arrived = 0
     app.state.requests = []     # (headers, body) of every arrival, like the real shim sees them
 
-    @app.post("/v1/completions")
-    async def completions(request: Request):
+    async def _serve(request: Request, chat: bool):
         app.state.arrived += 1
-        app.state.requests.append((dict(request.headers), await request.json()))
+        body = await request.json()
+        app.state.requests.append((dict(request.headers), body))
         echo = {"X-Trace-Id": request.headers.get("x-trace-id", "minted")}
+        # The chat route encodes a TEMPLATED prompt, so it reports more prompt tokens than the
+        # raw one. That is what a replay checks its chat_template fingerprint against.
+        text = body["messages"][0]["content"] if chat else body["prompt"]
+        prompt_tokens = len(text) + (TEMPLATE_OVERHEAD if chat else 0)
+
+        def token_chunk():
+            payload = ({"choices": [{"delta": {"content": "x"}, "finish_reason": None}]} if chat
+                       else {"choices": [{"text": "x", "finish_reason": None}]})
+            return f"data: {json.dumps(payload)}\n\n"
 
         async def gen():
             if release is not None:
                 await release.wait()
             await asyncio.sleep(ttft_s)
             for _ in range(n_tokens):
-                yield f'data: {json.dumps({"choices": [{"text": "x", "finish_reason": None}]})}\n\n'
+                yield token_chunk()
                 await asyncio.sleep(itl_s)
+            usage = {"choices": [], "usage": {"prompt_tokens": prompt_tokens,
+                                              "completion_tokens": n_tokens}}
+            yield f"data: {json.dumps(usage)}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream", headers=echo)
+
+    @app.post("/v1/completions")
+    async def completions(request: Request):
+        return await _serve(request, chat=False)
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        return await _serve(request, chat=True)
+
+    @app.get("/v1/models")
+    async def models():
+        return {"object": "list", "data": [{"id": MODEL, "object": "model"}]}
 
     @app.get("/scheduler/stats")
     async def sched():
@@ -232,3 +272,81 @@ def test_trace_prefix_is_unique_per_invocation():
     """Two replays against one server process share one telemetry file; ids must not collide."""
     a, b = rt.new_trace_prefix("steady_interactive", "seen"), rt.new_trace_prefix("steady_interactive", "seen")
     assert a != b and a.startswith("steady_interactive-seen-") and len(a.split("-")[-1]) == 6
+
+
+# ----------------------------------------------------- chat templating (kb-20260919-6ef4e6bf)
+
+def test_replay_posts_to_the_chat_route_by_default_and_says_so_in_the_panel(monkeypatch):
+    """A corpus prompt sent raw to an instruct model is answered with nothing; the whole point
+    of the chat route is that the model sees a templated turn instead."""
+    _fake_tokenizer(monkeypatch)
+    app = _app()
+    trace = _trace(3, 0.01)
+
+    async def go():
+        async with await _client(app) as client:
+            return await rt.run_replay(client, trace)
+
+    res = asyncio.run(go())
+    assert all(b.get("messages") == [{"role": "user", "content": t.prompt}]
+               for (_, b), t in zip(app.state.requests, trace))
+    assert all(r.out_tokens == 5 for r in res.rows), "delta.content chunks are counted"
+    # The templated length the server reported, not the trace's own byte count.
+    assert [r.prompt_tokens for r in res.rows] == \
+        [len(t.prompt) + TEMPLATE_OVERHEAD for t in trace]
+
+    panel = rt.build_panel(res, CLS, corpus_version="v1" * 8, split="seen", rate_scale=1.0,
+                           scheduler_stats={}, cache_stats={}, model_name=MODEL, trace=trace)
+    assert panel.validity.harness_config["prompt_format"] == "chat"
+    fp = panel.validity.chat_template
+    assert fp["tokenizer"] == MODEL and fp["enable_thinking"] is True
+    assert fp["probe_tokens"] == len("probe") + TEMPLATE_OVERHEAD
+    assert fp["verified"] is True, "the stamp was checked against the server that served the run"
+
+
+def test_raw_route_is_still_reachable_and_never_compares_against_a_templated_run(monkeypatch):
+    """The trace bytes are identical on both routes, so corpus_version cannot tell them apart.
+    prompt_format is what refuses the comparison."""
+    _fake_tokenizer(monkeypatch)
+    app = _app()
+    trace = _trace(2, 0.01)
+
+    async def go(fmt):
+        async with await _client(app) as client:
+            return await rt.run_replay(client, trace, prompt_format=fmt)
+
+    def panel(fmt):
+        return rt.build_panel(asyncio.run(go(fmt)), CLS, corpus_version="v1" * 8, split="seen",
+                              rate_scale=1.0, scheduler_stats={}, cache_stats={},
+                              prompt_format=fmt, model_name=MODEL, trace=trace)
+
+    raw, chat = panel("raw"), panel("chat")
+    assert raw.validity.chat_template is None, "nothing is templated on the raw route"
+    assert raw.validity.corpus_version == chat.validity.corpus_version
+    cmp_ = comparable(raw, chat, same_group_required=False)
+    assert not cmp_ and any("prompt_format" in r for r in cmp_.reasons)
+    assert app.state.requests[0][1].get("prompt") == trace[0].prompt   # raw sent bytes as-is
+
+
+def test_a_tokenizer_that_disagrees_with_the_server_marks_the_panel_unverified(monkeypatch):
+    """The fingerprint is computed client-side; the server is what applies the template. A panel
+    whose stamp describes a different tokenizer is worse than one with no stamp."""
+
+    class Drifted(FakeTokenizer):
+        def apply_chat_template(self, messages, *, enable_thinking=True, **kw):
+            return {"input_ids": list(range(len(messages[0]["content"]) + 99))}
+
+    _fake_tokenizer(monkeypatch, Drifted())
+    app = _app()
+    trace = _trace(2, 0.01)
+
+    async def go():
+        async with await _client(app) as client:
+            return await rt.run_replay(client, trace)
+
+    panel = rt.build_panel(asyncio.run(go()), CLS, corpus_version="v1" * 8, split="seen",
+                           rate_scale=1.0, scheduler_stats={}, cache_stats={},
+                           model_name=MODEL, trace=trace)
+    assert panel.validity.chat_template["verified"] is False
+    cmp_ = comparable(panel, panel, same_group_required=False)
+    assert not cmp_ and any("verification" in r for r in cmp_.reasons)

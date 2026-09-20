@@ -31,7 +31,7 @@ run. Everything else here runs locally.
 | script | measures |
 |---|---|
 | `bench_serving.py` | open-loop client for `/v1/completions`: Poisson arrivals, realistic lengths, SLO-gated |
-| `replay_trace.py` | open-loop replay of one `corpus/` trace (class, split) on the harness's own clock; panel stamped with `corpus_version`, per-request CSV beside it |
+| `replay_trace.py` | open-loop replay of one `corpus/` trace (class, split) on the harness's own clock; posts through `/v1/chat/completions` so the model's chat template is applied (`--prompt-format raw` for the old `/v1/completions` path); panel stamped with `corpus_version`, `prompt_format` and a verified `chat_template` fingerprint, per-request CSV beside it |
 | `replay_corpus_runpod.py` | the first GPU job: serves the engine on the pod with `TELEMETRY_DIR` on, replays `(class, split, rate_scale)` via `replay_trace` in-process, returns panels + per-request rows + telemetry rows in one payload. Speaks the venue contract; see the timing-model recipe under tools/ |
 | `roofline.py` | analytical decode ceiling and per-step breakdown (attribution input) |
 | `load_test.py` / `plot_load_test.py` | HTTP concurrency sweep against a running server, and its plots |

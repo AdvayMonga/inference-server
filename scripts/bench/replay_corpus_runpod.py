@@ -223,22 +223,29 @@ def attach_telemetry(replays: list[dict[str, Any]], rows: list[dict[str, Any]]) 
 
 # ------------------------------------------------------------------ the replays
 
-async def warmup(client: httpx.AsyncClient, cls_name: str, split: str, n: int) -> int:
-    """Sequential single requests, awaited one at a time, so lazy compile sees an empty queue."""
+async def warmup(client: httpx.AsyncClient, cls_name: str, split: str, n: int,
+                 prompt_format: str = rt.DEFAULT_PROMPT_FORMAT) -> int:
+    """Sequential single requests, awaited one at a time, so lazy compile sees an empty queue.
+
+    Same route as the replay it precedes: the chat route encodes a longer prompt and takes a
+    different code path into the tokenizer, so warming the other one warms the wrong thing."""
     _, trace = load_trace(cls_name, split)
     prefix = rt.new_trace_prefix("warmup", split)
     done = 0
     for i, req in enumerate(trace[:n]):
         s = await one_request(client, req.prompt, min(req.max_tokens, WARMUP_MAX_TOKENS),
                               headers={"X-Session-Id": f"warmup-{i}", "X-Turn-Index": "0",
-                                       "X-Trace-Id": f"{prefix}-{i}"})
+                                       "X-Trace-Id": f"{prefix}-{i}"},
+                              prompt_format=prompt_format)
         done += s.error is None
     return done
 
 
 async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]],
                    replays: list[dict[str, Any]], panels: list[dict[str, Any]], *,
-                   warmup_n: int, drain_timeout_s: float, settle_s: float = 2.0) -> None:
+                   warmup_n: int, drain_timeout_s: float, settle_s: float = 2.0,
+                   prompt_format: str = rt.DEFAULT_PROMPT_FORMAT,
+                   model_name: str | None = None) -> None:
     """Warm up, then one open-loop replay per (class, split, rate_scale).
 
     Appends into the caller's `replays` and `panels` rather than returning them, and catches per
@@ -248,7 +255,7 @@ async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]]
     continues — a dead server makes the rest fail fast anyway, and says so in their errors.
     """
     if warmup_n and plan:
-        ok = await warmup(client, plan[0][0], plan[0][1], warmup_n)
+        ok = await warmup(client, plan[0][0], plan[0][1], warmup_n, prompt_format)
         print(f"[replay] warmup {ok}/{warmup_n} ok (discarded)", flush=True)
     for cls_name, split, rate_scale in plan:
         prefix = rt.new_trace_prefix(cls_name, split)
@@ -262,7 +269,8 @@ async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]]
             print(f"-- replay {cls_name}/{split} x{rate_scale:g} ({len(trace)} requests, "
                   f"trace ids {prefix}-<i>) --", flush=True)
             res = await rt.run_replay(client, trace, rate_scale=rate_scale,
-                                      drain_timeout_s=drain_timeout_s, trace_prefix=prefix)
+                                      drain_timeout_s=drain_timeout_s, trace_prefix=prefix,
+                                      prompt_format=prompt_format)
             sched = await rt.fetch_stats(client, "/scheduler/stats")
             cache = await rt.fetch_stats(client, "/cache/stats")
             summary = res.summary(cls)
@@ -272,7 +280,9 @@ async def run_plan(client: httpx.AsyncClient, plan: list[tuple[str, str, float]]
             if summary["n_ok"]:
                 panel = rt.build_panel(res, cls, corpus_version=manifest.corpus_version,
                                        split=split, rate_scale=rate_scale, scheduler_stats=sched,
-                                       cache_stats=cache, trace_prefix=prefix)
+                                       cache_stats=cache, trace_prefix=prefix,
+                                       prompt_format=prompt_format, model_name=model_name,
+                                       trace=trace)
                 panel.validate()                 # fail here, in the run, not on the way home
                 panels.append(panel.to_dict())
             else:
@@ -293,6 +303,7 @@ def main() -> int:
     warmup_n = int(os.environ.get("REPLAY_WARMUP_N", "8"))
     drain_timeout_s = float(os.environ.get("REPLAY_DRAIN_TIMEOUT_S", "300"))
     ready_timeout_s = float(os.environ.get("REPLAY_READY_TIMEOUT_S", "1800"))
+    prompt_format = os.environ.get("REPLAY_PROMPT_FORMAT", rt.DEFAULT_PROMPT_FORMAT)
 
     telemetry_dir = Path(env["TELEMETRY_DIR"])
     telemetry_dir.mkdir(parents=True, exist_ok=True)
@@ -321,7 +332,8 @@ def main() -> int:
         async def go():
             async with make_client(base_url) as client:
                 await run_plan(client, plan, replays, panels, warmup_n=warmup_n,
-                               drain_timeout_s=drain_timeout_s)
+                               drain_timeout_s=drain_timeout_s, prompt_format=prompt_format,
+                               model_name=env["MODEL_NAME"])
         try:
             asyncio.run(go())
         except Exception as e:                   # noqa: BLE001 — whatever ran is still evidence

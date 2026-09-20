@@ -33,27 +33,37 @@ def _mock_server(store: RowStore) -> FastAPI:
     app = FastAPI()
     app.state.seen = []
 
-    @app.post("/v1/completions")
-    async def completions(request: Request):
+    async def _serve(request: Request, chat: bool):
         h, body = request.headers, await request.json()
         trace_id = h.get("x-trace-id", "")
         app.state.seen.append(trace_id)
+        text = body["messages"][0]["content"] if chat else body["prompt"]
         rec = RequestRecord(
             trace_id=trace_id, session_id=h.get("x-session-id", ""),
             turn_index=int(h.get("x-turn-index", "0")), arrival_ts=time.time(),
             pending_depth=0, active_size=len(app.state.seen) % 3, max_batch_size=8,
             kv_free_blocks=100, kv_free_frac=0.5, concurrent_sessions=0,
-            prompt_tokens=len(body["prompt"]) // 4, replica_age_s=1.0)
+            prompt_tokens=len(text) // 4, replica_age_s=1.0)
         rec.finish("ok", enqueue_ts=0.0, admit_ts=0.01, first_token_ts=0.05, end_ts=0.5,
                    tokens_out=4, cache_hit_tokens=0)
         store.put(rec)
+        chunk = ({"choices": [{"delta": {"content": "x"}, "finish_reason": None}]} if chat
+                 else {"choices": [{"text": "x", "finish_reason": None}]})
 
         async def gen():
             for _ in range(4):
-                yield f'data: {json.dumps({"choices": [{"text": "x", "finish_reason": None}]})}\n\n'
+                yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
         return StreamingResponse(gen(), media_type="text/event-stream",
                                  headers={"X-Trace-Id": trace_id})
+
+    @app.post("/v1/completions")
+    async def completions(request: Request):
+        return await _serve(request, chat=False)
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request):
+        return await _serve(request, chat=True)
 
     @app.get("/scheduler/stats")
     async def sched():

@@ -234,3 +234,21 @@ def test_429_carries_the_trace_id_on_both_routes_streaming_and_not():
             assert r.status_code == 429 and r.headers["X-Trace-Id"] == "steady-seen-41"
             r = client.post(path, json={**body, "stream": stream})
             assert r.status_code == 429 and len(r.headers["X-Trace-Id"]) == 32   # minted
+
+
+def test_both_routes_carry_the_corpus_sampling_block_identically():
+    """A corpus trace's sampling is {temperature, top_k, top_p}, and `top_k` is NOT an
+    OpenAI-standard field. Replaying through /v1/chat/completions instead of /v1/completions
+    (kb-20260919-6ef4e6bf) is only honest if the chat route does not quietly drop it — that
+    would trade one silent variable for another."""
+    sched = FakeScheduler()
+    client = TestClient(_app(sched))
+    sampling = {"temperature": 0.7, "top_p": 0.9, "top_k": 40}
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 5, **sampling})
+    assert r.status_code == 200
+    r = client.post("/v1/chat/completions", json={**CHAT_BODY, **sampling})
+    assert r.status_code == 200
+    raw, chat = sched.seen
+    assert (raw.sampling.temperature, raw.sampling.top_p, raw.sampling.top_k) == (0.7, 0.9, 40)
+    assert (chat.sampling.temperature, chat.sampling.top_p, chat.sampling.top_k) == (0.7, 0.9, 40)
+    assert raw.sampling == chat.sampling

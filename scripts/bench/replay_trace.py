@@ -1,7 +1,7 @@
 """Open-loop replay of one corpus trace against a running server.
 
     PYTHONPATH=src python scripts/bench/replay_trace.py --class steady_interactive --split seen \\
-        --base-url http://127.0.0.1:8000 [--rate-scale 1.0]
+        --base-url http://127.0.0.1:8000 [--rate-scale 1.0] [--prompt-format chat|raw]
 
 Every request fires at its trace `arrival_s` (divided by --rate-scale) on THIS process's clock,
 whatever the server is doing — a slow server gets the same arrivals as a fast one, so it cannot
@@ -15,6 +15,14 @@ a second turn lands on the same engine session as the first, and X-Trace-Id=<pre
 telemetry SQLite row and a replay CSV row share; the nonce keeps two replays against one server
 process (one telemetry file) from colliding, and the prefix is recorded in the panel's
 harness_config so the two can be joined by prefix.
+
+Prompts are posted to `/v1/chat/completions` by default, so the model's own chat template is
+applied server-side; `--prompt-format raw` restores the old `/v1/completions` path. The trace
+stores plain prompt text either way — templating a trace at build time would tie the corpus to
+one model's template, and Phase 0 is still choosing the model. What that costs is an invisible
+variable (which template, with which options), so a chat-route panel carries a `chat_template`
+fingerprint in its validity block, verified against the prompt-token count the server reported,
+and compare.py refuses across a changed one.
 
 Emits `runs/<run_id>.json` (a Vitals panel stamped with the corpus version and class) plus
 `runs/<run_id>.csv` with one row per request, which is what the loop re-slices later.
@@ -38,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bench_serving import _pct, one_request  # noqa: E402
+from inference_server.research import chat_template as CT  # noqa: E402
 from inference_server.research import harness as H  # noqa: E402
 from inference_server.research.corpus import (  # noqa: E402
     Manifest,
@@ -46,6 +55,15 @@ from inference_server.research.corpus import (  # noqa: E402
     load_trace,
 )
 from inference_server.research.schemas import Vitals  # noqa: E402
+
+# Corpus prompts go through the CHAT route by default. /v1/completions is spec-correct in not
+# templating, but gemma-4-E2B-it answers a bare un-templated prompt with an immediate end-of-turn:
+# cold_start/seen generated 220 tokens of a 626-token budget and six of eight cold_start/heldout
+# prompts generated nothing at all (kb-20260919-6ef4e6bf). Templating is done SERVER-side rather
+# than baked into the trace so the corpus stays model-independent — Phase 0 may swap the model.
+# The price is that the tokens the model sees now depend on the tokenizer's bundled template, so
+# every chat-route panel carries a verified `chat_template` fingerprint in its validity block.
+DEFAULT_PROMPT_FORMAT = "chat"
 
 
 @dataclass
@@ -62,6 +80,11 @@ class Row:
     tpot_ms: float | None
     out_tokens: int
     error: str | None
+    prompt_tokens: int | None = None    # what the server encoded; templated on the chat route
+    # The engine's own completion count, from the usage chunk. Higher than `out_tokens` whenever
+    # a generated token decodes to "" — the shim emits no chunk for those, so the client cannot
+    # see them. `out_tokens` stays the client's count because that is what TTFT/TPOT measured.
+    server_out_tokens: int | None = None
 
 
 @dataclass
@@ -90,9 +113,12 @@ class ReplayResult:
 
 async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
                      rate_scale: float = 1.0, drain_timeout_s: float = 300.0,
-                     trace_prefix: str = "replay") -> ReplayResult:
+                     trace_prefix: str = "replay",
+                     prompt_format: str = DEFAULT_PROMPT_FORMAT) -> ReplayResult:
     """Fire each request at arrival_s / rate_scale on our clock, then drain what is in flight.
-    Request i is sent as X-Trace-Id=<trace_prefix>-<i> on the trace's session/turn."""
+    Request i is sent as X-Trace-Id=<trace_prefix>-<i> on the trace's session/turn.
+
+    `prompt_format` picks the surface each prompt is posted to — see DEFAULT_PROMPT_FORMAT."""
     res = ReplayResult()
     tasks: list[tuple[asyncio.Task, int, TraceRequest]] = []
     fired_at: dict[int, float] = {}
@@ -106,12 +132,12 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
         headers = {"X-Session-Id": req.session_id, "X-Turn-Index": str(req.turn_index),
                    "X-Trace-Id": trace_id(i)}
         s = await one_request(client, req.prompt, req.max_tokens, headers=headers,
-                              sampling=req.sampling)
+                              sampling=req.sampling, prompt_format=prompt_format)
         res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
                             round(fired, 4),
                             round(s.ttft_s * 1000, 2) if s.error is None else None,
                             round(s.tpot_s * 1000, 3) if s.error is None else None,
-                            s.out_tokens, s.error))
+                            s.out_tokens, s.error, s.prompt_tokens, s.server_out_tokens))
 
     for i, req in enumerate(trace):
         delay = t0 + req.arrival_s / rate_scale - time.perf_counter()
@@ -147,21 +173,49 @@ def new_trace_prefix(cls_name: str, split: str) -> str:
     return f"{cls_name}-{split}-{uuid.uuid4().hex[:6]}"
 
 
+def template_stamp(prompt_format: str, model_name: str | None,
+                   trace: list[TraceRequest] | None, rows: list[Row] | None) -> dict | None:
+    """The chat_template fingerprint for this replay, verified against the server that served it.
+
+    None on the raw route (no template is applied) and whenever the tokenizer cannot be read —
+    an unknown stamp is an ordinary outcome, a WRONG one is what compare.py must refuse.
+    """
+    if prompt_format != "chat" or not model_name:
+        return None
+    fp = CT.fingerprint(model_name)
+    if fp is None or not trace or not rows:
+        return fp
+    # Spot check, not exhaustive: one tokenizer serves a whole run, so the first row reporting
+    # prompt_tokens settles whether the client's stamp describes the serving process.
+    by_index = {r.index: r for r in rows}
+    for i, req in enumerate(trace):
+        row = by_index.get(i)
+        if row is not None and row.prompt_tokens is not None:
+            return CT.verify(fp, req.prompt, row.prompt_tokens)
+    return fp
+
+
 def build_panel(res: ReplayResult, cls: WorkloadClass, *, corpus_version: str, split: str,
                 rate_scale: float, scheduler_stats: dict[str, Any],
-                cache_stats: dict[str, Any], trace_prefix: str = "replay") -> Vitals:
+                cache_stats: dict[str, Any], trace_prefix: str = "replay",
+                prompt_format: str = DEFAULT_PROMPT_FORMAT, model_name: str | None = None,
+                trace: list[TraceRequest] | None = None) -> Vitals:
     s = res.summary(cls)
     ttfts = [r.ttft_ms for r in res.rows if r.error is None]
     validity = H.build_validity(
         "replay_trace",
         {"workload_class": cls.name, "split": split, "corpus_version": corpus_version,
          "rate_scale": rate_scale, "arrival_rate_rps": cls.arrival_rate_rps * rate_scale,
-         "n_requests": len(res.rows), "trace_prefix": trace_prefix},
+         "n_requests": len(res.rows), "trace_prefix": trace_prefix,
+         # compare.py refuses across this: the trace bytes are identical on both routes, so
+         # corpus_version cannot tell a templated replay from an untemplated one.
+         "prompt_format": prompt_format},
         n_samples=s["n_ok"],
         workload_regime=H.infer_regime(cache_stats.get("hit_rate")),
         stderr_value=H.stderr(ttfts),
         concurrency_observed=scheduler_stats.get("active_high_water"),
         notes=f"open-loop trace replay, trial={H.trial_id()}",
+        chat_template=template_stamp(prompt_format, model_name, trace, res.rows),
     )
     validity.corpus_version = corpus_version
     validity.workload_class = cls.name
@@ -201,6 +255,10 @@ async def main() -> int:
                     help="after the last arrival, wait this long; still-open requests count as "
                          "errors (drain_timeout)")
     ap.add_argument("--runs-dir", default=None)
+    ap.add_argument("--prompt-format", default=DEFAULT_PROMPT_FORMAT, choices=("chat", "raw"),
+                    help="chat: post through /v1/chat/completions so the model's chat template "
+                         "is applied (default). raw: /v1/completions, the trace's bytes as-is — "
+                         "an instruct model mostly answers those with nothing")
     args = ap.parse_args()
 
     manifest: Manifest
@@ -208,15 +266,18 @@ async def main() -> int:
     cls = manifest.classes[args.cls]
     trace_prefix = new_trace_prefix(args.cls, args.split)
     print(f"-- replay {args.cls}/{args.split} ({len(trace)} requests, corpus "
-          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}) against {args.base_url}, "
-          f"trace ids {trace_prefix}-<i> --")
+          f"{manifest.corpus_version[:12]}, rate x{args.rate_scale}, {args.prompt_format} route) "
+          f"against {args.base_url}, trace ids {trace_prefix}-<i> --")
     async with httpx.AsyncClient(base_url=args.base_url,
                                  limits=httpx.Limits(max_connections=1024)) as client:
+        models = await fetch_stats(client, "/v1/models")
         res = await run_replay(client, trace, rate_scale=args.rate_scale,
                                drain_timeout_s=args.drain_timeout_s,
-                               trace_prefix=trace_prefix)
+                               trace_prefix=trace_prefix,
+                               prompt_format=args.prompt_format)
         sched = await fetch_stats(client, "/scheduler/stats")
         cache = await fetch_stats(client, "/cache/stats")
+    model_name = (models.get("data") or [{}])[0].get("id")
 
     s = res.summary(cls)
     print_summary(cls, s)
@@ -225,7 +286,8 @@ async def main() -> int:
         return 1
     panel = build_panel(res, cls, corpus_version=manifest.corpus_version, split=args.split,
                         rate_scale=args.rate_scale, scheduler_stats=sched, cache_stats=cache,
-                        trace_prefix=trace_prefix)
+                        trace_prefix=trace_prefix, prompt_format=args.prompt_format,
+                        model_name=model_name, trace=trace)
     runs_dir = Path(args.runs_dir) if args.runs_dir else None
     path = H.emit(panel, label=f"replay {args.cls}/{args.split}", runs_dir=runs_dir)
     write_rows(path.with_suffix(".csv"), res.rows)
