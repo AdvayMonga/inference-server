@@ -1,0 +1,92 @@
+{
+  "created_at": 1789864699.9276679,
+  "evidence": [
+    {
+      "run_group": "grp-20260919-759868"
+    },
+    {
+      "run_group": "grp-20260919-958ec6"
+    },
+    {
+      "timing_model": "knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json"
+    },
+    {
+      "run_id": "run-20260919-cf74cdb6"
+    },
+    {
+      "run_id": "run-20260919-5f9579fd"
+    },
+    {
+      "run_id": "run-20260919-e134030f"
+    },
+    {
+      "run_id": "run-20260919-446f0ca7"
+    },
+    {
+      "run_id": "run-20260919-29bd8871"
+    },
+    {
+      "run_id": "run-20260919-feec3826"
+    },
+    {
+      "run_id": "run-20260919-45a592ba"
+    },
+    {
+      "run_id": "run-20260919-f6108c0a"
+    },
+    {
+      "run_id": "run-20260919-4155e1d9"
+    },
+    {
+      "run_id": "run-20260919-1f26a4da"
+    },
+    {
+      "run_id": "run-20260919-b940da1a"
+    },
+    {
+      "run_id": "run-20260919-678d77c4"
+    }
+  ],
+  "id": "kb-20260919-94acfdb8",
+  "mechanism": "The simulator decodes every request to trace.max_tokens and has no early-termination model. Until PR #41 the engine did the same thing, so the two agreed by sharing one bug; with the engine stopping at <turn|> the simulator now charges 626 tokens of decode where the engine does 220, holding phantom rows in narrow batches and inventing queueing that hardware does not have.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "**Verdict: the simulator no longer ranks p95 TTFT on MPS/E2B, and the timing model cannot be\nrefitted from the prescribed fit configs at all. Both failures are consequences of the\nend-of-turn stop fix, and both are real results.**\n\n| check | result | verdict |\n|---|---|---|\n| refit the `TimingModel` from `configs_timing_fit.json` | **refused: singular fit** | **FAILS** |\n| rank `ttft_p95`, current model vs post-fix hardware | **rho 0.644** (n=9; was 0.745) | **FAILS** \u2014 below the two-tailed a=0.05 critical rho of 0.683 at n=9 |\n| rank `tpot_p50`, current model vs post-fix hardware | **rho 0.811** (n=9; was 0.966) | passes, with much less margin |\n\n`kb-20260918-9fc68282`'s first trigger said to do exactly this after `kb-20260918-5906bc13`\n(PR #41) landed. Same four fit configs (`scripts/bench/configs_timing_fit.json`) and the same\nnine validation configs (`configs_sim_validation.json`), nothing added, dropped or substituted;\nsame corpus version `659ea3b61303`, same backend `custom-mps`, same box, `HF_HUB_OFFLINE=1`.\nEngine `03f600e`. Fit group `grp-20260919-759868`, validation group `grp-20260919-958ec6`.\n\n## The fit refuses, and it is right to\n\n`fit_timing_from_runs.py grp-20260919-759868` raises\n`ValueError: singular fit: the normal matrix has a (near-)zero pivot`. It is not a bug \u2014 the\ndecode regressor is **constant**.\n\n| | PR #40 fit (`grp-20260918-b015e2`) | **this fit (`grp-20260919-759868`)** |\n|---|---|---|\n| panels | 4 of 4 | **3 of 4** |\n| ok telemetry rows | 26 (8+8+8+2) | **24 (8+8+8+0)** |\n| rows with a decode step | 26 | **4** |\n| decode batch widths | 1.00 \u2013 7.52, 20/26 rows varying | **1.00 in every row** |\n| prefill rows / prompt-token span | 26 / 18 \u2013 1497 | **24 / 18 \u2013 120** |\n\nTwo independent things emptied it, and neither is a harness change:\n\n1. **`cold_start/heldout` barely decodes.** Of the 8 requests, **6 now emit zero tokens**, one\n   emits a single token and one emits 215. At rate scale x1, x2 *and* x4 the only thing in the\n   batch is that one long request, so **every decode step in the whole fit group happened at\n   width 1**. There is no slope to fit. Before the fix all eight ran to `max_tokens` and\n   produced widths up to 7.52.\n2. **`long_context/heldout` produces no panel at all.** All 40 requests that the engine admitted\n   answer with **zero tokens** \u2014 the model's first emitted token is `<turn|>` \u2014 so the client\n   sees no successful request, and `replay_local.run_one` discards a run whose client saw\n   nothing (`if not summary[\"n_ok\"]: return None`), taking its telemetry file with it. The\n   engine's own rows for that run (recovered by hand from its temp dir, not used for anything)\n   confirm it: 14 `ok`, 26 `expired`, `tokens_out` 0 and `decode_steps` 0 on every one of the\n   14, with prefill spans of 1.66 \u2013 2.67 s at 899 \u2013 1498 prompt tokens. This is the config that\n   existed **specifically** to give the decode fit leverage at W=1 (`configs_timing_fit.json`\n   comments say so) and PR #40 got its two W=1 rows from it. It now contributes nothing.\n\nSo there is **no new timing model**, and `knowledge/timing/` gains no file. The current model is\nstill `knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json` (PR #40) \u2014 and per\nthe rank check below **it no longer passes**, so \"current\" now means \"the most recent one, which\nfails\". The un-suffixed `google-gemma-4-e2b-it-apple-m4-pro-mps.json` remains PR #35's, kept as\n`kb-20260917-c07eb94b`'s evidence.\n\n## The rank check, against the same nine configs\n\nWith no new model to test, the check was run on the models that exist. **No fit was made for\nthis \u2014 the only fit attempted is the one above, and it refused.** Both columns are Spearman rho\nover the same nine configs.\n\n| model \\ hardware draw | PR #40 draw (pre-fix, `grp-20260918-97253b`) | **this draw (post-fix, `grp-20260919-958ec6`)** |\n|---|---|---|\n| PR #35 (`active_size` fit) | 0.611 fail | **0.527 fail** |\n| **PR #40 / current (`834525f`, decode-width fit)** | **0.745 pass** | **0.644 FAIL** |\n\n`tpot_p50` is 0.811 for both models on the new draw (was 0.966 and 0.966).\n\nThe current model is still the better of the two \u2014 the decode-width fix that PR #40 made was\nreal and is not undone here. It simply is not enough any more.\n\n## Per-config pairs (current model `834525f`, post-fix hardware)\n\n`sim` is unchanged from PR #40 to the last decimal, because the simulator is deterministic and\nnothing about it changed. **Every number that moved is a hardware number.**\n\n| config | hw ttft_p95 (pre-fix) | **hw ttft_p95 (post)** | sim | sim/hw | hw tpot_p50 (pre) | **hw tpot_p50 (post)** | sim | sim/hw |\n|---|---|---|---|---|---|---|---|---|\n| `mbs8-x1` | 642 | **467.4** | 346.6 | 0.74x | 185.7 | **92.8** | 164.5 | 1.77x |\n| `mbs8-x05` | 387 | **521.2** | 347.1 | 0.67x | 120.8 | **72.3** | 143.6 | 1.99x |\n| `mbs8-x4` | 552 | **696.3** | 470.1 | 0.68x | 278.2 | **199.4** | 220.4 | 1.11x |\n| `mbs2-x1` | 11995 | **762.0** | 12468.7 | **16.4x** | 105.0 | **90.9** | 130.8 | 1.44x |\n| `mbs1-deadline5-x4` | 4743 | **861.8** | 116.8 | 0.14x | 50.5 | **60.5** | 111.3 | 1.84x |\n| `mbs2-x4` | 18110 | **1291.0** | 17528.9 | **13.6x** | 98.9 | **113.1** | 130.8 | 1.16x |\n| `mbs2-fair-x4` | 17553 | **1374.8** | 17528.9 | **12.7x** | 95.8 | **89.6** | 130.8 | 1.46x |\n| `mbs1-x1` | 22611 | **10505.5** | 29202.7 | 2.78x | 57.1 | **50.9** | 111.3 | 2.19x |\n| `mbs1-x4` | 19329 | **11857.8** | 7551.1 | 0.64x | 53.4 | **53.4** | 111.3 | 2.08x |\n\nThe three `mbs=2` configs are the whole story. They were the *best* agreements in PR #40\n(0.97 \u2013 1.04x) and are now the worst (12.7 \u2013 16.4x). Hardware went from 12 \u2013 18 s to 0.76 \u2013 1.4 s;\nthe simulator still says 12.5 \u2013 17.5 s.\n\n**This is not a noise result.** The nine hardware `ttft_p95` values span 467 to 11858 ms, and the\nsix clustered ones (467 \u2013 1375) are separated by far more than the re-measured cold_start band of\n\u00b15.12% (`kb-20260919-0a58befd`). The simulator is genuinely mis-ordering configs, not losing a\ncoin flip between adjacent ones \u2014 though the caveat from PR #40 still stands that these are\nsingle runs per config, not replicated arms.\n\n## Mechanism: the simulator has no stop-token model, and the bug was hiding that\n\n`simulator.simulate` decodes every request for exactly `trace.max_tokens` steps\n(`if r.generated < r.trace.max_tokens` / `r.generated >= r.trace.max_tokens`). There is no\nearly-termination model; the corpus trace carries an `expected_output_hash` but no expected\noutput *length*.\n\nUntil PR #41 the **engine did the same thing** \u2014 it ignored `<turn|>` and ran every request to\n`max_tokens` \u2014 so the simulator's \"decode to the cap\" assumption was accidentally exact. The two\nagreed because both were wrong in the same way. Now the engine generates **220 tokens on\n`cold_start/seen` where the simulator still generates 626**: the simulator charges ~2.8x the\ndecode work the engine does, and charges it to rows that in reality left the batch long ago.\n\nThat explains the shape of the failure precisely:\n\n- At `MAX_BATCH_SIZE=8` nothing queues in either world, so the error is a bounded 0.67 \u2013 0.74x.\n- At `MAX_BATCH_SIZE=2` the simulator holds phantom rows in a 2-wide batch for 400-odd extra\n  steps each, and everything behind them waits. Hardware empties the batch and the queue never\n  builds. Hence 13 \u2013 16x.\n- At `MAX_BATCH_SIZE=1` both worlds serialise, so the error is nearer the 2 \u2013 3x that the decode\n  intercept alone explains \u2014 the failure mode PR #40 already recorded.\n\n`tpot_p50` degrades much less (0.966 \u2192 0.811) because TPOT is a *per-step* cost: simulating too\nmany steps barely changes the average cost of one. It is still uniformly ~1.1 \u2013 2.2x too slow,\nwhich is PR #40's known W=1 intercept problem, unchanged.\n\n**PR #40's rho of 0.745 was therefore partly an artifact of the inflated workload** \u2014 not\nentirely (the decode-width fix moved rho on both draws, which PR #40's own 2x2 table showed), but\nthe margin it passed by was. It passed by ~3.7 adjacent-rank swaps; the workload correction costs\nmore than that.\n\n## What would have to change, and what must not\n\nDo not tune the model, drop a config or switch metrics to recover the pass \u2014 none of that was\ndone here, and the fit was attempted exactly once. What the numbers actually ask for, in order:\n\n1. **The simulator needs a termination model.** This is the load-bearing gap. Options, cheapest\n   first: (a) record the observed output length per trace request in the corpus (a new\n   `corpus_version`, which is a new corpus, not an edit); (b) have the simulator sample a length\n   from a fitted distribution; (c) keep decoding to `max_tokens` and accept that the simulator\n   models a workload the engine does not run. (c) is what is in the repo today and it is now\n   measurably wrong.\n2. **The fit configs need a class that decodes at more than one width.** No refit is possible\n   until then. See `kb-20260919-6ef4e6bf` \u2014 this is a corpus problem, not a fitting problem, and\n   it is out of scope for this PR.\n3. The two problems PR #40 already named \u2014 the unweighted fit and the missing context-length\n   term \u2014 are unchanged and are now second-order next to the above.\n\n## Staleness rule, applied\n\n`kb-20260917-c07eb94b`'s rule is that a tier-1 rejection hinging on a metric whose rank check\nfails is suspended. So, on MPS/E2B, as of this entry:\n\n- **`ttft_p95` tier-1 results are SUSPENDED.** rho 0.644 < 0.683. Any simulator-only rejection\n  that turns on p95 TTFT must not be trusted until a termination model lands and the check\n  passes again.\n- **`tpot_p50` is still supported at rho 0.811**, but with the standing caveat that the model is\n  1.1 \u2013 2.2x slow per step and worst at `MAX_BATCH_SIZE=1`.\n\n## Caveats carried\n\n- Single runs per config, not replicated arms \u2014 same limitation as PR #35 and PR #40.\n- The nine hardware panels and the four fit runs were measured at engine `03f600e`; `origin/main`\n  moved to `89ed4c9` during this work, but that range touches only `knowledge/`, `benchmarks/`,\n  `pyproject.toml` and `scripts/`, no engine file, so the arms are not stale.\n- MPS on an Apple M4 Pro, E2B. Says nothing about A100/E4B.\n- The box was not quiesced (VS Code and language servers running). No second MPS workload ran\n  during any sweep; all three sweeps were serialised for that reason.\n- `mbs1-deadline5-x4` now sheds 4 of 8 at the deadline in hardware (it shed 3 of 8 before) while\n  the simulator sheds 6 of 8, so its p95 is still taken over different survivor sets on the two\n  sides. That was already true in PR #40.\n",
+  "superseded_by": null,
+  "supersedes": "kb-20260918-9fc68282",
+  "tags": [
+    "loop",
+    "benchmark",
+    "scheduler",
+    "validity",
+    "harness",
+    "decode",
+    "batching",
+    "cold-start",
+    "telemetry",
+    "simulator",
+    "corpus"
+  ],
+  "title": "Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all",
+  "transfer_checked": null,
+  "triggers": [
+    "the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check",
+    "the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf)",
+    "a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683",
+    "a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40",
+    "replicated validation arms become affordable: rho from single-run draws is partly luck at n=9",
+    "GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about",
+    "the engine's decode path changes from row-by-row to a real batched forward (refit)"
+  ],
+  "updated_at": 1789864699.927673,
+  "validity_range": {
+    "concurrency": [
+      1,
+      4
+    ],
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "hardware": "Apple M4 Pro (MPS)",
+    "model": "google/gemma-4-E2B-it",
+    "workload_class": "cold_start"
+  }
+}
