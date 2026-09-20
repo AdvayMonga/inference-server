@@ -266,6 +266,8 @@ def format_judgement(j: Judgement, hypothesis: Hypothesis, exp: Experiment | Non
     lines += ["", f"verdict: {j.verdict.upper()}"]
     if exp is not None:
         lines.append(f"recorded {exp.id}")
+        if exp.notes.startswith("no noise band"):   # saying it only in the JSON is not saying it
+            lines.append(f"  !! {exp.notes}")
     if j.verdict != "confirmed":
         lines += ["", "This is a RESULT, not a failure. Write it to knowledge/ so the loop does "
                   "not re-propose it."]

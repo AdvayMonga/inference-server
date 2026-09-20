@@ -20,7 +20,7 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (28)
+## Open (29)
 
 Live — being worked, or waiting on a trigger.
 
@@ -203,7 +203,7 @@ fails is suspended. So, on MPS/E2B, as of this entry:
   the simulator sheds 6 of 8, so its p95 is still taken over different survivor sets on the two
   sides. That was already true in PR #40.
 
-**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19: under the chat route's enable_thinking=True default every request runs to max_tokens, so output length IS the trace's max_tokens and the missing termination model may no longer bite (kb-20260919-9ea56f98)
+**Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit); 2026-09-19: the decode-width leverage is back (kb-20260919-bfd8f9b0) — cold_start/heldout went from one decode row at width 1.00 to eight spanning 2.06-4.00, so the refit and the rank check can both be re-run; 2026-09-19 HAZARD, not progress: under the chat route's inherited enable_thinking=True every request runs to max_tokens (kb-20260919-9ea56f98), so the missing termination model stops showing up. That is the ENGINE becoming degenerate, not the simulator being fixed. Re-running the fit or rank check in this state proves only that two systems share one defect. This does NOT satisfy the termination-model trigger and must NOT lift this suspension.
 
 **Evidence:** grp-20260919-759868, grp-20260919-958ec6, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, run-20260919-cf74cdb6, run-20260919-5f9579fd, run-20260919-e134030f, run-20260919-446f0ca7, run-20260919-29bd8871, run-20260919-feec3826, run-20260919-45a592ba, run-20260919-f6108c0a, run-20260919-4155e1d9, run-20260919-1f26a4da, run-20260919-b940da1a, run-20260919-678d77c4
 
@@ -216,6 +216,98 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 **Mechanism:** The simulator decodes every request to trace.max_tokens and has no early-termination model. Until PR #41 the engine did the same thing, so the two agreed by sharing one bug; with the engine stopping at <turn|> the simulator now charges 626 tokens of decode where the engine does 220, holding phantom rows in narrow batches and inventing queueing that hardware does not have.
 
 **Supersedes:** `kb-20260918-9fc68282`
+
+### [2026-09-20] Server-side chat templating adds two invisible variables, not one: the template hash AND enable_thinking, which on gemma-4 removes early termination entirely
+*tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `gates`* · `kb-20260919-9ea56f98`
+
+**Moving the corpus onto the chat route replaces one silent variable with two, and only one of
+them was obvious.** Both are now recorded in the panel's validity block as
+`validity.chat_template`, beside `device_state` and `corpus_version`.
+
+## What is stamped
+
+`research/chat_template.py` produces, per chat-route panel:
+
+```json
+{"tokenizer": "google/gemma-4-E2B-it",
+ "chat_template_sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+ "enable_thinking": true, "probe_tokens": 17, "verified": true}
+```
+
+- `chat_template_sha256` — the resolved template string. A model-card revision moves it.
+- `probe_tokens` — the rendered length of the fixed prompt `"probe"`. This catches a tokenizer or
+  transformers upgrade that renders an *unchanged* template string differently, which the hash
+  alone would not.
+- `enable_thinking` — see below. Recorded rather than assumed.
+- `verified` — the fingerprint is computed by the CLIENT; the SERVER is what applies the
+  template. It is checked against the `prompt_tokens` the server reported for a request whose
+  text the replayer knows. `false` means the stamp describes a different tokenizer than the one
+  that served the run, and `compare.py` refuses such a panel outright. `null` means "not checked",
+  which is a different fact and does not invalidate anything.
+
+## The one that was not obvious: `enable_thinking=True`
+
+`openai_shim.chat_completions` calls `Tokenizer.encode_messages(messages)` positionally, so it
+inherits that method's `thinking=True` default. The rendered prompt is therefore not
+`<bos><|turn>user ...` but `<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user ...` — seven
+extra tokens, and a mode switch. `gemma-4-E2B-it` then opens every answer with
+`thought\nThinking Process: ...`.
+
+Measured on `cold_start`, one request at a time through the running engine, `HF_HUB_OFFLINE=1`:
+
+| | raw | **chat, thinking ON** (what the shim does) | chat, thinking OFF |
+|---|---|---|---|
+| `seen`: tokens / 626 budget | 220 | **626** | 612 |
+| `seen`: requests ending early | 7 of 8 (at 0–9 tokens) | **0** | 2 |
+| `heldout`: tokens / 728 budget | 216 | **728** | 711 |
+| `heldout`: requests ending early | 7 of 8 (six at 0) | **0** | 2 |
+
+(thinking-OFF measured by rendering the template client-side and posting the rendered text to
+`/v1/completions`, minus its leading `<bos>`; the engine re-adds one.)
+
+**With thinking on, every single request runs to exactly `max_tokens`.** That has two consequences
+worth being explicit about, one good and one a loss:
+
+- **A HAZARD, and it is the dangerous one.** `kb-20260919-94acfdb8`'s first trigger asks for
+  "observed output length in the corpus, or a fitted length distribution", because the simulator
+  has no termination model. Under this configuration it appears not to need one: output length
+  *is* `max_tokens`. **Do not read that as the blocker being gone, and do not use it to lift the
+  `ttft_p95` suspension.** Nothing was added to the simulator; the ENGINE was made degenerate by
+  a shim bug. Re-running the fit or the rank check in this state would only show that the
+  simulator agrees with an engine that shares its defect — the third time this project has been
+  offered that trade (the June vLLM head-to-head, the pre-#41 stop-token bug, this). The
+  agreement evaporates the moment `openai_shim.py`'s thinking default is fixed, the model
+  changes, or the corpus does.
+- **A loss.** The corpus no longer exercises early termination at all — a request that would stop
+  on its own is indistinguishable from one that is truncated. Thinking OFF keeps 96–98% of the
+  token volume *and* keeps genuine early stops (8 of 22, 26 of 29, 27 of 40, 53 of 54). If the
+  loop ever wants to study termination, that is the configuration to use — and it needs an
+  `openai_shim.py` change, which is an engine file and so needs a premerge evidence path.
+
+Thinking ON was never chosen — it is inherited from a positional call, and it makes 100% of requests hit budget, which is as unrepresentative as the zero-token workload it replaced. Thinking OFF is what the corpus should run on. Both are now at least written down and stamped into the validity block, which is why this entry is `open` and not `resolved`: the recording is done, the shim is not.
+
+## Client-visible token counts undercount by exactly one
+
+The shim emits no SSE chunk for a generated token that decodes to the empty string, so a
+streaming client cannot see it. On the chat route the first thinking-block token is such a token,
+so `out_tokens` in every replay CSV row is **uniformly one lower** than what the engine generated
+(626 vs 618 on `seen`, 728 vs 720 on `heldout`). The effect pre-dates this change — it is why
+`kb-20260919-0a58befd` saw "6 client-visible, 2 no_tokens" against 8 engine-side `ok` — but it was
+per-request and irregular before and is per-request and uniform now.
+
+`replay_trace.py` now records the engine's own count as `server_out_tokens` beside `out_tokens`
+in every CSV row. `out_tokens` is deliberately NOT replaced: it is the count TTFT and TPOT were
+measured over, and swapping it would silently move every throughput number ever compared.
+
+**Revisit when:** FIX openai_shim.py's chat route to pass thinking=False explicitly (it calls Tokenizer.encode_messages(messages) positionally and inherits thinking=True): engine file, so it needs a premerge evidence path. Until then every chat-route corpus run is budget-truncated by construction.; a panel is compared across a transformers or model-card upgrade: the template hash and probe_tokens are the fields that catch it; the simulator is given a termination model: do NOT skip it because enable_thinking=True makes output length == max_tokens. That is a degenerate engine, not a modelled one (kb-20260919-94acfdb8); anyone wants output-length variance back (early stops): turning enable_thinking off restores it, at the cost of an openai_shim.py change and therefore a premerge evidence path; a panel appears with chat_template.verified=false: the client and the serving process have different tokenizers and the panel's stamp is describing the wrong one; the replayer is ever run on a different machine from the engine: the fingerprint is computed client-side and verification is the only thing making that safe
+
+**Evidence:** grp-20260919-2c36c0, run-20260919-a4f66edf, run-20260919-3177144a, run-20260919-08ac920d, run-20260919-e66c4739
+
+**Regime:** `cold_start`
+
+**Valid over:** `{"corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
+
+**Mechanism:** The shim's chat route calls Tokenizer.encode_messages(messages) positionally, so it takes that method's thinking=True default, which renders a <|turn>system <|think|> block ahead of the user turn. gemma-4-E2B-it then opens every answer with a thinking preamble and never finishes inside the corpus's max_tokens, so output length becomes exactly max_tokens for every request.
 
 ### [2026-09-20] The cold_start noise band is now a raw-route band only: the default workload has no band, and the gate falls back to the t-test alone
 *tags: `loop`, `benchmark`, `variance`, `validity`, `harness`, `gates`, `cold-start`* · `kb-20260919-e610af2a`
@@ -802,7 +894,7 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (39)
+## Resolved (38)
 
 Settled. Kept because the reasoning still constrains new work.
 
@@ -1217,92 +1309,6 @@ the prefix-cache hit the construction exists to produce.
 **Mechanism:** /v1/completions does not apply a chat template (spec-correct for that route), so gemma-4-E2B-it read every corpus prompt as a turn that was already over and emitted <turn|> first. Posting the same prompt bytes to /v1/chat/completions as a single user message makes the model see a real user turn, and it answers.
 
 **Supersedes:** `kb-20260919-6ef4e6bf`
-
-### [2026-09-20] Server-side chat templating adds two invisible variables, not one: the template hash AND enable_thinking, which on gemma-4 removes early termination entirely
-*tags: `loop`, `harness`, `validity`, `corpus`, `benchmark`, `gates`* · `kb-20260919-9ea56f98`
-
-**Moving the corpus onto the chat route replaces one silent variable with two, and only one of
-them was obvious.** Both are now recorded in the panel's validity block as
-`validity.chat_template`, beside `device_state` and `corpus_version`.
-
-## What is stamped
-
-`research/chat_template.py` produces, per chat-route panel:
-
-```json
-{"tokenizer": "google/gemma-4-E2B-it",
- "chat_template_sha256": "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
- "enable_thinking": true, "probe_tokens": 17, "verified": true}
-```
-
-- `chat_template_sha256` — the resolved template string. A model-card revision moves it.
-- `probe_tokens` — the rendered length of the fixed prompt `"probe"`. This catches a tokenizer or
-  transformers upgrade that renders an *unchanged* template string differently, which the hash
-  alone would not.
-- `enable_thinking` — see below. Recorded rather than assumed.
-- `verified` — the fingerprint is computed by the CLIENT; the SERVER is what applies the
-  template. It is checked against the `prompt_tokens` the server reported for a request whose
-  text the replayer knows. `false` means the stamp describes a different tokenizer than the one
-  that served the run, and `compare.py` refuses such a panel outright. `null` means "not checked",
-  which is a different fact and does not invalidate anything.
-
-## The one that was not obvious: `enable_thinking=True`
-
-`openai_shim.chat_completions` calls `Tokenizer.encode_messages(messages)` positionally, so it
-inherits that method's `thinking=True` default. The rendered prompt is therefore not
-`<bos><|turn>user ...` but `<bos><|turn>system\n<|think|>\n<turn|>\n<|turn>user ...` — seven
-extra tokens, and a mode switch. `gemma-4-E2B-it` then opens every answer with
-`thought\nThinking Process: ...`.
-
-Measured on `cold_start`, one request at a time through the running engine, `HF_HUB_OFFLINE=1`:
-
-| | raw | **chat, thinking ON** (what the shim does) | chat, thinking OFF |
-|---|---|---|---|
-| `seen`: tokens / 626 budget | 220 | **626** | 612 |
-| `seen`: requests ending early | 7 of 8 (at 0–9 tokens) | **0** | 2 |
-| `heldout`: tokens / 728 budget | 216 | **728** | 711 |
-| `heldout`: requests ending early | 7 of 8 (six at 0) | **0** | 2 |
-
-(thinking-OFF measured by rendering the template client-side and posting the rendered text to
-`/v1/completions`, minus its leading `<bos>`; the engine re-adds one.)
-
-**With thinking on, every single request runs to exactly `max_tokens`.** That has two consequences
-worth being explicit about, one good and one a loss:
-
-- **Good, and it matters for the simulator.** `kb-20260919-94acfdb8`'s first trigger asks for
-  "observed output length in the corpus, or a fitted length distribution", because the simulator
-  has no termination model. Under this configuration it does not need one: output length *is*
-  `max_tokens`, which the trace already carries. The blocker may be gone, by accident.
-- **A loss.** The corpus no longer exercises early termination at all — a request that would stop
-  on its own is indistinguishable from one that is truncated. Thinking OFF keeps 96–98% of the
-  token volume *and* keeps genuine early stops (8 of 22, 26 of 29, 27 of 40, 53 of 54). If the
-  loop ever wants to study termination, that is the configuration to use — and it needs an
-  `openai_shim.py` change, which is an engine file and so needs a premerge evidence path.
-
-Neither configuration is wrong. What was wrong was that neither was written down.
-
-## Client-visible token counts undercount by exactly one
-
-The shim emits no SSE chunk for a generated token that decodes to the empty string, so a
-streaming client cannot see it. On the chat route the first thinking-block token is such a token,
-so `out_tokens` in every replay CSV row is **uniformly one lower** than what the engine generated
-(626 vs 618 on `seen`, 728 vs 720 on `heldout`). The effect pre-dates this change — it is why
-`kb-20260919-0a58befd` saw "6 client-visible, 2 no_tokens" against 8 engine-side `ok` — but it was
-per-request and irregular before and is per-request and uniform now.
-
-`replay_trace.py` now records the engine's own count as `server_out_tokens` beside `out_tokens`
-in every CSV row. `out_tokens` is deliberately NOT replaced: it is the count TTFT and TPOT were
-measured over, and swapping it would silently move every throughput number ever compared.
-
-**Revisit when:** a panel is compared across a transformers or model-card upgrade: the template hash and probe_tokens are the fields that catch it; the simulator is given a termination model: under enable_thinking=True there is nothing to model on this corpus — output length IS max_tokens — and that is a property of the flag, not of the corpus (kb-20260919-94acfdb8); anyone wants output-length variance back (early stops): turning enable_thinking off restores it, at the cost of an openai_shim.py change and therefore a premerge evidence path; a panel appears with chat_template.verified=false: the client and the serving process have different tokenizers and the panel's stamp is describing the wrong one; the replayer is ever run on a different machine from the engine: the fingerprint is computed client-side and verification is the only thing making that safe
-
-**Evidence:** grp-20260919-2c36c0, run-20260919-a4f66edf, run-20260919-3177144a, run-20260919-08ac920d, run-20260919-e66c4739
-
-**Regime:** `cold_start`
-
-**Valid over:** `{"corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "hardware": "Apple M4 Pro (MPS)", "model": "google/gemma-4-E2B-it", "prompt_format": "chat"}`
-
-**Mechanism:** The shim's chat route calls Tokenizer.encode_messages(messages) positionally, so it takes that method's thinking=True default, which renders a <|turn>system <|think|> block ahead of the user turn. gemma-4-E2B-it then opens every answer with a thinking preamble and never finishes inside the corpus's max_tokens, so output length becomes exactly max_tokens for every request.
 
 ### [2026-09-19] Custom backend ignored end-of-turn: every custom-* request ran to max_tokens (fixed)
 *tags: `correctness`, `custom-backend`, `stop-tokens`, `validity`, `benchmark`, `telemetry`* · `kb-20260918-5906bc13`

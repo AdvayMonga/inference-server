@@ -185,6 +185,8 @@ def template_stamp(prompt_format: str, model_name: str | None,
     fp = CT.fingerprint(model_name)
     if fp is None or not trace or not rows:
         return fp
+    # Spot check, not exhaustive: one tokenizer serves a whole run, so the first row reporting
+    # prompt_tokens settles whether the client's stamp describes the serving process.
     by_index = {r.index: r for r in rows}
     for i, req in enumerate(trace):
         row = by_index.get(i)

@@ -18,8 +18,10 @@ posts through the chat route: turn 1 becomes one user message containing turn 0'
 follow-up. The alternative — a real [user, assistant, user] conversation — needs turn 0's
 assistant reply, which the corpus does not have and cannot store without tying the trace to one
 model's outputs (and Gemma's template rejects two consecutive user turns, so the reply cannot
-simply be omitted). Concatenation also keeps turn 0's templated prompt a literal prefix of turn
-1's, which is the prefix-cache hit this construction exists to produce. The replayer sends the
+simply be omitted). Concatenation keeps turn 0's prompt TEXT a literal prefix of turn 1's, so the
+shared run of tokens still hits the prefix cache, which is what this construction exists to
+produce. The RENDERED turns are not prefixes of one another: turn 0 closes with its own end-of-
+turn and model-role tokens where turn 1 simply continues the user message. The replayer sends the
 trace's own session_id as X-Session-Id, so both turns land on one engine session.
 """
 
