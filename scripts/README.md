@@ -71,6 +71,18 @@ PYTHONPATH=src python scripts/gpu_tests/cuda_gate.py                            
 RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py --gpu 'NVIDIA GeForce RTX 4090'
 ```
 
+`check_e4b_stop_tokens_modal.py` is a one-shot Modal instrument, not part of the gate: it
+narrowed the E4B half of `kb-20260918-5906bc13` by replaying the June head-to-head's 8 raw
+token-id prompts on `google/gemma-4-E4B-it` alone (plain `transformers`, greedy, unbatched, 100
+steps, nothing stopping early) and recording where `1` / `106` / `50` first appear, so the two
+engines' stop sets can be compared on the same rollout. `--out FILE` writes every generated id as
+JSON; that artifact is the evidence (`knowledge/evidence/e4b-stop-tokens-20260919.json`) and the
+entry's table is generated from it by `summarise()`, so the two cannot drift. Cheapest card that
+fits (L4, 24 GB), weights on the `hf-cache` volume, torch/transformers pinned so a re-run is the
+same experiment; `--dry-run` prints the plan without starting a GPU. Needs the `modal` extra. It
+measures the *model* under HF decode, not our engine, which is why the entry keeps a trigger to
+re-check under `custom-cuda` at the real batch widths.
+
 ## tools/
 
 `smoke_custom.py`, `test_scheduler.py`, `test_batch_cache.py` are local end-to-end smoke runs.
