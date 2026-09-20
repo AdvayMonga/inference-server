@@ -96,7 +96,7 @@ def _report(r):
 def main(dry_run: bool = False):
     if dry_run:
         print(f"planned: gpu={GPU}  model={MODEL}  steps={STEPS}  prompts={len(PROMPTS)}")
-        print(f"image=debian_slim(3.11)+torch+transformers  volume=hf-cache@/root/.cache/huggingface")
+        print("image=debian_slim(3.11)+torch+transformers  volume=hf-cache@/root/.cache/huggingface")
         print(f"secret=huggingface-secret  prompt[0]={PROMPTS[0][:3]}...{PROMPTS[0][-2:]} "
               f"(len {len(PROMPTS[0])})")
         print("dry run OK — no GPU started")

@@ -26,8 +26,11 @@ dev = [
     "ruff>=0.4",
     "matplotlib>=3.8",
 ]
-# No `modal` extra: the instruments that needed it are archived under scripts/archive/modal/
-# and are not expected to run. See that folder's README to reproduce a historical number.
+# Modal is a live runner again for one-shot instruments (scripts/gpu_tests/*_modal.py). The
+# sweeps under scripts/archive/modal/ stay archived; see that folder's README to reproduce one.
+modal = [
+    "modal>=1.0",
+]
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"
