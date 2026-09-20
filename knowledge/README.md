@@ -7,6 +7,7 @@ decision; [`DECISIONS.md`](../DECISIONS.md) at the repo root is a **generated** 
 python -m inference_server.research.loop kb --status rejected     # the dead ends — read first
 python -m inference_server.research.loop kb --tags prefill cache  # what is known about an area
 python -m inference_server.research.loop kb --regime cold_start   # what applies to a workload class
+python -m inference_server.research.loop kb --suspended           # what the loop cannot measure right now
 python -m inference_server.research.loop kb --situation model=gemma-4-e4b,hardware=A100-80GB   # what covers my situation
 python -m inference_server.research.loop index                    # regenerate DECISIONS.md
 ```
@@ -27,6 +28,7 @@ Edit the JSON, never the markdown. The record type is `KnowledgeEntry` in
 | `validity_range` | the bounds it was measured over; `covers()` in `kb.py` answers "does my situation fall inside" |
 | `mechanism` | one sentence on why it worked or did not, so a near-miss hypothesis can reason about transfer |
 | `transfer_checked` | re-run on a second model or hardware, and the result (`{"model": ..., "held": ...}`) |
+| `suspended_metrics` / `suspended_tiers` | panel fields this entry says the loop currently **cannot measure**, and at which falsification tiers |
 
 `validity_range` is a plain dict. Conventional keys: `model`, `hardware`, `corpus_version`,
 `engine_sha_range`, `context_tokens`, `concurrency`. A value is a scalar (equality), a list of
@@ -42,6 +44,38 @@ failure this field exists to stop.
 both places. Entries written before these fields existed were backfilled on 2026-09-16 by
 `scripts/tools/backfill_kb_regime.py` (its mapping table is the record of why each entry got
 what it got); a new entry sets `regime` at write time, or says why it has none.
+
+## Suspensions — what the loop cannot currently measure
+
+`status` says what we believe; `suspended_metrics` says what we are **not able to find out**, so
+the two are orthogonal. `kb-20260919-94acfdb8` is `open` — live, waiting on a trigger — and at the
+same time suspends `ttft_p95` at tier 1, because the simulator ranks that metric at rho 0.644
+against a 0.683 critical value and therefore cannot falsify a p95-TTFT hypothesis without a GPU.
+
+A suspension is **scoped to a metric and a tier**, never to a whole entry — that would block
+everything its subject touches, get worked around, and a gate people route around is worse than
+no gate.
+
+Metric and tier are also *all* the gate enforces. An entry's `regime` and `validity_range` are
+printed next to a block so a reader can see where the finding came from, but `suspends()` does
+**not** check them: a `Hypothesis` carries no regime to check against. That is the right
+behaviour for every suspension we hold today, because each describes the **instrument** — the
+simulator has no termination model on any hardware — so blocking that metric-tier pair
+everywhere is exactly right. A suspension that is genuinely hardware-specific ("this kernel
+misbehaves only on Blackwell") would instead over-block every machine, and wants a
+`Hypothesis.regime` field before it can be scoped honestly. Not built: no such suspension exists.
+
+`loop screen` checks live suspensions against **every** entry, not only the ones `related()`
+surfaces: a suspension is a property of the instrument, not of the subject, so a prefix-cache
+hypothesis predicting `ttft_p95` at tier 1 is exactly as unfalsifiable as a scheduling one. It
+exits 1 and names the entry and its scope.
+
+**Lifting one:** fix the instrument, file the record that shows it measuring again, and point
+`supersedes` / `superseded_by` at each other. `suspensions()` returns only entries that are
+neither superseded nor `obsolete`, so the gate opens the moment the successor lands. Never edit
+the fields away — that erases the record that the gate was ever there. This has already happened
+by hand once: `kb-20260917-c07eb94b` suspended `ttft_p95`, `kb-20260918-9fc68282` lifted it, and
+`kb-20260919-94acfdb8` re-imposed it.
 
 ## Subdirectories: machine-readable companions
 

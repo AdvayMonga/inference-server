@@ -14,6 +14,12 @@ Grep by tag or title rather than reading top-to-bottom.
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
 
+## Active suspensions
+
+Metrics the loop currently **cannot measure** at the tiers named. `loop screen` blocks a hypothesis that predicts one of them. Lifted by superseding the entry with one that shows the instrument working again.
+
+- `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
+
 ## Open (28)
 
 Live — being worked, or waiting on a trigger.
@@ -278,6 +284,11 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 - **`ttft_p95` tier-1 results are SUSPENDED.** rho 0.644 < 0.683. Any simulator-only rejection
   that turns on p95 TTFT must not be trusted until a termination model lands and the check
   passes again.
+  This is now machine-readable and enforced: `suspended_metrics: ["ttft_p95"]`,
+  `suspended_tiers: [1]` on this entry, scoped by the `regime` and `validity_range` below.
+  `loop screen` exits 1 on any tier-1 hypothesis predicting `ttft_p95`. It is lifted by
+  SUPERSEDING this entry with one that shows the rank check passing — not by editing the
+  fields away, which would erase the record that the gate was ever there.
 - **`tpot_p50` is still supported at rho 0.811**, but with the standing caveat that the model is
   1.1 – 2.2x slow per step and worst at `MAX_BATCH_SIZE=1`.
 
@@ -300,6 +311,8 @@ fails is suspended. So, on MPS/E2B, as of this entry:
 **Revisit when:** the simulator gains a termination model (observed output length in the corpus, or a fitted length distribution): re-run the fit and the rank check; the corpus gains a class that decodes at more than one batch width: the fit is singular until then (kb-20260919-6ef4e6bf); a tier-1 hypothesis turns on p95 TTFT on MPS/E2B: SUSPENDED, rho 0.644 < 0.683; a tier-1 hypothesis turns on MAX_BATCH_SIZE=1 or deadline shedding: the model is still ~2x slow at W=1 there, unchanged from PR #40; replicated validation arms become affordable: rho from single-run draws is partly luck at n=9; GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward (refit)
 
 **Evidence:** grp-20260919-759868, grp-20260919-958ec6, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps-834525f.json, run-20260919-cf74cdb6, run-20260919-5f9579fd, run-20260919-e134030f, run-20260919-446f0ca7, run-20260919-29bd8871, run-20260919-feec3826, run-20260919-45a592ba, run-20260919-f6108c0a, run-20260919-4155e1d9, run-20260919-1f26a4da, run-20260919-b940da1a, run-20260919-678d77c4
+
+**Suspends:** `ttft_p95` at tier(s) 1 — LIVE
 
 **Regime:** `cold_start`
 
@@ -1304,6 +1317,8 @@ cleared, `ttft_p95` did not.
 **Revisit when:** telemetry gains a per-step batch width (then refit and re-run this check); GPU budget returns: re-run the whole check on A100/E4B, which this says nothing about; the engine's decode path changes from row-by-row to a real batched forward; a tier-1 hypothesis turns on ttft_p95 — it is not supported until rho clears 0.683
 
 **Evidence:** grp-simval-coldstart-mps, grp-fit-coldheld-mps, grp-fit-mps-e2b, knowledge/timing/google-gemma-4-e2b-it-apple-m4-pro-mps.json, run-20260917-50f769fe, run-20260917-7c85e56c, run-20260917-8556ab5b, run-20260917-c562f6f2, run-20260917-3f6fb56e, run-20260917-1d3206a4, run-20260917-14ca8656, run-20260917-42ead64e, run-20260917-9c3752a6
+
+**Suspends:** `ttft_p95` at tier(s) 1 — lifted (superseded)
 
 **Regime:** `cold_start`
 

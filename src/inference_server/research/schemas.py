@@ -407,6 +407,19 @@ class KnowledgeEntry:
     mechanism: str | None = None     # one sentence: why it worked or did not
     supersedes: str | None = None    # partner of superseded_by
     transfer_checked: dict[str, Any] | None = None   # re-run on a 2nd model/hardware, and result
+    # What we currently CANNOT find out, which is orthogonal to `status` (what we believe).
+    # The entry that suspends `ttft_p95` at tier 1 — the simulator ranks it at rho 0.644 against
+    # a 0.683 critical value because it has no termination model — is `open`: live, and waiting
+    # on a trigger. These two say WHICH panel fields and WHICH falsification tiers are
+    # untrustworthy, so a suspension blocks the hypotheses it covers instead of the whole entry's
+    # subject area; an over-blocking gate gets routed around, which is worse than no gate.
+    # ENFORCEMENT IS METRIC + TIER ONLY: `regime` and `validity_range` are shown by format_scope()
+    # and never checked, because a Hypothesis carries no regime to intersect against. Correct
+    # while a suspension describes the INSTRUMENT (a missing termination model is not hardware-
+    # specific); a hardware-specific one would over-block every machine and needs Hypothesis.regime.
+    # Lifted by SUPERSEDING the entry, never by editing these away — see kb.suspensions().
+    suspended_metrics: list[str] = field(default_factory=list)   # Vitals fields not measurable
+    suspended_tiers: list[int] = field(default_factory=list)     # 1..4; empty means every tier
     id: str = field(default_factory=lambda: _new_id("kb"))
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -436,3 +449,15 @@ class KnowledgeEntry:
             if not ok:
                 raise SchemaError(f"validity_range[{key!r}] must be a scalar or a non-empty list "
                                   f"of scalars, got {bound!r}")
+        # A suspension names panel fields, because `screen` matches it against a hypothesis's
+        # predicted_metric. A typo would suspend nothing and nobody would notice.
+        panel_fields = {f.name for f in fields(Vitals)}
+        for metric in self.suspended_metrics:
+            if metric not in panel_fields:
+                raise SchemaError(f"suspended_metrics {metric!r} is not a panel field")
+        for tier in self.suspended_tiers:
+            if not isinstance(tier, int) or isinstance(tier, bool) or not 1 <= tier <= 4:
+                raise SchemaError(f"suspended_tiers must be 1..4, got {tier!r}")
+        if self.suspended_tiers and not self.suspended_metrics:
+            raise SchemaError("suspended_tiers without suspended_metrics suspends nothing; name "
+                              "the metrics the instrument cannot measure")
