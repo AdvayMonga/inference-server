@@ -10,6 +10,7 @@ discouraged: arms measured in one process share it, and compare.py refuses acros
 from __future__ import annotations
 
 import json
+import math
 import os
 import statistics
 import time
@@ -46,11 +47,50 @@ def trial_id() -> str:
     return _TRIAL
 
 
+def rank_index(q: float, n: int) -> int:
+    """0-based NEAREST-RANK index of the q-th percentile of n items: `ceil(q * n) - 1`.
+
+    The textbook definition, and deliberately not the `floor(q * (n - 1))` this module used
+    until panel version 2. Two reasons it has to be this one:
+
+    * At n=8 it makes p95 the maximum rather than the second largest. A tail metric that a
+      merge is gated on should err toward the slow end, and 8 is the size of the cold_start
+      reference configs, so this is the regime actually run rather than a limit case.
+    * It is the convention `session.primary_metric` already used. Its failure rule is
+      `n_ok < ceil(0.95 * n)`, which is exactly the condition under which this index falls
+      among the requests that never answered — so the two agreed on paper and disagreed in
+      code. `kb-20260918-4f4c85b7` had already named the floor variant as the bug ("an earlier
+      floor-interpolation version let 1 failure in 8 through"); `pct_over_attempts` reintroduced
+      it, and `tests/test_panel_failure_accounting.py` now pins the two rules together.
+    """
+    return min(max(math.ceil(q * n) - 1, 0), n - 1)
+
+
 def pct(values: Iterable[float], q: float) -> float:
+    """Nearest-rank percentile over the values given. See `rank_index` for the convention."""
     xs = sorted(values)
     if not xs:
         return 0.0
-    return float(xs[min(int(q * (len(xs) - 1)), len(xs) - 1)])
+    return float(xs[rank_index(q, len(xs))])
+
+
+def pct_over_attempts(values: Iterable[float], q: float, n_attempted: int) -> float:
+    """`pct`, but over ATTEMPTS: the requests that never answered rank worst.
+
+    A shed, expired or timed-out request is a first token that never arrived, so it sorts above
+    every measured one rather than dropping out of the sample. `inf` when the percentile lands
+    among them: the tail is genuinely worse than anything this run measured, and quoting the
+    survivors' number there is what let a config improve its p95 by refusing its slowest
+    requests. Identical to `pct` when nothing failed — the panel has ONE percentile convention,
+    which is the point; two of them is how the simulator and the hardware ended up ranking
+    `ttft_p95` against each other under different definitions for nine configs.
+    """
+    xs = sorted(values)
+    n = max(int(n_attempted), len(xs))
+    if not n:
+        return 0.0
+    idx = rank_index(q, n)
+    return float(xs[idx]) if idx < len(xs) else math.inf
 
 
 def stderr(values: Iterable[float]) -> float | None:

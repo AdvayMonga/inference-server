@@ -23,7 +23,7 @@ from inference_server.research.noise import (
     format_band,
     metric_band,
 )
-from inference_server.research.schemas import Hypothesis, Vitals
+from inference_server.research.schemas import PANEL_VERSION, Hypothesis, Vitals
 
 MODEL = "google/gemma-4-E2B-it"
 HARDWARE = "Apple M4 Pro (MPS)"
@@ -202,7 +202,7 @@ def test_a_raw_route_band_does_not_gate_a_chat_route_run(tmp_path):
     the tokens (kb-20260919-6ef4e6bf), so the raw band describes a workload that is not this one.
     No band is the safe answer: the gate then behaves as it did before bands existed."""
     band = NoiseBand(harness="replay_trace", workload_class="cold_start", model="m",
-                     hardware="M4", prompt_format="raw",
+                     hardware="M4", prompt_format="raw", panel_version=PANEL_VERSION,
                      metrics={"ttft_p95": MetricBand(n=5, mean=100.0, sd=5.0, cv=0.05,
                                                      min=95.0, max=105.0,
                                                      min_max_ratio=1.11)})
@@ -216,3 +216,24 @@ def test_a_raw_route_band_does_not_gate_a_chat_route_run(tmp_path):
     legacy.pop("prompt_format")
     (tmp_path / "legacy.json").write_text(json.dumps(legacy))
     assert NoiseBand.load(tmp_path / "legacy.json").prompt_format == "raw"
+
+
+def test_a_band_measured_under_an_older_panel_version_does_not_gate_a_current_run(tmp_path):
+    """A band is the spread of particular METRICS. `ttft_p95` was taken over survivors under
+    panel version 1 and over attempts under 2, so a v1 band describes numbers nobody measures
+    any more — and the hole it would have left open is the one bands exist to close."""
+    band = NoiseBand(harness="replay_trace", workload_class="cold_start", model="m",
+                     hardware="M4", prompt_format="chat", panel_version=PANEL_VERSION - 1,
+                     metrics={"ttft_p95": MetricBand(n=5, mean=100.0, sd=5.0, cv=0.05,
+                                                     min=95.0, max=105.0,
+                                                     min_max_ratio=1.11)})
+    band.to_json(tmp_path / "old.json")
+    common = dict(harness="replay_trace", workload_class="cold_start", model="m",
+                  hardware="M4", prompt_format="chat", directory=tmp_path)
+    assert find_band(panel_version=PANEL_VERSION - 1, **common) is not None
+    assert find_band(**common) is None, "find_band defaults to the CURRENT panel version"
+    # A band file written before the field existed is a version-1 band, which is what it was.
+    legacy = json.loads((tmp_path / "old.json").read_text())
+    legacy.pop("panel_version")
+    (tmp_path / "legacy-v.json").write_text(json.dumps(legacy))
+    assert NoiseBand.load(tmp_path / "legacy-v.json").panel_version == 1

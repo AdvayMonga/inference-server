@@ -132,8 +132,14 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *
     except Exception as e:
         return Sample(error=type(e).__name__, trace_id=trace_id)
     if ttft is None:
-        return Sample(error="no_tokens", trace_id=trace_id, prompt_tokens=prompt_tokens,
-                      server_out_tokens=server_out_tokens)
+        # Two different facts, and charging them the same way makes a panel lie in one direction
+        # or the other. "no_tokens": the server generated nothing, a real failure to serve.
+        # "no_visible_tokens": it generated, but every token decoded to "" and the shim emitted no
+        # chunk — the SERVICE worked and the INSTRUMENT is blind, so the failure accounting must
+        # not charge it as a shed request (kb-20260919-9ea56f98).
+        blind = bool(server_out_tokens)
+        return Sample(error="no_visible_tokens" if blind else "no_tokens", trace_id=trace_id,
+                      prompt_tokens=prompt_tokens, server_out_tokens=server_out_tokens)
     tpot = (last_tok_t - first_tok_t) / (n - 1) if n > 1 else 0.0
     return Sample(ttft_s=ttft, tpot_s=tpot, out_tokens=n, trace_id=trace_id,
                   prompt_tokens=prompt_tokens, server_out_tokens=server_out_tokens)
@@ -147,6 +153,13 @@ class RateResult:
     samples: list[Sample] = field(default_factory=list)
 
     def summary(self) -> dict:
+        # DELIBERATE CARVE-OUT from the panel's failure accounting (kb-20260920-7f31c4ad).
+        # These percentiles are over the requests that ANSWERED, so shedding flatters them —
+        # unlike `replay_trace.ReplayResult.summary`, which ranks failures worst over attempts.
+        # Left that way because this function builds no `Vitals`, nothing programmatic ingests
+        # its CSV, and the published vLLM head-to-head comes from guidellm, not from here. If
+        # that stops being true, this has to move to `H.pct_over_attempts` and the move is a
+        # PANEL_VERSION question. `one_request`, which replay_trace shares, IS fixed.
         ok = [s for s in self.samples if s.error is None]
         errs = [s for s in self.samples if s.error is not None]
         # Arrivals stop at the deadline; completions keep landing through the drain. Past

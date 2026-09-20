@@ -321,24 +321,50 @@ def test_screen_points_cheap_tiers_at_the_simulator(tmp_path, capsys):
 
 # ---------------------------------------------------------------- termination
 
-# sha256 over {rows, summary} for every committed (class, split) at two batch sizes, measured at
-# 3aed53b, BEFORE TraceRequest gained `expected_output_tokens`. No committed trace populates the
-# field, so `decode_limit` returns `max_tokens` and every one of these must still match: this is
-# the guarantee that the seam moved no stored panel. It is a golden, not a property — if a corpus
-# ever ships the field, the affected entries change and must be re-measured deliberately.
+# sha256 over the simulated ROWS for every committed (class, split) at two batch sizes, measured
+# at 3aed53b, BEFORE TraceRequest gained `expected_output_tokens`. No committed trace populates
+# the field, so `decode_limit` returns `max_tokens` and every one of these must still match: this
+# is the guarantee that the seam moved no stored panel. It is a golden, not a property — if a
+# corpus ever ships the field, the affected entries change and must be re-measured deliberately.
+#
+# The hash covered {rows, summary} until PANEL_VERSION 2, which moved `ttft_p50` / `ttft_p95` onto
+# a per-attempt ceiling-based percentile and added `n_failed` — a change to what the PANEL means,
+# not to what the simulator does. Hashing the rows alone keeps this golden pointed at the seam it
+# was written to guard and makes it immune to the next panel-definition change; the rows half was
+# verified byte-identical across that bump for all twelve configs, which is what let it be split
+# rather than simply re-pinned. `SUMMARY_GOLDEN` below carries the panel half at version 2.
 PRE_TERMINATION_GOLDEN = {
-    "cold_start/heldout/mbs2": "cae8df6b839ed332bcfef522f7601b69b36cf7958611a770ae34a7b22b730db1",
-    "cold_start/heldout/mbs8": "cae8df6b839ed332bcfef522f7601b69b36cf7958611a770ae34a7b22b730db1",
-    "cold_start/seen/mbs2": "4b4804e32b702707745dddd4faf95db4d78f2c4f87a81a95deb03b0cc3e3e584",
-    "cold_start/seen/mbs8": "4b4804e32b702707745dddd4faf95db4d78f2c4f87a81a95deb03b0cc3e3e584",
-    "long_context/heldout/mbs2": "0914ca37dbfa53f9d087d902fd95affe7ac0137431e4872a0cdfcd4e94ac4044",
-    "long_context/heldout/mbs8": "9de2ae019f2800a7585ef0a63197141cbfb5072bfde56bb30f20a5b686ae15d9",
-    "long_context/seen/mbs2": "69e09473b67c352a6254bde157aab395d3eb5b0603b9c69ae0edad869201a76b",
-    "long_context/seen/mbs8": "550948de4f6f027069da6b1d65b1c8d2ea3060d10c0ca253be1ab8b9efbeb049",
-    "steady_interactive/heldout/mbs2": "917299b66a0d117e81a118adc5075fee6e20b3550f340a8c592e3a93de5c6518",
-    "steady_interactive/heldout/mbs8": "690773e629be2b9c001ee1da72cbd77c02545aa9ab8839852b03dd3c52a6d117",
-    "steady_interactive/seen/mbs2": "0966b315fd1f0f11746d0960353701ae50dbc812e0c3a60ac9483c16424357dd",
-    "steady_interactive/seen/mbs8": "ae75a01fcbe9ffe7130f55d446628f9bf29bf0c0064eeb6173681005e85d16e3",
+    "cold_start/heldout/mbs2": "c4285c1d02ad8d270e6143ef86eb991d6efd5a0bff480a655122f8dfedccac89",
+    "cold_start/heldout/mbs8": "c4285c1d02ad8d270e6143ef86eb991d6efd5a0bff480a655122f8dfedccac89",
+    "cold_start/seen/mbs2": "1e8e5b8562f596ea3b9111a669a9662891f0edeca861362dcd3ef17d3b2bf747",
+    "cold_start/seen/mbs8": "1e8e5b8562f596ea3b9111a669a9662891f0edeca861362dcd3ef17d3b2bf747",
+    "long_context/heldout/mbs2": "eb558a81b8460b2f8613d1dc6820ea3769739e0b7e8cb52178d5238cec775b5a",
+    "long_context/heldout/mbs8": "9a17a382cc3cc03808711be968faee4908e9756756c8b73793d57fa3471843b9",
+    "long_context/seen/mbs2": "b731fe6f2030bb2f010fd2f55caff402df508520e3c252a0f5baf11aa8f8590f",
+    "long_context/seen/mbs8": "28f0ccad415a3f3099979240bfc2897a98bd0e4dae36209f3c6657d2a4edd0d3",
+    "steady_interactive/heldout/mbs2": "2a8db72d37c7914b5d8238f56ccc11c9b04f19c00c192c91739db5bda5e23e85",
+    "steady_interactive/heldout/mbs8": "30804d3f08756b1297ce5074c7155f0ef1b4fb7d3a9b79e9b0dd765e7209cba7",
+    "steady_interactive/seen/mbs2": "e2a4bc7d08d944e439520c67a7b45a8324180d4d46d7e6af9887e5becf620b20",
+    "steady_interactive/seen/mbs8": "fe0eb4020cd7ff9d641ba356700ac01b9f76a6b4834d0b61c89f233297b16d29",
+}
+
+
+# The panel half, re-pinned at PANEL_VERSION 2. Separate constant because the two guard different
+# things: the rows above must never move until a corpus populates the field, while these move
+# whenever the panel's definition does — deliberately, and only in a PR that bumps the version.
+SUMMARY_GOLDEN = {
+    "cold_start/heldout/mbs2": "c6edf817609c0e622caf6ebbe6b0670387d7fd08aa775a46d59bbb07217f2b0a",
+    "cold_start/heldout/mbs8": "c6edf817609c0e622caf6ebbe6b0670387d7fd08aa775a46d59bbb07217f2b0a",
+    "cold_start/seen/mbs2": "f9d58fe0b7897cd395c741b85420098bda0a745f3211e6730c738d06ec416624",
+    "cold_start/seen/mbs8": "f9d58fe0b7897cd395c741b85420098bda0a745f3211e6730c738d06ec416624",
+    "long_context/heldout/mbs2": "2ce3b600ee0623faca6230a8e40710e4ca5584d7ebbe58f628798c8eddb93111",
+    "long_context/heldout/mbs8": "12098045cc11daca08c37d5558efc596435beb165e23e10269de213900c44eff",
+    "long_context/seen/mbs2": "05621046c7b063dd3c662d99aa71fc5f6210ad800094b12e15cdc067a7eb7492",
+    "long_context/seen/mbs8": "f5591a551bbf3bd38dad27235b70f55ea395ee70823d73f36f99c1ece7263ef4",
+    "steady_interactive/heldout/mbs2": "71ac09da7e1fbc3f75eb40addb1108df8f1186f093bf5caefcf00e6879aeeb45",
+    "steady_interactive/heldout/mbs8": "791ece2da4a1ce31f60a8de6d678ac3e37a3c59c40e7b0f51fdcb66cc88652b1",
+    "steady_interactive/seen/mbs2": "72ba12e6baff447f2761ccd166a8635c32c2707375e65a84684e7359db3c0279",
+    "steady_interactive/seen/mbs8": "8777f21149cdb97401c2c504b520c5927fd2783c15cfe8420d532b4057639d86",
 }
 
 
@@ -348,9 +374,10 @@ def test_committed_corpus_simulates_byte_identically_to_before_the_field(key):
     m, trace = load_trace(name, split, CORPUS_DIR)
     assert all(r.expected_output_tokens is None for r in trace), "no corpus populates it yet"
     res = simulate(trace, SimConfig(max_batch_size=int(mbs[3:])), PLACEHOLDER_A100_E4B)
-    blob = json.dumps({"rows": [asdict(r) for r in res.rows],
-                       "summary": res.summary(m.classes[name])}, sort_keys=True)
-    assert hashlib.sha256(blob.encode()).hexdigest() == PRE_TERMINATION_GOLDEN[key]
+    rows = json.dumps([asdict(r) for r in res.rows], sort_keys=True)
+    assert hashlib.sha256(rows.encode()).hexdigest() == PRE_TERMINATION_GOLDEN[key]
+    blob = json.dumps({"rows": rows, "summary": res.summary(m.classes[name])}, sort_keys=True)
+    assert hashlib.sha256(blob.encode()).hexdigest() == SUMMARY_GOLDEN[key]
 
 
 def test_absent_expected_output_tokens_means_run_to_budget():

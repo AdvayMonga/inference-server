@@ -113,9 +113,11 @@ def test_cache_stats_are_flattened_for_either_backend():
 def test_the_ttft_split_comes_from_this_replays_ok_rows_only():
     s = rl.split_from_telemetry(_telemetry("cold_start-seen-abc"), "cold_start-seen-abc")
     # seconds -> ms, over the four ok rows only; H.pct is the same nearest-rank the rest of
-    # the panel uses, so p95 of four samples is the third.
-    assert s["ttft_queue_p50"] == 2.0 and s["ttft_queue_p95"] == 3.0
-    assert s["ttft_prefill_p50"] == 200.0 and s["ttft_prefill_p95"] == 300.0
+    # the panel uses, so p95 of four samples is the FOURTH: ceil(0.95 * 4) - 1 = 3. It was the
+    # third until PANEL_VERSION 2 moved `pct` off `floor(q * (n - 1))` onto the textbook
+    # ceiling-based rank, which errs toward the slow end where a tail metric should.
+    assert s["ttft_queue_p50"] == 2.0 and s["ttft_queue_p95"] == 4.0
+    assert s["ttft_prefill_p50"] == 200.0 and s["ttft_prefill_p95"] == 400.0
     assert rl.split_from_telemetry([], "x")["ttft_queue_p50"] is None
 
 

@@ -241,13 +241,20 @@ class SimResult:
         ttfts = [r.ttft_ms for r in ok]
         tpots = [r.tpot_ms for r in ok if r.tpot_ms is not None]
         window = self.wall_s or 1e-9
-        p95_ttft = H.pct(ttfts, 0.95)
+        # Over ATTEMPTS, like replay_trace: a simulated request the scheduler rejected or expired
+        # is a first token that never arrived. The simulator sheds heavily under a deadline
+        # (6 of 8 on mbs1-deadline5), so this is where the two sides stopped taking their p95
+        # over different survivor sets (kb-20260919-94acfdb8).
+        n_attempted = len(self.rows)
+        p95_ttft = H.pct_over_attempts(ttfts, 0.95, n_attempted)
         p95_tpot = H.pct(tpots, 0.95) if tpots else None
         return {
             "n_ok": len(ok), "n_err": len(self.rows) - len(ok),
+            "n_failed": n_attempted - len(ok),
             "achieved_rps": round(len(ok) / window, 2),
             "tok_per_s": round(sum(r.out_tokens for r in ok) / window, 1),
-            "ttft_p50": round(H.pct(ttfts, 0.50), 1), "ttft_p95": round(p95_ttft, 1),
+            "ttft_p50": round(H.pct_over_attempts(ttfts, 0.50, n_attempted), 1),
+            "ttft_p95": round(p95_ttft, 1),
             "ttft_queue_p50": round(H.pct([r.queue_ms for r in ok], 0.50), 1),
             "ttft_queue_p95": round(H.pct([r.queue_ms for r in ok], 0.95), 1),
             "ttft_prefill_p50": round(H.pct([r.prefill_ms for r in ok], 0.50), 1),
@@ -300,9 +307,13 @@ class SimResult:
             tok_s_within_slo=s["tok_per_s"] if s["within_slo"] else None,
             slo_ttft_ms=cls.slo_ttft_ms, slo_tpot_ms=cls.slo_tpot_ms,
             ttft_p50=s["ttft_p50"], ttft_p95=s["ttft_p95"],
+            # Decomposition, not an SLO metric: a request that never started has no queue or
+            # prefill span, so these stay over the requests that ran. Read them beside n_failed.
             ttft_queue_p50=s["ttft_queue_p50"], ttft_queue_p95=s["ttft_queue_p95"],
             ttft_prefill_p50=s["ttft_prefill_p50"], ttft_prefill_p95=s["ttft_prefill_p95"],
             tpot_p50=s["tpot_p50"], tpot_p95=s["tpot_p95"], wall_s=s["wall_s"],
+            # The simulator has no shim, so no generated token is invisible to it.
+            n_failed=s["n_failed"], invisible_tokens=0,
         )
 
 

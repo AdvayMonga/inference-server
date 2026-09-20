@@ -63,9 +63,10 @@
     "GPU budget returns: re-measure the A100/E4B band as a proper null",
     "the corpus gains a class that actually batches on this box: cold_start/seen now generates 220 tokens over 8 requests at a peak batch width of 3, so this band describes an almost-unbatched workload",
     "a second null on another regime or machine disagrees with BAND_SIGMAS=2 (still calibrated from the 2026-09-17 null alone; this re-measurement produced no false positive to calibrate against)",
-    "the default (chat) workload needs a band: this one does not apply to it, see kb-20260919-e610af2a"
+    "the default (chat) workload needs a band: this one does not apply to it, see kb-20260919-e610af2a",
+    "2026-09-20 (kb-20260920-7f31c4ad): this band is a PANEL_VERSION 1 band and find_band now keys on the version, so it gates nothing. Its null runs had no failed requests, so its spreads are not wrong \u2014 they simply describe metrics whose definition has moved"
   ],
-  "updated_at": 1789867354.5650299,
+  "updated_at": 1789877996.7249742,
   "validity_range": {
     "concurrency": [
       1,
