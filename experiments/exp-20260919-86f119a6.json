@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "31d926856d390d676090706ced8b67e7bb09349b"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "61c348bce8778e291e90323e2492bc791c12245b"
+    }
+  ],
+  "branch": "fix/warn-when-the-stop-set-falls-back",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "31d926856d390d676090706ced8b67e7bb09349b",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260919-86f119a6",
+  "no_behaviour_change": "stop_token_ids keeps the same fallback order and returns the same ids; the only change is a logging.warning on the fallback path, evaluated once per load_model, off the request path. No scheduling, admission, sampling or numerics behaviour changes.",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1789863966.560381,
+  "verdict": "confirmed"
+}
