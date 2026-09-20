@@ -778,7 +778,7 @@ narrow `MAX_BATCH_SIZE`. Named:
   (5.86 GPU-s per session) counts the wasted tail; its client-side BROKEN verdict rests on
   `no_tokens` that are, per the table above, mostly real empty answers.
 
-## The June A100 head-to-head (1151 vs 2628 tok/s) — checked, and clean
+## The June A100 head-to-head (1151 vs 2628 tok/s) — checked on the model, clean there
 
 It **did run on the custom backend**: `benchmarks/README.md` ("custom — our engine
 (`bench_load_sweep_modal.py`, `custom-cuda`)"), `scripts/archive/modal/bench/bench_load_sweep_modal.py`
@@ -800,10 +800,13 @@ What the CSVs can show (tokens per request = `tok_s x window / reqs`, window in
 - **E2B: like for like.** Both engines ran ~100 tokens a request. Re-run locally (MPS, E2B,
   greedy) on those exact 8 prompts, the model repeats token `159` for all 100 steps and never
   emits 1, 106 or 50 — so the stop set cannot have mattered.
-- **E4B (the headline): like for like, measured.** Those exact 8 prompts replayed on
-  `google/gemma-4-E4B-it` itself — plain `transformers`, no engine, greedy, 100 steps, nothing
-  stopping early, Modal L4, 2026-09-19, `scripts/gpu_tests/check_e4b_stop_tokens_modal.py`
-  (generation config confirmed `[1, 106, 50]`):
+- **E4B (the headline): like for like under HF greedy decode, measured and archived.** Those
+  exact 8 prompts replayed on `google/gemma-4-E4B-it` itself — plain `transformers`, no engine,
+  no tokenizer, greedy argmax, unbatched, bf16, 100 steps, nothing stopping early. Modal L4,
+  2026-09-19, `scripts/gpu_tests/check_e4b_stop_tokens_modal.py` (torch 2.14.0, transformers
+  5.17.0, both pinned in the instrument). Generation config confirmed `[1, 106, 50]`. **Every
+  generated id is committed** at `knowledge/evidence/e4b-stop-tokens-20260919.json`; the table
+  below is generated from that file by the instrument's `summarise()`, not transcribed.
 
   | prompt | first `1` | first `106` | first `50` | custom stops | vLLM stops | wasted |
   |---|---|---|---|---|---|---|
@@ -817,14 +820,26 @@ What the CSVs can show (tokens per request = `tok_s x window / reqs`, window in
   | 50007 | — | — | — | 100 | 100 | 0 |
   | **total** | | | | **630** | **630** | **0 of 800** |
 
-  **`106` and `50` never appear.** On these raw-token-id prompts E4B just loops the prompt's own
-  `100..159` run (`107` shows up; `106` does not), and the only terminator it reaches is `<eos>`
-  (1), on two prompts at index 14 — which the custom backend's stop set already contained. Both
-  engines therefore did the same 630 decode steps across the 8 prompts. **The June A100 E4B
-  head-to-head is output-length-matched on the axis this bug could have broken: the 2.3x gap
-  (1151 vs 2628 tok/s) is not affected.** This says nothing about the other length mismatch
-  below — the CSV arithmetic still shows both engines averaging well under 100 tokens a request,
-  which these two `<eos>` prompts explain.
+  **`106` and `50` are never emitted.** The continuation does *not* resume the prompt's `100..159`
+  run from the bottom: it jumps to `144` and cycles inside **`144..159`**, the top 16 ids of the
+  prompt's range, on all 8 prompts. `106` sits 38 below that cycle's floor. The only ids below
+  `144` the model ever produces are `107` and `1`, on prompts `50001` and `50006`, which emit
+  `107` at index 13 and `1` at index 14 — and `1` was already in the custom backend's stop set,
+  so both engines ended those two at step 15 and ran the other six to 100. Same 630 decode steps
+  either way. This also explains the CSV arithmetic above (both engines well under 100 tokens a
+  request): two prompts in eight stop at 15, for both engines.
+
+- **What that does and does not settle.** It settles the part that was never checked at all: on
+  this workload E4B does not reach `106` or `50`, so there is no length mismatch for the bug to
+  have caused, and **the 2.3x gap should not be cited as affected by it.** It is not proof about
+  the June run itself. June ran our custom CUDA backend, batched at N=1..32, under bucketed CUDA
+  graphs, on an A100; this ran stock HF attention, unbatched, on an L4. Our greedy path is not
+  byte-identical to the HF/SDPA path — `kb-20260611-030` measures ~1% logit noise flipping
+  near-ties — and is not batch-invariant — `kb-20260901-011`: the same prompt can yield different
+  tokens depending on how many requests are in flight. A flip at index 13 of `50001`/`50006`,
+  where the model does leave the cycle, is the place that could differ; we did not record the
+  logit margin there, so we cannot say how near a tie it was. **Strong evidence, not conclusive.**
+
 - **Aside, same arithmetic:** the HF baseline on A100/E4B (`sweep_cuda_a100_e4b.csv`, the "125
   tok/s / 9x over naive HF" row) averaged ~21-53 tokens a request at N>=4 against ~60-86 for the other
   two. The 9x is not output-length-matched either; that is not this bug (the HF backend already
@@ -834,9 +849,9 @@ What the CSVs can show (tokens per request = `tok_s x window / reqs`, window in
   to 2048, outputs up to 1024), so the check above does not extend to them: not shown affected,
   not shown clean. They have no vLLM arm, so nothing is being compared across stop sets there.
 
-**Revisit when:** a new model family whose generation config lacks its turn terminator; any serving measurement predating commit bb85b10 on a custom-* backend is cited as evidence
+**Revisit when:** a new model family whose generation config lacks its turn terminator; any serving measurement predating commit bb85b10 on a custom-* backend is cited as evidence; the June head-to-head is re-run, or the 2.3x is challenged: re-check the E4B stop-token result under the custom CUDA backend at the real batch widths (and record the logit margin at index 13, where the model leaves the 144-159 cycle) — knowledge/evidence/e4b-stop-tokens-20260919.json is HF-greedy/unbatched only
 
-**Evidence:** exp-20260918-ca98c450, branch fix/custom-backend-stops-at-end-of-turn, commit bb85b10, run-20260918-99883258, grp-null-coldstart-mps, grp-simval-coldstart-mps, grp-fit-coldheld-mps, scripts/gpu_tests/check_e4b_stop_tokens_modal.py, Modal L4 run ap-4SE0IPFyjhgfygPyfVQPfq, 2026-09-19
+**Evidence:** exp-20260918-ca98c450, branch fix/custom-backend-stops-at-end-of-turn, commit bb85b10, run-20260918-99883258, grp-null-coldstart-mps, grp-simval-coldstart-mps, grp-fit-coldheld-mps, knowledge/evidence/e4b-stop-tokens-20260919.json — raw ids from scripts/gpu_tests/check_e4b_stop_tokens_modal.py, Modal L4 ap-QmGEkj3ioC5K10f63piPs1, 2026-09-19
 
 **Valid over:** `{"backend": ["custom-cuda", "custom-mps", "custom-cpu"], "model": ["google/gemma-4-E2B-it", "google/gemma-4-E4B-it"]}`
 
