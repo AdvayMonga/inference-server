@@ -33,8 +33,8 @@ smoke detector, not a door.
 | `engine` | everything else | ruff, the full fast suite, and `premerge_check.py`. CPU only — the model-heavy tests are deselected and no kernel runs. |
 | `gpu` | never automatically | the CUDA correctness gate on a rented RunPod GPU. Weekly, or dispatch it by hand. |
 
-Anything the classifier does not recognise routes to `engine`: safe, not fast. Markdown,
-`docs/` and `runs/` gate nothing.
+Anything the classifier does not recognise routes to `engine`: safe, not fast. Markdown
+and `runs/` gate nothing.
 
 ### The GPU lane
 
@@ -114,7 +114,3 @@ Touched no engine file? The gate passes on its own; say so in the PR.
 Read `LOOP.md` before running an experiment, and `loop kb --status rejected` before proposing
 an optimisation — nine things in there are already disproved.
 
-## Docs
-
-CLAUDE.md's hard rule: a change to a component, endpoint, env var, metric or data-flow path
-updates `docs/architecture.html` **and** the relevant `arch-*.html` in the same PR.

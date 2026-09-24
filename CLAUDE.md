@@ -202,10 +202,6 @@ Do **not** build yet: model registry, LoRA hot-swap, multi-tenant auth/quotas, g
 | `telemetry.py` | `RequestRecord` + `RowStore` — one SQLite row per request (conditions at arrival, spans, outcome; `trace_id`/`session_id`/`turn_index`), written off the scheduler thread. Off unless `TELEMETRY_DIR` is set |
 | Prometheus metrics | All labeled by `session_id` |
 
-### Architecture docs hard rule (`docs/architecture.html`)
-
-Any change that adds/removes/alters a feature, component, queue, endpoint, env var, metric, or data-flow path **must** update both `architecture.html` and the relevant detail page (`arch-server.html`, `arch-scheduler.html`, `arch-cache.html`, `arch-backend.html`) in the same change. Update the "Last updated" date; verify SVG text fits its rect. If a page sprawls past a few diagrams, split it.
-
 ---
 
 ## Roadmap
@@ -215,7 +211,7 @@ and benchmarkable, so the project produces results even if later phases are cut.
 
 ### Engine already built (data plane) — do not re-plan
 
-Continuous batching (`ContinuousBatchScheduler`, iteration-level) · monolithic / chunked / batched prefill · block-paged KV cache with refcounted blocks, window-aware sliding layers and a radix `PrefixCache` for cross-session sharing · Triton paged decode + prefill kernels (split-K decode) · bucketed CUDA-graph decode, `torch.compile`, int8 weight-only quantization · custom Gemma 4 forward, byte-identical to HF on the parity fixture · FCFS / fair (VTC) scheduling with priority hooks · queue + KV backpressure (HTTP 429), admission deadline, preemption under KV pressure · FastAPI + SSE with `session_id` end to end, OpenAI shim · Prometheus + Grafana (`monitoring/`). Detail lives in `docs/arch-*.html`; engine work measured and set aside (mixed-batch prefill, tiled prefill attention, length-grouped waves, per-session KV quotas, MLX) is in `knowledge/` as `rejected` / `deferred` entries.
+Continuous batching (`ContinuousBatchScheduler`, iteration-level) · monolithic / chunked / batched prefill · block-paged KV cache with refcounted blocks, window-aware sliding layers and a radix `PrefixCache` for cross-session sharing · Triton paged decode + prefill kernels (split-K decode) · bucketed CUDA-graph decode, `torch.compile`, int8 weight-only quantization · custom Gemma 4 forward, byte-identical to HF on the parity fixture · FCFS / fair (VTC) scheduling with priority hooks · queue + KV backpressure (HTTP 429), admission deadline, preemption under KV pressure · FastAPI + SSE with `session_id` end to end, OpenAI shim · Prometheus + Grafana (`monitoring/`). Engine work measured and set aside (mixed-batch prefill, tiled prefill attention, length-grouped waves, per-session KV quotas, MLX) is in `knowledge/` as `rejected` / `deferred` entries.
 
 ### Phase 0 — decide 🔲 open
 

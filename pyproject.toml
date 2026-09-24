@@ -34,7 +34,6 @@ modal = [
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"
-"Architecture map" = "https://advaymonga.github.io/inference-server/architecture.html"
 
 [tool.setuptools.packages.find]
 where = ["src"]
