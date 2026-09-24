@@ -110,7 +110,7 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py <instrument>     # rent, run, 
 | [`LOOP.md`](LOOP.md) | **the method** — read before changing the engine |
 | [`CLAUDE.md`](CLAUDE.md) | plan of record: three planes, the metric, the roadmap |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | branch → PR → `ci-ok` → merge; the three CI lanes; the evidence paths |
-| [`DECISIONS.md`](DECISIONS.md) | generated view of `knowledge/` — 69 findings with their evidence |
+| [`DECISIONS.md`](DECISIONS.md) | generated view of `knowledge/` — every finding with its evidence |
 | [`benchmarks/README.md`](benchmarks/README.md) | the sweep CSVs and how the vLLM gap closed, step by step |
 | [`corpus/README.md`](corpus/README.md) | the frozen workload traces and their versioning |
 | [`scripts/README.md`](scripts/README.md) | instrument layout and the GPU recipes |
