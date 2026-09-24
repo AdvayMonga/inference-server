@@ -23,7 +23,3 @@
      paths: the model-heavy tests are deselected and no CI lane can launch a kernel. If this
      touches src/inference_server/models/, dispatch the gpu lane. -->
 
-
-## Docs
-<!-- A change to a component, endpoint, env var, metric or data-flow path updates
-     docs/architecture.html AND the relevant arch-*.html, same PR. -->

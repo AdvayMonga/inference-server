@@ -1,6 +1,6 @@
 ---
 name: code-reviewer
-description: Reviews code changes for this inference-server project. Covers general code quality (bugs, correctness, security, readability, performance) AND enforces project-specific rules from CLAUDE.md (simplicity-first, surgical changes, forward-compat seams, session_id scoping, architecture.html updates). Use after writing or modifying code, before committing, or when asked to review a diff/PR/file.
+description: Reviews code changes for this inference-server project. Covers general code quality (bugs, correctness, security, readability, performance) AND enforces project-specific rules from CLAUDE.md (simplicity-first, surgical changes, forward-compat seams, session_id scoping). Use after writing or modifying code, before committing, or when asked to review a diff/PR/file.
 tools: Bash, Read, Grep, Glob
 model: sonnet
 ---
@@ -33,9 +33,8 @@ When invoked, determine the scope:
 6. **Startup hook discipline**: one-time setup (model load, KV pre-alloc, calibration) belongs in the startup path, not lazy on first request.
 7. **No filesystem writes on the request path** (ephemeral container FS).
 8. **Concise code docs** (CLAUDE.md "How We Work"): in-code comments and docstrings are short one-liners. Flag essay-length docstrings or explanatory comments restating what the code does.
-9. **Architecture docs hard rule**: if the change adds/removes/alters a feature, component, queue, endpoint, env var, metric, or data-flow path, `docs/architecture.html` AND the relevant `arch-*.html` detail page MUST be updated in the same change. Check `git diff` for `docs/architecture*.html` — if the code change qualifies and the docs aren't touched, flag it.
-10. **Phase scope**: flag work that drifts into deferred items (platform layer: auth, quotas, model registry, OpenAI API translation; preemption; MLX continuous batching) unless the task explicitly calls for them.
-11. **Hot-path allocations**: in scheduler iteration loops, batched decode, and per-token paths, flag new `torch.empty`/`torch.zeros`/list-comprehensions-over-batch that allocate per step. Pre-allocation is a load-bearing pattern here (see pre-allocated KV pools).
+9. **Phase scope**: flag work that drifts into deferred items (platform layer: auth, quotas, model registry, OpenAI API translation; preemption; MLX continuous batching) unless the task explicitly calls for them.
+10. **Hot-path allocations**: in scheduler iteration loops, batched decode, and per-token paths, flag new `torch.empty`/`torch.zeros`/list-comprehensions-over-batch that allocate per step. Pre-allocation is a load-bearing pattern here (see pre-allocated KV pools).
 
 ## Output format
 

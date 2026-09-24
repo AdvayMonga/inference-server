@@ -25,8 +25,7 @@ measured and the thing doing the measuring stay in different processes.
 Override the Grafana login with `GRAFANA_USER` / `GRAFANA_PASSWORD` in the environment.
 Both Prometheus and Grafana keep their state in named volumes, so a restart does not lose history.
 
-This is the only place aggregate numbers live. The chat page shows the request you just sent
-and nothing more, on purpose — see `docs/arch-server.html`.
+This is the only place aggregate numbers live. Nothing else recomputes them.
 
 ## Metrics
 

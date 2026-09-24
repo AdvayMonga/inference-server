@@ -234,14 +234,29 @@ def write_html_report(results: list[PolicyResult], out_path: pathlib.Path) -> No
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Eviction policy benchmark — {timestamp}</title>
-<link rel="stylesheet" href="arch.css" />
 <style>
+  :root {{ --bg: #0e1116; --panel: #161b22; --panel-2: #1c232c; --ink: #e6edf3; --muted: #8b949e; --line: #30363d; --cyan: #56d4dd; }}
+  html, body {{ background: var(--bg); color: var(--ink); margin: 0; }}
+  body {{ font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 32px 28px 96px; }}
+  h1 {{ font-size: 28px; margin: 0 0 4px; }}
+  h2 {{ font-size: 20px; margin: 40px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }}
+  h3 {{ font-size: 14px; margin: 0 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }}
+  p.lead {{ color: var(--muted); margin-top: 2px; }}
+  code {{ font: 13px/1.4 ui-monospace, Menlo, monospace; background: var(--panel-2); padding: 1px 5px; border-radius: 3px; color: var(--cyan); }}
+  .panel {{ background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 16px 18px; margin: 12px 0 24px; }}
+  table {{ border-collapse: collapse; margin: 8px 0 0; font-size: 13px; width: 100%; }}
+  th, td {{ text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }}
+  th {{ color: var(--muted); font-weight: 600; }}
+  .footnote {{ color: var(--muted); font-size: 12px; margin-top: 6px; }}
+  svg {{ display: block; max-width: 100%; height: auto; }}
+  svg text {{ font: 13px -apple-system, sans-serif; fill: var(--ink); }}
+  svg .lbl {{ font: 12px -apple-system, sans-serif; fill: var(--muted); }}
+  svg .title {{ font: bold 14px -apple-system, sans-serif; fill: var(--ink); }}
   .charts {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }}
   .charts > div {{ background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }}
 </style>
 </head>
 <body>
-<div class="crumbs"><a href="architecture.html">← Architecture map</a> · Benchmark</div>
 <h1>Eviction policy benchmark</h1>
 <p class="lead">Generated {timestamp}. Compares <code>lru</code> · <code>attention_sink_lru</code> · <code>h2o</code> on the same workload.</p>
 
@@ -265,7 +280,7 @@ def write_html_report(results: list[PolicyResult], out_path: pathlib.Path) -> No
 {chart_blocks}
 </div>
 
-<p class="footnote">Green bar = best for that metric. H2O currently behaves like LRU because the backend doesn't extract attention weights yet — see <a href="arch-cache.html#eviction">cache page</a>.</p>
+<p class="footnote">Green bar = best for that metric. H2O currently behaves like LRU because the backend doesn't extract attention weights yet.</p>
 </body>
 </html>
 """
@@ -284,7 +299,7 @@ def main() -> int:
 
     repo_root = pathlib.Path(__file__).resolve().parents[2]
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = repo_root / "docs" / f"bench-eviction-{stamp}.html"
+    out = repo_root / "runs" / f"bench-eviction-{stamp}.html"
     write_html_report(results, out)
     print(f"HTML report written to {out.relative_to(repo_root)}", file=sys.stderr)
     return 0
