@@ -117,7 +117,7 @@ each with a magnitude and the evidence for it. No hypotheses yet.
 
 ## Step 2 — HYPOTHESIZE
 
-Inputs: the gap list + the knowledge base (`knowledge/*.json`, rendered as `DECISIONS.md`; the `rejected` entries matter most).
+Inputs: the gap list + the knowledge base (`knowledge/*.json`; query with `loop kb`; the `rejected` entries matter most).
 Ask it by regime and situation, not by grep: `loop kb --regime cold_start --situation model=E4B,concurrency=8` keeps only entries whose `validity_range` covers you.
 Each candidate MUST carry:
 - predicted direction **and magnitude**, written before measuring
