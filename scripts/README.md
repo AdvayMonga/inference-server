@@ -40,6 +40,7 @@ run. Everything else here runs locally.
 | `coldstart_load.py` | one cold `GemmaForCausalLM.from_hf` per PROCESS, as one panel (`wall_s` = load time, stage split in `harness_config.stage_ms`). Replicates are repeated processes; `RESEARCH_ARM` tags the arm. Tier 2, runs on any box |
 | `serve_accounted.py` | the engine's uvicorn server plus a resource sidecar rewritten on every sample (so a SIGKILLed server still leaves one): the server's own peak RSS, peak device memory (exact on CUDA; sampled on MPS, which has no peak counter, by a thread that is GIL-starved under load — its coverage is recorded and a short one is named in the panel) and storage read bytes (Linux only). Not run directly; `replay_local.py` launches it so `research/` never has to import torch to know what a run cost |
 | `replay_local.py` | serves the engine on THIS box and replays corpus traces against it, **one fresh server process per run**. Every panel carries a total-accounting block (wall clock from the server's launch, idle time, sessions served, the sidecar's resources) and the run prints the primary metric — GPU-seconds per session at the class's p95 TTFT ceiling. `--null N` is the noise-floor experiment (the same config as both arms, ABBA); `--configs FILE` is a sweep of engine configs, one run each. Fills the `ttft_queue_*` / `ttft_prefill_*` split from the telemetry rows and writes the `runs/<group>/` layout `fit_timing_from_runs.py` reads |
+| `tune_triton_launch.py` | tier 3, CUDA only: sweeps the paged-attention kernels' launch configs (num_warps × num_stages × decode SPLITS × tiled-prefill BLOCK_M) per decode graph bucket and prefill bucket, checks each against the default launch at the parity tolerance, and writes the launch table the engine reads at load (`CUSTOM_BACKEND_LAUNCH_TABLE`). See *Tuning the Triton launch table* below |
 
 The eleven A100/A10G sweeps (`bench_serving_modal.py`, `bench_stress_modal.py`,
 `bench_load_sweep_modal.py`, `bench_vllm_sweep_modal.py`, `bench_chunked_prefill_modal.py`,
@@ -94,6 +95,32 @@ instrument at `archive/modal/` when those scripts were archived (2026-09-16); it
 turned prose notes into `knowledge/` and `experiments/` records; `backfill_kb_regime.py` stamped
 `regime` and `validity_range` onto the entries that predate those fields (2026-09-16), and its
 mapping table is the record of why each got what it got. All kept for provenance.
+
+### Tuning the Triton launch table
+
+No `@triton.autotune` in the engine: it benchmarks on first call, which is cold-start time. The
+engine instead reads a table at model load when `CUSTOM_BACKEND_LAUNCH_TABLE` points at one
+(`models/launch_table.py`), keyed on (kernel, decode rows N or prefill tokens S, head_dim,
+block_size, GPU name) for one model. Any launch with no entry is byte-for-byte today's launch, so
+with the variable unset nothing changes. Blocked on RunPod funding; once funded:
+
+```bash
+RUNPOD_API_KEY=... MODEL_NAME=google/gemma-4-E4B-it MAX_BATCH_SIZE=256 \
+    scripts/tools/run_on_runpod.py scripts/bench/tune_triton_launch.py --gpu 'NVIDIA A100 80GB PCIe'
+#   -> knowledge/timing/triton-launch-<gpu>-<sha>.json   (the table; do not commit yet)
+#   -> runs/<group>/triton_launch_sweep.json             (every config's ms, diff, exactness)
+```
+
+`MAX_BATCH_SIZE` / `CUSTOM_BACKEND_COMPILE` must match the serving config, since they set the
+decode-bucket ladder being tuned. Entries are written only where a config beats the default
+launch by 5% in isolation.
+
+**Before the table is committed**, it is a behaviour change and needs an experiment
+(kb-20260905-a474d802 says sweep first, then A/B; this is the sweep). Run the E2E A/B on one pod,
+arm A without and arm B with `CUSTOM_BACKEND_LAUNCH_TABLE=knowledge/timing/<table>.json`
+(it passes through `replay_corpus_runpod.py`), ≥3 runs per arm on `steady_interactive/seen`,
+replicate on `heldout`, and `loop judge` it. Dispatch the CI `gpu` lane with the table set too.
+An isolated kernel win is not an end-to-end win (the 10.84x tiled-prefill kernel lost E2E).
 
 ### The two local recipes
 
