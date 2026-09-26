@@ -5,10 +5,13 @@ The engine is measured, not argued about. That is what most of this document is 
 ## Setup
 
 ```bash
-python -m venv venv && source venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev && source .venv/bin/activate    # exact versions from uv.lock
 git config core.hooksPath scripts/hooks     # pre-push runs CI's lint + tests in ~10s
 ```
+
+`uv.lock` pins every dependency; Linux takes the CPU torch wheel, macOS the PyPI one (MPS).
+A lock change that moves torch, triton, transformers or accelerate is an engine change and
+needs an experiment record like any other; `premerge_check.py` enforces it.
 
 The hook needs the venv on `PATH` and says so rather than passing silently. `git push
 --no-verify` or `SKIP_HOOKS=1 git push` when you mean it.

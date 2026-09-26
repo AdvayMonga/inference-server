@@ -38,6 +38,15 @@ Repository = "https://github.com/AdvayMonga/inference-server"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Linux (CI, pods) takes torch from the CPU index; macOS keeps the PyPI wheel, which has MPS.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

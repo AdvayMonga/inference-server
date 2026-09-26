@@ -1,0 +1,32 @@
+# A torch/triton/transformers/accelerate bump is an engine change: premerge_check.py refuses it
+# without an experiment record. Everything else in uv.lock merges on green CI.
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    open-pull-requests-limit: 3
+    labels: ["kind:deps"]
+    groups:
+      engine-runtime:
+        patterns: ["torch", "triton", "transformers", "accelerate"]
+      tooling:
+        patterns: ["*"]
+        exclude-patterns: ["torch", "triton", "transformers", "accelerate"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3
+    labels: ["kind:deps", "ci"]

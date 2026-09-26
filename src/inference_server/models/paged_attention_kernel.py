@@ -20,6 +20,8 @@ import torch
 import triton
 import triton.language as tl
 
+from inference_server.models import launch_table
+
 # Tiled prefill attention. On by default; CUSTOM_BACKEND_TILED_PREFILL=0 falls back to the
 # one-program-per-query kernel for A/B.
 # DEFAULT OFF. The kernel is correct and 10.84x faster in isolation, but a properly replicated
@@ -265,7 +267,9 @@ def paged_decode_attention(
     out = torch.empty(N, Hq, D, dtype=torch.float32, device=q.device)
     q = q.contiguous()
 
-    splits = decode_splits(N, Hq)
+    cfg = launch_table.lookup("paged_decode", N, D, k_pool.shape[2])
+    splits = cfg["splits"] if cfg else decode_splits(N, Hq)
+    kw = launch_table.compile_kwargs(cfg)
     if splits > 1:
         pm = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
         pl = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
@@ -278,7 +282,7 @@ def paged_decode_attention(
             pa.stride(0), pa.stride(1), pa.stride(2),
             block_tables.stride(0),
             scale, window,
-            GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, SPLITS=splits,
+            GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, SPLITS=splits, **kw,
         )
         _splitk_combine_kernel[(N, Hq)](
             pm, pl, pa, out,
@@ -299,6 +303,7 @@ def paged_decode_attention(
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
+        **kw,
     )
     return out.to(q.dtype)
 
@@ -467,6 +472,11 @@ def paged_prefill_attention(
 
     block_m, warps = prefill_launch(D, Sq)
     if block_m:
+        # The table tunes within the tiled variant; it never switches tiling on or off.
+        cfg = launch_table.lookup("paged_prefill_tiled", Sq, D, k_pool.shape[2])
+        if cfg:
+            block_m = cfg["block_m"]
+        kw = {"num_warps": warps, **launch_table.compile_kwargs(cfg)}
         grid = (N, Hq, triton.cdiv(Sq, block_m))
         _paged_prefill_tiled_kernel[grid](
             q, k_pool, v_pool, block_tables, prefix_lens, suffix_lens, out,
@@ -475,11 +485,11 @@ def paged_prefill_attention(
             out.stride(0), out.stride(1), out.stride(2),
             block_tables.stride(0),
             scale, window,
-            GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, BLOCK_M=block_m,
-            num_warps=warps,
+            GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, BLOCK_M=block_m, **kw,
         )
         return out.to(q.dtype)
 
+    kw = launch_table.compile_kwargs(launch_table.lookup("paged_prefill", Sq, D, k_pool.shape[2]))
     _paged_prefill_kernel[(N, Hq, Sq)](
         q, k_pool, v_pool, block_tables, prefix_lens, suffix_lens, out,
         q.stride(0), q.stride(1), q.stride(2),
@@ -490,5 +500,6 @@ def paged_prefill_attention(
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
+        **kw,
     )
     return out.to(q.dtype)

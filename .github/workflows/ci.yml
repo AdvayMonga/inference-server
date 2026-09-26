@@ -135,10 +135,12 @@ jobs:
         with:
           fetch-depth: 0          # premerge_check.py diffs against the base branch
 
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.11"
-          cache: pip
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          activate-environment: true     # later steps run python/ruff/pytest from .venv
 
       - name: Cache HF hub
         uses: actions/cache@v4
@@ -149,14 +151,13 @@ jobs:
           key: hf-${{ runner.os }}
 
       - name: Install deps
-        run: |
-          # CPU wheel: the CUDA build is ~2.5 GB and nothing in this job runs a kernel.
-          pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install -e ".[dev]"
+        # Exactly what uv.lock pins; --locked fails if pyproject.toml and the lock disagree.
+        # Linux resolves torch from the CPU index (pyproject [tool.uv.sources]).
+        run: uv sync --locked --extra dev
 
       - name: Assert torch stayed on CPU
-        # The editable install re-resolves torch. It keeps the CPU wheel today; a dependency
-        # bump that quietly pulls the CUDA one should fail here, not double the job's runtime.
+        # A lock or source change that quietly pulls the CUDA wheel should fail here, not
+        # double the job's runtime.
         run: |
           python -c "import torch, sys; v = torch.__version__; \
             sys.exit(0) if v.endswith('+cpu') or torch.version.cuda is None \

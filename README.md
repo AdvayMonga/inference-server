@@ -65,8 +65,7 @@ Not built; Phases 5–7.
 ## Quickstart
 
 ```bash
-python -m venv venv && source venv/bin/activate
-pip install -e ".[dev]"
+uv sync --extra dev && source .venv/bin/activate   # pinned by uv.lock; plain pip ignores the CPU-torch index
 cp .env.example .env                      # set MODEL_NAME; DEVICE auto-detects CUDA → MPS → CPU
 
 uvicorn inference_server.server:app --host 0.0.0.0 --port 8000
