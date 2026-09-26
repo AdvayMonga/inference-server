@@ -97,9 +97,13 @@ def engine_runtime_changed(old_text: str | None, new_text: str | None) -> list[s
 
 
 def _lock_at(rev: str) -> str | None:
-    r = subprocess.run(["git", "show", f"{rev}:{LOCKFILE}"],
-                       cwd=REPO_ROOT, capture_output=True, text=True)
-    return r.stdout if r.returncode == 0 else None
+    """uv.lock at `rev`, or None only when that commit has no such file; any git error raises."""
+    listed = subprocess.run(["git", "ls-tree", "--name-only", rev, "--", LOCKFILE],
+                            cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    if not listed.strip():
+        return None
+    return subprocess.run(["git", "show", f"{rev}:{LOCKFILE}"], cwd=REPO_ROOT,
+                          capture_output=True, text=True, check=True).stdout
 
 
 def lock_bumps_engine_runtime(base: str, ref: str) -> bool:

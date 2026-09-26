@@ -9,7 +9,6 @@ updates:
       day: monday
     cooldown:
       default-days: 7
-      semver-major-days: 30
     ignore:
       - dependency-name: "*"
         update-types: ["version-update:semver-major"]
