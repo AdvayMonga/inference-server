@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-95 entries. Tags: `benchmark`(38), `kv`(30), `kernel`(27), `prefill`(26), `decode`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `harness`(17), `cold-start`(17), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `correctness`(2), `long_context`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `custom-backend`(1), `stop-tokens`(1)
+97 entries. Tags: `benchmark`(38), `kv`(30), `kernel`(27), `prefill`(26), `decode`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `harness`(17), `cold-start`(17), `validity`(16), `compile`(15), `memory`(14), `numerics`(11), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `correctness`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `config`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `long_context`(2), `dependencies`(2), `gemma4`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `custom-backend`(1), `stop-tokens`(1), `torch`(1), `parity`(1), `transformers`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,7 +12,7 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (23): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`, `kb-20260920-7f31c4ad`
 - **long_context** (6): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`, `kb-20260926-ffe24b0f`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (45) — no `regime` field yet
+- **unassigned** (47) — no `regime` field yet
 
 ## Active suspensions
 
@@ -20,9 +20,31 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (31)
+## Open (32)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-26] Heavy Gemma 4 parity fails on the locked torch 2.14: CPU bf16 SDPA rounds differently
+*tags: `dependencies`, `torch`, `gemma4`, `parity`, `numerics`* · `kb-20260926-02b780e2`
+
+**On the locked env (torch 2.14.0, transformers 5.17.0) two heavy parity tests fail on CPU; the same code passes on torch 2.11.0 with either transformers.**
+
+Measured on an Apple M4 Pro, CPU, 2026-09-26, at cc50e50:
+- torch 2.14 / transformers 5.17: `test_full_model_matches_hf` (hidden_states[1] max diff 0.125 vs the committed fixture) and `test_kv_cache_matches_no_cache` (last-position logits max diff 0.875) fail; 9 pass, 1 skipped.
+- torch 2.11 / transformers 5.17 (scratch venv): 11 passed, 1 skipped.
+- torch 2.11 / transformers 5.5.3: 11 passed, 1 skipped.
+
+The engine's loaded weights and buffers hash identically across transformers versions, so the model is the same; the difference is torch. A seeded bf16 CPU `F.scaled_dot_product_attention` (scale=1.0, causal, 8x7x256) hashes differently on 2.14 and 2.11 while `F.linear`, tanh-GELU and RMS reductions hash identically. Accuracy against an fp32 reference is the same on both (max err 0.0076-0.0151), so this is different rounding, not a worse kernel. Both tests assert atol=1e-3 on bf16, i.e. bitwise agreement, so the fixture (`tests/fixtures/gemma4_e2b_parity.pt`, generated on an older torch) and the cached-vs-uncached equality are torch-version-specific.
+
+Not yet decided: regenerate the fixture on 2.14 and accept the new cached-vs-uncached drift, or loosen the tolerance to a bf16-appropriate bound. Either way the torch bump in PR #52 needs its own record; it was not caught because CI deselects heavy tests.
+
+**Revisit when:** anyone runs `-m heavy tests/test_gemma4_parity.py` on the locked env and sees these two failures: this is the cause, not a model bug; the parity fixture is regenerated or the tolerance changed: resolve this entry with the decision; torch is bumped again: re-run the heavy parity suite before merge
+
+**Evidence:** exp-20260926-14549000
+
+**Valid over:** `{"hardware": "Apple M4 Pro (CPU)", "model": "google/gemma-4-E2B-it", "torch": ["2.11.0", "2.14.0"], "transformers": ["5.5.3", "5.17.0"]}`
+
+**Mechanism:** torch 2.14 changed CPU bf16 SDPA rounding; the parity tests demand bitwise agreement with a fixture from an older torch and between q_len=1 and full-sequence attention.
 
 ### [2026-09-20] Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 *tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `telemetry`, `simulator`, `corpus`* · `kb-20260919-94acfdb8`
@@ -1065,9 +1087,28 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (41)
+## Resolved (42)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-26] Gemma 4 could not load on the pinned transformers 5.17: head_dim became per-layer
+*tags: `dependencies`, `transformers`, `gemma4`, `config`, `correctness`* · `kb-20260926-8f6d7832`
+
+**The custom engine could not build Gemma 4 on transformers 5.17.0, the version uv.lock pins.**
+
+5.17 moved Gemma 4's `head_dim` into `text_config.per_layer_config`: reading `text_config.head_dim` raises `AmbiguousGlobalPerLayerAttributeError`, `text_config.global_head_dim` no longer exists, and `per_layer_config[i].head_dim` is 256 on sliding layers and 512 on full-attention layers. On 5.5.3 both are flat attributes and `per_layer_config` does not exist. `GemmaForCausalLM.from_hf` read the flat pair, so it raised before touching a weight; `scripts/bench/tune_triton_launch.py` and four parity-test sites did the same.
+
+Fix (PR branch `fix/gemma4-config-transformers-517`, commit 104a8eb): `gemma4.head_dims(text_cfg)` returns (sliding, full) from `per_layer_config` paired with `layer_types` when present, else the flat attributes. Every other attribute `from_hf` reads is unchanged in 5.17. The engine's loaded state_dict and buffers hash identically on 5.5.3 and 5.17.0.
+
+**The lock made this visible; it did not cause it.** CI was already installing transformers 5.17.0 before PR #52, but conftest deselects the model-heavy tests by default and CI never runs `-m heavy`, so nothing on CI ever called `from_hf` against a real Gemma 4 config. The regression test now reads a committed copy of google/gemma-4-E2B-it's config.json on CPU, so CI catches a config-layout change without weights.
+
+**Revisit when:** a transformers bump must run the heavy tests (`-m heavy`) locally before merge: CI deselects them, so it cannot see a model-loading break; transformers makes another Gemma 4 text-config attribute per-layer (sliding_window, rope_parameters, intermediate_size): extend head_dims' pattern, and refresh tests/fixtures/gemma-4-E2B-it/config.json if the hub config changes; the benchmark model moves off Gemma 4 E2B/E4B (Phase 0): the fixture and head_dims only cover this family
+
+**Evidence:** exp-20260926-14549000, kb-20260926-02b780e2
+
+**Valid over:** `{"model": ["google/gemma-4-E2B-it", "google/gemma-4-E4B-it"], "transformers": ["5.5.3", "5.17.0"]}`
+
+**Mechanism:** transformers 5.17 made Gemma 4 text_config.head_dim a per-layer attribute (global access raises, global_head_dim removed); the engine read the flat pair and CI's default deselection of heavy tests meant nothing exercised it.
 
 ### [2026-09-26] Batched prefill on CPU/MPS applies the sliding window per column, not per query
 *tags: `prefill`, `correctness`, `kv`, `harness`, `long_context`* · `kb-20260926-ffe24b0f`
