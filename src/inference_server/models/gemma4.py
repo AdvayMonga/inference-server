@@ -63,6 +63,15 @@ def _skip_param_init():
                 c.reset_parameters = fn
 
 
+def head_dims(text_cfg) -> tuple[int, int]:
+    """(sliding, full-attention) head_dim from a Gemma 4 text config, flat or per-layer layout."""
+    per_layer = getattr(text_cfg, "per_layer_config", None)  # transformers >= 5.17
+    if per_layer is None:
+        return text_cfg.head_dim, text_cfg.global_head_dim
+    by_type = {t: per_layer[i].head_dim for i, t in enumerate(text_cfg.layer_types)}
+    return by_type["sliding_attention"], by_type["full_attention"]
+
+
 class KVCache:
     """Per-layer (K, V) tensors stored as contiguous [B, H, S, D]. Append concatenates along S."""
 
@@ -671,6 +680,7 @@ class GemmaForCausalLM(nn.Module):
     def from_hf(cls, model_name: str = "google/gemma-4-E2B-it", dtype: torch.dtype = torch.bfloat16):
         from transformers import AutoConfig, AutoModelForCausalLM
         cfg = AutoConfig.from_pretrained(model_name).text_config
+        head_dim, global_head_dim = head_dims(cfg)
         with _skip_param_init():
             model = GemmaModel(
                 vocab_size=cfg.vocab_size,
@@ -679,8 +689,8 @@ class GemmaForCausalLM(nn.Module):
                 intermediate_size=cfg.intermediate_size,
                 num_q_heads=cfg.num_attention_heads,
                 num_kv_heads=cfg.num_key_value_heads,
-                head_dim=cfg.head_dim,
-                global_head_dim=cfg.global_head_dim,
+                head_dim=head_dim,
+                global_head_dim=global_head_dim,
                 hidden_per_layer=cfg.hidden_size_per_layer_input,
                 layer_types=list(cfg.layer_types),
                 sliding_window=cfg.sliding_window,

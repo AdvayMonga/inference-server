@@ -244,13 +244,14 @@ def test_full_model_matches_hf():
 def test_attention_matches_hf_sliding_layer0():
     """GemmaAttention vs HF Gemma4TextAttention on sliding layer 0, real hidden_states[0] input."""
     from inference_server.models.gemma4 import (
-        GemmaAttention, GemmaRotaryEmbedding,
+        GemmaAttention, GemmaRotaryEmbedding, head_dims,
     )
     from transformers import AutoConfig
     from transformers.models.gemma4.modeling_gemma4 import Gemma4TextAttention
 
     cfg = AutoConfig.from_pretrained(MODEL_NAME).text_config
     cfg._attn_implementation = "sdpa"
+    head_dim, _ = head_dims(cfg)
     hf_sd = _load_hf_state_dict_cached()
     fixture = torch.load(FIXTURE_PATH, map_location="cpu", weights_only=False)
 
@@ -259,7 +260,7 @@ def test_attention_matches_hf_sliding_layer0():
         hidden_size=cfg.hidden_size,
         num_q_heads=cfg.num_attention_heads,
         num_kv_heads=cfg.num_key_value_heads,
-        head_dim=cfg.head_dim,
+        head_dim=head_dim,
         eps=cfg.rms_norm_eps,
         sliding_window=cfg.sliding_window,
     ).eval()
@@ -276,7 +277,7 @@ def test_attention_matches_hf_sliding_layer0():
     theirs.k_norm.weight.data.copy_(hf_sd[f"{p}.k_norm.weight"])
 
     # cos/sin from our sliding rotary (already parity-tested)
-    rope = GemmaRotaryEmbedding(head_dim=cfg.head_dim, base=10000.0, partial_rotary_factor=1.0).eval()
+    rope = GemmaRotaryEmbedding(head_dim=head_dim, base=10000.0, partial_rotary_factor=1.0).eval()
     position_ids = torch.arange(5).unsqueeze(0)
     with torch.no_grad():
         cos, sin = rope(position_ids)
@@ -322,7 +323,7 @@ def test_mlp_matches_hf():
 
 def test_rotary_matches_hf():
     """GemmaRotaryEmbedding cos/sin must equal HF's per layer-type, and apply_rotary too."""
-    from inference_server.models.gemma4 import GemmaRotaryEmbedding, apply_rotary
+    from inference_server.models.gemma4 import GemmaRotaryEmbedding, apply_rotary, head_dims
     from transformers import AutoConfig
     from transformers.models.gemma4.modeling_gemma4 import (
         Gemma4TextRotaryEmbedding,
@@ -330,7 +331,7 @@ def test_rotary_matches_hf():
     )
 
     cfg = AutoConfig.from_pretrained(MODEL_NAME).text_config
-    head_dim = cfg.head_dim
+    head_dim, global_head_dim = head_dims(cfg)
 
     hf_rope = Gemma4TextRotaryEmbedding(cfg).eval()
     position_ids = torch.arange(5).unsqueeze(0)  # [1, 5]
@@ -346,7 +347,6 @@ def test_rotary_matches_hf():
 
     # Full-attention layer uses global_head_dim=512 (wider lens), base=1e6, partial=0.25.
     # See modeling_gemma4.py::Gemma4TextAttention — head_dim swaps to global_head_dim there too.
-    global_head_dim = cfg.global_head_dim
     ours_f = GemmaRotaryEmbedding(head_dim=global_head_dim, base=1_000_000.0, partial_rotary_factor=0.25).eval()
     with torch.no_grad():
         cos_h, sin_h = hf_rope(dummy, position_ids, layer_type="full_attention")

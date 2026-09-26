@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO / "scripts" / "gpu_tests"))
 
 import checks  # noqa: E402
 from inference_server.models import launch_table  # noqa: E402
+from inference_server.models.gemma4 import head_dims  # noqa: E402
 
 WARPS = (1, 2, 4, 8)
 STAGES = (1, 2, 3, 4)
@@ -76,9 +77,10 @@ class Case:
 def attention_shapes(text_cfg: Any) -> list[Shape]:
     """Distinct (head_dim, heads, window) the model's layers launch with."""
     out: list[Shape] = []
+    sliding_dim, full_dim = head_dims(text_cfg)
     for t in dict.fromkeys(text_cfg.layer_types):
         sliding = t == "sliding_attention"
-        s = Shape(text_cfg.head_dim if sliding else text_cfg.global_head_dim,
+        s = Shape(sliding_dim if sliding else full_dim,
                   text_cfg.num_attention_heads, text_cfg.num_key_value_heads,
                   text_cfg.sliding_window if sliding else FULL)
         if s not in out:
