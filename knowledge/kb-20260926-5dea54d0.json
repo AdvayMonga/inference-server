@@ -1,12 +1,5 @@
 {
-  "title": "Blind hypothesis ranking: sonnet/opus order past changes by payoff (rho 0.71/0.77); haiku and a category prior do not",
-  "summary": "Retrospective bake-off (research/bakeoff/): 26 eligible ledger records merged into 21 blind cards (change, gap, mechanism, metric, context, tier; numbers, verdict and hindsight words stripped), scored 0-3 by isolated Claude CLI rankers (no tools, no project context, empty temp dir, 3 card orders each) against a pre-registered outcome score. Pre-registered rule: Spearman rho < 0.3 rejects a ranker. Results (rho of the 3-sample average, primary / invalid-excluded): haiku 0.09 / 0.23 REJECTED; naive category prior 0.11 / 0.12 REJECTED; sonnet 0.71 / 0.80 and opus 0.77 / 0.76 NOT rejected (p < 0.001 one-sided, critical rho 0.37 at n=21). sonnet~opus agree at 0.76. Not rejected is not accepted: n=21, card writer saw the results, 17 of 21 records are back-filled, outcomes are on each record's own (often isolated-probe) metric. Jev and human arms are built but not run.",
-  "status": "open",
-  "tags": [
-    "loop",
-    "hypothesis",
-    "ranker"
-  ],
+  "created_at": 1790404357.935168,
   "evidence": [
     {
       "url": "research/bakeoff/PREREGISTRATION.md"
@@ -21,21 +14,28 @@
       "url": "research/bakeoff/answer_key.json"
     }
   ],
+  "id": "kb-20260926-5dea54d0",
+  "mechanism": "Exploratory, not pre-registered: large models appear to carry the field's priors about which inference-engine changes survive a careful A/B, but much of their correlation comes from cards whose mechanism nearly settles the outcome (rho on the 13 non-obvious cards: sonnet 0.53, opus 0.65); a small model is inconsistent even with itself (self-agreement 0.27).",
+  "regime": null,
+  "status": "open",
+  "summary": "Retrospective bake-off (research/bakeoff/): 26 eligible ledger records merged into 21 blind cards (change, gap, mechanism, metric, context, tier; numbers, verdict and hindsight words stripped), scored 0-3 by isolated Claude CLI rankers (no tools, no project context, empty temp dir, 3 card orders each) against a pre-registered outcome score. Pre-registered rule: Spearman rho < 0.3 rejects a ranker. Results (rho of the 3-sample average, primary / invalid-excluded): haiku 0.09 / 0.23 REJECTED; naive category prior 0.11 / 0.12 REJECTED; sonnet 0.71 / 0.80 and opus 0.77 / 0.76 NOT rejected (p < 0.001 one-sided, critical rho 0.37 at n=21). sonnet~opus agree at 0.76. Not rejected is not accepted: n=21, card writer saw the results, 17 of 21 records are back-filled, outcomes are on each record's own (often isolated-probe) metric. Jev and human arms are built but not run. Sensitivity after review: dropping the eight outcome-3 cards, whose mechanism nearly settles the result, leaves sonnet 0.53 (p 0.035) and opus 0.65 (p 0.010) at n=13; strong on obvious cases, weaker on uncertain ones.",
+  "superseded_by": null,
+  "supersedes": null,
+  "suspended_metrics": [],
+  "suspended_tiers": [],
+  "tags": [
+    "loop",
+    "hypothesis",
+    "ranker"
+  ],
+  "title": "Blind hypothesis ranking: sonnet/opus order past changes by payoff (rho 0.71/0.77); haiku and a category prior do not",
+  "transfer_checked": null,
   "triggers": [
     "prospective test: rank new hypotheses with sonnet/opus BEFORE their A/B and score when verdicts land; rho < 0.3 there rejects",
     "TYPESAFE_API_KEY becomes available: run jev_ranker.py and re-score",
     "the repo owner fills HUMAN_SHEET.md: compare the human's rho against the models'",
     "someone proposes a haiku-class or keyword-prior hypothesis selector: this entry rejects it"
   ],
-  "superseded_by": null,
-  "regime": null,
-  "validity_range": {},
-  "mechanism": "Large models appear to carry the field's priors about which inference-engine changes survive a careful A/B (isolated probes win, end-to-end sweeps and toggles through captured graphs do not); a small model is inconsistent even with itself (self-agreement 0.27).",
-  "supersedes": null,
-  "transfer_checked": null,
-  "suspended_metrics": [],
-  "suspended_tiers": [],
-  "id": "kb-20260926-5dea54d0",
-  "created_at": 1790404357.935168,
-  "updated_at": 1790404357.935168
+  "updated_at": 1790404357.935168,
+  "validity_range": {}
 }

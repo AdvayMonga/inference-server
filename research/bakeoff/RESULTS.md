@@ -56,6 +56,33 @@ Not rejected is not accepted. What this supports is running the next step — ra
 *prospective* hypotheses before their A/B and scoring the ranker when the verdicts land — not
 building a generator on the strength of a retrospective test.
 
+## Sensitivity: the obvious cards (added after review, not pre-registered)
+
+An adversarial review found that all eight outcome-3 cards (C05, C06, C08, C10, C13, C15, C16, C18)
+describe a mechanism that nearly settles the result on its own: removing an artificial cap from a
+metric that measures that cap, catching an exception on a metric that counts exceptions, or
+removing work that pre-change profiling already blamed. The leakage grep cannot see this; it is
+logical, not lexical. Dropping those eight cards (recomputed independently, one-sided permutation p,
+10,000 draws):
+
+| ranker | all 21 | outcome < 3 only (n = 13) |
+|---|---|---|
+| haiku | 0.09 (p 0.35) | 0.15 (p 0.32) |
+| sonnet | 0.71 (p < 0.001) | 0.53 (p 0.035) |
+| opus | 0.77 (p < 0.001) | 0.65 (p 0.010) |
+
+Restricting on the outcome itself also shrinks its range, which lowers any correlation mechanically,
+so the drop overstates the leak somewhat. The honest reading: **sonnet and opus are strong on the
+obvious cases and weaker but still positive on the genuinely uncertain ones.** Card length vs
+outcome is rho 0.30 (p 0.19); tier vs outcome is -0.40. Only the prospective test in the knowledge
+entry can separate forecasting skill from reading the mechanism.
+
+**Audit gap.** The cards/answer-key commit and the ranker-output commit share one timestamp to the
+second, so git alone cannot prove the cards were frozen before the rankers ran (the pre-registration
+itself is 13 minutes earlier and is intact). The build script has no per-card logic, so there is no
+path to tune cards to outputs, but future bake-offs should commit cards and key, then run rankers
+in a later commit.
+
 ## Caveats
 
 - **n = 21, low power, coarse ordinal outcome with many ties.** A rho of 0.3 would be detected
