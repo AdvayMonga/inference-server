@@ -3,15 +3,15 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-94 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `cold-start`(17), `harness`(16), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
+96 entries. Tags: `benchmark`(38), `kv`(31), `kernel`(27), `prefill`(27), `cache`(25), `decode`(25), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `harness`(17), `cold-start`(17), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `long_context`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `correctness`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `custom-backend`(1), `stop-tokens`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
 - **cold_start** (23): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`, `kb-20260920-7f31c4ad`
-- **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
-- **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
+- **long_context** (6): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`, `kb-20260926-ffe24b0f`
+- **steady_interactive** (22): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`, `kb-20260926-5c1b5f61`
 - **unassigned** (45) — no `regime` field yet
 
 ## Active suspensions
@@ -20,9 +20,53 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (31)
+## Open (33)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-26] Prefix-cache prompts longer than the sliding window (built, not yet measured)
+*tags: `cache`, `prefill`, `kv`, `long_context`* · `kb-20260926-5c1b5f61`
+
+Reverses the June simplification in kb-20260612-036 ("only cache prefixes <= window"). Branch `fix/prefix-cache-long-prompts`, fix commit `2d5be8b` on `3fddf95`.
+
+**Rule (LMCache's Gemma rule):** the radix cache stores full-attention blocks for the whole prefix and sliding blocks only for chunks still resident. A lookup walks the trie, then backs off to the deepest depth n at which every sliding layer holds chunks [max(0, n*bs-window)//bs, n), and seeds -1 plus the evicted count below that, which is exactly the state a cold prefill to n*bs leaves. Store fills sliding blocks an existing node lacks, otherwise a long prompt's partial path would shadow every short prompt sharing its start (a regression vs. the old rule). The dict `PrefixCache` keeps the old refuse-if-evicted rule.
+
+**Consequence of the rule:** a stored long prompt is usable ONLY at its own full depth (its kept sliding blocks start at n0 - window/bs exactly), so it serves continuations (multi-turn, repeats) and never a partial-prefix match that ends earlier. Tests: `tests/test_prefix_cache_long_prompts.py` (fails at 3fddf95).
+
+**What it can move in the corpus (corpus 659ea3b61303):** almost nothing. `long_context` has a unique `Case <hash>.` preamble in its first block and `followup_p=0`, so its 0% hit rate is by construction, not caused by the window rule; this change cannot move it. `steady_interactive/seen` has exactly 2 follow-ups whose turn 0 exceeds 512 tokens (908 and 1502 templated tokens, shared run 903 / 1497, both reaching the last full block) -> +2 hits of 136. `steady_interactive/heldout` has none. Predicted before measuring (hyp-prefix-cache-long-prompts): +2 hits of 136 lookups: about +0.015 absolute (~+6% relative on a ~0.25 baseline), deterministic across runs. Secondary, not judged: ttft_p95 down 0-15% (two ~900/~1500-token prefills become ~25-token ones), likely inside run-to-run noise; long_context hit rate 0 -> 0.
+
+**Why unmeasured:** the local A/B (grp-20260926-prefixlong, MPS, E2B) was attempted with PREFILL_MODE=monolithic, because batched prefill on CPU/MPS is itself wrong for prompts past the window (kb-20260926-ffe24b0f) and would give the two arms different outputs. The baseline's first run served 10 of 136 requests (126 shed with no tokens, TPOT p50 1.4 s, 24.8 GB device memory on a 24 GB box); the A/B was stopped. Needs a CUDA venue.
+
+**New cost it adds:** long prompts now fill the trie, and `_evict_lru_leaf` is an O(nodes) scan per evicted node. Synthetic churn of 900-1500-token prompts at the 2048-node cap: store 0.1 ms -> 9.4 ms per request on the scheduler thread, paid on long_context where it can never hit.
+
+**Revisit when:** a CUDA venue is available: A/B 3fddf95 vs 2d5be8b on steady_interactive/seen, >=4 runs per arm ABBA, predicted metric cache_hit_rate (+2/136); the corpus is rebuilt with long multi-turn sessions or shared long documents: this is where the change pays; long_context TTFT regresses after merge: check _evict_lru_leaf scan cost first
+
+**Evidence:** grp-20260926-prefixlong, kb-20260612-036, kb-20260926-ffe24b0f
+
+**Regime:** `steady_interactive`
+
+**Valid over:** `{"block_size": 16, "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76", "model": "google/gemma-4-E2B-it", "sliding_window": 512}`
+
+**Mechanism:** Sliding layers keep only the last window, so a stored long prefix is resumable only at a depth whose window blocks are all still resident; storing full-attention blocks for the whole prefix plus the resident sliding tail makes exact continuations of >512-token prompts hit.
+
+### [2026-09-26] Batched prefill on CPU/MPS applies the sliding window per column, not per query
+*tags: `prefill`, `correctness`, `kv`, `harness`, `long_context`* · `kb-20260926-ffe24b0f`
+
+Found while testing the long-prompt prefix cache. `CustomTorchBackend.prefill_batch` (the non-CUDA path, used by every local replay since ENGINE_BASE sets PREFILL_MODE=batched) passes an explicit `attn_mask`, and `GemmaAttention.forward`'s attn_mask branch applies the window as "keep the rightmost W key columns" for every query row. That is right for one-token decode and wrong for a multi-token prefill whose prefix+suffix exceeds W: early queries lose keys inside their own window. Tiny random model (window 16, 50-token prompt), teacher-forced continuation logits vs a plain full forward: monolithic `prefill` 4.8e-6, `prefill_batch` 2.48. A second defect sits under it: suffixes are LEFT-padded, so for a shorter row in a K>1 wave the column distance between prefix and suffix keys exceeds the position distance by the pad, and a per-query fix alone would still be wrong for that row.
+
+**Blast radius:** CUDA is unaffected (paged prefill kernel applies the window per query). Every local MPS panel with prompts > 512 tokens in batched mode computed wrong attention on sliding layers: all of long_context, 13 of 136 steady_interactive/seen prompts. Their timing is roughly right; their outputs, and so their token counts and TPOT, are not the model's.
+
+**Fix sketch:** right-pad suffixes in prefill_batch (prefix+suffix then contiguous per row) and make the attn_mask window per query, `(S_k - S_q + i) - col < W`, which is identical to today's rule at S_q=1 so decode stays byte-identical.
+
+**Revisit when:** any local MPS panel with prompts over 512 tokens in PREFILL_MODE=batched is cited for outputs, token counts or TPOT; before any local A/B that touches the prefix cache on long prompts
+
+**Evidence:** kb-20260926-5c1b5f61
+
+**Regime:** `long_context`
+
+**Valid over:** `{"context_tokens": ">512", "device": "cpu/mps", "prefill_mode": "batched"}`
+
+**Mechanism:** The attn_mask branch keeps the rightmost W columns for all queries, which is only the window of the LAST query; multi-token prefill past the window drops in-window keys for earlier queries.
 
 ### [2026-09-20] Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 *tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `telemetry`, `simulator`, `corpus`* · `kb-20260919-94acfdb8`

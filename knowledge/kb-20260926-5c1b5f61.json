@@ -1,0 +1,41 @@
+{
+  "id": "kb-20260926-5c1b5f61",
+  "title": "Prefix-cache prompts longer than the sliding window (built, not yet measured)",
+  "status": "open",
+  "summary": "Reverses the June simplification in kb-20260612-036 (\"only cache prefixes <= window\"). Branch `fix/prefix-cache-long-prompts`, fix commit `2d5be8b` on `3fddf95`.\n\n**Rule (LMCache's Gemma rule):** the radix cache stores full-attention blocks for the whole prefix and sliding blocks only for chunks still resident. A lookup walks the trie, then backs off to the deepest depth n at which every sliding layer holds chunks [max(0, n*bs-window)//bs, n), and seeds -1 plus the evicted count below that, which is exactly the state a cold prefill to n*bs leaves. Store fills sliding blocks an existing node lacks, otherwise a long prompt's partial path would shadow every short prompt sharing its start (a regression vs. the old rule). The dict `PrefixCache` keeps the old refuse-if-evicted rule.\n\n**Consequence of the rule:** a stored long prompt is usable ONLY at its own full depth (its kept sliding blocks start at n0 - window/bs exactly), so it serves continuations (multi-turn, repeats) and never a partial-prefix match that ends earlier. Tests: `tests/test_prefix_cache_long_prompts.py` (fails at 3fddf95).\n\n**What it can move in the corpus (corpus 659ea3b61303):** almost nothing. `long_context` has a unique `Case <hash>.` preamble in its first block and `followup_p=0`, so its 0% hit rate is by construction, not caused by the window rule; this change cannot move it. `steady_interactive/seen` has exactly 2 follow-ups whose turn 0 exceeds 512 tokens (908 and 1502 templated tokens, shared run 903 / 1497, both reaching the last full block) -> +2 hits of 136. `steady_interactive/heldout` has none. Predicted before measuring (hyp-prefix-cache-long-prompts): +2 hits of 136 lookups: about +0.015 absolute (~+6% relative on a ~0.25 baseline), deterministic across runs. Secondary, not judged: ttft_p95 down 0-15% (two ~900/~1500-token prefills become ~25-token ones), likely inside run-to-run noise; long_context hit rate 0 -> 0.\n\n**Why unmeasured:** the local A/B (grp-20260926-prefixlong, MPS, E2B) was attempted with PREFILL_MODE=monolithic, because batched prefill on CPU/MPS is itself wrong for prompts past the window (kb-20260926-ffe24b0f) and would give the two arms different outputs. The baseline's first run served 10 of 136 requests (126 shed with no tokens, TPOT p50 1.4 s, 24.8 GB device memory on a 24 GB box); the A/B was stopped. Needs a CUDA venue.\n\n**New cost it adds:** long prompts now fill the trie, and `_evict_lru_leaf` is an O(nodes) scan per evicted node. Synthetic churn of 900-1500-token prompts at the 2048-node cap: store 0.1 ms -> 9.4 ms per request on the scheduler thread, paid on long_context where it can never hit.",
+  "mechanism": "Sliding layers keep only the last window, so a stored long prefix is resumable only at a depth whose window blocks are all still resident; storing full-attention blocks for the whole prefix plus the resident sliding tail makes exact continuations of >512-token prompts hit.",
+  "evidence": [
+    {
+      "run_group": "grp-20260926-prefixlong"
+    },
+    {
+      "knowledge_id": "kb-20260612-036"
+    },
+    {
+      "knowledge_id": "kb-20260926-ffe24b0f"
+    }
+  ],
+  "regime": "steady_interactive",
+  "validity_range": {
+    "model": "google/gemma-4-E2B-it",
+    "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+    "sliding_window": 512,
+    "block_size": 16
+  },
+  "tags": [
+    "cache",
+    "prefill",
+    "kv",
+    "long_context"
+  ],
+  "triggers": [
+    "a CUDA venue is available: A/B 3fddf95 vs 2d5be8b on steady_interactive/seen, >=4 runs per arm ABBA, predicted metric cache_hit_rate (+2/136)",
+    "the corpus is rebuilt with long multi-turn sessions or shared long documents: this is where the change pays",
+    "long_context TTFT regresses after merge: check _evict_lru_leaf scan cost first"
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "transfer_checked": null,
+  "created_at": 1790404629.477681,
+  "updated_at": 1790404629.477681
+}
