@@ -51,8 +51,8 @@ measure ──► attribute ──► hypothesize ──► screen ──► exp
 - Open-loop trace replay (`scripts/bench/replay_trace.py`); its CSV joins telemetry on `X-Trace-Id`
 - Tier-1 simulator (`simulator.py`) — trace replay through the scheduler's real iteration order
   with a fitted `TimingModel` in place of attention. Rejects policy hypotheses; never confirms
-- Knowledge base (`knowledge/*.json`, 69 entries, tagged by regime and validity range) →
-  generated `DECISIONS.md`. The `rejected` entries stop dead ends being re-tried
+- Knowledge base (`knowledge/*.json`, 69 entries, tagged by regime and validity range).
+  The `rejected` entries stop dead ends being re-tried
 - Merge gate (`scripts/premerge_check.py`) — an engine change with no green experiment record
   does not merge
 - Venues (`research/venues.py`) — rent a GPU, run one instrument, bring the panel home, terminate
@@ -107,9 +107,8 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py <instrument>     # rent, run, 
 | file | what it is |
 |---|---|
 | [`LOOP.md`](LOOP.md) | **the method** — read before changing the engine |
-| [`CLAUDE.md`](CLAUDE.md) | plan of record: three planes, the metric, the roadmap |
+| [`CLAUDE.md`](CLAUDE.md) | how to work with Claude on this project |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | branch → PR → `ci-ok` → merge; the three CI lanes; the evidence paths |
-| [`DECISIONS.md`](DECISIONS.md) | generated view of `knowledge/` — every finding with its evidence |
 | [`benchmarks/README.md`](benchmarks/README.md) | the sweep CSVs and how the vLLM gap closed, step by step |
 | [`corpus/README.md`](corpus/README.md) | the frozen workload traces and their versioning |
 | [`scripts/README.md`](scripts/README.md) | instrument layout and the GPU recipes |

@@ -323,7 +323,7 @@ def main(argv: list[str] | None = None) -> int:
                         "the one the significance gate faces)")
     b.set_defaults(fn=cmd_band)
 
-    i = sub.add_parser("index", help="regenerate DECISIONS.md from knowledge/")
+    i = sub.add_parser("index", help="regenerate archive/DECISIONS.md from knowledge/")
     i.set_defaults(fn=cmd_index)
 
     k = sub.add_parser("kb", help="query the knowledge base")
