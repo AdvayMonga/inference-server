@@ -192,6 +192,74 @@ def test_premerge_classifies_engine_vs_exempt_changes():
     assert pm.behavioural(engine + exempt) == engine
 
 
+def _lock(**versions):
+    """A minimal uv.lock text with one [[package]] per (name, version)."""
+    rows = [f'[[package]]\nname = "{n}"\nversion = "{v}"\n'
+            for n, vs in versions.items() for v in (vs if isinstance(vs, list) else [vs])]
+    return 'version = 1\n\n' + "\n".join(rows)
+
+
+def test_a_lock_bump_of_an_engine_runtime_package_is_behavioural():
+    """torch/triton/transformers/accelerate change the engine's numerics; nothing else does."""
+    pm = _premerge_here()
+    base = _lock(torch=["2.14.0", "2.14.0+cpu"], transformers="5.17.0", ruff="0.16.8")
+    assert pm.engine_runtime_changed(base, base) == []
+    assert pm.engine_runtime_changed(base, _lock(torch=["2.14.0", "2.14.0+cpu"],
+                                                 transformers="5.17.0", ruff="0.17.0")) == []
+    assert pm.engine_runtime_changed(base, _lock(torch=["2.15.0", "2.15.0+cpu"],
+                                                 transformers="5.17.0", ruff="0.16.8")) == ["torch"]
+    # Only the linux +cpu wheel moving still counts.
+    assert pm.engine_runtime_changed(base, _lock(torch=["2.14.0", "2.14.1+cpu"],
+                                                 transformers="5.17.0", ruff="0.16.8")) == ["torch"]
+    # Triton appearing (a CUDA wheel slipped in) is a change.
+    assert pm.engine_runtime_changed(base, _lock(torch=["2.14.0", "2.14.0+cpu"], triton="3.6.0",
+                                                 transformers="5.17.0", ruff="0.16.8")) == ["triton"]
+    assert pm.engine_runtime_changed(None, base) == []            # lockfile introduced
+    assert pm.engine_runtime_changed(base, None) == list(pm.ENGINE_RUNTIME_PACKAGES)  # deleted
+
+
+def test_uv_lock_is_behavioural_only_when_it_bumps_the_engine_runtime(tmp_path, monkeypatch):
+    """End to end through git: a tooling bump in uv.lock is exempt, a torch bump is not."""
+    import subprocess
+
+    pm = _premerge_here()
+
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    (tmp_path / "uv.lock").write_text(_lock(torch="2.14.0", ruff="0.16.8"))
+    git("add", "uv.lock")
+    git("commit", "-qm", "base")
+    git("checkout", "-qb", "tooling")
+    (tmp_path / "uv.lock").write_text(_lock(torch="2.14.0", ruff="0.17.0"))
+    git("commit", "-qam", "ruff")
+    git("checkout", "-qb", "engine")
+    (tmp_path / "uv.lock").write_text(_lock(torch="2.15.0", ruff="0.17.0"))
+    git("commit", "-qam", "torch")
+    monkeypatch.setattr(pm, "REPO_ROOT", tmp_path)
+
+    assert pm.behavioural(["uv.lock"], diff_ref="tooling", base="main") == []
+    assert pm.behavioural(["uv.lock"], diff_ref="engine", base="main") == ["uv.lock"]
+    assert pm.behavioural(["uv.lock"], diff_ref="engine", base="tooling") == ["uv.lock"]
+    assert pm.behavioural(["uv.lock"]) == ["uv.lock"]      # no diff supplied -> conservative
+
+
+def _premerge_here():
+    """The gate from this checkout (REPO_ROOT may point at another worktree's copy)."""
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "premerge", Path(__file__).resolve().parents[1] / "scripts" / "premerge_check.py")
+    pm = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pm)
+    return pm
+
+
 def test_reconstructed_experiments_are_history_not_authorisation():
     """Back-filled records let the loop see what was already tried, but must never satisfy the
     merge gate — otherwise prose about an unreproducible run becomes evidence."""
