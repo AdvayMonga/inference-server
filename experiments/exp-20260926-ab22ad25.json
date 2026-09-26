@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "3fddf9539566768a3e74c29d09945330371acc7a"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "d71aaa024293de9a306c27a6a4166da4ffdad9b2"
+    }
+  ],
+  "branch": "perf/triton-autotune-buckets",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "3fddf9539566768a3e74c29d09945330371acc7a",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20260926-ab22ad25",
+  "no_behaviour_change": "Kernel launch sites consult a Triton launch table that is empty unless CUSTOM_BACKEND_LAUNCH_TABLE is set (it is set nowhere and no table is committed); with no entry every launch is identical to origin/main - same grid, decode_splits, and no num_warps/num_stages kwargs - proven by tests/test_triton_launch_table.py and a 1140-launch stubbed-triton comparison against origin/main's kernel file.",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1790403991.367342,
+  "verdict": "confirmed"
+}
