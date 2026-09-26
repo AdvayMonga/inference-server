@@ -1080,7 +1080,7 @@ Found while testing the long-prompt prefix cache. `CustomTorchBackend.prefill_ba
 
 **Revisit when:** any local MPS panel with prompts over 512 tokens in PREFILL_MODE=batched is cited for outputs, token counts or TPOT; before any local A/B that touches the prefix cache on long prompts
 
-**Evidence:** kb-20260926-5c1b5f61, exp-20260926-a4dce45b
+**Evidence:** exp-20260926-a4dce45b
 
 **Regime:** `long_context`
 
