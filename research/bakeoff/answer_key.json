@@ -1,0 +1,343 @@
+{
+  "C01": {
+    "experiment_ids": [
+      "exp-backfill-feat-mixed-batch-prefill"
+    ],
+    "governing_record": "exp-backfill-feat-mixed-batch-prefill",
+    "branch": "feat/mixed-batch-prefill",
+    "verdict": "rejected",
+    "delta": {
+      "decode_ms_by_bucket": {
+        "before": 20.6,
+        "after": 75.6,
+        "pct": 266.9
+      }
+    },
+    "outcome_score": 0
+  },
+  "C02": {
+    "experiment_ids": [
+      "exp-backfill-perf-graph-capture-order"
+    ],
+    "governing_record": "exp-backfill-perf-graph-capture-order",
+    "branch": "perf/graph-capture-order",
+    "verdict": "rejected",
+    "delta": {
+      "graph_capture_s": {
+        "before": 1288.0,
+        "after": 1348.0,
+        "pct": 4.7
+      }
+    },
+    "outcome_score": 0
+  },
+  "C03": {
+    "experiment_ids": [
+      "exp-backfill-perf-inductor-cache-volume"
+    ],
+    "governing_record": "exp-backfill-perf-inductor-cache-volume",
+    "branch": "perf/inductor-cache-volume",
+    "verdict": "confirmed",
+    "delta": {
+      "graph_capture_s": {
+        "before": 705.5,
+        "after": 574.5,
+        "pct": -18.6
+      }
+    },
+    "outcome_score": 2
+  },
+  "C04": {
+    "experiment_ids": [
+      "exp-backfill-perf-graph-compile-cost"
+    ],
+    "governing_record": "exp-backfill-perf-graph-compile-cost",
+    "branch": "perf/graph-compile-cost",
+    "verdict": "noise",
+    "delta": {
+      "graph_capture_s": {
+        "before": 553.0,
+        "after": 771.0,
+        "pct": 39.4
+      }
+    },
+    "outcome_score": 1
+  },
+  "C05": {
+    "experiment_ids": [
+      "exp-backfill-fix-radix-capacity-semantics"
+    ],
+    "governing_record": "exp-backfill-fix-radix-capacity-semantics",
+    "branch": "fix/radix-capacity-semantics",
+    "verdict": "confirmed",
+    "delta": {
+      "cache_max_blocks": {
+        "before": 1024,
+        "after": 4096,
+        "pct": 300.0
+      }
+    },
+    "outcome_score": 3
+  },
+  "C06": {
+    "experiment_ids": [
+      "exp-backfill-fix-kv-backpressure-and-cache-eviction"
+    ],
+    "governing_record": "exp-backfill-fix-kv-backpressure-and-cache-eviction",
+    "branch": "fix/kv-backpressure-and-cache-eviction",
+    "verdict": "confirmed",
+    "delta": {
+      "total_iteration_errors": {
+        "before": 1,
+        "after": 0,
+        "pct": -100.0
+      }
+    },
+    "outcome_score": 3
+  },
+  "C07": {
+    "experiment_ids": [
+      "exp-backfill-perf-depython-decode-step"
+    ],
+    "governing_record": "exp-backfill-perf-depython-decode-step",
+    "branch": "perf/depython-decode-step",
+    "verdict": "confirmed",
+    "delta": {
+      "tok_s_within_slo": {
+        "before": 598.2,
+        "after": 732.3,
+        "pct": 22.4
+      }
+    },
+    "outcome_score": 2
+  },
+  "C08": {
+    "experiment_ids": [
+      "exp-backfill-perf-split-k-decode-attention"
+    ],
+    "governing_record": "exp-backfill-perf-split-k-decode-attention",
+    "branch": "perf/split-k-decode-attention",
+    "verdict": "confirmed",
+    "delta": {
+      "decode_ms_by_bucket": {
+        "before": 0.5635,
+        "after": 0.0795,
+        "pct": -85.9
+      }
+    },
+    "outcome_score": 3
+  },
+  "C09": {
+    "experiment_ids": [
+      "exp-backfill-obs-ttft-breakdown"
+    ],
+    "governing_record": "exp-backfill-obs-ttft-breakdown",
+    "branch": "obs/ttft-breakdown",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_prefill_p50": {
+        "before": 44.0,
+        "after": 35.0,
+        "pct": -20.5
+      }
+    },
+    "outcome_score": 1
+  },
+  "C10": {
+    "experiment_ids": [
+      "exp-20260917-2ee69bde"
+    ],
+    "governing_record": "exp-20260917-2ee69bde",
+    "branch": "perf/skip-param-init-on-load",
+    "verdict": "confirmed",
+    "delta": {
+      "wall_s": {
+        "before": 39.089666666666666,
+        "after": 12.007,
+        "pct": -69.28344234196592
+      }
+    },
+    "outcome_score": 3
+  },
+  "C11": {
+    "experiment_ids": [
+      "exp-backfill-perf-prefill-graph-general"
+    ],
+    "governing_record": "exp-backfill-perf-prefill-graph-general",
+    "branch": "perf/prefill-graph-general",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_prefill_p50": {
+        "before": 282.3,
+        "after": 228.0,
+        "pct": -19.2
+      }
+    },
+    "outcome_score": 2
+  },
+  "C12": {
+    "experiment_ids": [
+      "exp-backfill-perf-length-grouped-waves"
+    ],
+    "governing_record": "exp-backfill-perf-length-grouped-waves",
+    "branch": "perf/length-grouped-waves",
+    "verdict": "invalid",
+    "delta": {
+      "tok_s_within_slo": {
+        "before": 529.1,
+        "after": 565.0,
+        "pct": 6.8
+      }
+    },
+    "outcome_score": 0
+  },
+  "C13": {
+    "experiment_ids": [
+      "exp-backfill-perf-prefill-graph-prefix-hits"
+    ],
+    "governing_record": "exp-backfill-perf-prefill-graph-prefix-hits",
+    "branch": "perf/prefill-graph-prefix-hits",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_p50": {
+        "before": 98.0,
+        "after": 46.0,
+        "pct": -53.1
+      }
+    },
+    "outcome_score": 3
+  },
+  "C14": {
+    "experiment_ids": [
+      "exp-backfill-perf-prefill-graph-long-prompts"
+    ],
+    "governing_record": "exp-backfill-perf-prefill-graph-long-prompts",
+    "branch": "perf/prefill-graph-long-prompts",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_p95": {
+        "before": 238.0,
+        "after": 239.0,
+        "pct": 0.4
+      }
+    },
+    "outcome_score": 1
+  },
+  "C15": {
+    "experiment_ids": [
+      "exp-backfill-perf-bucketed-decode-graphs"
+    ],
+    "governing_record": "exp-backfill-perf-bucketed-decode-graphs",
+    "branch": "perf/bucketed-decode-graphs",
+    "verdict": "confirmed",
+    "delta": {
+      "decode_ms_by_bucket": {
+        "before": 31.84,
+        "after": 17.73,
+        "pct": -44.3
+      }
+    },
+    "outcome_score": 3
+  },
+  "C16": {
+    "experiment_ids": [
+      "exp-backfill-feat-radix-prefix-cache"
+    ],
+    "governing_record": "exp-backfill-feat-radix-prefix-cache",
+    "branch": "feat/radix-prefix-cache",
+    "verdict": "confirmed",
+    "delta": {
+      "cache_hit_rate": {
+        "before": 0.0,
+        "after": 0.975,
+        "pct": null
+      }
+    },
+    "outcome_score": 3
+  },
+  "C17": {
+    "experiment_ids": [
+      "exp-backfill-perf-lm-head-last-position"
+    ],
+    "governing_record": "exp-backfill-perf-lm-head-last-position",
+    "branch": "perf/lm-head-last-position",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_prefill_p50": {
+        "before": 51.36,
+        "after": 50.07,
+        "pct": -2.5
+      }
+    },
+    "outcome_score": 2
+  },
+  "C18": {
+    "experiment_ids": [
+      "exp-backfill-fix-prefill-graph-ima"
+    ],
+    "governing_record": "exp-backfill-fix-prefill-graph-ima",
+    "branch": "fix/prefill-graph-ima",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_prefill_p50": {
+        "before": 105.0,
+        "after": 43.0,
+        "pct": -59.0
+      }
+    },
+    "outcome_score": 3
+  },
+  "C19": {
+    "experiment_ids": [
+      "exp-20260905-e5da5d8a",
+      "exp-20260905-520667e1",
+      "exp-20260905-26c0e0f5"
+    ],
+    "governing_record": "exp-20260905-26c0e0f5",
+    "branch": "perf/tiled-prefill-attention",
+    "verdict": "noise",
+    "delta": {
+      "ttft_prefill_p95": {
+        "before": 214.18877749998444,
+        "after": 194.0476675999714,
+        "pct": -9.403438469139456
+      }
+    },
+    "outcome_score": 1
+  },
+  "C20": {
+    "experiment_ids": [
+      "exp-20260905-0d85ab30"
+    ],
+    "governing_record": "exp-20260905-0d85ab30",
+    "branch": "perf/tiled-prefill-attention",
+    "verdict": "invalid",
+    "delta": {
+      "ttft_prefill_p95": {
+        "before": 243.30394684999985,
+        "after": 165.71393999998918,
+        "pct": -31.890155443243156
+      }
+    },
+    "outcome_score": 0
+  },
+  "C21": {
+    "experiment_ids": [
+      "exp-20260905-fcc4f992",
+      "exp-20260905-4a8ad526",
+      "exp-20260905-927c75ff",
+      "exp-20260905-bc4f63f8"
+    ],
+    "governing_record": "exp-20260905-bc4f63f8",
+    "branch": "feat/prefill-graph-variants",
+    "verdict": "confirmed",
+    "delta": {
+      "ttft_prefill_p95": {
+        "before": 126.90045813332817,
+        "after": 144.1040891166768,
+        "pct": 13.55679186380367
+      }
+    },
+    "outcome_score": 1
+  }
+}

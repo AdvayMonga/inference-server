@@ -1,0 +1,249 @@
+# Ranker bake-off — human sheet
+
+Score each proposed change **cold**: do not open `answer_key.json`, `RESULTS.md`, `experiments/`,
+`knowledge/` or git history before you finish, and do not revise a score after seeing results.
+
+Question for every card: *how likely is this change to produce a confirmed, significant
+end-to-end improvement on its target metric in a careful A/B with >=3 runs per arm on a single
+rented A100?*
+
+- 0 = no effect, invalid test, or regression
+- 1 = small or unconfirmed effect
+- 2 = confirmed modest win
+- 3 = large confirmed win
+
+Write one integer after `Score:` for each card (leave the rest of the line alone). Then run
+`python research/bakeoff/score.py` — it picks the sheet up once every card has a score.
+If you remember a card's result, score it anyway and note `(recalled)` after the number;
+the scorer ignores the note but it belongs in the write-up.
+
+### C02
+
+- **change:** Captures the torch.compile'd decode CUDA graphs in ascending bucket order instead of descending (a one-line change to the capture loop's sort order).
+- **gap:** Under automatic-dynamic compilation, the largest buckets compile and the mid-size ones reuse the dynamic artifact, but each of the smallest buckets re-specialises and pays its own multi-minute compile, so startup takes over twenty minutes.
+- **mechanism:** Introducing the symbolic batch dimension at the small end should give guards that generalise upward, so fewer buckets recompile.
+- **metric:** Total decode graph capture/compile time at startup, seconds (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; MAX_BATCH_SIZE=256, an eight-bucket ladder, torch.compile on.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C10
+
+- **change:** During model construction, nn.Linear and nn.Embedding parameters are allocated without running their default Kaiming-uniform initialisation, because the loader then copies the pretrained weights over every parameter. Buffers (RoPE tables, normalisers, layer scalars) are still computed.
+- **gap:** A profile of cold model load attributes most of its wall time to the default random-initialisation fill of parameters that are immediately overwritten, rather than to disk read or copy.
+- **mechanism:** Removing the random fill removes that work from every cold start.
+- **metric:** Cold model-load wall time in seconds (lower is better)
+- **context:** Apple M4 Pro (MPS), Gemma 4 E2B; one fresh process per run measuring model construction plus weight load; replicated runs per arm.
+- **tier:** 3 (single-machine probe)
+
+Score: 
+
+### C07
+
+- **change:** Three per-step host costs removed from decode: sampling is batched by identical sampling params (one call for a uniform batch instead of a Python loop per row over the full-vocab logits); next tokens are read back with one device-to-host copy instead of a per-row .item() sync; the scheduler stops growing an attention mask every step for the paged backend, which never reads it.
+- **gap:** TPOT grows steeply with batch size from 1 to 32 while vLLM's grows far less; decode is memory-bound, so TPOT should be roughly flat.
+- **mechanism:** Per-row Python work and per-row syncs scale with batch size for reasons unrelated to the model; removing them flattens TPOT and raises throughput.
+- **metric:** Throughput within the latency SLO, tokens/s (higher is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving sweep at SLO-constrained load.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C16
+
+- **change:** Replaces the prefix cache, which keyed whole block-aligned prompts in a dict, with a block-granular radix trie whose nodes each own one KV block; common leading blocks are shared and stored once.
+- **gap:** Requests that share a system prompt but differ after it reuse no blocks, because the boundary where they diverge was never itself a stored key.
+- **mechanism:** The trie matches at every block boundary, so the shared system-prompt blocks are reused across requests.
+- **metric:** Prefix-cache hit rate (higher is better)
+- **context:** Paged KV pool; a workload of many requests sharing one system prompt with distinct tails; old dict cache as baseline.
+- **tier:** 2 (CPU repro)
+
+Score: 
+
+### C04
+
+- **change:** Compiles the decode forward with dynamic=None (automatic dynamic shapes) instead of dynamic=False, and starts the decode bucket ladder at 2 instead of 1.
+- **gap:** Every decode bucket is a distinct static shape and pays its own Inductor compile, so startup with a full ladder takes tens of minutes.
+- **mechanism:** After the first recompile marks the batch dim symbolic, later buckets reuse the dynamic artifact instead of compiling again; dropping bucket 1 avoids a forced specialisation.
+- **metric:** Total decode graph capture/compile time at startup, seconds (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; a five-to-six-bucket ladder, torch.compile on.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C06
+
+- **change:** Five changes to KV caching and overload handling: LRU eviction for the prefix cache with an entry cap and a share-of-pool watermark plus reclaim-on-demand; reclaim counts blocks that became free; all prefill paths release partially allocated blocks when allocation fails; the scheduler loop survives an iteration exception, releasing the KV it drops and preempting the newest row under KV pressure; an admission deadline sheds stale requests and KV exhaustion becomes a typed 429-style refusal.
+- **gap:** A stress harness driving distinct, cache-missing prompts past saturation into a deliberately small KV pool makes the engine fail: the pool drains and iteration errors occur.
+- **mechanism:** Without leaks and with eviction and shedding, the engine degrades into backpressure instead of breaking.
+- **metric:** Scheduler iteration errors under the stress run (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; stress harness, distinct prompts, small KV pools, arrival rates past the saturation knee.
+- **tier:** 4 (full stress sweep)
+
+Score: 
+
+### C15
+
+- **change:** The decode CUDA graph was captured once at max_batch_size and replayed at full size every step, slicing the first n outputs. Now a power-of-two ladder of decode graphs is captured and each step replays the smallest bucket that fits the active rows.
+- **gap:** With MAX_BATCH_SIZE=256 and a handful of active rows, every decode step runs a full-size forward: far more activations through every layer, a full-size lm_head GEMM into a very large vocabulary, and a large block-table fill per step.
+- **mechanism:** Replaying a right-sized graph removes the wasted rows from every decode step.
+- **metric:** Decode milliseconds per step at low active-row counts (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; in-process decode A/B against a forced max-size bucket, with a graphed-vs-eager parity check.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C17
+
+- **change:** Prefill projects just the last position of each row through the tied lm_head (and softcap) instead of every position, since just that row's next-token logits are read.
+- **gap:** Prefill materialises logits for every prompt position into a vocabulary of about a quarter-million tokens, then reads one row per request.
+- **mechanism:** Skipping the vocab projection for all but one position removes a large GEMM and a large logits allocation from prefill.
+- **metric:** Single-row prefill latency at a few hundred tokens, p50 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; isolated prefill forward with the slicing on vs off.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C21
+
+- **change:** Captures one prefill CUDA graph per attention-kernel variant at startup and picks the graph for the configured variant at replay time, so that a kernel toggle reaches graphed prefills. With the default variant selected, the graphed path runs the same kernel as before.
+- **gap:** An attention-kernel A/B cannot be run on the production (graphed) prefill path, because a captured graph replays whichever kernel was active at capture time.
+- **mechanism:** Makes kernel variants A/B-able on the graphed path; it is not intended to change the default path's speed.
+- **metric:** TTFT prefill-phase p95 with the default variant (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving harness, cache-miss-heavy workload; replicated runs per arm.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C12
+
+- **change:** Length-grouped batched prefill: a starvation-free wave planner chooses which pending requests share a prefill wave so rows of similar length pad together; the queue head is always included.
+- **gap:** A batched prefill right-pads every row to the longest, and on a chat-like length distribution a wave of eight or more rows is mostly padding.
+- **mechanism:** Grouping similar lengths cuts padding compute in batched prefill, which is the binding SLO constraint.
+- **metric:** Throughput within the latency SLO, tokens/s (higher is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving sweep with Poisson arrivals, MAX_BATCH_SIZE=256, torch.compile off, batched prefill mode; grouping on vs off.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C19
+
+- **change:** Adds a FlashAttention-style tiled variant of the paged prefill attention Triton kernel: one program handles a tile of BLOCK_M query positions and loads each K/V block once per tile, instead of the current kernel's one program per (sequence, head, query token) that walks its own KV blocks serially. Routed exclusively to layers with head_dim <= 256 and prompts of at least 512 tokens; otherwise the untiled kernel runs.
+- **gap:** A per-op profile of one graphed prefill shows attention is the largest single cost at long prompts, and its share grows superlinearly with prompt length while its FLOP share stays tiny: the kernel re-reads K/V from HBM once per query, so memory traffic is quadratic for trivial arithmetic.
+- **mechanism:** Tiling reuses each loaded K/V block across BLOCK_M queries, cutting HBM traffic for long-prompt prefill, which should shorten the prefill tail.
+- **metric:** TTFT prefill-phase p95 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving harness with a cache-miss-heavy workload of variable-length prompts; A/B by toggling the kernel via configuration in one serving process; prefill CUDA graphs enabled.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C08
+
+- **change:** Split-K (flash-decoding) paged decode attention: adds a grid dimension over KV-block ranges so several programs each reduce a slice of a sequence into a partial softmax state, followed by a combine pass. Split count is a function of (rows, query heads) alone so the grid is stable under CUDA-graph replay; large batches keep the original kernel.
+- **gap:** At one to eight decode rows the kernel launches a few dozen CUDA blocks on a GPU with over a hundred SMs, so most of the GPU idles while each program walks its sequence serially.
+- **mechanism:** Splitting the KV walk across programs fills the GPU at low batch.
+- **metric:** Decode attention kernel time per step at one row and a long context (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; isolated kernel test at a 2048-token context, correctness checked against the existing kernel.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C09
+
+- **change:** Adds an admit timestamp so TTFT splits into queue time and prefill time per request, and refines the prefill CUDA-graph bucket ladder from (64,128,256,512,1024) to (64,128,192,256,384,512,768,1024) tokens so fewer prompts land in a much larger bucket.
+- **gap:** TTFT p95 sits near its budget and it is unknown whether the tail is queueing or prefill compute; a graph processes its whole bucket, so a prompt just past a bucket boundary pays for padding.
+- **mechanism:** The split attributes the tail; a finer ladder cuts padding waste in graphed prefill.
+- **metric:** TTFT prefill-phase p50 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving sweep over Poisson arrival rates, prompt-length distribution resembling chat traffic.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C03
+
+- **change:** Persists torch Inductor compile artifacts to a network volume (TORCHINDUCTOR_CACHE_DIR, committed after compile) so a later cold start can reuse them.
+- **gap:** torch.compile is the main reason cold start takes many minutes: every decode graph bucket is its own compile.
+- **mechanism:** A warm artifact cache should let later cold starts skip Inductor code generation.
+- **metric:** Startup graph capture/compile time, seconds, warm cache vs cold cache (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; MAX_BATCH_SIZE=32, torch.compile on, serverless container with a mounted volume.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C20
+
+- **change:** Same tiled prefill attention kernel as a tile-per-BLOCK_M-queries design, now launched with BLOCK_M=16 and num_warps=4 on head_dim 256 layers (the launch configuration picked by an isolated launch-config sweep); head_dim 512 layers stay on the untiled kernel.
+- **gap:** Prefill attention dominates long-prompt prefill time; the tiled kernel's earlier launch configuration had not been tuned.
+- **mechanism:** A tuned launch configuration lets the tile's accumulator stay in registers and increases occupancy, so the K/V reuse from tiling shows up as lower prefill latency.
+- **metric:** TTFT prefill-phase p95 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving harness, cache-miss-heavy workload; one run per arm; A/B by configuration toggle.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C11
+
+- **change:** In batched prefill, KV writes were a Python loop per row per layer, each doing a host-to-device copy of the block list plus a scatter launch, and the block table was rebuilt from Python lists at every layer. Now blocks are reserved up front, the block table is built once per layer, and one scatter per layer covers the whole right-padded wave.
+- **gap:** A probe attributes about a third of a multi-row prefill forward to this per-row append and block-table overhead.
+- **mechanism:** Collapsing per-row launches and copies into one per layer makes the overhead flat in the number of rows.
+- **metric:** Batched prefill forward latency at eight rows, a few hundred tokens each (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; prefill overhead probe; the code path is CUDA-specific.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C18
+
+- **change:** Fixes the single-row prefill CUDA graph: three tensors allocated before capture (positions, prefix lengths, and the context owning the scatter index) were not kept referenced, so the caching allocator recycled their memory and later replays read garbage and hit an illegal memory access. They are now kept alive for the life of the graph; decode and prefill graphs also share one scratch block per pool.
+- **gap:** The prefill CUDA graph could not be replayed reliably, so single-row prefills ran the eager forward, which is dispatch-bound (kernel launches from Python dominate).
+- **mechanism:** With the graph replayable, a short single-row prefill replays one captured graph instead of launching every kernel from Python.
+- **metric:** TTFT prefill-phase p50 for prompts of a few hundred tokens (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; prefill graph probe with repeated replays and block alloc/free churn between them.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C13
+
+- **change:** Two changes to the single-row prefill CUDA graph: it now fires on prefix-cache hits (write positions derived in-graph from a runtime prefix-length buffer; bucketed on suffix length), where previously it ran on cache misses alone; and all prefill graph buckets are captured up front during warmup instead of lazily on first use.
+- **gap:** With a warm prefix cache nearly every request hits, so the prefill graph almost never fired and prefills ran the eager, dispatch-bound forward; lazily captured buckets also stall the first request that reaches each one.
+- **mechanism:** Graphing prefix-hit prefills removes dispatch overhead from most requests, and warmup capture moves capture stalls off the request path.
+- **metric:** TTFT p50 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving sweep, torch.compile off, workload of reused prompts with a warm prefix cache; prefill graph on vs off.
+- **tier:** 4 (full serving sweep)
+
+Score: 
+
+### C01
+
+- **change:** vLLM-style mixed-batch chunked prefill: each engine step packs the in-flight decode tokens together with a chunk of a pending prompt's prefill into one forward pass, instead of running prefill and decode as separate steps.
+- **gap:** A long prefill stalls every in-flight decode for its whole duration (prefill/decode interference).
+- **mechanism:** Interleaving prefill chunks with decode keeps decode progressing every step and smooths the per-step cost.
+- **metric:** Per-step decode time at moderate batch size (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; decode steps are normally replayed from bucketed CUDA graphs; premise probe comparing step time of today's decode step against the mixed step.
+- **tier:** 3 (single-GPU probe)
+
+Score: 
+
+### C05
+
+- **change:** The radix prefix cache's capacity was min(block watermark, max_entries), but max_entries counts whole prompts for the dict cache and single blocks for the trie. For the trie the share-of-pool block watermark is now the sole binding limit.
+- **gap:** At high concurrency the trie was capped far below its block allowance and thrashed, evicting constantly with a near-zero hit rate.
+- **mechanism:** Letting the trie use its full block allowance stops the thrash.
+- **metric:** Effective maximum number of KV blocks the prefix cache may hold (higher is better)
+- **context:** A100-80GB, Gemma 4 E4B; high-concurrency serving run at the engine's stated concurrency target.
+- **tier:** 2 (CPU repro)
+
+Score: 
+
+### C14
+
+- **change:** Lets prefills whose prompt can cross a sliding-attention window go through the prefill CUDA graph (buckets extended to 1024 tokens), handling window eviction after the replay instead of refusing the graph; also reserves just the blocks the prompt uses rather than a whole bucket's worth.
+- **gap:** The long prompts in the tail of the length distribution were ineligible for the graph and still took the slower eager prefill path; those are the requests that set TTFT p95.
+- **mechanism:** Graphing the long tail removes eager dispatch overhead from exactly the requests at the p95.
+- **metric:** TTFT p95 (lower is better)
+- **context:** A100-80GB, Gemma 4 E4B; serving sweep with a chat-like prompt-length distribution and a warm prefix cache.
+- **tier:** 4 (full serving sweep)
+
+Score: 
