@@ -3,14 +3,14 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-94 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `cold-start`(17), `harness`(16), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
+95 entries. Tags: `benchmark`(38), `kv`(30), `kernel`(27), `prefill`(26), `decode`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `harness`(17), `cold-start`(17), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `correctness`(2), `long_context`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `custom-backend`(1), `stop-tokens`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
 ## By regime
 
 - **cold_start** (23): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`, `kb-20260920-7f31c4ad`
-- **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
+- **long_context** (6): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`, `kb-20260926-ffe24b0f`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
 - **unassigned** (45) — no `regime` field yet
 
@@ -1065,9 +1065,28 @@ Single packed forward combining decode + one prefill chunk via varlen attention.
 
 `mlx_lm.stream_generate` owns its own KV cache. Bundle with the MLX-continuous-batching future extension (same work). MPS is primary backend. **Trigger:** MLX continuous batching becomes a priority.
 
-## Resolved (40)
+## Resolved (41)
 
 Settled. Kept because the reasoning still constrains new work.
+
+### [2026-09-26] Batched prefill on CPU/MPS applies the sliding window per column, not per query
+*tags: `prefill`, `correctness`, `kv`, `harness`, `long_context`* · `kb-20260926-ffe24b0f`
+
+Found while testing the long-prompt prefix cache. `CustomTorchBackend.prefill_batch` (the non-CUDA path, used by every local replay since ENGINE_BASE sets PREFILL_MODE=batched) passes an explicit `attn_mask`, and `GemmaAttention.forward`'s attn_mask branch applies the window as "keep the rightmost W key columns" for every query row. That is right for one-token decode and wrong for a multi-token prefill whose prefix+suffix exceeds W: early queries lose keys inside their own window. Tiny random model (window 16, 50-token prompt), teacher-forced continuation logits vs a plain full forward: monolithic `prefill` 4.8e-6, `prefill_batch` 2.48. A second defect sits under it: suffixes are LEFT-padded, so for a shorter row in a K>1 wave the column distance between prefix and suffix keys exceeds the position distance by the pad, and a per-query fix alone would still be wrong for that row.
+
+**Blast radius:** CUDA is unaffected (the paged prefill kernel `_prefill_batch_kernel` applies the window per query, and CUDA decode never takes the attn_mask branch). Local CPU/MPS decode was also correct: at one query the old rule is the right one. What was wrong: every local CPU/MPS panel run in PREFILL_MODE=batched (the ENGINE_BASE default for local replays) whose prompt exceeded 512 tokens computed wrong attention on the sliding layers during prefill, and so wrote wrong sliding-layer KV that decode then read: all of long_context, and 13 of 136 steady_interactive/seen prompts. Their timing is roughly right (same shapes, same FLOPs); their outputs, and so their token counts, stop points and TPOT, are not the model's. Monolithic and chunked prefill were unaffected. Do not cite such panels for outputs or token counts; re-run them at or after the fix commit.
+
+**Fix (commit bfbb4c3, record exp-20260926-a4dce45b):** prefill_batch right-pads suffixes, so each row's prefix+suffix keys are contiguous and query i sits at column S_k - S_q + i; the attn_mask branch keeps keys with `(S_k - S_q + i) - col < W`, which at S_q=1 is exactly the old rightmost-W rule, so decode is byte-identical (tested with torch.equal). Tiny random model, window 16, 50-token prompt: continuation logit error vs a full forward 1.81 -> 5.7e-6 (monolithic prefill 5.7e-6). A ragged K=3 wave with prefix hits: 1.17 at base, 0.52 with only the attention fix (the padding defect), under 1e-4 with both. Tests: tests/test_prefill_batch_sliding_window.py.
+
+**Revisit when:** any local MPS panel with prompts over 512 tokens in PREFILL_MODE=batched is cited for outputs, token counts or TPOT; before any local A/B that touches the prefix cache on long prompts
+
+**Evidence:** kb-20260926-5c1b5f61, exp-20260926-a4dce45b
+
+**Regime:** `long_context`
+
+**Valid over:** `{"context_tokens": ">512", "device": "cpu/mps", "prefill_mode": "batched"}`
+
+**Mechanism:** The attn_mask branch keeps the rightmost W columns for all queries, which is only the window of the LAST query; multi-token prefill past the window drops in-window keys for earlier queries. Fixed by a per-query window over contiguous (right-padded) rows.
 
 ### [2026-09-20] PANEL_VERSION 2: failures rank worst in the TTFT percentiles, on a ceiling-based nearest rank; the client's blind spot is instrumented and measured dormant
 *tags: `antihacking`, `harness`, `loop`, `metric`, `ttft`, `validity`, `gates`, `telemetry`, `cold-start`, `simulator`, `variance`* · `kb-20260920-7f31c4ad`
