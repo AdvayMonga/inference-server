@@ -3,7 +3,7 @@
 > **Generated file — do not edit.** Source of truth is `knowledge/*.json`.
 > Regenerate with `python -m inference_server.research.loop index`.
 
-94 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `cache`(24), `loop`(24), `modal`(23), `graph`(19), `scheduler`(19), `cold-start`(17), `harness`(16), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1)
+95 entries. Tags: `benchmark`(38), `kv`(29), `kernel`(27), `decode`(25), `prefill`(25), `loop`(25), `cache`(24), `modal`(23), `graph`(19), `scheduler`(19), `cold-start`(17), `harness`(16), `validity`(16), `compile`(15), `memory`(14), `numerics`(10), `backpressure`(8), `corpus`(8), `gates`(7), `batching`(7), `simulator`(7), `variance`(6), `venue`(5), `triton`(4), `roofline`(4), `benchmarking`(4), `telemetry`(4), `quantization`(3), `attention`(3), `observability`(3), `attribution`(3), `literature`(3), `metrics`(2), `measurement-gap`(2), `slo`(2), `admission`(2), `tpot`(2), `scheduling`(2), `snapshot`(2), `router`(2), `plan`(2), `rejected`(2), `antihacking`(2), `metric`(2), `ttft`(2), `torch-compile`(1), `flash-attention`(1), `wave-planning`(1), `capture-order`(1), `corrected`(1), `resolved-noise`(1), `knowledge-base`(1), `refined`(1), `kv-cache`(1), `bug`(1), `throughput`(1), `config`(1), `migration`(1), `multi-replica`(1), `phase-6`(1), `planning`(1), `strategy`(1), `novelty`(1), `capture`(1), `criu`(1), `cuda-checkpoint`(1), `storage`(1), `gds`(1), `control-plane`(1), `prefix-cache`(1), `locality`(1), `session-affinity`(1), `staleness`(1), `determinism`(1), `accounting`(1), `client-bug`(1), `cold_start`(1), `correctness`(1), `custom-backend`(1), `stop-tokens`(1), `long_context`(1), `hypothesis`(1), `ranker`(1)
 
 Grep by tag or title rather than reading top-to-bottom.
 
@@ -12,7 +12,7 @@ Grep by tag or title rather than reading top-to-bottom.
 - **cold_start** (23): `kb-20260530-013`, `kb-20260901-010`, `kb-20260902-008`, `kb-20260903-000`, `kb-20260903-002`, `kb-20260916-6cdd19dd`, `kb-20260916-7cfa895f`, `kb-20260916-87c69eea`, `kb-20260916-d12c9170`, `kb-20260916-d6c4b565`, `kb-20260917-aa6b0f4d`, `kb-20260917-c07eb94b`, `kb-20260918-4f4c85b7`, `kb-20260918-9fc68282`, `kb-20260919-0a58befd`, `kb-20260919-5db5aafa`, `kb-20260919-6ef4e6bf`, `kb-20260919-94acfdb8`, `kb-20260919-9ea56f98`, `kb-20260919-bfd8f9b0`, `kb-20260919-e610af2a`, `kb-20260920-54976f51`, `kb-20260920-7f31c4ad`
 - **long_context** (5): `kb-20260612-035`, `kb-20260612-036`, `kb-20260612-037`, `kb-20260902-003`, `kb-20260920-bf1ed4f3`
 - **steady_interactive** (21): `kb-20260514-025`, `kb-20260530-014`, `kb-20260611-029`, `kb-20260611-030`, `kb-20260612-031`, `kb-20260612-032`, `kb-20260613-015`, `kb-20260901-009`, `kb-20260901-011`, `kb-20260902-006`, `kb-20260902-007`, `kb-20260903-001`, `kb-20260905-481ec50a`, `kb-20260905-b170a1ac`, `kb-20260905-b9bc66c6`, `kb-20260905-dcb78725`, `kb-20260906-6000f7f5`, `kb-20260906-7efc7fcd`, `kb-20260906-9454d8a1`, `kb-20260906-f13d8e3d`, `kb-20260916-68132cdb`
-- **unassigned** (45) — no `regime` field yet
+- **unassigned** (46) — no `regime` field yet
 
 ## Active suspensions
 
@@ -20,9 +20,20 @@ Metrics the loop currently **cannot measure** at the tiers named. `loop screen` 
 
 - `ttft_p95` at tier 1 (regime=cold_start, concurrency=[1, 4], corpus_version=659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76, hardware=Apple M4 Pro (MPS), model=google/gemma-4-E2B-it, workload_class=cold_start) — `kb-20260919-94acfdb8`: Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 
-## Open (31)
+## Open (32)
 
 Live — being worked, or waiting on a trigger.
+
+### [2026-09-26] Blind hypothesis ranking: sonnet/opus order past changes by payoff (rho 0.71/0.77); haiku and a category prior do not
+*tags: `loop`, `hypothesis`, `ranker`* · `kb-20260926-5dea54d0`
+
+Retrospective bake-off (research/bakeoff/): 26 eligible ledger records merged into 21 blind cards (change, gap, mechanism, metric, context, tier; numbers, verdict and hindsight words stripped), scored 0-3 by isolated Claude CLI rankers (no tools, no project context, empty temp dir, 3 card orders each) against a pre-registered outcome score. Pre-registered rule: Spearman rho < 0.3 rejects a ranker. Results (rho of the 3-sample average, primary / invalid-excluded): haiku 0.09 / 0.23 REJECTED; naive category prior 0.11 / 0.12 REJECTED; sonnet 0.71 / 0.80 and opus 0.77 / 0.76 NOT rejected (p < 0.001 one-sided, critical rho 0.37 at n=21). sonnet~opus agree at 0.76. Not rejected is not accepted: n=21, card writer saw the results, 17 of 21 records are back-filled, outcomes are on each record's own (often isolated-probe) metric. Jev and human arms are built but not run.
+
+**Revisit when:** prospective test: rank new hypotheses with sonnet/opus BEFORE their A/B and score when verdicts land; rho < 0.3 there rejects; TYPESAFE_API_KEY becomes available: run jev_ranker.py and re-score; the repo owner fills HUMAN_SHEET.md: compare the human's rho against the models'; someone proposes a haiku-class or keyword-prior hypothesis selector: this entry rejects it
+
+**Evidence:** research/bakeoff/PREREGISTRATION.md, research/bakeoff/RESULTS.md, research/bakeoff/results.json, research/bakeoff/answer_key.json
+
+**Mechanism:** Large models appear to carry the field's priors about which inference-engine changes survive a careful A/B (isolated probes win, end-to-end sweeps and toggles through captured graphs do not); a small model is inconsistent even with itself (self-agreement 0.27).
 
 ### [2026-09-20] Simulator FAILS the p95 TTFT rank check after the end-of-turn stop fix (rho 0.745 -> 0.644), and the timing model cannot be refitted at all
 *tags: `loop`, `benchmark`, `scheduler`, `validity`, `harness`, `decode`, `batching`, `cold-start`, `telemetry`, `simulator`, `corpus`* · `kb-20260919-94acfdb8`
