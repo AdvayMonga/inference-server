@@ -375,10 +375,7 @@ class CustomTorchBackend(InferenceBackend):
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
                 # Store the prompt's full blocks for future sharing (before releasing our refs).
-                # Skip if a sliding layer evicted (prompt > window) — we only cache prefixes
-                # that fit fully in the window (no partial/offset blocks to share).
-                if not cache.any_evicted:
-                    self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.block_tables)
                 return visible
             finally:
                 cache.free_all()
@@ -423,8 +420,7 @@ class CustomTorchBackend(InferenceBackend):
                     step = torch.tensor([[tok]], device=self.device)
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
-                if not cache.any_evicted:   # only cache prefixes that fit fully in the window
-                    self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.block_tables)
             finally:
                 cache.free_all()
 
@@ -472,8 +468,7 @@ class CustomTorchBackend(InferenceBackend):
             cache.free_all()            # do not abandon partially allocated blocks
             raise
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
-        if not cache.any_evicted:   # only cache prefixes that fit fully in the window
-            self.prefix_cache.store(token_ids, cache.block_tables)
+        self.prefix_cache.store(token_ids, cache.block_tables)
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
@@ -559,8 +554,7 @@ class CustomTorchBackend(InferenceBackend):
                 ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = the last L positions
                 tot = ki_t.shape[2]
                 cache.append(i, ki_t[k:k + 1, :, tot - L:, :], vi_t[k:k + 1, :, tot - L:, :])
-            if not cache.any_evicted:
-                self.prefix_cache.store(prompts[k], cache.block_tables)
+            self.prefix_cache.store(prompts[k], cache.block_tables)
             results.append((cache, first, len(prompts[k])))
         return results
 
@@ -626,8 +620,7 @@ class CustomTorchBackend(InferenceBackend):
         results = []
         for k in range(len(prompts)):
             first = int(sample(logits[k:k + 1, 0, :], GREEDY).item())
-            if not caches[k].any_evicted:
-                self.prefix_cache.store(prompts[k], caches[k].block_tables)
+            self.prefix_cache.store(prompts[k], caches[k].block_tables)
             results.append((caches[k], first, len(prompts[k])))
         return results
 
@@ -652,8 +645,7 @@ class CustomTorchBackend(InferenceBackend):
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
-        if not full_kv.any_evicted:   # only cache prefixes that fit fully in the window
-            self.prefix_cache.store(token_ids, full_kv.block_tables)
+        self.prefix_cache.store(token_ids, full_kv.block_tables)
 
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
@@ -960,8 +952,7 @@ class CustomTorchBackend(InferenceBackend):
             if pool is not None and pool.window is not None:
                 cache._evict(L)
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
-        if not cache.any_evicted:
-            self.prefix_cache.store(prompt_ids, cache.block_tables)
+        self.prefix_cache.store(prompt_ids, cache.block_tables)
         return cache, first, matched + S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):

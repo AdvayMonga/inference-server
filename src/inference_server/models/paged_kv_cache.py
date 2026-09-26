@@ -163,6 +163,9 @@ class PrefixCache:
         n_full_blocks = len(token_ids) // self.block_size
         if n_full_blocks == 0:
             return
+        if any(b < 0 for i, bids in enumerate(block_tables) if self.pools[i] is not None
+               for b in bids[:n_full_blocks]):
+            return  # a sliding layer evicted part of this prefix; only the radix cache stores those
         key = tuple(token_ids[: n_full_blocks * self.block_size])
         if key in self.entries:
             self.entries.move_to_end(key)
@@ -264,6 +267,7 @@ class RadixPrefixCache:
         self.pools = pools
         self.block_size = next(p.block_size for p in pools if p is not None)
         self._live = [i for i, p in enumerate(pools) if p is not None]
+        self._full = [i for i in self._live if pools[i].window is None]
         self.root = _RadixNode()
         live = [pools[i].num_blocks for i in self._live]
         # One node holds one block per layer, so for the trie the block watermark IS the node
@@ -291,6 +295,16 @@ class RadixPrefixCache:
     def _capacity(self) -> int:
         return self.max_blocks
 
+    def _keep_from(self, layer_idx: int, n: int) -> int:
+        """First chunk a request `n` chunks long still holds on this layer (sliding windows evict)."""
+        w = self.pools[layer_idx].window
+        return 0 if w is None else max(0, n * self.block_size - w) // self.block_size
+
+    def _resident(self, path: list[_RadixNode], n: int) -> bool:
+        """Does every layer have a block for every chunk it needs at depth `n`?"""
+        return all(L in path[i].blocks
+                   for L in self._live for i in range(self._keep_from(L, n), n))
+
     def _evict_lru_leaf(self) -> int:
         """Drop the least recently used LEAF (an interior node is still someone's path)."""
         best, stack = None, [self.root]
@@ -315,35 +329,42 @@ class RadixPrefixCache:
     # ---- public API (same shape as PrefixCache) ----
 
     def lookup(self, token_ids: list[int]) -> tuple[int, dict[int, list[int]]]:
+        """Longest usable match; sliding layers get -1 for chunks already out of their window."""
         self.lookups += 1
-        node, matched = self.root, 0
-        per_layer: dict[int, list[int]] = {i: [] for i in self._live}
+        node, path = self.root, []
         bs = self.block_size
         for i in range(len(token_ids) // bs):
             child = node.children.get(tuple(token_ids[i * bs:(i + 1) * bs]))
             if child is None:
                 break
             node = child
-            node.last_used = self._tick()
-            for layer_idx, bid in node.blocks.items():
-                per_layer[layer_idx].append(bid)
-            matched += bs
-        if matched == 0:
+            path.append(node)
+        # A stored long prompt keeps sliding blocks only for its own last window, so a shorter
+        # match may need blocks that were evicted. Back off to a depth whose window is complete.
+        n = len(path)
+        while n and not self._resident(path, n):
+            n -= 1
+        if n == 0:
             return 0, {}
         self.hits += 1
-        for layer_idx, bids in per_layer.items():
-            for bid in bids:
-                self.pools[layer_idx].acquire(bid)
-        return matched, per_layer
+        for nd in path[:n]:
+            nd.last_used = self._tick()
+        per_layer: dict[int, list[int]] = {}
+        for L in self._live:
+            lo = self._keep_from(L, n)
+            per_layer[L] = [-1] * lo + [path[i].blocks[L] for i in range(lo, n)]
+            for bid in per_layer[L][lo:]:
+                self.pools[L].acquire(bid)
+        return n * bs, per_layer
 
     def store(self, token_ids: list[int], block_tables: list[list[int]]) -> None:
         bs = self.block_size
         n_chunks = len(token_ids) // bs
         if n_chunks == 0:
             return
-        # A node is only usable if EVERY live layer has a real block for that chunk; a layer that
-        # evicted its leading blocks (sliding window) caps how deep we can store.
-        for layer_idx in self._live:
+        # Full-attention layers never evict, so a missing block there caps the depth. Sliding
+        # layers may hold only their last window; those chunks are stored without that layer.
+        for layer_idx in self._full:
             bids = block_tables[layer_idx]
             usable = 0
             for b in bids[:n_chunks]:
@@ -365,12 +386,15 @@ class RadixPrefixCache:
                 if self._nodes >= self._capacity():
                     return                       # cannot make room; stop growing the trie
                 child = _RadixNode(chunk=key, parent=node)
-                for layer_idx in self._live:
-                    bid = block_tables[layer_idx][i]
-                    child.blocks[layer_idx] = bid
-                    self.pools[layer_idx].acquire(bid)
                 node.children[key] = child
                 self._nodes += 1
+            # Also fills blocks an existing node lacks, so a short prompt can complete the window
+            # of a path a longer prompt stored without it.
+            for layer_idx in self._live:
+                bid = block_tables[layer_idx][i]
+                if bid >= 0 and layer_idx not in child.blocks:
+                    child.blocks[layer_idx] = bid
+                    self.pools[layer_idx].acquire(bid)
             node = child
             node.last_used = self._tick()
 
@@ -421,11 +445,11 @@ class PagedKVCache:
             for layer_idx, bids in shared_prefix.items():
                 self.block_tables[layer_idx] = list(bids)
                 self.seq_lens[layer_idx] = shared_prefix_tokens
+                self.evicted[layer_idx] = sum(1 for b in bids if b < 0)   # leading -1s from lookup
 
     @property
     def any_evicted(self) -> bool:
-        """True if any sliding layer has freed an out-of-window block (prompt/context > window).
-        Used to skip prefix-cache storage — we only cache prefixes that fit fully in the window."""
+        """True if any sliding layer has freed an out-of-window block (prompt/context > window)."""
         return any(e > 0 for e in self.evicted)
 
     def _evict(self, layer_idx: int) -> None:

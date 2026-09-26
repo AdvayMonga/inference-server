@@ -1,0 +1,34 @@
+{
+  "id": "kb-20260926-ffe24b0f",
+  "title": "Batched prefill on CPU/MPS applies the sliding window per column, not per query",
+  "status": "open",
+  "summary": "Found while testing the long-prompt prefix cache. `CustomTorchBackend.prefill_batch` (the non-CUDA path, used by every local replay since ENGINE_BASE sets PREFILL_MODE=batched) passes an explicit `attn_mask`, and `GemmaAttention.forward`'s attn_mask branch applies the window as \"keep the rightmost W key columns\" for every query row. That is right for one-token decode and wrong for a multi-token prefill whose prefix+suffix exceeds W: early queries lose keys inside their own window. Tiny random model (window 16, 50-token prompt), teacher-forced continuation logits vs a plain full forward: monolithic `prefill` 4.8e-6, `prefill_batch` 2.48. A second defect sits under it: suffixes are LEFT-padded, so for a shorter row in a K>1 wave the column distance between prefix and suffix keys exceeds the position distance by the pad, and a per-query fix alone would still be wrong for that row.\n\n**Blast radius:** CUDA is unaffected (paged prefill kernel applies the window per query). Every local MPS panel with prompts > 512 tokens in batched mode computed wrong attention on sliding layers: all of long_context, 13 of 136 steady_interactive/seen prompts. Their timing is roughly right; their outputs, and so their token counts and TPOT, are not the model's.\n\n**Fix sketch:** right-pad suffixes in prefill_batch (prefix+suffix then contiguous per row) and make the attn_mask window per query, `(S_k - S_q + i) - col < W`, which is identical to today's rule at S_q=1 so decode stays byte-identical.",
+  "mechanism": "The attn_mask branch keeps the rightmost W columns for all queries, which is only the window of the LAST query; multi-token prefill past the window drops in-window keys for earlier queries.",
+  "evidence": [
+    {
+      "knowledge_id": "kb-20260926-5c1b5f61"
+    }
+  ],
+  "regime": "long_context",
+  "validity_range": {
+    "device": "cpu/mps",
+    "prefill_mode": "batched",
+    "context_tokens": ">512"
+  },
+  "tags": [
+    "prefill",
+    "correctness",
+    "kv",
+    "harness",
+    "long_context"
+  ],
+  "triggers": [
+    "any local MPS panel with prompts over 512 tokens in PREFILL_MODE=batched is cited for outputs, token counts or TPOT",
+    "before any local A/B that touches the prefix cache on long prompts"
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "transfer_checked": null,
+  "created_at": 1790404629.477681,
+  "updated_at": 1790404629.477681
+}
