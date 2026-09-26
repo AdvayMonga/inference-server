@@ -152,7 +152,7 @@ jobs:
           activate-environment: true     # later steps run python/ruff/pytest from .venv
 
       - name: Cache HF hub
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # test_tokenizer / test_server pull the public gpt2 tokenizer. No auth, but a live
           # Hub dependency on every run is flake waiting to happen.
