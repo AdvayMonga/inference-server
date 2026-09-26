@@ -493,8 +493,9 @@ class CustomTorchBackend(InferenceBackend):
         its own prefix. For repeated/shared prompts the suffix is ~1 token, so the forward is tiny
         (dispatch-bound) instead of re-prefilling the full prompt. No cache hit → suffix = full prompt
         (the v1 behaviour). Returns per-row (PagedKVCache, first_token, kv_len). Device-agnostic
-        (gather + masked SDPA). Left-pad both prefix and suffix; a per-row mask keeps rows independent
-        (suffix query attends to its real prefix keys + causal suffix keys).
+        (gather + masked SDPA). Left-pad the prefix, right-pad the suffix, so each row's prefix+suffix
+        keys are contiguous (the sliding window is per query by column); a per-row mask keeps rows
+        independent (suffix query attends to its real prefix keys + causal suffix keys).
 
         CUDA uses the gather-free paged prefill kernel instead (`_prefill_batch_kernel`)."""
         if self.device.type == "cuda":
@@ -522,8 +523,8 @@ class CustomTorchBackend(InferenceBackend):
         position_ids = torch.zeros(K, Smax, dtype=torch.long, device=dev)
         for k in range(K):
             s, m = suffixes[k], matched[k]
-            input_ids[k, Smax - len(s):] = torch.tensor(s, device=dev)
-            position_ids[k, Smax - len(s):] = torch.arange(m, m + len(s), device=dev)
+            input_ids[k, :len(s)] = torch.tensor(s, device=dev)                  # right-padded
+            position_ids[k, :len(s)] = torch.arange(m, m + len(s), device=dev)
 
         # Seed a batched KVCache with each row's gathered prefix, left-padded to Pmax (per layer).
         seeded = KVCache(num_layers=nlayers)
@@ -549,10 +550,9 @@ class CustomTorchBackend(InferenceBackend):
         ki = torch.arange(Ktot, device=dev)
         for k in range(K):
             L, m = len(suffixes[k]), matched[k]
-            soff = Smax - L
-            real_q = (qi >= soff)[:, None]                                       # [Smax,1]
+            real_q = (qi < L)[:, None]                                           # [Smax,1]
             prefix_key = ((ki < Pmax) & (ki >= Pmax - m))[None, :]               # [1,Ktot]
-            suffix_key = ((ki >= Pmax + soff))[None, :] & ((ki[None, :] - Pmax) <= qi[:, None])
+            suffix_key = (ki >= Pmax)[None, :] & ((ki[None, :] - Pmax) <= qi[:, None])
             mask[k, 0] = real_q & (prefix_key | suffix_key)
 
         logits = self.model(input_ids, position_ids=position_ids, kv_cache=seeded, attn_mask=mask)
@@ -560,15 +560,14 @@ class CustomTorchBackend(InferenceBackend):
         results = []
         for k in range(K):
             L = len(suffixes[k])
-            first = int(sample(logits[k:k + 1, -1, :], GREEDY).item())
+            first = int(sample(logits[k:k + 1, L - 1, :], GREEDY).item())
             cache = caches[k]
             for i in range(nlayers):
                 kvi = seeded.get(i)
                 if kvi is None:  # KV-shared layer — reads the source layer's pool
                     continue
-                ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = the last L positions
-                tot = ki_t.shape[2]
-                cache.append(i, ki_t[k:k + 1, :, tot - L:, :], vi_t[k:k + 1, :, tot - L:, :])
+                ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = columns Pmax..Pmax+L
+                cache.append(i, ki_t[k:k + 1, :, Pmax:Pmax + L, :], vi_t[k:k + 1, :, Pmax:Pmax + L, :])
             if not cache.any_evicted:
                 self.prefix_cache.store(prompts[k], cache.block_tables)
             results.append((cache, first, len(prompts[k])))

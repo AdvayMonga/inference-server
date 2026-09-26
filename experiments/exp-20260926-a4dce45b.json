@@ -1,0 +1,27 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "ec13cfe"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "bfbb4c3"
+    }
+  ],
+  "branch": "fix/batched-prefill-sliding-window",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "ec13cfe",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "hyp-batched-prefill-window-per-column",
+  "id": "exp-20260926-a4dce45b",
+  "notes": "Correctness fix, not a performance change (kb-20260926-ffe24b0f). CustomTorchBackend.prefill_batch (CPU/MPS) passed an explicit attn_mask and GemmaAttention's attn_mask branch kept the rightmost W key columns for every query row, so a multi-token prefill past the sliding window dropped in-window keys for early queries; and left-padded suffixes left a gap between a shorter row's prefix and suffix keys. Fix: right-pad suffixes (prefix+suffix contiguous per row) and keep keys within W columns of each query (query i at column S_k - S_q + i), identical to the old rule at S_q=1. The assertion is the measurement: tiny random model (window 16), 50-token prompt, teacher-forced continuation logits vs a full forward: max error 1.81 at ec13cfe, 5.7e-6 at bfbb4c3 (monolithic prefill 5.7e-6). Verified failing at base by stashing src/ with the tests in place. Companion tests in the same file: the ragged K>1 wave with prefix hits fails at base (1.17) and also with only the attention fix applied (0.52, the padding defect); the S_q=1 decode-mask test is byte-identical (torch.equal) against the old rule. CUDA (paged prefill kernel) untouched.",
+  "regression_test": "tests/test_prefill_batch_sliding_window.py::test_prefill_batch_long_prompt_matches_full_forward",
+  "source": "loop",
+  "started_at": 1790405767.716102,
+  "verdict": "confirmed"
+}
