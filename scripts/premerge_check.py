@@ -10,7 +10,7 @@ which change did what.
 
 Docs, tests, benchmarks, browser assets and the research package itself are exempt: they cannot
 change engine behaviour, so requiring a GPU experiment for them would only teach people to
-bypass the gate.
+bypass the gate. uv.lock is exempt unless it moves torch, triton, transformers or accelerate.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -32,6 +33,10 @@ EXEMPT_PREFIXES = (
     "src/inference_server/static/",     # browser assets never execute on the request path
     "docs/", "tests/", "scripts/", "benchmarks/", "knowledge/", "experiments/", "monitoring/",
 )
+
+# uv.lock is exempt except for these: a version change here changes the engine's numerics.
+LOCKFILE = "uv.lock"
+ENGINE_RUNTIME_PACKAGES = ("torch", "triton", "transformers", "accelerate")
 
 
 def changed_files(ref: str, base: str = "main") -> list[str]:
@@ -55,6 +60,10 @@ def behavioural(files: list[str], diff_ref: str | None = None,
     """
     hits = []
     for f in files:
+        if f == LOCKFILE:
+            if diff_ref is None or lock_bumps_engine_runtime(base, diff_ref):
+                hits.append(f)
+            continue
         if any(f.startswith(x) for x in EXEMPT_PREFIXES):
             continue
         if any(f.startswith(p) for p in BEHAVIOURAL_PREFIXES):
@@ -62,6 +71,46 @@ def behavioural(files: list[str], diff_ref: str | None = None,
                 continue
             hits.append(f)
     return hits
+
+
+def engine_runtime_versions(lock_text: str) -> dict[str, list[str]]:
+    """{package: sorted versions} for the engine-runtime packages in a uv.lock."""
+    found: dict[str, set[str]] = {}
+    for pkg in tomllib.loads(lock_text).get("package", []):
+        if pkg.get("name") in ENGINE_RUNTIME_PACKAGES:
+            found.setdefault(pkg["name"], set()).add(pkg.get("version", ""))
+    return {name: sorted(v) for name, v in found.items()}
+
+
+def engine_runtime_changed(old_text: str | None, new_text: str | None) -> list[str]:
+    """Engine-runtime packages whose locked versions differ between two uv.lock texts.
+
+    No lock at the base is the lockfile being introduced: it pins what was already installed,
+    so it is not a change. A lock deleted at the tip unpins everything, so it is.
+    """
+    if old_text is None:
+        return []
+    if new_text is None:
+        return list(ENGINE_RUNTIME_PACKAGES)
+    old, new = engine_runtime_versions(old_text), engine_runtime_versions(new_text)
+    return [p for p in ENGINE_RUNTIME_PACKAGES if old.get(p) != new.get(p)]
+
+
+def _lock_at(rev: str) -> str | None:
+    """uv.lock at `rev`, or None only when that commit has no such file; any git error raises."""
+    listed = subprocess.run(["git", "ls-tree", "--name-only", rev, "--", LOCKFILE],
+                            cwd=REPO_ROOT, capture_output=True, text=True, check=True).stdout
+    if not listed.strip():
+        return None
+    return subprocess.run(["git", "show", f"{rev}:{LOCKFILE}"], cwd=REPO_ROOT,
+                          capture_output=True, text=True, check=True).stdout
+
+
+def lock_bumps_engine_runtime(base: str, ref: str) -> bool:
+    """Does `ref` change a torch/triton/transformers/accelerate version relative to `base`?"""
+    merge_base = subprocess.run(["git", "merge-base", base, ref], cwd=REPO_ROOT,
+                                capture_output=True, text=True, check=True).stdout.strip()
+    return bool(engine_runtime_changed(_lock_at(merge_base), _lock_at(ref)))
 
 
 # Prefixes for counter state that only accumulates observations. Assigning to anything else —
