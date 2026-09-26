@@ -281,6 +281,16 @@ class CustomTorchBackend(InferenceBackend):
             max_block_fraction=settings.prefix_cache_block_fraction,
         )
 
+        # Tuned Triton launch table (scripts/bench/tune_triton_launch.py). Read here, before any
+        # graph is captured, because a graph freezes its launch config. Unset = launch as before.
+        launch_path = os.environ.get("CUSTOM_BACKEND_LAUNCH_TABLE", "")
+        if launch_path and self.device.type == "cuda":
+            from inference_server.models import launch_table
+            gpu = torch.cuda.get_device_name(self.device)
+            n = launch_table.load(launch_path, gpu, model_name)
+            (logger.info if n else logger.warning)(
+                "Triton launch table %s: %d entries for gpu=%r model=%r", launch_path, n, gpu, model_name)
+
         # CUDA-graph decode: one graph per ROW BUCKET, replay the smallest bucket >= n_rows.
         # A single max-batch graph padded every step to max_batch_size (64x waste at 4 active
         # rows with max_batch=256), which dominated TPOT at the low concurrency the SLO lives at.
