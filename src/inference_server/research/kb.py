@@ -326,6 +326,7 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
 
 
 def write_index(path: Path | None = None, entries: list[KnowledgeEntry] | None = None) -> Path:
-    target = path or (REPO_ROOT / "DECISIONS.md")
+    target = path or (REPO_ROOT / "archive" / "DECISIONS.md")
+    target.parent.mkdir(exist_ok=True)
     target.write_text(generate_index(entries))
     return target

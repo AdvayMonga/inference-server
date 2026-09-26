@@ -1,7 +1,7 @@
 # knowledge/ — the knowledge base
 
 One JSON file per finding. This is the loop's memory and the source of truth for every design
-decision; [`DECISIONS.md`](../DECISIONS.md) at the repo root is a **generated** view of it.
+decision; `loop index` renders a local, untracked view of it to `archive/DECISIONS.md`.
 
 ```bash
 python -m inference_server.research.loop kb --status rejected     # the dead ends — read first
@@ -9,7 +9,7 @@ python -m inference_server.research.loop kb --tags prefill cache  # what is know
 python -m inference_server.research.loop kb --regime cold_start   # what applies to a workload class
 python -m inference_server.research.loop kb --suspended           # what the loop cannot measure right now
 python -m inference_server.research.loop kb --situation model=gemma-4-e4b,hardware=A100-80GB   # what covers my situation
-python -m inference_server.research.loop index                    # regenerate DECISIONS.md
+python -m inference_server.research.loop index                    # regenerate archive/DECISIONS.md
 ```
 
 Edit the JSON, never the markdown. The record type is `KnowledgeEntry` in

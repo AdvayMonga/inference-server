@@ -124,15 +124,6 @@ jobs:
       - name: Tests
         run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
 
-      - name: DECISIONS.md matches knowledge/
-        # DECISIONS.md is generated and tracked. Drift silently re-opens dead ends, because
-        # this is the file everyone greps for prior art.
-        run: |
-          PYTHONPATH=src python -m inference_server.research.loop index
-          git diff --exit-code DECISIONS.md || {
-            echo "DECISIONS.md is stale. Run: python -m inference_server.research.loop index"
-            exit 1
-          }
 
   engine:
     needs: changes
