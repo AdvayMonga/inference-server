@@ -1,0 +1,27 @@
+{
+ "arms": [
+  {
+   "name": "baseline",
+   "run_ids": [],
+   "sha": "a9a666f"
+  },
+  {
+   "name": "treatment",
+   "run_ids": [],
+   "sha": "104a8eb"
+  }
+ ],
+ "branch": "fix/gemma4-config-transformers-517",
+ "cost_usd": 0.0,
+ "delta": {},
+ "engine_sha_base": "a9a666f",
+ "finished_at": null,
+ "gates": {},
+ "hypothesis_id": "hyp-gemma4-head-dim-per-layer-config",
+ "id": "exp-20260926-14549000",
+ "notes": "Correctness fix, not a performance change. transformers 5.17.0 (what uv.lock pins) made Gemma 4's head_dim a per-layer attribute: text_config.head_dim raises AmbiguousGlobalPerLayerAttributeError, text_config.global_head_dim no longer exists, and per_layer_config[i].head_dim is 256 on sliding layers and 512 on full-attention layers. GemmaForCausalLM.from_hf read both flat attributes, so the engine could not build Gemma 4 at all on the pinned version. gemma4.head_dims() returns (sliding, full) from per_layer_config paired by layer type when present, else from the flat 5.5.3 attributes; from_hf, scripts/bench/tune_triton_launch.py and the parity tests use it. No other attribute from_hf reads moved (sliding_window, num_kv_shared_layers, layer_types, rope_parameters, use_double_wide_mlp, final_logit_softcapping all read identically). The regression test drives from_hf on the committed google/gemma-4-E2B-it config.json fixture and stops at GemmaModel construction; verified failing at ec13cfe (base src tree + this test and fixture, locked .venv: AmbiguousGlobalPerLayerAttributeError on head_dim) and passing at cc50e50. Behaviour on 5.5.3 is unchanged: the engine's loaded state_dict and buffers hash identically on 5.5.3 and 5.17.0 (580 tensors), and the heavy parity suite passes on 5.5.3/torch 2.11 and on 5.17.0/torch 2.11. On the locked env (5.17.0/torch 2.14) two heavy parity tests still fail on bf16 CPU SDPA rounding, which is the torch bump, not this fix: see kb-20260926-02b780e2. Re-issued against 104a8eb (the same fix cherry-picked onto a9a666f after PR #61 merged; originally cc50e50 on ec13cfe).",
+ "regression_test": "tests/test_gemma4_config.py::test_from_hf_builds_gemma_with_256_sliding_and_512_full_head_dim",
+ "source": "loop",
+ "started_at": 1790442374.0,
+ "verdict": "confirmed"
+}

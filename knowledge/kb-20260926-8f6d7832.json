@@ -1,0 +1,43 @@
+{
+  "id": "kb-20260926-8f6d7832",
+  "title": "Gemma 4 could not load on the pinned transformers 5.17: head_dim became per-layer",
+  "status": "resolved",
+  "summary": "**The custom engine could not build Gemma 4 on transformers 5.17.0, the version uv.lock pins.**\n\n5.17 moved Gemma 4's `head_dim` into `text_config.per_layer_config`: reading `text_config.head_dim` raises `AmbiguousGlobalPerLayerAttributeError`, `text_config.global_head_dim` no longer exists, and `per_layer_config[i].head_dim` is 256 on sliding layers and 512 on full-attention layers. On 5.5.3 both are flat attributes and `per_layer_config` does not exist. `GemmaForCausalLM.from_hf` read the flat pair, so it raised before touching a weight; `scripts/bench/tune_triton_launch.py` and four parity-test sites did the same.\n\nFix (PR branch `fix/gemma4-config-transformers-517`, commit 104a8eb): `gemma4.head_dims(text_cfg)` returns (sliding, full) from `per_layer_config` paired with `layer_types` when present, else the flat attributes. Every other attribute `from_hf` reads is unchanged in 5.17. The engine's loaded state_dict and buffers hash identically on 5.5.3 and 5.17.0.\n\n**The lock made this visible; it did not cause it.** CI was already installing transformers 5.17.0 before PR #52, but conftest deselects the model-heavy tests by default and CI never runs `-m heavy`, so nothing on CI ever called `from_hf` against a real Gemma 4 config. The regression test now reads a committed copy of google/gemma-4-E2B-it's config.json on CPU, so CI catches a config-layout change without weights.",
+  "mechanism": "transformers 5.17 made Gemma 4 text_config.head_dim a per-layer attribute (global access raises, global_head_dim removed); the engine read the flat pair and CI's default deselection of heavy tests meant nothing exercised it.",
+  "evidence": [
+    {
+      "experiment_id": "exp-20260926-14549000"
+    },
+    {
+      "knowledge_id": "kb-20260926-02b780e2"
+    }
+  ],
+  "regime": null,
+  "validity_range": {
+    "model": [
+      "google/gemma-4-E2B-it",
+      "google/gemma-4-E4B-it"
+    ],
+    "transformers": [
+      "5.5.3",
+      "5.17.0"
+    ]
+  },
+  "tags": [
+    "dependencies",
+    "transformers",
+    "gemma4",
+    "config",
+    "correctness"
+  ],
+  "triggers": [
+    "a transformers bump must run the heavy tests (`-m heavy`) locally before merge: CI deselects them, so it cannot see a model-loading break",
+    "transformers makes another Gemma 4 text-config attribute per-layer (sliding_window, rope_parameters, intermediate_size): extend head_dims' pattern, and refresh tests/fixtures/gemma-4-E2B-it/config.json if the hub config changes",
+    "the benchmark model moves off Gemma 4 E2B/E4B (Phase 0): the fixture and head_dims only cover this family"
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "transfer_checked": null,
+  "created_at": 1790442374.0,
+  "updated_at": 1790442374.0
+}

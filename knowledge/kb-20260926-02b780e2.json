@@ -1,0 +1,42 @@
+{
+  "id": "kb-20260926-02b780e2",
+  "title": "Heavy Gemma 4 parity fails on the locked torch 2.14: CPU bf16 SDPA rounds differently",
+  "status": "open",
+  "summary": "**On the locked env (torch 2.14.0, transformers 5.17.0) two heavy parity tests fail on CPU; the same code passes on torch 2.11.0 with either transformers.**\n\nMeasured on an Apple M4 Pro, CPU, 2026-09-26, at cc50e50:\n- torch 2.14 / transformers 5.17: `test_full_model_matches_hf` (hidden_states[1] max diff 0.125 vs the committed fixture) and `test_kv_cache_matches_no_cache` (last-position logits max diff 0.875) fail; 9 pass, 1 skipped.\n- torch 2.11 / transformers 5.17 (scratch venv): 11 passed, 1 skipped.\n- torch 2.11 / transformers 5.5.3: 11 passed, 1 skipped.\n\nThe engine's loaded weights and buffers hash identically across transformers versions, so the model is the same; the difference is torch. A seeded bf16 CPU `F.scaled_dot_product_attention` (scale=1.0, causal, 8x7x256) hashes differently on 2.14 and 2.11 while `F.linear`, tanh-GELU and RMS reductions hash identically. Accuracy against an fp32 reference is the same on both (max err 0.0076-0.0151), so this is different rounding, not a worse kernel. Both tests assert atol=1e-3 on bf16, i.e. bitwise agreement, so the fixture (`tests/fixtures/gemma4_e2b_parity.pt`, generated on an older torch) and the cached-vs-uncached equality are torch-version-specific.\n\nNot yet decided: regenerate the fixture on 2.14 and accept the new cached-vs-uncached drift, or loosen the tolerance to a bf16-appropriate bound. Either way the torch bump in PR #52 needs its own record; it was not caught because CI deselects heavy tests.",
+  "mechanism": "torch 2.14 changed CPU bf16 SDPA rounding; the parity tests demand bitwise agreement with a fixture from an older torch and between q_len=1 and full-sequence attention.",
+  "evidence": [
+    {
+      "experiment_id": "exp-20260926-14549000"
+    }
+  ],
+  "regime": null,
+  "validity_range": {
+    "hardware": "Apple M4 Pro (CPU)",
+    "model": "google/gemma-4-E2B-it",
+    "torch": [
+      "2.11.0",
+      "2.14.0"
+    ],
+    "transformers": [
+      "5.5.3",
+      "5.17.0"
+    ]
+  },
+  "tags": [
+    "dependencies",
+    "torch",
+    "gemma4",
+    "parity",
+    "numerics"
+  ],
+  "triggers": [
+    "anyone runs `-m heavy tests/test_gemma4_parity.py` on the locked env and sees these two failures: this is the cause, not a model bug",
+    "the parity fixture is regenerated or the tolerance changed: resolve this entry with the decision",
+    "torch is bumped again: re-run the heavy parity suite before merge"
+  ],
+  "supersedes": null,
+  "superseded_by": null,
+  "transfer_checked": null,
+  "created_at": 1790442374.0,
+  "updated_at": 1790442374.0
+}
