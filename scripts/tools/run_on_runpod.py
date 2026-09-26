@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO / "scripts" / "bench"))
 
 from inference_server.research.venues import PodSpec, VenueError, run_instrument  # noqa: E402
 from replay_corpus_runpod import ENGINE_DEFAULTS, ENGINE_PASSTHROUGH  # noqa: E402
+from tune_triton_launch import TIMING_DIR, table_filename, write_table  # noqa: E402
 
 
 def _git(*args: str) -> str:
@@ -90,6 +91,18 @@ def write_replays(payload: dict, run_group: str, runs: Path) -> list[Path]:
     return written
 
 
+def write_launch_table(payload: dict, run_group: str, runs: Path,
+                       timing_dir: Path = TIMING_DIR) -> list[Path]:
+    """tune_triton_launch.py's table to knowledge/timing/ (uncommitted until an experiment
+    passes), and its full sweep to `runs/<run_group>/triton_launch_sweep.json`."""
+    doc = payload["launch_table"]
+    table = write_table(doc, timing_dir / table_filename(doc["hardware"], doc["engine_sha"]))
+    sweep = runs / run_group / "triton_launch_sweep.json"
+    sweep.parent.mkdir(parents=True, exist_ok=True)
+    sweep.write_text(json.dumps(payload.get("sweep", []), indent=1))
+    return [table, sweep]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("instrument", help="repo-relative path, e.g. scripts/bench/x.py")
@@ -116,7 +129,7 @@ def main() -> int:
         if k in os.environ:
             env[k] = os.environ[k]
     for k, v in os.environ.items():
-        if k.startswith(("REPLAY_", "TELEMETRY_")):
+        if k.startswith(("REPLAY_", "TELEMETRY_", "TUNE_")):
             env[k] = v
     token, source = hf_token()
     if token:
@@ -168,6 +181,10 @@ def main() -> int:
             print(f"  {p.relative_to(REPO)}")
         print(f"fit the timing model with: python scripts/tools/fit_timing_from_runs.py "
               f"{env['RESEARCH_RUN_GROUP']}")
+
+    if payload.get("launch_table"):
+        for p in write_launch_table(payload, env["RESEARCH_RUN_GROUP"], runs):
+            print(f"  {p.relative_to(REPO)}")
 
     # A smoke run returns no panels on purpose; print what it did return so the run is readable.
     if "smoke" in payload:

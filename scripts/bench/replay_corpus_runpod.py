@@ -98,7 +98,7 @@ ENGINE_DEFAULTS = {
 # Passed through when set; never defaulted. HF_TOKEN reaches the server but never the payload.
 ENGINE_PASSTHROUGH = ("PREFILL_CHUNK_SIZE", "WAVE_WINDOW_MULT", "CONTEXT_WINDOW",
                       "CUSTOM_BACKEND_PREFILL_GRAPH", "HF_TOKEN", "HF_HOME",
-                      "TORCHINDUCTOR_CACHE_DIR")
+                      "TORCHINDUCTOR_CACHE_DIR", "CUSTOM_BACKEND_LAUNCH_TABLE")
 SECRET_KEYS = ("HF_TOKEN",)
 
 WARMUP_MAX_TOKENS = 16
