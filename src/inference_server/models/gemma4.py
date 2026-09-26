@@ -261,12 +261,13 @@ class GemmaAttention(nn.Module):
         S_q, S_k = q.shape[2], k_exp.shape[2]
         W = self.sliding_window
         if attn_mask is not None:
-            # Batched decode: external mask encodes per-row validity (real tokens right-aligned).
-            # Sliding window = keep only the rightmost W columns (the W most-recent keys), same
-            # cutoff for every row.
+            # External mask encodes per-row validity; callers lay each row's keys out contiguously
+            # up to its queries, so query i sits at column S_k - S_q + i. Sliding window = keys
+            # within W columns of each query (at S_q=1: the rightmost W columns, as for decode).
             if W is not None and S_k > W:
-                keep = torch.arange(S_k, device=q.device) >= (S_k - W)
-                attn_mask = attn_mask & keep[None, None, None, :]
+                qcol = torch.arange(S_q, device=q.device)[:, None] + (S_k - S_q)
+                keep = (qcol - torch.arange(S_k, device=q.device)[None, :]) < W
+                attn_mask = attn_mask & keep[None, None, :, :]
             attn = F.scaled_dot_product_attention(q, k_exp, v_exp, attn_mask=attn_mask, scale=1.0)
         elif (W is not None and S_k > W) or (S_k > S_q and S_q > 1):
             # Window active, OR a cached multi-token suffix (is_causal can't express the cache
