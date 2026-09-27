@@ -292,8 +292,7 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
             continue
         lines += [f"## {status.capitalize()} ({len(group)})", "", STATUS_BLURB[status], ""]
         for e in sorted(group, key=lambda x: -x.updated_at):
-            # UTC, not localtime: DECISIONS.md is generated AND tracked, so the same
-            # knowledge/ must render identically on a laptop and on a CI runner.
+            # UTC, not localtime: the same knowledge/ renders identically wherever it is run.
             date = time.strftime("%Y-%m-%d", time.gmtime(e.created_at))
             lines.append(f"### [{date}] {e.title}")
             if e.tags:
@@ -326,6 +325,7 @@ def generate_index(entries: list[KnowledgeEntry] | None = None) -> str:
 
 
 def write_index(path: Path | None = None, entries: list[KnowledgeEntry] | None = None) -> Path:
-    target = path or (REPO_ROOT / "DECISIONS.md")
+    target = path or (REPO_ROOT / "archive" / "DECISIONS.md")
+    target.parent.mkdir(exist_ok=True)
     target.write_text(generate_index(entries))
     return target
