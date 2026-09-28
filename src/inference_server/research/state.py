@@ -59,7 +59,11 @@ class TurnState:
         if not self.records:
             return graph.ENTRY
         last = self.records[-1]
-        return graph.next_node(last.node, last.outcome)
+        nxt = graph.next_node(last.node, last.outcome)
+        cap = nxt and graph.NODES[nxt].max_visits
+        if cap and sum(r.node == nxt for r in self.records) >= cap:
+            return graph.GIVE_UP
+        return nxt
 
     def append(self, node: str, outcome: str, body: dict[str, Any], *,
                reads: tuple[str, ...] = (), objection: str | None = None) -> Record:
