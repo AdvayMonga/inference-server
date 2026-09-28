@@ -1,4 +1,4 @@
-"""The loop graph is well-formed, and the ledger admits records only in the order it allows."""
+"""The loop graph is well-formed, and a turn's saved state admits records only in the order it allows."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import json
 import pytest
 
 from inference_server.research import graph
-from inference_server.research.ledger import Ledger, LedgerError
+from inference_server.research.state import StateError, TurnState
 
 
 def test_every_edge_joins_declared_nodes_and_outcomes():
@@ -40,61 +40,63 @@ def test_every_node_is_reachable_from_the_entry():
     assert seen == set(graph.NODES)
 
 
-def _walk_to_hypothesis(led: Ledger):
+def _walk_to_hypothesis(led: TurnState):
     q = led.append("question", "ok", {"class": "cold_start"})
     p = led.append("measure", "ok", {"ttft_p95": 1.0}, reads=(q.id,))
     return q, p
 
 
-def test_a_full_iteration_loops_back_to_measure(tmp_path):
-    led = Ledger(tmp_path / "run1")
+def test_a_turn_ends_at_record(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
     q, p = _walk_to_hypothesis(led)
     h = led.append("hypothesize", "ok", {"claim": "x"}, reads=(q.id, p.id))
     v = led.append("experiment", "confirmed", {}, reads=(h.id, p.id))
     led.append("record", "confirmed", {}, reads=(h.id, v.id))
-    assert led.expected_node() == "measure"
+    assert led.expected_node() is None
+    with pytest.raises(StateError, match="ended"):
+        led.append("measure", "ok", {})
 
 
-def test_the_ledger_refuses_a_skipped_step(tmp_path):
-    led = Ledger(tmp_path / "run1")
+def test_the_state_refuses_a_skipped_step(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
     q, p = _walk_to_hypothesis(led)
-    with pytest.raises(LedgerError, match="expects 'hypothesize'"):
+    with pytest.raises(StateError, match="expects 'hypothesize'"):
         led.append("experiment", "confirmed", {}, reads=(p.id,))
 
 
-def test_the_ledger_refuses_an_undeclared_outcome(tmp_path):
-    led = Ledger(tmp_path / "run1")
-    with pytest.raises(LedgerError, match="cannot end with"):
+def test_the_state_refuses_an_undeclared_outcome(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
+    with pytest.raises(StateError, match="cannot end with"):
         led.append("question", "confirmed", {})
 
 
 def test_a_node_must_read_the_records_it_takes(tmp_path):
-    led = Ledger(tmp_path / "run1")
+    led = TurnState(tmp_path / "run1" / "turn-001")
     q, p = _walk_to_hypothesis(led)
-    with pytest.raises(LedgerError, match="Question"):
+    with pytest.raises(StateError, match="Question"):
         led.append("hypothesize", "ok", {}, reads=(p.id,))
 
 
 def test_an_objection_stops_the_run_and_needs_a_reason(tmp_path):
-    led = Ledger(tmp_path / "run1")
+    led = TurnState(tmp_path / "run1" / "turn-001")
     q, p = _walk_to_hypothesis(led)
-    with pytest.raises(LedgerError, match="reason"):
+    with pytest.raises(StateError, match="reason"):
         led.append("hypothesize", "objection", {}, reads=(q.id, p.id))
     led.append("hypothesize", "objection", {}, reads=(q.id, p.id), objection="measure first")
     led.append("ask_human", "stopped", {})
     assert led.expected_node() is None
-    with pytest.raises(LedgerError, match="stopped"):
+    with pytest.raises(StateError, match="ended"):
         led.append("measure", "ok", {})
 
 
 def test_records_survive_a_reload_and_are_never_overwritten(tmp_path):
-    led = Ledger(tmp_path / "run1")
+    led = TurnState(tmp_path / "run1" / "turn-001")
     q, _ = _walk_to_hypothesis(led)
-    again = Ledger(tmp_path / "run1")
+    again = TurnState(tmp_path / "run1" / "turn-001")
     assert [r.id for r in again.records] == [r.id for r in led.records]
     assert again.expected_node() == "hypothesize"
-    stale = Ledger(tmp_path / "run1")
+    stale = TurnState(tmp_path / "run1" / "turn-001")
     again.append("hypothesize", "ok", {}, reads=(q.id, again.records[1].id))
     with pytest.raises(FileExistsError):   # a second writer cannot clobber a record
         stale.append("hypothesize", "ok", {}, reads=(q.id, stale.records[1].id))
-    assert json.loads((tmp_path / "run1" / "002-hypothesize.json").read_text())["node"] == "hypothesize"
+    assert json.loads((tmp_path / "run1" / "turn-001" / "002-hypothesize.json").read_text())["node"] == "hypothesize"

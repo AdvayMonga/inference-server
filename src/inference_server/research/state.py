@@ -1,4 +1,4 @@
-"""Append-only run state: one JSON file per record, admitted only in the order graph.py allows."""
+"""Saved state of one loop turn: append-only JSON records, admitted only in the order graph.py allows."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from . import graph
 from .schemas import git_sha
 
 
-class LedgerError(ValueError):
+class StateError(ValueError):
     """A record the graph does not allow here. Always fatal."""
 
 
@@ -21,6 +21,7 @@ class LedgerError(ValueError):
 class Record:
     id: str
     run_id: str
+    turn: str
     seq: int
     node: str
     type: str | None
@@ -33,14 +34,14 @@ class Record:
     created_at: str
 
 
-class Ledger:
-    """Records of one run, stored as `<run_dir>/<seq>-<node>.json`."""
+class TurnState:
+    """Records of one turn, stored as `runs/<run_id>/<turn>/<seq>-<node>.json`."""
 
-    def __init__(self, run_dir: Path):
-        self.run_dir = Path(run_dir)
-        self.run_id = self.run_dir.name
+    def __init__(self, turn_dir: Path):
+        self.turn_dir = Path(turn_dir)
+        self.run_id, self.turn = self.turn_dir.parent.name, self.turn_dir.name
         self.records: list[Record] = []
-        for path in sorted(self.run_dir.glob("*.json")):
+        for path in sorted(self.turn_dir.glob("*.json")):
             raw = json.loads(path.read_text())
             self.records.append(Record(**{**raw, "reads": tuple(raw["reads"])}))
 
@@ -48,13 +49,13 @@ class Ledger:
         for r in self.records:
             if r.id == record_id:
                 return r
-        raise LedgerError(f"no record {record_id!r} in run {self.run_id}")
+        raise StateError(f"no record {record_id!r} in {self.run_id}/{self.turn}")
 
     def latest(self, type_: str) -> Record | None:
         return next((r for r in reversed(self.records) if r.type == type_), None)
 
     def expected_node(self) -> str | None:
-        """The only node the graph admits next; None once the run has stopped."""
+        """The only node the graph admits next; None once the turn has ended."""
         if not self.records:
             return graph.ENTRY
         last = self.records[-1]
@@ -64,27 +65,28 @@ class Ledger:
                reads: tuple[str, ...] = (), objection: str | None = None) -> Record:
         expected = self.expected_node()
         if expected is None:
-            raise LedgerError(f"run {self.run_id} has stopped; nothing may follow")
+            raise StateError(f"turn {self.run_id}/{self.turn} has ended; nothing may follow")
         if node != expected:
-            raise LedgerError(f"graph expects {expected!r} next, got {node!r}")
+            raise StateError(f"graph expects {expected!r} next, got {node!r}")
         spec = graph.NODES[node]
         if outcome not in spec.outcomes:
-            raise LedgerError(f"{node!r} cannot end with {outcome!r}; allowed {spec.outcomes}")
+            raise StateError(f"{node!r} cannot end with {outcome!r}; allowed {spec.outcomes}")
         if (outcome == "objection") != bool(objection):
-            raise LedgerError("an objection outcome needs its reason, and only it may carry one")
+            raise StateError("an objection outcome needs its reason, and only it may carry one")
         read_types = {self.get(i).type for i in reads}
         missing = set(spec.takes) - read_types
         if missing:
-            raise LedgerError(f"{node!r} must read a {sorted(missing)} record")
+            raise StateError(f"{node!r} must read a {sorted(missing)} record")
 
         record = Record(
-            id=f"rec-{uuid.uuid4().hex[:8]}", run_id=self.run_id, seq=len(self.records),
+            id=f"rec-{uuid.uuid4().hex[:8]}", run_id=self.run_id, turn=self.turn,
+            seq=len(self.records),
             node=node, type=spec.gives, outcome=outcome, reads=tuple(reads), body=body,
             objection=objection, graph_version=graph.GRAPH_VERSION, engine_sha=git_sha(),
             created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
-        self.run_dir.mkdir(parents=True, exist_ok=True)
-        path = self.run_dir / f"{record.seq:03d}-{node}.json"
+        self.turn_dir.mkdir(parents=True, exist_ok=True)
+        path = self.turn_dir / f"{record.seq:03d}-{node}.json"
         with path.open("x") as f:   # exclusive create: an existing record is never overwritten
             json.dump(asdict(record), f, indent=2)
         self.records.append(record)

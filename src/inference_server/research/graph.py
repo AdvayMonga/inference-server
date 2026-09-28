@@ -11,7 +11,7 @@ GRAPH_VERSION = 1
 @dataclass(frozen=True)
 class Node:
     kind: Literal["code", "agent", "human"]
-    takes: tuple[str, ...]       # record types it must read from the ledger
+    takes: tuple[str, ...]       # record types it must read from the turn state
     gives: str | None            # record type it appends
     outcomes: tuple[str, ...]    # labels it may end with; EDGES routes on them
 
@@ -27,7 +27,7 @@ NODES: dict[str, Node] = {
 }
 
 ENTRY = "question"
-TERMINAL = {"ask_human"}   # the run stops here for you
+TERMINAL = {"record", "ask_human"}   # a turn ends here; the next turn starts fresh at ENTRY
 
 EDGES: dict[tuple[str, str], str] = {
     ("question", "ok"):             "measure",
@@ -37,8 +37,6 @@ EDGES: dict[tuple[str, str], str] = {
     ("experiment", "confirmed"):    "record",
     ("experiment", "rejected"):     "record",
     ("experiment", "anomaly"):      "ask_human",
-    ("record", "confirmed"):        "measure",       # bottleneck moved: re-measure
-    ("record", "rejected"):         "hypothesize",
 }
 
 
