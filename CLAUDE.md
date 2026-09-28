@@ -22,3 +22,13 @@
   human nodes. `state.py` saves each turn as append-only JSON and refuses out-of-order records.
 - Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
   objection, which stops the turn for me.
+
+## Strict referee, free player (the bitter lesson)
+- Harness is code and strict: sandbox, grader, measurement protocol, output equivalence,
+  hidden held-out data, budgets, graph order. It defines what counts as a win and keeps it honest.
+- Strategy is not harness. Heuristics about *how* to find a win live only in prompts, as advice
+  that never blocks. Test: if the model got 10x smarter, would this rule be unnecessary? Then
+  it's a heuristic — keep it soft or drop it.
+- The knowledge base informs, never forbids. Only integrity failures (gaming, escaping) become
+  hard rules; a bad idea is what the loop is for.
+- When we design the harness, flag anything that drifts from referee into strategy.
