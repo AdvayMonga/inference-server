@@ -16,3 +16,9 @@
 ## Context
 - Don't maintain process docs (plans, handoffs, logs). Git history, PRs, and memory carry state.
 - Derive what the project is from the code, git log, and recent memory — not from assumptions.
+
+## The research loop
+- The method is `src/inference_server/research/graph.py`: a fixed graph of code, agent and
+  human nodes. `state.py` saves each turn as append-only JSON and refuses out-of-order records.
+- Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
+  objection, which stops the turn for me.
