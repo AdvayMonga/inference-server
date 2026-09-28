@@ -1,4 +1,4 @@
-"""CLI driver for the research loop's steps (the loop itself is graph.py).
+"""CLI driver for the research loop's steps (the loop itself is method/graph.py).
 
     python -m inference_server.research.loop attribute runs/<id>.json
     python -m inference_server.research.loop screen <hypotheses.json>

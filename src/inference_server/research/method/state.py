@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import graph
-from .schemas import git_sha
+from ..schemas import git_sha
 
 
 class StateError(ValueError):

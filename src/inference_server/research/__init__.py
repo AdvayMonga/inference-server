@@ -2,7 +2,7 @@
 
 Nothing in here may import engine internals. Instruments in scripts/ are the only layer that
 knows about backends, pools and kernels; they hand this package structured records.
-See graph.py for the method this implements.
+See method/graph.py for the method this implements.
 """
 
 from inference_server.research.schemas import (

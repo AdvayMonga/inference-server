@@ -7,7 +7,7 @@ learned offline by the loop and selected at runtime by a controller. Gemma 4 on 
 Measured against vLLM on the same model and hardware (`benchmarks/`), but that comparison is a
 **guardrail**, not the objective. The objective is **GPU-seconds per session at a fixed p95 TTFT
 ceiling**, starting with the cold-start regime. An engine change merges only with a measured,
-replicated experiment record behind it. The research loop is [`graph.py`](src/inference_server/research/graph.py).
+replicated experiment record behind it. The research loop is [`graph.py`](src/inference_server/research/method/graph.py).
 
 ---
 
@@ -106,7 +106,7 @@ RUNPOD_API_KEY=... scripts/tools/run_on_runpod.py <instrument>     # rent, run, 
 
 | file | what it is |
 |---|---|
-| [`graph.py`](src/inference_server/research/graph.py) | **the method**: the research loop as a fixed graph — read before changing the engine |
+| [`graph.py`](src/inference_server/research/method/graph.py) | **the method**: the research loop as a fixed graph — read before changing the engine |
 | [`CLAUDE.md`](CLAUDE.md) | how to work with Claude on this project |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | branch → PR → `ci-ok` → merge; the three CI lanes; the evidence paths |
 | [`benchmarks/README.md`](benchmarks/README.md) | the sweep CSVs and how the vLLM gap closed, step by step |

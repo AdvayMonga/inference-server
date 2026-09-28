@@ -18,8 +18,11 @@
 - Derive what the project is from the code, git log, and recent memory — not from assumptions.
 
 ## The research loop
-- The method is `src/inference_server/research/graph.py`: a fixed graph of code, agent and
-  human nodes. `state.py` saves each turn as append-only JSON and refuses out-of-order records.
+- The method is `src/inference_server/research/method/graph.py`: a fixed graph of code, agent
+  and human nodes. `method/state.py` saves each turn as append-only JSON and refuses
+  out-of-order records.
+- The referee is `research/safety/`: `change_kinds.py` (deny-by-default write surfaces),
+  `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
 - Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
   objection, which stops the turn for me.
 

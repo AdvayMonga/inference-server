@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from inference_server.research.change_kinds import may_write
-from inference_server.research.grader import (
+from inference_server.research.safety.change_kinds import may_write
+from inference_server.research.safety.grader import (
     MAX_FILE_BYTES, audit, prepare_workspace, pristine_tests,
 )
-from inference_server.research.jail import API_HOST, srt_settings
+from inference_server.research.safety.jail import API_HOST, srt_settings
 
 needs_srt = pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")
 
@@ -70,7 +70,7 @@ def test_write_surfaces_are_deny_by_default(kind, path, new, allowed):
 
 def test_an_unknown_kind_is_refused():
     with pytest.raises(ValueError, match="may not start"):
-        may_write("method", "src/inference_server/research/graph.py", new_file=False)
+        may_write("method", "src/inference_server/research/method/graph.py", new_file=False)
 
 
 def test_the_workspace_has_no_history_and_no_hidden_files(ws):

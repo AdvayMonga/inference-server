@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from inference_server.research import graph
-from inference_server.research.state import StateError, TurnState
+from inference_server.research.method import graph
+from inference_server.research.method.state import StateError, TurnState
 
 
 def test_every_edge_joins_declared_nodes_and_outcomes():
