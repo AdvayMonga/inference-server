@@ -16,7 +16,8 @@ class Result:
     objection: str | None = None
 
 
-# A node sees only the latest record of each type it `takes`; the runner picks them, not the node.
+# A node sees only the latest record of each type it `takes` (and `optional`, when present);
+# the runner picks them, not the node.
 NodeFn = Callable[[dict[str, Record]], Result]
 
 
@@ -27,10 +28,12 @@ def run_turn(state: TurnState, impls: dict[str, NodeFn], *,
     if missing:
         raise ValueError(f"no implementation for nodes {sorted(missing)}")
     while (node := state.expected_node()) is not None:
-        inputs = {t: state.latest(t) for t in graph.NODES[node].takes}
+        spec = graph.NODES[node]
+        inputs = {t: state.latest(t) for t in spec.takes}
         absent = [t for t, r in inputs.items() if r is None]
         if absent:
             raise ValueError(f"{node!r} needs {absent} but the turn has none")
+        inputs |= {t: r for t in spec.optional if (r := state.latest(t)) is not None}
         marker = state.turn_dir / f"{len(state.records):03d}-{node}.started"
         if marker.exists():   # a node may have side effects (GPU spend, a PR); never re-run blind
             raise RuntimeError(f"{node!r} was interrupted mid-run; check its effects, then delete {marker}")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-GRAPH_VERSION = 2
+GRAPH_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class Node:
     gives: str | None            # record type it appends
     outcomes: tuple[str, ...]    # labels it may end with; EDGES routes on them
     max_visits: int | None = None   # per turn; past it the turn goes to GIVE_UP
+    optional: tuple[str, ...] = ()  # record types it also reads when the turn has them
 
 
 NODES: dict[str, Node] = {
@@ -22,7 +23,8 @@ NODES: dict[str, Node] = {
     "measure":     Node("code", ("Question",), "Panel", ("ok",)),
     "hypothesize": Node("agent", ("Question", "Panel"), "Hypothesis", ("ok", "objection")),
     # code-edit subgraph
-    "build":       Node("agent", ("Hypothesis",), "Change", ("ok", "objection"), max_visits=3),
+    "build":       Node("agent", ("Hypothesis", "Panel"), "Change", ("ok", "objection"),
+                        max_visits=3, optional=("CheckReport", "Review")),
     "check":       Node("code", ("Change",), "CheckReport", ("pass", "fail")),
     "review_1":    Node("agent", ("Hypothesis", "Change", "CheckReport"), "Review",
                         ("ok", "changes", "objection")),

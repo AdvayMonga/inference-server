@@ -9,15 +9,16 @@ from pathlib import Path
 API_HOST = "api.anthropic.com"
 
 
-def srt_settings(writable: list[Path], venv: Path, domains: list[str]) -> dict:
-    """Write only `writable`; read nothing under home but it and `venv`; reach only `domains`."""
+def srt_settings(writable: list[Path], venv: Path, domains: list[str],
+                 readonly: tuple[Path, ...] | list[Path] = ()) -> dict:
+    """Write only `writable`; read nothing under home but it, `readonly` and `venv`; reach `domains`."""
     return {
         "network": {"allowedDomains": list(domains), "deniedDomains": [],
                     "allowUnixSockets": [], "allowAllUnixSockets": False,
                     "allowLocalBinding": False},
         "filesystem": {
             "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in writable] + [str(venv)],
+            "allowRead": [str(p) for p in [*writable, *readonly, venv]],
             "allowWrite": [str(p) for p in writable],
             "denyWrite": [],
         },

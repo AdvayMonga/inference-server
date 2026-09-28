@@ -24,6 +24,9 @@
   latest record of each type it `takes`), calls it, saves the result; `pause` = supervised mode.
 - The referee is `research/safety/`: `change_kinds.py` (deny-by-default write surfaces),
   `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
+- `research/agents/`: `brief.py` renders an agent node's context (its input records, knowledge,
+  the graph map); `call.py` is the one place a model is called — Agent SDK CLI inside the srt
+  jail, env wiped, write hook on. `research/nodes/` holds one module per node (`build.py` so far).
 - Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
   objection, which stops the turn for me.
 
