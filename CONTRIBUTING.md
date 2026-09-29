@@ -103,7 +103,7 @@ must rise by both 25% and 10 seconds to fail it; the others by 60s / 2GB / 2GB.
 An arm with no accounting block still passes, and the gate's reason says it could not see cost
 moved outside the measured window — so every experiment recorded before this existed judges
 exactly as it did before. Instruments that fill the block: `replay_local.py` (which launches
-`serve_accounted.py` so the server reports its own resources). See LOOP.md step 0.
+`serve_accounted.py` so the server reports its own resources).
 
 A "faster" claim must also clear the **noise band** for its situation: the measured run-to-run
 spread of the same harness, workload class, model and hardware with nothing changed, stored in
@@ -114,6 +114,6 @@ none: `replay_local.py --null 6`, then `loop band --run-group <group>`.
 
 Touched no engine file? The gate passes on its own; say so in the PR.
 
-Read `LOOP.md` before running an experiment, and `loop kb --status rejected` before proposing
+Read `src/inference_server/research/graph.py` before running an experiment, and `loop kb --status rejected` before proposing
 an optimisation — nine things in there are already disproved.
 

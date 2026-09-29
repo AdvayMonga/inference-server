@@ -17,7 +17,7 @@ provenance for a measured number.** Deleting them would orphan the audit trail t
 
 **They are not expected to run.** There are no Modal credits, `modal` is no longer an extra in
 `pyproject.toml`, and nothing in CI or in the research loop calls them. Live GPU work goes
-through `src/inference_server/research/venues.py` (RunPod) — see `LOOP.md` and `CONTRIBUTING.md`.
+through `src/inference_server/research/venues.py` (RunPod) — see `CONTRIBUTING.md`.
 
 Layout mirrors where each file used to live: `bench/`, `probes/`, `gpu_tests/` under
 `scripts/`, and `modal_app.py` at the repo root.

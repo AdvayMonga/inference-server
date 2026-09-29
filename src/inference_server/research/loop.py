@@ -1,4 +1,4 @@
-"""CLI driver for the research loop. Every step of LOOP.md, deterministic where it can be.
+"""CLI driver for the research loop's steps (the loop itself is graph.py).
 
     python -m inference_server.research.loop attribute runs/<id>.json
     python -m inference_server.research.loop screen <hypotheses.json>

@@ -13,7 +13,7 @@ its clocks were locked — a pod is a container, so the lock is always refused a
 under `archive/modal/` — kept as the provenance 13 `knowledge/` entries cite, not expected to
 run. Everything else here runs locally.
 
-| folder | what | LOOP.md tier |
+| folder | what | tier |
 |---|---|---|
 | `bench/` | sweeps and A/Bs that produce a number worth recording | 4 (full sweep) |
 | `probes/` | one-question diagnostics: where does the time go, is X even true | 3 (single-GPU probe) |
