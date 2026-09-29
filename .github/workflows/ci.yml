@@ -123,7 +123,7 @@ jobs:
         # Without srt those tests skip and the lane still goes green. Ubuntu 24.04 blocks the
         # unprivileged user namespaces bubblewrap needs unless AppArmor's restriction is lifted.
         run: |
-          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           npm install -g @anthropic-ai/sandbox-runtime@0.0.77
       - name: Lint
