@@ -20,7 +20,8 @@
 ## The research loop
 - The method is `src/inference_server/research/method/graph.py`: a fixed graph of code, agent
   and human nodes. `method/state.py` saves each turn as append-only JSON and refuses
-  out-of-order records.
+  out-of-order records. `method/runner.py` walks one turn: it picks each node's inputs (the
+  latest record of each type it `takes`), calls it, saves the result; `pause` = supervised mode.
 - The referee is `research/safety/`: `change_kinds.py` (deny-by-default write surfaces),
   `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
 - Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
