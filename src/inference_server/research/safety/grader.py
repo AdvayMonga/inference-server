@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from pathlib import Path
@@ -157,8 +158,9 @@ def run_lint(tree: Path) -> TestRun:
 
 def run_tests(dest: Path, timeout_s: int = 1800) -> TestRun:
     """The fast suite on a pristine tree, inside the jail: its code is the agent's."""
-    tmp = dest.with_name(dest.name + "-tmp").resolve()   # beside the tree: private to this run
-    tmp.mkdir(exist_ok=True)
+    # Private to this run, but short: the jail's bridge sockets live here and Linux caps a
+    # socket path at 108 bytes, which a directory beside a deep tree can exceed.
+    tmp = Path(tempfile.mkdtemp(prefix="jail-")).resolve()
     env = {   # nothing inherited: agent code must not see our secrets
         "PATH": os.environ["PATH"], "HOME": str(Path.home()), "TMPDIR": str(tmp),
         "PYTHONPATH": str(dest / "src"),   # beats the editable install
@@ -170,6 +172,9 @@ def run_tests(dest: Path, timeout_s: int = 1800) -> TestRun:
     argv = jail_command(settings, dest.with_suffix(".srt.json"),
                         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                          "-m", "not heavy and not needs_host"])   # CI runs the needs_host ones
-    proc = subprocess.run(argv, cwd=dest, env=env, capture_output=True, text=True,
-                          timeout=timeout_s)
+    try:
+        proc = subprocess.run(argv, cwd=dest, env=env, capture_output=True, text=True,
+                              timeout=timeout_s)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     return TestRun(proc.returncode == 0, proc.returncode, (proc.stdout + proc.stderr)[-5000:])
