@@ -114,6 +114,6 @@ none: `replay_local.py --null 6`, then `loop band --run-group <group>`.
 
 Touched no engine file? The gate passes on its own; say so in the PR.
 
-Read `src/inference_server/research/graph.py` before running an experiment, and `loop kb --status rejected` before proposing
+Read `src/inference_server/research/method/graph.py` before running an experiment, and `loop kb --status rejected` before proposing
 an optimisation — nine things in there are already disproved.
 
