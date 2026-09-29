@@ -156,6 +156,7 @@ def test_plan_is_the_cross_product_with_documented_defaults():
 
 # ---------------------------------------------------------------- the payload
 
+@pytest.mark.needs_host
 def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path, capsys):
     store = RowStore(tmp_path / "telemetry")
     app = _mock_server(store)
@@ -198,6 +199,7 @@ def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path,
     assert not any(t in joined for t in warm)
 
 
+@pytest.mark.needs_host
 def test_a_replay_that_blows_up_midway_keeps_the_panels_already_paid_for(
         monkeypatch, tmp_path, capsys):
     """Three configs, the second raises. The first and third are GPU-minutes already billed; a
@@ -230,6 +232,7 @@ def test_a_replay_that_blows_up_midway_keeps_the_panels_already_paid_for(
     assert "server_log_tail" in payload
 
 
+@pytest.mark.needs_host
 def test_a_server_that_never_becomes_ready_is_an_error_payload_not_a_silent_result(
         monkeypatch, tmp_path, capsys):
     """LOOP.md: no evidence must fail loudly. The venue still gets a parseable block, with the

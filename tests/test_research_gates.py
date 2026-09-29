@@ -4,6 +4,8 @@ loop cannot repeat them unattended.
 
 from __future__ import annotations
 
+import pytest
+
 
 from inference_server.research.gates import (
     correctness_gate,
@@ -218,6 +220,7 @@ def test_a_lock_bump_of_an_engine_runtime_package_is_behavioural():
     assert pm.engine_runtime_changed(base, None) == list(pm.ENGINE_RUNTIME_PACKAGES)  # deleted
 
 
+@pytest.mark.needs_host
 def test_uv_lock_is_behavioural_only_when_it_bumps_the_engine_runtime(tmp_path, monkeypatch):
     """End to end through git: a tooling bump in uv.lock is exempt, a torch bump is not."""
     import subprocess

@@ -197,6 +197,7 @@ def _ab(runs_dir, base_sha, treat_sha):
     return arms_for("g1", runs_dir=runs_dir)
 
 
+@pytest.mark.needs_host
 def test_same_sha_arms_still_fail_when_an_engine_file_moved(tmp_path, monkeypatch):
     """The case the rule was written for, unchanged: one sha, one engine commit after it."""
     from inference_server.research import session
@@ -208,6 +209,7 @@ def test_same_sha_arms_still_fail_when_an_engine_file_moved(tmp_path, monkeypatc
         session.check_still_measurable(arms, ref=treat)
 
 
+@pytest.mark.needs_host
 def test_same_sha_arms_pass_when_nothing_engine_moved(tmp_path, monkeypatch):
     from inference_server.research import session
 
@@ -216,6 +218,7 @@ def test_same_sha_arms_pass_when_nothing_engine_moved(tmp_path, monkeypatch):
     session.check_still_measurable(_ab(tmp_path / "runs", treat, treat), ref=docs)
 
 
+@pytest.mark.needs_host
 def test_two_commit_ab_needs_no_escape_hatch(tmp_path, monkeypatch):
     """baseline@parent, treatment@child, HEAD==child. The drift between the baseline arm's sha
     and HEAD is the change under test; only a blanket --no-drift-check used to get through."""
@@ -226,6 +229,7 @@ def test_two_commit_ab_needs_no_escape_hatch(tmp_path, monkeypatch):
     session.check_still_measurable(_ab(tmp_path / "runs", base, treat), ref=treat)
 
 
+@pytest.mark.needs_host
 def test_a_commit_after_a_two_commit_ab_fails_both_arms(tmp_path, monkeypatch):
     """Drift is what landed after EVERY arm, so it invalidates every arm — including the one
     measured at the tip."""
@@ -240,6 +244,7 @@ def test_a_commit_after_a_two_commit_ab_fails_both_arms(tmp_path, monkeypatch):
             session.check_still_measurable(ordered, ref=later)
 
 
+@pytest.mark.needs_host
 def test_non_engine_commit_after_a_two_commit_ab_fails_neither_arm(tmp_path, monkeypatch):
     from inference_server.research import session
 
@@ -269,6 +274,7 @@ def test_escape_hatch_still_bypasses_the_check(tmp_path, monkeypatch):
         assert len(called) == expected
 
 
+@pytest.mark.needs_host
 def test_arms_on_divergent_branches_fall_back_to_their_own_shas(tmp_path, monkeypatch):
     """No arm sha is an ancestor of the other, so there is no tip and no relief: each arm is
     checked against its own sha, which is the stricter rule."""
@@ -283,6 +289,7 @@ def test_arms_on_divergent_branches_fall_back_to_their_own_shas(tmp_path, monkey
         session.check_still_measurable(_ab(tmp_path / "runs", treat, fork), ref=fork)
 
 
+@pytest.mark.needs_host
 def test_the_tip_of_a_three_commit_chain_is_the_last_one_whatever_the_order(tmp_path, monkeypatch):
     """The tip is a property of the history, not of the order the arms happen to be listed in."""
     import itertools
@@ -295,6 +302,7 @@ def test_the_tip_of_a_three_commit_chain_is_the_last_one_whatever_the_order(tmp_
         assert session._experiment_tip(list(order)) == later
 
 
+@pytest.mark.needs_host
 def test_a_sha_git_cannot_resolve_yields_no_tip(tmp_path, monkeypatch):
     """An unanswerable ancestry question must not read as 'not an ancestor': it drops the arms
     back to the per-arm check rather than silently picking a tip from the shas that did resolve."""

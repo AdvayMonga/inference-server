@@ -49,7 +49,7 @@ def _walk_to_hypothesis(led: TurnState):
 def _walk_to_change(led: TurnState):
     q, p = _walk_to_hypothesis(led)
     h = led.append("hypothesize", "ok", {"claim": "x"}, reads=(q.id, p.id))
-    c = led.append("build", "ok", {}, reads=(h.id,))
+    c = led.append("build", "ok", {}, reads=(h.id, p.id))
     return h, c
 
 
@@ -80,15 +80,22 @@ def test_a_rejected_change_skips_publish(tmp_path):
 def test_build_gives_up_after_its_visit_cap(tmp_path):
     led = TurnState(tmp_path / "run1" / "turn-001")
     h, c = _walk_to_change(led)
+    for _ in range(2):   # a failed check goes to review_1, which sends it back
+        k = led.append("check", "fail", {}, reads=(c.id,))
+        led.append("review_1", "changes", {}, reads=(h.id, c.id, k.id))
+        c = led.append("build", "ok", {}, reads=(h.id, led.latest("Panel").id))
     k = led.append("check", "fail", {}, reads=(c.id,))
-    c = led.append("build", "ok", {}, reads=(h.id,))
-    k = led.append("check", "pass", {}, reads=(c.id,))
     led.append("review_1", "changes", {}, reads=(h.id, c.id, k.id))
-    c = led.append("build", "ok", {}, reads=(h.id,))
-    led.append("check", "fail", {}, reads=(c.id,))
     assert led.expected_node() == graph.GIVE_UP
     with pytest.raises(StateError, match="expects 'record'"):
-        led.append("build", "ok", {}, reads=(h.id,))
+        led.append("build", "ok", {}, reads=(h.id, led.latest("Panel").id))
+
+
+def test_a_violation_stops_the_turn_for_a_human(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
+    h, c = _walk_to_change(led)
+    led.append("check", "violation", {}, reads=(c.id,))
+    assert led.expected_node() == "ask_human"
 
 
 def test_the_state_refuses_a_skipped_step(tmp_path):

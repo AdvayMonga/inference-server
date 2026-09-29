@@ -28,6 +28,8 @@ _HEAVY_MODULES = {
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "heavy: loads a real model (GBs of RAM); run alone")
+    config.addinivalue_line(
+        "markers", "needs_host: needs what the loop's jail forbids (held-out corpus, git, sockets); check skips it, CI runs it")
 
 
 def pytest_collection_modifyitems(config, items):

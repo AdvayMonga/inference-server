@@ -9,6 +9,11 @@ from inference_server.research.method.runner import Result, run_turn
 from inference_server.research.method.state import TurnState
 
 
+def follows_check(inputs):
+    """A review_1 stand-in that never approves a failing check."""
+    return Result("changes" if inputs["CheckReport"].outcome == "fail" else "ok", {})
+
+
 def stubs(**overrides):
     """Every node returns its first declared outcome; `overrides` replace chosen nodes."""
     impls = {name: (lambda _inputs, o=node.outcomes[0]: Result(o, {}))
@@ -58,7 +63,7 @@ def test_supervised_mode_pauses_and_resumes_from_disk(state, tmp_path):
 
 
 def test_endless_check_failures_give_up_at_the_build_cap(state):
-    run_turn(state, stubs(check=lambda _i: Result("fail", {})))
+    run_turn(state, stubs(check=lambda _i: Result("fail", {}), review_1=follows_check))
     nodes = [r.node for r in state.records]
     assert nodes.count("build") == graph.NODES["build"].max_visits
     assert nodes[-1] == graph.GIVE_UP
@@ -77,7 +82,7 @@ def test_review_1_sees_the_passing_change_after_a_failed_build(state):
 
     def review_1(inputs):
         seen.update({t: r.seq for t, r in inputs.items()})
-        return Result("ok", {})
+        return follows_check(inputs)
 
     run_turn(state, stubs(check=lambda _i: Result(next(outcomes), {}), review_1=review_1))
     builds = [r.seq for r in state.records if r.node == "build"]

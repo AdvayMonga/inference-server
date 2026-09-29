@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-GRAPH_VERSION = 2
+GRAPH_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,7 @@ class Node:
     gives: str | None            # record type it appends
     outcomes: tuple[str, ...]    # labels it may end with; EDGES routes on them
     max_visits: int | None = None   # per turn; past it the turn goes to GIVE_UP
+    optional: tuple[str, ...] = ()  # record types it also reads when the turn has them
 
 
 NODES: dict[str, Node] = {
@@ -22,8 +23,9 @@ NODES: dict[str, Node] = {
     "measure":     Node("code", ("Question",), "Panel", ("ok",)),
     "hypothesize": Node("agent", ("Question", "Panel"), "Hypothesis", ("ok", "objection")),
     # code-edit subgraph
-    "build":       Node("agent", ("Hypothesis",), "Change", ("ok", "objection"), max_visits=3),
-    "check":       Node("code", ("Change",), "CheckReport", ("pass", "fail")),
+    "build":       Node("agent", ("Hypothesis", "Panel"), "Change", ("ok", "objection"),
+                        max_visits=3, optional=("CheckReport", "Review")),
+    "check":       Node("code", ("Change",), "CheckReport", ("pass", "fail", "violation")),
     "review_1":    Node("agent", ("Hypothesis", "Change", "CheckReport"), "Review",
                         ("ok", "changes", "objection")),
     "experiment":  Node("code", ("Hypothesis", "Change"), "Results", ("done", "anomaly")),
@@ -47,7 +49,8 @@ EDGES: dict[tuple[str, str], str] = {
     ("build", "ok"):                "check",
     ("build", "objection"):         "ask_human",
     ("check", "pass"):              "review_1",
-    ("check", "fail"):              "build",
+    ("check", "fail"):              "review_1",      # the reviewer diagnoses the failure
+    ("check", "violation"):         "ask_human",     # touched what grades it: you look first
     ("review_1", "ok"):             "experiment",
     ("review_1", "changes"):        "build",
     ("review_1", "objection"):      "ask_human",

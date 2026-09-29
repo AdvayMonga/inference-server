@@ -29,6 +29,12 @@ ALWAYS_DENY = (
     "*.pth",
     "*sitecustomize.py",
     "*usercustomize.py",
+    # Tool config: a nested one would reconfigure lint or tests for the agent's own files.
+    "*ruff.toml",
+    "*pyproject.toml",
+    "*setup.cfg",
+    "*pytest.ini",
+    "*tox.ini",
 )
 
 # Removed from the agent's workspace; it can neither read nor recreate them.

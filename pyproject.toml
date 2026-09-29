@@ -31,6 +31,10 @@ dev = [
 modal = [
     "modal>=1.0",
 ]
+# The research loop's agent nodes (research/agents/call.py); the engine never imports it.
+agents = [
+    "claude-agent-sdk>=0.2.161",
+]
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"
