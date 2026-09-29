@@ -11,9 +11,17 @@ import pytest
 
 from inference_server.research.safety.change_kinds import may_write
 from inference_server.research.safety.grader import (
-    MAX_FILE_BYTES, audit, prepare_workspace, pristine_tests,
+    MAX_FILE_BYTES, audit, prepare_workspace, pristine_tree, run_tests,
 )
 from inference_server.research.safety.jail import API_HOST, srt_settings
+
+def pristine_tests(repo, base, ws, result, dest):
+    pristine_tree(repo, base, ws, result, dest)
+    return run_tests(dest)
+
+
+# Tests the safety stack itself, with throwaway git repos the jail cannot create.
+pytestmark = pytest.mark.needs_host
 
 # CI sets REQUIRE_SRT so a missing jail fails these tests instead of silently skipping them.
 needs_srt = pytest.mark.skipif(shutil.which("srt") is None and not os.environ.get("REQUIRE_SRT"),
@@ -65,6 +73,8 @@ def ws(repo, tmp_path):
     ("fix", "tests/test_new_bug.py", True, True),                       # fix may add a test
     ("fix", "tests/test_engine.py", False, False),                      # but never edit one
     ("perf", "src/inference_server/CONFTEST.PY", True, False),          # macOS ignores case
+    ("perf", "src/inference_server/models/ruff.toml", True, False),     # would silence lint
+    ("perf", "src/inference_server/pyproject.toml", True, False),
 ])
 def test_write_surfaces_are_deny_by_default(kind, path, new, allowed):
     assert may_write(kind, path, new_file=new) is allowed

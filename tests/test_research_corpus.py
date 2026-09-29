@@ -33,6 +33,7 @@ CLASSES = ("cold_start", "steady_interactive", "long_context")
 
 # ---------------------------------------------------------------- the committed corpus
 
+@pytest.mark.needs_host
 def test_committed_corpus_verifies_and_has_the_three_classes():
     m = load_manifest(CORPUS_DIR)
     assert set(m.classes) == set(CLASSES)
@@ -45,6 +46,7 @@ def test_committed_corpus_verifies_and_has_the_three_classes():
     assert "placeholder" in m.notes, "SLOs are placeholders pending the Phase 0 decision"
 
 
+@pytest.mark.needs_host
 def test_committed_corpus_is_what_the_builder_produces(tmp_path):
     """Provenance: the data on disk came from build_corpus.py at the default seed, byte for
     byte. If prompt_bank.py or the class table changes, rebuild and commit a new version."""
@@ -54,6 +56,7 @@ def test_committed_corpus_is_what_the_builder_produces(tmp_path):
     assert rebuilt.corpus_version == committed.corpus_version
 
 
+@pytest.mark.needs_host
 def test_seen_and_heldout_prompts_are_disjoint():
     for name in CLASSES:
         _, seen = load_trace(name, "seen", CORPUS_DIR)
@@ -62,6 +65,7 @@ def test_seen_and_heldout_prompts_are_disjoint():
         assert not {r.session_id for r in seen} & {r.session_id for r in held}, name
 
 
+@pytest.mark.needs_host
 def test_every_prompt_has_a_unique_first_block_except_follow_up_turns():
     """The miss path is the default; only turn_index > 0 may share a prefix (with its own
     session's first turn), which is what makes multi-turn sessions meaningful."""

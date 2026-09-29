@@ -12,6 +12,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from inference_server.research.compare import comparable
 from inference_server.research.corpus import Manifest, WorkloadClass
 from inference_server.research.session import _alternating, arm_label
@@ -93,6 +95,7 @@ def test_the_simulated_pool_is_the_pool_the_custom_backend_serves_from():
     assert rl.ENGINE_BASE["KV_CACHE_BLOCK_SIZE"] == rl.ENGINE_BASE["CUSTOM_BACKEND_BLOCK_SIZE"]
 
 
+@pytest.mark.needs_host
 def test_the_warmup_prompt_is_not_a_corpus_prompt():
     """Warming with a trace prompt would leave the replay hitting its own prefix cache, turning
     a cache_miss_heavy measurement into a cache_hit_heavy one without saying so."""

@@ -26,7 +26,9 @@
   `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
 - `research/agents/`: `brief.py` renders an agent node's context (its input records, knowledge,
   the graph map); `call.py` is the one place a model is called — Agent SDK CLI inside the srt
-  jail, env wiped, write hook on. `research/nodes/` holds one module per node (`build.py` so far).
+  jail, env wiped, write hook on. `research/nodes/` holds one module per node (`build.py`,
+  `check.py`). `check` runs the suite with `-m "not heavy and not needs_host"`: tests marked
+  `needs_host` need what the jail forbids (held-out corpus, git, sockets) and run in CI only.
 - Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
   objection, which stops the turn for me.
 

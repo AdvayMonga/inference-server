@@ -131,6 +131,7 @@ def _hardware_panel(runs: Path, grp: str, cls_name: str, split: str, scale: floa
     panel.to_json(runs / f"{v.run_id}.json")
 
 
+@pytest.mark.needs_host
 def test_validate_reports_rho_one_when_hardware_equals_the_simulator(tmp_path, capsys):
     runs = tmp_path / "runs"
     (runs / "grp-val").mkdir(parents=True)
@@ -190,6 +191,7 @@ def test_validate_refuses_fewer_than_two_panels(tmp_path, capsys):
     assert "needs >= 2" in capsys.readouterr().err
 
 
+@pytest.mark.needs_host
 def test_validate_flags_the_kv_gate_the_simulator_does_not_model(tmp_path, capsys):
     """With BACKEND=custom-*, admission gates on a token budget, not the block pool the
     simulator counts. Disagreement under KV pressure is the model's, and must be said out loud."""

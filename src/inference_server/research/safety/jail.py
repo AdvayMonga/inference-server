@@ -11,7 +11,10 @@ API_HOST = "api.anthropic.com"
 
 def srt_settings(writable: list[Path], venv: Path, domains: list[str],
                  readonly: tuple[Path, ...] | list[Path] = ()) -> dict:
-    """Write only `writable`; read nothing under home but it, `readonly` and `venv`; reach `domains`."""
+    """Write only `writable`; read nothing under home but it, `readonly` and `venv`; reach `domains`.
+
+    Keep each run's temp dir inside `writable` and under home, where other runs cannot read it.
+    """
     return {
         "network": {"allowedDomains": list(domains), "deniedDomains": [],
                     "allowUnixSockets": [], "allowAllUnixSockets": False,

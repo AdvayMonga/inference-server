@@ -18,6 +18,9 @@ from inference_server.research.nodes.build import OUTPUT_SCHEMA, Build
 from inference_server.research.safety.change_kinds import KINDS
 from inference_server.research.safety.hooks import allowed, write_guard
 
+# Tests the safety stack itself, with throwaway git repos the jail cannot create.
+pytestmark = pytest.mark.needs_host
+
 needs_srt = pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")
 
 FILES = {
@@ -82,11 +85,14 @@ def test_first_attempt_gets_a_clean_workspace_and_a_deterministic_brief(repo, tm
 def test_a_retry_is_a_fresh_session_on_the_same_workspace_with_the_failure(repo, tmp_path):
     agent, checks = FakeAgent(), iter(["fail", "pass"])
     state = turn(tmp_path)
+    review_1 = lambda i: Result("changes" if i["CheckReport"].outcome == "fail" else "ok", {})  # noqa: E731
     run_turn(state, stubs(build=Build(repo, "HEAD", state.turn_dir, call=agent),
-                          check=lambda _i: Result(next(checks), {"tests": "1 failed"})))
+                          check=lambda _i: Result(next(checks), {"tests": "1 failed"}),
+                          review_1=review_1))
     first, second = agent.specs
     assert first.workspace == second.workspace and first.scratch != second.scratch
     assert "# CheckReport (from check, outcome fail)" in second.prompt
+    assert "# Review (from review_1, outcome changes)" in second.prompt
     assert "# attempt 1" in (second.workspace / "src/inference_server/engine.py").read_text()
 
 

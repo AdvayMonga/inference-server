@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import shlex
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,10 +41,10 @@ class AgentReply:
 
 def _wrapper(spec: AgentSpec, cli: Path) -> Path:
     """A script the SDK runs as its CLI: wipes the env, then execs the real CLI under srt."""
-    home = spec.scratch / "home"
+    home, tmp = spec.scratch / "home", spec.scratch / "tmp"   # private to this session
     home.mkdir(parents=True, exist_ok=True)
-    tmp = Path(tempfile.gettempdir()).resolve()
-    settings = srt_settings([spec.workspace.resolve(), home, tmp], Path(sys.prefix),
+    tmp.mkdir(exist_ok=True)
+    settings = srt_settings([spec.workspace.resolve(), home.resolve(), tmp.resolve()], Path(sys.prefix),
                             [API_HOST], readonly=spec.readonly)
     argv = jail_command(settings, spec.scratch / "srt.json", [str(cli)])
     keep = " ".join(f'"{k}=${k}"' for k in PASS_ENV)

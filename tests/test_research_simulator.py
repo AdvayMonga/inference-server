@@ -281,6 +281,7 @@ def test_to_panel_validates_and_is_unmistakably_simulated():
 
 # ---------------------------------------------------------------- real corpus + CLI
 
+@pytest.mark.needs_host
 def test_steady_interactive_runs_end_to_end_in_under_a_second():
     m, trace = load_trace("steady_interactive", "seen")
     t0 = time.perf_counter()
@@ -291,6 +292,7 @@ def test_steady_interactive_runs_end_to_end_in_under_a_second():
     assert s["decode_steps"] > 0 and s["cache_hit_rate"] is not None
 
 
+@pytest.mark.needs_host
 def test_loop_simulate_prints_one_row_per_config_and_emits_panels(tmp_path, capsys):
     rc = loop.main(["simulate", "--class", "steady_interactive", "--split", "seen",
                     "--config", '{"policy": "fcfs"}', "--config", '{"policy": "fair"}',
@@ -302,6 +304,7 @@ def test_loop_simulate_prints_one_row_per_config_and_emits_panels(tmp_path, caps
     assert len(panels) == 2 and {p.validity.harness for p in panels} == {"simulator"}
 
 
+@pytest.mark.needs_host
 def test_loop_simulate_rejects_an_unknown_knob(tmp_path):
     with pytest.raises(TypeError):
         loop.main(["simulate", "--class", "steady_interactive", "--config", '{"pool": 1}'])
@@ -368,6 +371,7 @@ SUMMARY_GOLDEN = {
 }
 
 
+@pytest.mark.needs_host
 @pytest.mark.parametrize("key", sorted(PRE_TERMINATION_GOLDEN))
 def test_committed_corpus_simulates_byte_identically_to_before_the_field(key):
     name, split, mbs = key.rsplit("/", 2)

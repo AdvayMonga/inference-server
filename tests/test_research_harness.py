@@ -82,6 +82,7 @@ def test_engine_sha_comes_from_the_environment_inside_a_container(monkeypatch):
     assert git_dirty() is False
 
 
+@pytest.mark.needs_host
 def test_engine_sha_falls_back_to_real_git_locally(monkeypatch):
     from inference_server.research.schemas import git_sha
     monkeypatch.delenv("RESEARCH_ENGINE_SHA", raising=False)
