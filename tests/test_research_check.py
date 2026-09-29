@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from inference_server.research.safety.grader import prepare_workspace
 
 # Throwaway git repos, which the jail cannot create.
 pytestmark = [pytest.mark.needs_host,
-              pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")]
+              pytest.mark.skipif(shutil.which("srt") is None and not os.environ.get("REQUIRE_SRT"), reason="sandbox-runtime not installed")]
 
 FILES = {
     "src/inference_server/__init__.py": "",

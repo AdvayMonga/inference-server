@@ -19,6 +19,6 @@ help you work; they are not evidence. The loop measures the change itself afterw
 When you finish, declare:
 - `kind`: `perf`, `fix`, `refactor` or `obs`.
 - `exactness`: `exact` if the engine's output tokens are unchanged, `approximate` if the change
-  trades precision for speed. This is checked; a wrong declaration rejects the change.
+  trades precision for speed. Declare it honestly; reviewers rely on it.
 - `objection`: if you think this hypothesis should not be built as stated, or the next step
   is wrong, say why here instead of building a bad change. Otherwise leave it null.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 
@@ -21,7 +22,7 @@ from inference_server.research.safety.hooks import allowed, write_guard
 # Tests the safety stack itself, with throwaway git repos the jail cannot create.
 pytestmark = pytest.mark.needs_host
 
-needs_srt = pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")
+needs_srt = pytest.mark.skipif(shutil.which("srt") is None and not os.environ.get("REQUIRE_SRT"), reason="sandbox-runtime not installed")
 
 FILES = {
     "src/inference_server/__init__.py": "",
