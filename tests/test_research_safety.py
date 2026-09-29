@@ -15,7 +15,9 @@ from inference_server.research.safety.grader import (
 )
 from inference_server.research.safety.jail import API_HOST, srt_settings
 
-needs_srt = pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")
+# CI sets REQUIRE_SRT so a missing jail fails these tests instead of silently skipping them.
+needs_srt = pytest.mark.skipif(shutil.which("srt") is None and not os.environ.get("REQUIRE_SRT"),
+                               reason="sandbox-runtime not installed")
 
 FILES = {
     "README.md": "readme\n",

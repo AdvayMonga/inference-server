@@ -119,9 +119,18 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install pytest pytest-asyncio ruff
+      - name: Install the jail the safety tests exercise
+        # Without srt those tests skip and the lane still goes green. Ubuntu 24.04 blocks the
+        # unprivileged user namespaces bubblewrap needs unless AppArmor's restriction is lifted.
+        run: |
+          sudo apt-get install -y --no-install-recommends bubblewrap socat
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          npm install -g @anthropic-ai/sandbox-runtime@0.0.77
       - name: Lint
         run: ruff check src/inference_server/research src/control_plane tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
       - name: Tests
+        env:
+          REQUIRE_SRT: "1"    # a missing jail fails the jail tests instead of skipping them
         run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
 
 
