@@ -46,22 +46,56 @@ def _walk_to_hypothesis(led: TurnState):
     return q, p
 
 
-def test_a_turn_ends_at_record(tmp_path):
-    led = TurnState(tmp_path / "run1" / "turn-001")
+def _walk_to_change(led: TurnState):
     q, p = _walk_to_hypothesis(led)
     h = led.append("hypothesize", "ok", {"claim": "x"}, reads=(q.id, p.id))
-    v = led.append("experiment", "confirmed", {}, reads=(h.id, p.id))
-    led.append("record", "confirmed", {}, reads=(h.id, v.id))
+    c = led.append("build", "ok", {}, reads=(h.id,))
+    return h, c
+
+
+def test_an_accepted_change_is_published_then_recorded(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
+    h, c = _walk_to_change(led)
+    k = led.append("check", "pass", {}, reads=(c.id,))
+    led.append("review_1", "ok", {}, reads=(h.id, c.id, k.id))
+    res = led.append("experiment", "done", {}, reads=(h.id, c.id))
+    j = led.append("review_2", "accept", {}, reads=(h.id, c.id, res.id))
+    led.append("publish", "ok", {}, reads=(c.id, j.id))
+    led.append("record", "ok", {}, reads=(h.id,))
     assert led.expected_node() is None
     with pytest.raises(StateError, match="ended"):
         led.append("measure", "ok", {})
+
+
+def test_a_rejected_change_skips_publish(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
+    h, c = _walk_to_change(led)
+    k = led.append("check", "pass", {}, reads=(c.id,))
+    led.append("review_1", "ok", {}, reads=(h.id, c.id, k.id))
+    res = led.append("experiment", "done", {}, reads=(h.id, c.id))
+    led.append("review_2", "reject", {}, reads=(h.id, c.id, res.id))
+    assert led.expected_node() == "record"
+
+
+def test_build_gives_up_after_its_visit_cap(tmp_path):
+    led = TurnState(tmp_path / "run1" / "turn-001")
+    h, c = _walk_to_change(led)
+    k = led.append("check", "fail", {}, reads=(c.id,))
+    c = led.append("build", "ok", {}, reads=(h.id,))
+    k = led.append("check", "pass", {}, reads=(c.id,))
+    led.append("review_1", "changes", {}, reads=(h.id, c.id, k.id))
+    c = led.append("build", "ok", {}, reads=(h.id,))
+    led.append("check", "fail", {}, reads=(c.id,))
+    assert led.expected_node() == graph.GIVE_UP
+    with pytest.raises(StateError, match="expects 'record'"):
+        led.append("build", "ok", {}, reads=(h.id,))
 
 
 def test_the_state_refuses_a_skipped_step(tmp_path):
     led = TurnState(tmp_path / "run1" / "turn-001")
     q, p = _walk_to_hypothesis(led)
     with pytest.raises(StateError, match="expects 'hypothesize'"):
-        led.append("experiment", "confirmed", {}, reads=(p.id,))
+        led.append("build", "ok", {}, reads=(p.id,))
 
 
 def test_the_state_refuses_an_undeclared_outcome(tmp_path):
