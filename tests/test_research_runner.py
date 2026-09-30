@@ -11,7 +11,7 @@ from inference_server.research.method.state import TurnState
 
 def follows_check(inputs):
     """A review_1 stand-in that never approves a failing check."""
-    return Result("changes" if inputs["CheckReport"].outcome == "fail" else "ok", {})
+    return Result("fix" if inputs["CheckReport"].outcome == "fail" else "ok", {})
 
 
 def stubs(**overrides):
@@ -30,7 +30,7 @@ def test_a_turn_runs_end_to_end_on_stubs(state):
     last = run_turn(state, stubs())
     assert [r.node for r in state.records] == [
         "question", "measure", "hypothesize", "build", "check", "review_1",
-        "experiment", "review_2", "publish", "record"]
+        "experiment", "profile", "review_2", "publish", "record"]
     assert last.node == "record" and state.expected_node() is None
 
 
@@ -42,15 +42,17 @@ def test_a_node_sees_only_the_latest_records_it_takes(state):
         return Result("reject", {})
 
     run_turn(state, stubs(review_2=review_2))
-    assert seen == {"Hypothesis": "hypothesize", "Change": "build", "Results": "experiment"}
+    assert seen == {"Hypothesis": "hypothesize", "Change": "build", "Results": "experiment",
+                    "Profile": "profile"}
     judgement = state.latest("Judgement")
-    assert judgement.reads == tuple(state.latest(t).id for t in ("Hypothesis", "Change", "Results"))
+    assert judgement.reads == tuple(state.latest(t).id
+                                    for t in ("Hypothesis", "Change", "Results", "Profile"))
 
 
-def test_an_objection_stops_the_turn_at_ask_human(state):
-    run_turn(state, stubs(build=lambda _i: Result("objection", {}, objection="wrong target")))
-    assert [r.node for r in state.records][-2:] == ["build", "ask_human"]
-    assert state.expected_node() is None
+def test_a_note_rides_along_without_stopping_the_turn(state):
+    run_turn(state, stubs(build=lambda _i: Result("ok", {}, note="wrong target")))
+    assert state.latest("Change").note == "wrong target"
+    assert state.records[-1].node == "record"
 
 
 def test_supervised_mode_pauses_and_resumes_from_disk(state, tmp_path):
@@ -62,11 +64,17 @@ def test_supervised_mode_pauses_and_resumes_from_disk(state, tmp_path):
     assert [r.node for r in again.records].count("hypothesize") == 1
 
 
-def test_endless_check_failures_give_up_at_the_build_cap(state):
+def test_endless_check_failures_stop_at_the_backstop_not_the_round_cap(state):
     run_turn(state, stubs(check=lambda _i: Result("fail", {}), review_1=follows_check))
     nodes = [r.node for r in state.records]
-    assert nodes.count("build") == graph.NODES["build"].max_visits
+    assert nodes.count("build") == graph.MAX_NODE_VISITS   # no round was ever spent
     assert nodes[-1] == graph.GIVE_UP
+
+
+def test_endless_review_send_backs_stop_at_the_round_cap(state):
+    run_turn(state, stubs(review_1=lambda _i: Result("changes", {})))
+    nodes = [r.node for r in state.records]
+    assert nodes.count("review_1") == graph.MAX_ROUNDS + 1 and nodes[-1] == graph.GIVE_UP
 
 
 def test_every_node_needs_an_implementation(state):

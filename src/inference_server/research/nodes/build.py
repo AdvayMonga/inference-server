@@ -16,11 +16,11 @@ from ..safety.grader import prepare_workspace
 OUTPUT_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["kind", "exactness", "objection"],
+    "required": ["kind", "exactness", "note"],
     "properties": {
         "kind": {"type": "string", "enum": sorted(KINDS)},
         "exactness": {"type": "string", "enum": ["exact", "approximate"]},
-        "objection": {"type": ["string", "null"]},
+        "note": {"type": ["string", "null"]},
     },
 }
 
@@ -53,9 +53,7 @@ class Build:
         ))
         body = {"workspace": str(workspace), "base": self.base, "attempt": attempt,
                 "cost_usd": reply.cost_usd, "turns": reply.turns}
-        if reply.output is None:   # the agent failed or ran out of budget: a human decides
-            return Result("objection", body, objection=f"build agent failed: {reply.error}")
+        if reply.output is None:   # the agent failed, not the idea: build again
+            return Result("crashed", body | {"error": reply.error})
         body |= {"kind": reply.output["kind"], "exactness": reply.output["exactness"]}
-        if reply.output.get("objection"):
-            return Result("objection", body, objection=reply.output["objection"])
-        return Result("ok", body)
+        return Result("ok", body, note=reply.output.get("note"))

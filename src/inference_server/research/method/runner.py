@@ -13,7 +13,7 @@ from .state import Record, TurnState
 class Result:
     outcome: str
     body: dict[str, Any]
-    objection: str | None = None
+    note: str | None = None      # a suggestion to the human; recorded, never routed on
 
 
 # A node sees only the latest record of each type it `takes` (and `optional`, when present);
@@ -41,7 +41,7 @@ def run_turn(state: TurnState, impls: dict[str, NodeFn], *,
         marker.touch()
         res = impls[node](inputs)
         rec = state.append(node, res.outcome, res.body,
-                           reads=tuple(r.id for r in inputs.values()), objection=res.objection)
+                           reads=tuple(r.id for r in inputs.values()), note=res.note)
         marker.unlink()
         if pause is not None and not pause(rec):
             return rec

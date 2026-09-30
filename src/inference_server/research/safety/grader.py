@@ -118,6 +118,7 @@ def audit(repo: Path, base: str, workspace: Path, kind: str) -> Audit:
 def pristine_tree(repo: Path, base: str, workspace: Path, result: Audit, dest: Path) -> None:
     """A fresh export of `base` plus only the audited changes; from here on, the change is this.
 
+    A two-commit repo (base, then change) so reviewers see a real diff and no other history.
     Hidden files stay out: agent code runs in this tree, and its output goes back to agents.
     """
     if not result.ok:
@@ -126,11 +127,22 @@ def pristine_tree(repo: Path, base: str, workspace: Path, result: Audit, dest: P
         shutil.rmtree(dest)
     _export(repo, base, dest)
     _strip_hidden(dest)
+    _commit(dest, "base", init=True)
     for rel in result.added + result.modified:
         (dest / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(workspace / rel, dest / rel)
     for rel in result.deleted:
         (dest / rel).unlink()
+    _commit(dest, "change")
+
+
+def _commit(tree: Path, message: str, init: bool = False) -> None:
+    git = ["git", "-C", str(tree), "-c", "user.name=loop", "-c", "user.email=loop@localhost",
+           "-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"]
+    if init:
+        subprocess.run(["git", "-C", str(tree), "init", "-q"], check=True)
+    subprocess.run(git + ["add", "-A", "--force"], check=True)   # an ignored file is still a change
+    subprocess.run(git + ["commit", "-q", "--allow-empty", "--no-verify", "-m", message], check=True)
 
 
 def diff(repo: Path, base: str, tree: Path, result: Audit) -> str:
