@@ -12,7 +12,7 @@ import pytest
 from inference_server.research.method import graph
 from inference_server.research.method.runner import Result, run_turn
 from inference_server.research.method.state import TurnState
-from inference_server.research.nodes.check import Check, kind_consistent
+from inference_server.research.nodes.check import Check
 from inference_server.research.safety.grader import prepare_workspace
 
 # Throwaway git repos, which the jail cannot create.
@@ -60,7 +60,7 @@ def test_a_good_change_passes_with_a_computed_diff_and_a_clean_tree(repo, tmp_pa
     res, turn = check_after(repo, tmp_path, lambda w: (w / ENGINE).write_text(
         "def f():\n    return 1  # faster\n"))
     assert res.outcome == "pass"
-    assert steps(res) == {"kind": True, "lint": True, "tests": True, "equivalence": None}
+    assert steps(res) == {"lint": True, "tests": True, "equivalence": None}
     assert "+    return 1  # faster" in res.body["diff"]
     tree = turn / "pristine-1"
     assert "# faster" in (tree / ENGINE).read_text()
@@ -81,13 +81,6 @@ def test_a_binary_file_is_reported_not_crashed_on(repo, tmp_path):
     res, _ = check_after(repo, tmp_path, lambda w: (w / "src/inference_server/blob.bin").write_bytes(
         b"\x00\xff\xfe"))
     assert "Binary file src/inference_server/blob.bin changed" in res.body["diff"]
-
-
-def test_an_obs_change_may_only_add_lines(repo, tmp_path):
-    res, _ = check_after(repo, tmp_path, lambda w: (w / ENGINE).write_text(
-        "def f():\n    return 1 + 0\n"), kind="obs")
-    assert res.outcome == "fail" and steps(res) == {"kind": False}
-    assert kind_consistent("obs", "+++ b/x\n+counter += 1\n").passed
 
 
 def test_touching_a_test_is_a_violation_that_stops_for_a_human(repo, tmp_path):

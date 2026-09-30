@@ -51,7 +51,7 @@ class FakeAgent:
 
     def __init__(self, output=None):
         self.specs: list[AgentSpec] = []
-        self.output = output or {"kind": "perf", "exactness": "exact", "note": None}
+        self.output = output or {"exactness": "exact", "note": None}
 
     def __call__(self, spec: AgentSpec) -> AgentReply:
         self.specs.append(spec)
@@ -98,7 +98,7 @@ def test_a_retry_is_a_fresh_session_on_the_same_workspace_with_the_failure(repo,
 
 
 def test_a_note_is_passed_on_and_the_turn_continues(repo, tmp_path):
-    agent = FakeAgent({"kind": "perf", "exactness": "exact", "note": "measure prefill first"})
+    agent = FakeAgent({"exactness": "exact", "note": "measure prefill first"})
     state = turn(tmp_path)
     run_turn(state, stubs(build=Build(repo, "HEAD", state.turn_dir, call=agent)))
     assert state.latest("Change").note == "measure prefill first"
@@ -119,8 +119,8 @@ def test_a_crashed_builder_is_run_again_on_the_same_workspace(repo, tmp_path):
     assert builds[0].body["error"] == "error_max_budget_usd"
 
 
-def test_the_declared_kind_can_only_be_one_the_loop_may_start():
-    assert OUTPUT_SCHEMA["properties"]["kind"]["enum"] == sorted(KINDS)
+def test_the_loop_only_makes_perf_changes():
+    assert set(KINDS) == {"perf"} and "kind" not in OUTPUT_SCHEMA["properties"]
 
 
 def test_knowledge_is_an_empty_seam_until_designed():
@@ -132,7 +132,7 @@ def test_knowledge_is_an_empty_seam_until_designed():
     ("src/inference_server/research/gates.py", False),
     ("../outside.py", False),
     ("tests/test_engine.py", False),          # existing test: no kind may edit it
-    ("tests/test_new_bug.py", True),          # a new test: fix may add it
+    ("tests/test_new_kernel.py", True),       # a new test: may be added
 ])
 def test_the_write_hook_refuses_before_the_write(repo, tmp_path, path, ok):
     ws = tmp_path / "ws"

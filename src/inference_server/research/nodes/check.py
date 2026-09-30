@@ -1,4 +1,4 @@
-"""check: code-only referee pass on a build — audit, kind, lint, tests; cheapest first."""
+"""check: code-only referee pass on a build — audit, lint, tests; cheapest first."""
 
 from __future__ import annotations
 
@@ -7,19 +7,7 @@ from pathlib import Path
 
 from ..method.runner import Result
 from ..method.state import Record
-from ..safety.grader import TestRun, audit, diff, pristine_tree, run_lint, run_tests
-
-
-def kind_consistent(kind: str, patch: str) -> TestRun:
-    """The diff does what its declared kind allows; `obs` may only add lines.
-
-    Textual only: added lines can still change behaviour. The reviewers judge that.
-    """
-    if kind == "obs":
-        removed = [ln for ln in patch.splitlines() if ln.startswith("-") and not ln.startswith("---")]
-        if removed:
-            return TestRun(False, 1, "obs may only add lines; removes:\n" + "\n".join(removed[:20]))
-    return TestRun(True, 0, "")
+from ..safety.grader import audit, diff, pristine_tree, run_lint, run_tests
 
 
 @dataclass
@@ -40,8 +28,7 @@ class Check:
         pristine_tree(self.repo, self.base, workspace, a, tree)
         patch = diff(self.repo, self.base, tree, a)
         body |= {"tree": str(tree), "diff": patch}
-        for name, run in (("kind", lambda: kind_consistent(kind, patch)),
-                          ("lint", lambda: run_lint(tree)),
+        for name, run in (("lint", lambda: run_lint(tree)),
                           ("tests", lambda: run_tests(tree))):
             r = run()
             body["steps"].append({"step": name, "passed": r.passed, "output": r.output})

@@ -22,6 +22,9 @@
   and human nodes. `method/state.py` saves each turn as append-only JSON and refuses
   out-of-order records. `method/runner.py` walks one turn: it picks each node's inputs (the
   latest record of each type it `takes`), calls it, saves the result; `pause` = supervised mode.
+- The loop makes `perf:` changes only: engine code (`src/inference_server/` minus `research/`)
+  plus new test files; never existing tests, the harness, or anything else. Other kinds are
+  human sessions.
 - The referee is `research/safety/`: `change_kinds.py` (deny-by-default write surfaces),
   `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
 - `research/agents/`: `brief.py` renders an agent node's context (its input records, knowledge,
