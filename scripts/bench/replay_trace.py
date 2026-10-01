@@ -17,9 +17,10 @@ process (one telemetry file) from colliding, and the prefix is recorded in the p
 harness_config so the two can be joined by prefix.
 
 Prompts are posted to `/v1/chat/completions` by default, so the model's own chat template is
-applied server-side; `--prompt-format raw` restores the old `/v1/completions` path. The trace
-stores plain prompt text either way — templating a trace at build time would tie the corpus to
-one model's template, and Phase 0 is still choosing the model. What that costs is an invisible
+applied server-side; a request whose trace line carries `messages` (a real multi-turn
+conversation) posts that list, otherwise one user message. `--prompt-format raw` posts the
+plain `prompt` text to `/v1/completions`. The trace never stores templated text — that would
+tie the corpus to one model's template, and Phase 0 is still choosing the model. What that costs is an invisible
 variable (which template, with which options), so a chat-route panel carries a `chat_template`
 fingerprint in its validity block, verified against the prompt-token count the server reported,
 and compare.py refuses across a changed one.
@@ -160,7 +161,8 @@ async def run_replay(client: httpx.AsyncClient, trace: list[TraceRequest], *,
         headers = {"X-Session-Id": req.session_id, "X-Turn-Index": str(req.turn_index),
                    "X-Trace-Id": trace_id(i)}
         s = await one_request(client, req.prompt, req.max_tokens, headers=headers,
-                              sampling=req.sampling, prompt_format=prompt_format)
+                              sampling=req.sampling, prompt_format=prompt_format,
+                              messages=req.messages)
         res.rows.append(Row(i, req.session_id, req.turn_index, trace_id(i), req.arrival_s,
                             round(fired, 4),
                             round(s.ttft_s * 1000, 2) if s.error is None else None,
@@ -213,12 +215,12 @@ def template_stamp(prompt_format: str, model_name: str | None,
     fp = CT.fingerprint(model_name)
     if fp is None or not trace or not rows:
         return fp
-    # Spot check, not exhaustive: one tokenizer serves a whole run, so the first row reporting
-    # prompt_tokens settles whether the client's stamp describes the serving process.
+    # Spot check, not exhaustive: one tokenizer serves a whole run, so the first single-message
+    # row reporting prompt_tokens settles whether the stamp describes the serving process.
     by_index = {r.index: r for r in rows}
     for i, req in enumerate(trace):
         row = by_index.get(i)
-        if row is not None and row.prompt_tokens is not None:
+        if row is not None and row.prompt_tokens is not None and req.messages is None:
             return CT.verify(fp, req.prompt, row.prompt_tokens)
     return fp
 
