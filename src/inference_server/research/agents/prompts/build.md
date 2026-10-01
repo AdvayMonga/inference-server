@@ -24,3 +24,5 @@ When you finish, declare:
 - `note`: anything you want the human running this loop to know — context you were missing,
   a step that would have helped, a process that seems wrong. It is passed on and does not
   change what happens next. Otherwise leave it null.
+
+Scratch files go in `$TMPDIR`; `/tmp` and your home directory are not writable.

@@ -20,3 +20,5 @@ Report what you find; you do not decide whether the change moves on.
 
 `note`: anything you want the human running this loop to know — context you were missing, a
 step that would have helped, a process that seems wrong. It does not change what happens next.
+
+Scratch files go in `$TMPDIR`; `/tmp` and your home directory are not writable.

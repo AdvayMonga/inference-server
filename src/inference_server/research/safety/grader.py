@@ -19,7 +19,8 @@ from .change_kinds import HIDDEN, may_write
 from .jail import jail_command, srt_settings
 
 # Caches a test run leaves behind; never copied into the pristine tree.
-IGNORED = ("*/__pycache__/*", "__pycache__/*", "*.pyc", ".pytest_cache/*")
+IGNORED = ("*/__pycache__/*", "__pycache__/*", "*.pyc", ".pytest_cache/*", ".ruff_cache/*",
+           ".mypy_cache/*", ".hypothesis/*")
 MAX_FILE_BYTES = 5_000_000
 # Downloaded models only: its parent also holds the HF login token, which stays unreadable.
 HF_HUB = Path.home() / ".cache" / "huggingface" / "hub"

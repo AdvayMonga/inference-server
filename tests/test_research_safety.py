@@ -95,6 +95,8 @@ def test_an_engine_edit_passes_the_audit(repo, ws):
     (ws / "src/inference_server/engine.py").write_text("def f():\n    return 1  # faster\n")
     (ws / "src/inference_server/__pycache__").mkdir()
     (ws / "src/inference_server/__pycache__/engine.pyc").write_bytes(b"x")   # ignored
+    (ws / ".ruff_cache").mkdir()
+    (ws / ".ruff_cache/CACHEDIR.TAG").write_text("x")                         # a tool cache, not a change
     a = audit(repo, "HEAD", ws, "perf")
     assert a.ok and a.modified == ["src/inference_server/engine.py"] and not a.added
 
