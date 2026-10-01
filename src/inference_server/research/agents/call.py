@@ -11,11 +11,14 @@ from typing import Any
 
 from ..safety.hooks import WRITE_TOOLS, write_guard
 from ..safety.jail import API_HOST, jail_command, srt_settings
+from ..safety.secrets import known_secrets, model_token, redact
 
 MODEL = "claude-fable-5-1"   # strongest available; agreed 2026-09-28
 BUILD_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
 REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash", "Skill"]   # read-only is the jail's job, not this list
-PASS_ENV = ("PATH", "ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION")
+CODE_REVIEW_TOOLS = REVIEW_TOOLS + ["Agent", "Task"]       # /code-review fans out to sub-agents
+PASS_ENV = ("PATH", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_AGENT_SDK_VERSION")
 
 
 @dataclass
@@ -25,7 +28,7 @@ class AgentSpec:
     prompt: str
     workspace: Path
     scratch: Path                  # outside the workspace: the CLI's own home, the jail settings
-    output_schema: dict[str, Any]
+    output_schema: dict[str, Any] | None   # None: the session's final text is the output
     max_turns: int
     max_budget_usd: float
     timeout_s: float
@@ -40,6 +43,7 @@ class AgentReply:
     cost_usd: float | None
     turns: int
     error: str | None
+    text: str | None = None        # the session's final text, for schema-less sessions
 
 
 def _wrapper(spec: AgentSpec, cli: Path) -> Path:
@@ -54,7 +58,9 @@ def _wrapper(spec: AgentSpec, cli: Path) -> Path:
     argv = jail_command(settings, spec.scratch / "srt.json", [str(cli)])
     keep = " ".join(f'"{k}=${k}"' for k in PASS_ENV)
     env = (f"{keep} HOME={shlex.quote(str(home))} CLAUDE_CONFIG_DIR={shlex.quote(str(home))} "
-           f"TMPDIR={shlex.quote(str(tmp))} "
+           f"TMPDIR={shlex.quote(str(tmp))} CLAUDE_CODE_TMPDIR={shlex.quote(str(tmp))} "
+           f"TMPPREFIX={shlex.quote(str(tmp / 'zsh'))} "
+           "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 "
            f"PYTHONPATH={shlex.quote(str(spec.workspace / 'src'))} PYTHONDONTWRITEBYTECODE=1")
     script = spec.scratch / "cli.sh"
     script.write_text(f"#!/bin/sh\nexec env -i {env} {shlex.join(argv)} \"$@\"\n")
@@ -68,11 +74,13 @@ async def _run(spec: AgentSpec) -> AgentReply:
     import claude_agent_sdk
     cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
     options = ClaudeAgentOptions(
-        model=MODEL, system_prompt=spec.system, tools=spec.tools, allowed_tools=spec.tools,
+        model=MODEL, system_prompt=spec.system or None, tools=spec.tools, allowed_tools=spec.tools,
         permission_mode="dontAsk", setting_sources=[], cwd=str(spec.workspace),
         max_turns=spec.max_turns, max_budget_usd=spec.max_budget_usd,
-        output_format={"type": "json_schema", "schema": spec.output_schema},
+        output_format=({"type": "json_schema", "schema": spec.output_schema}
+                       if spec.output_schema else None),
         cli_path=str(_wrapper(spec, cli)),
+        env={"CLAUDE_CODE_OAUTH_TOKEN": token} if (token := model_token()) else {},
         hooks={"PreToolUse": [HookMatcher(matcher=WRITE_TOOLS, hooks=[write_guard(spec.workspace)])]},
     )
     reply = AgentReply(None, None, 0, "no result message")
@@ -80,14 +88,18 @@ async def _run(spec: AgentSpec) -> AgentReply:
         if isinstance(msg, ResultMessage):
             reply = AgentReply(msg.structured_output if not msg.is_error else None,
                                msg.total_cost_usd, msg.num_turns,
-                               None if not msg.is_error else msg.subtype)
+                               None if not msg.is_error else msg.subtype,
+                               msg.result if not msg.is_error else None)
     return reply
 
 
 def call_agent(spec: AgentSpec) -> AgentReply:
-    """Run one fresh agent session and return its structured output; never raises on agent failure."""
+    """Run one fresh agent session and return its structured output, secrets redacted."""
     spec.scratch.mkdir(parents=True, exist_ok=True)
     try:
-        return asyncio.run(asyncio.wait_for(_run(spec), spec.timeout_s))
+        reply = asyncio.run(asyncio.wait_for(_run(spec), spec.timeout_s))
     except TimeoutError:
         return AgentReply(None, None, 0, f"timed out after {spec.timeout_s}s")
+    secrets = known_secrets()
+    return AgentReply(redact(reply.output, secrets), reply.cost_usd, reply.turns,
+                      redact(reply.error, secrets), redact(reply.text, secrets))

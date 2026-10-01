@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from inference_server.research.agents.call import REVIEW_TOOLS, AgentReply, AgentSpec, _wrapper
-from inference_server.research.nodes.review_1 import Review1, verdict
+from inference_server.research.agents.call import (
+    CODE_REVIEW_TOOLS, REVIEW_TOOLS, AgentReply, AgentSpec, _wrapper,
+)
+from inference_server.research.nodes.review_1 import CODE_REVIEW, Review1, verdict
 from inference_server.research.safety.grader import audit, prepare_workspace, pristine_tree
 
 needs_srt = pytest.mark.skipif(shutil.which("srt") is None, reason="sandbox-runtime not installed")
@@ -39,6 +41,8 @@ class FakeReviewer:
 
     def __call__(self, spec: AgentSpec) -> AgentReply:
         self.specs.append(spec)
+        if spec.output_schema is None:   # pass 1: /code-review answers in text
+            return AgentReply(None, 0.02, 3, None, text="off-by-one at src/x.py:1")
         return AgentReply({"findings": self.findings, "note": None}, 0.01, 2, None)
 
 
@@ -58,9 +62,13 @@ def inputs(tmp_path, check_outcome="pass", previous=None):
 def test_the_reviewer_reviews_the_clean_tree_read_only_without_its_old_review(tmp_path):
     agent = FakeReviewer([f("nit")])
     res = Review1(tmp_path, call=agent)(inputs(tmp_path, previous={"nit_pass_used": False}))
-    spec = agent.specs[0]
-    assert spec.workspace == tmp_path / "tree" and spec.writable is False
+    code_review, spec = agent.specs
+    assert code_review.prompt == CODE_REVIEW and code_review.tools == CODE_REVIEW_TOOLS
+    assert "off-by-one at src/x.py:1" in spec.prompt   # pass 2 verifies pass 1's findings
+    assert spec.workspace == code_review.workspace == tmp_path / "tree"
+    assert spec.writable is False and code_review.writable is False
     assert spec.tools == REVIEW_TOOLS
+    assert res.body["cost_usd"] == pytest.approx(0.03) and res.body["code_review"]
     assert "# CheckReport (from check, outcome pass)" in spec.prompt
     assert "# Review" not in spec.prompt            # it judges the change, not its last opinion
     assert res.outcome == "changes" and res.body["nit_pass_used"] is True

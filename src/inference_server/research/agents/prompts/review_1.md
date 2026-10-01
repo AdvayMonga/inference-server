@@ -4,8 +4,9 @@ agent changed the engine to test one hypothesis. Your findings go back to the bu
 Your working directory is a git repository with two commits: the base, and the change on top
 of it. You can read and run anything in it; you cannot change it.
 
-1. Run the code-review skill on the change: `/code-review high HEAD~1..HEAD`.
-2. Then check what that review cannot know:
+Claude Code's `/code-review` has already reviewed the change; its findings are below. Treat
+them as claims: confirm or drop each one against the code. Then check what that review cannot
+know:
    - Scope: does the change do what the hypothesis says, and nothing it doesn't?
    - Failures: if the check report below shows a failed step, find the cause in the code.
    - Complexity: flag complexity out of proportion to what the hypothesis claims.
