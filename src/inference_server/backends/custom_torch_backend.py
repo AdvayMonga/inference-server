@@ -219,7 +219,7 @@ class _PrefillCtx:
 
 
 class CustomTorchBackend(InferenceBackend):
-    """PyTorch backend driven by our custom GemmaForCausalLM forward."""
+    """PyTorch backend driven by our custom forward (GemmaForCausalLM or Qwen3MoeForCausalLM)."""
 
     THINK_START = 100
     THINK_END = 101
@@ -240,20 +240,34 @@ class CustomTorchBackend(InferenceBackend):
 
     def load_model(self, model_name: str) -> None:
         import os
-        from transformers import AutoTokenizer
-        from inference_server.models.gemma4 import GemmaForCausalLM
+        from transformers import AutoConfig, AutoTokenizer
         from inference_server.models.paged_kv_cache import make_pools_for_gemma
+
+        model_type = AutoConfig.from_pretrained(model_name).model_type
+        if model_type == "gemma4":
+            from inference_server.models.gemma4 import GemmaForCausalLM as model_cls
+        elif model_type == "qwen3_moe":
+            from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM as model_cls
+        else:
+            raise ValueError(f"CustomTorchBackend supports gemma4 and qwen3_moe, not {model_type!r}")
+        # The MoE expert loop syncs to the host per layer, so graphs / compile / int8 stay Gemma-only.
+        moe = model_type == "qwen3_moe"
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        if moe:   # Qwen's think markers; ids 100/101 are ordinary characters in its vocab
+            self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
 
-        self.model = GemmaForCausalLM.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
+        self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
         # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
-        if os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8":
+        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8"
+        if quant and moe:
+            logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
+        elif quant:
             from inference_server.models.quant import quantize_model_int8
             # On CUDA, route layers through the shared compiled GEMV so Inductor fuses the dequant
             # (keeps weight int8 in HBM — the bandwidth win); composes with the decode CUDA graph.
@@ -297,8 +311,10 @@ class CustomTorchBackend(InferenceBackend):
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
-        self._graph_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
-        self._compile_on = self.device.type == "cuda" and os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
+        self._graph_on = self.device.type == "cuda" and not moe and \
+            os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
+        self._compile_on = self.device.type == "cuda" and not moe and \
+            os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
         self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
         self._scratch = None                 # one padding block per pool, shared by every bucket
@@ -328,7 +344,7 @@ class CustomTorchBackend(InferenceBackend):
         # K=1 CUDA-graph prefill — replays the forward instead of paying ~73ms eager dispatch
         # (the unloaded-TTFT floor). Captured lazily per suffix bucket on first use (capture is
         # ~seconds, unlike torch.compile). Flag-gated OFF until verified; deploy unaffected.
-        self._prefill_graph_on = self.device.type == "cuda" and \
+        self._prefill_graph_on = self.device.type == "cuda" and not moe and \
             os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
         self._prefill_graphs: dict = {}
 

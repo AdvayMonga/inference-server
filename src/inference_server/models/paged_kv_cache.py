@@ -717,7 +717,7 @@ def make_pools_for_gemma(
     model, num_blocks_per_pool: int = 1024, block_size: int = 16,
     sliding_blocks: int | None = None,
 ) -> list[BlockPool | None]:
-    """Build the BlockPool list matching a GemmaForCausalLM's heterogeneous layers.
+    """Build the BlockPool list matching a GemmaForCausalLM's (or Qwen3MoeForCausalLM's) layers.
 
     Shared layers get None (they don't own K/V). Full-attention pools are sized to
     `num_blocks_per_pool` (they grow with sequence length). Sliding pools are capped at the
