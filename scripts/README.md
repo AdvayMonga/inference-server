@@ -87,8 +87,9 @@ re-check under `custom-cuda` at the real batch widths.
 ## tools/
 
 `smoke_custom.py`, `test_scheduler.py`, `test_batch_cache.py` are local end-to-end smoke runs.
-`build_corpus.py` generated the frozen traces in `corpus/` once, from a fixed seed; rerun it only to
-cut a new corpus version (see `corpus/README.md`).
+`fetch_traces.py` downloads the pinned public traces (BurstGPT, WildChat-1M, Azure 2024) and the
+Qwen3 tokenizer into a local cache; `build_corpus.py` builds the frozen traces in `corpus/` from
+them with a fixed seed; rerun it only to cut a new corpus version (see `corpus/README.md`).
 `migrate_modal_citations.py` re-pointed the 13 `knowledge/` entries that cite a `*_modal.py`
 instrument at `archive/modal/` when those scripts were archived (2026-09-16); it is idempotent.
 `migrate_decisions_to_kb.py` and `backfill_experiments.py` are the one-shot migrations that

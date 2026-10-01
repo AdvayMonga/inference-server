@@ -35,6 +35,10 @@ modal = [
 agents = [
     "claude-agent-sdk>=0.2.161",
 ]
+# scripts/tools/fetch_traces.py reads the WildChat parquet shards; nothing else imports it.
+corpus = [
+    "pyarrow>=17",
+]
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"

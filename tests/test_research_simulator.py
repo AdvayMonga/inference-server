@@ -336,19 +336,25 @@ def test_screen_points_cheap_tiers_at_the_simulator(tmp_path, capsys):
 # was written to guard and makes it immune to the next panel-definition change; the rows half was
 # verified byte-identical across that bump for all twelve configs, which is what let it be split
 # rather than simply re-pinned. `SUMMARY_GOLDEN` below carries the panel half at version 2.
+# Both re-pinned 2026-10-01 on the real-trace corpus (a new corpus_version; simulator
+# unchanged), and `spike` added.
 PRE_TERMINATION_GOLDEN = {
-    "cold_start/heldout/mbs2": "c4285c1d02ad8d270e6143ef86eb991d6efd5a0bff480a655122f8dfedccac89",
-    "cold_start/heldout/mbs8": "c4285c1d02ad8d270e6143ef86eb991d6efd5a0bff480a655122f8dfedccac89",
-    "cold_start/seen/mbs2": "1e8e5b8562f596ea3b9111a669a9662891f0edeca861362dcd3ef17d3b2bf747",
-    "cold_start/seen/mbs8": "1e8e5b8562f596ea3b9111a669a9662891f0edeca861362dcd3ef17d3b2bf747",
-    "long_context/heldout/mbs2": "eb558a81b8460b2f8613d1dc6820ea3769739e0b7e8cb52178d5238cec775b5a",
-    "long_context/heldout/mbs8": "9a17a382cc3cc03808711be968faee4908e9756756c8b73793d57fa3471843b9",
-    "long_context/seen/mbs2": "b731fe6f2030bb2f010fd2f55caff402df508520e3c252a0f5baf11aa8f8590f",
-    "long_context/seen/mbs8": "28f0ccad415a3f3099979240bfc2897a98bd0e4dae36209f3c6657d2a4edd0d3",
-    "steady_interactive/heldout/mbs2": "2a8db72d37c7914b5d8238f56ccc11c9b04f19c00c192c91739db5bda5e23e85",
-    "steady_interactive/heldout/mbs8": "30804d3f08756b1297ce5074c7155f0ef1b4fb7d3a9b79e9b0dd765e7209cba7",
-    "steady_interactive/seen/mbs2": "e2a4bc7d08d944e439520c67a7b45a8324180d4d46d7e6af9887e5becf620b20",
-    "steady_interactive/seen/mbs8": "fe0eb4020cd7ff9d641ba356700ac01b9f76a6b4834d0b61c89f233297b16d29",
+    "cold_start/heldout/mbs2": "78f11328fbbf3ae8f4bf83cd1b0f2b4f16e74513c42c2eb95c1f46790089b4f3",
+    "cold_start/heldout/mbs8": "37c98f74cb73062e9a95ca85572ccc1158f52510e37a59f7cef3b6375c7c8bb5",
+    "cold_start/seen/mbs2": "b0188b82abec34ded05fd9be857c2b030cb83d41877b3c83b2a2e119add330f0",
+    "cold_start/seen/mbs8": "0f229ea4ad472ce045b7393f50f63dcc8c170370610302a16558468b0291782d",
+    "long_context/heldout/mbs2": "987f7620775c9d249f6363f93630402d2d0dc09d97d617ab01289b65b70aab9b",
+    "long_context/heldout/mbs8": "bf41c91bc616d769d16b9940cb4c9087ae0e1ac64865f6d0f05b27f8ddaf6f08",
+    "long_context/seen/mbs2": "b3f067da63155f542164c2bc55ad8df3a14baf1aff503529bdb7c6e825b8b39a",
+    "long_context/seen/mbs8": "8a6c3d56949746149f28e4995d3b5eabd8168ba85f49325f774fc1165d029468",
+    "steady_interactive/heldout/mbs2": "61084a8e6e28db5884c53756b0da6cb14f2e6f44404cf6483f2576a6c828679e",
+    "steady_interactive/heldout/mbs8": "a1cc3ba782608196bb87fa7f798070b7fb3a079457331a1caf838c5bc20b060b",
+    "steady_interactive/seen/mbs2": "898809590501b6cd4082bf4d0b9f20f85ee5c2e82836b871968e3a60d8990b41",
+    "steady_interactive/seen/mbs8": "9a6a0a7c4d4c63dd4d24d7a5dddc236e80cd2ce597e679431bfa4cf1f8a1ab18",
+    "spike/heldout/mbs2": "a06698b0dfd0365348f7aa2d1b29a6ea4fff871865aef1003f8d3e9bc52cbd8f",
+    "spike/heldout/mbs8": "316bb2150f71bc36b36795be3e7813f6c6b8bf69ca89851da3c5f3104d7741b1",
+    "spike/seen/mbs2": "2c7287cbb8062c734dd8e20b1aecc853889f34abdd903141310a63aa5ec04228",
+    "spike/seen/mbs8": "b2c0c6ad5a67aa48641eb35c2362d9c98dd2296557e15107e7bdc38a81ed4f01",
 }
 
 
@@ -356,18 +362,22 @@ PRE_TERMINATION_GOLDEN = {
 # things: the rows above must never move until a corpus populates the field, while these move
 # whenever the panel's definition does — deliberately, and only in a PR that bumps the version.
 SUMMARY_GOLDEN = {
-    "cold_start/heldout/mbs2": "c6edf817609c0e622caf6ebbe6b0670387d7fd08aa775a46d59bbb07217f2b0a",
-    "cold_start/heldout/mbs8": "c6edf817609c0e622caf6ebbe6b0670387d7fd08aa775a46d59bbb07217f2b0a",
-    "cold_start/seen/mbs2": "f9d58fe0b7897cd395c741b85420098bda0a745f3211e6730c738d06ec416624",
-    "cold_start/seen/mbs8": "f9d58fe0b7897cd395c741b85420098bda0a745f3211e6730c738d06ec416624",
-    "long_context/heldout/mbs2": "2ce3b600ee0623faca6230a8e40710e4ca5584d7ebbe58f628798c8eddb93111",
-    "long_context/heldout/mbs8": "12098045cc11daca08c37d5558efc596435beb165e23e10269de213900c44eff",
-    "long_context/seen/mbs2": "05621046c7b063dd3c662d99aa71fc5f6210ad800094b12e15cdc067a7eb7492",
-    "long_context/seen/mbs8": "f5591a551bbf3bd38dad27235b70f55ea395ee70823d73f36f99c1ece7263ef4",
-    "steady_interactive/heldout/mbs2": "71ac09da7e1fbc3f75eb40addb1108df8f1186f093bf5caefcf00e6879aeeb45",
-    "steady_interactive/heldout/mbs8": "791ece2da4a1ce31f60a8de6d678ac3e37a3c59c40e7b0f51fdcb66cc88652b1",
-    "steady_interactive/seen/mbs2": "72ba12e6baff447f2761ccd166a8635c32c2707375e65a84684e7359db3c0279",
-    "steady_interactive/seen/mbs8": "8777f21149cdb97401c2c504b520c5927fd2783c15cfe8420d532b4057639d86",
+    "cold_start/heldout/mbs2": "e69461ddd9e9edc9e31b458ad79ecfbd477f24e6b4419827a4c624cc98d4abbe",
+    "cold_start/heldout/mbs8": "174c6125e9ecfc7c75886fa4614bf1221d1268492dd5908b84872553e11fb8bb",
+    "cold_start/seen/mbs2": "0a9ebb6f710109ed3a7545e32b742530b6e1f662d04835ec5695bc652577095d",
+    "cold_start/seen/mbs8": "a33553653e2451d2307e0f83d8c0c43edd28405b924ec7da0588d7e894ac2f50",
+    "long_context/heldout/mbs2": "773d10cd6faa906f45c96dd12f71b8e58b1d0ca1edd383f81698b3a8c251b82a",
+    "long_context/heldout/mbs8": "18e1a41111b11ddd48ec15470d20f5d75c21411a8a54d98ae02aec23599868e3",
+    "long_context/seen/mbs2": "b8d11af17e7952a46b83ee7c1f77b1bef79ff5226e9112cfa25701055347daff",
+    "long_context/seen/mbs8": "21c1d731206bc37283781d7b1038466b890d8f2f6b7b3797db2e04763d254ec0",
+    "steady_interactive/heldout/mbs2": "f553f26b376d5e227f94039da0a6018fece86b3a9c410f2817c1edd3ea40fe1c",
+    "steady_interactive/heldout/mbs8": "566329215f8f7978ae9420e8fa62ea44a272d20538feacb1855ccd3a96cee42c",
+    "steady_interactive/seen/mbs2": "9db5e5fd024c29388d8f2262df1aa9b1edd250a6d229d9076c6778031bce5058",
+    "steady_interactive/seen/mbs8": "8536eedaf88dc83bf74546f312e99f5ce46dc558cf87ad37456b957d01a9c7b7",
+    "spike/heldout/mbs2": "9801564527a8fac3c3701a8e83c968824fc043afdc6c1e7f4f2829c1cb0dbee0",
+    "spike/heldout/mbs8": "3af4633f8b36149fa185a439f99def8d540009823dffb92eb118150e2cab9c1c",
+    "spike/seen/mbs2": "0979143edafdbea9b172cfa529697a43bea67db3b9bdecb872a100b81c231d2e",
+    "spike/seen/mbs8": "b93882769f63ada3839713aa30ff72533c577ccffb918643888ee049abf72ec6",
 }
 
 

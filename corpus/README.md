@@ -2,67 +2,139 @@
 
 The corpus defines the landscape the research loop searches. Anything not in it is invisible.
 
-**A trace** (`<class>/<split>.jsonl`) is one request per line: `arrival_s` (offset from trace
-start), `session_id`, `turn_index`, `prompt`, `max_tokens`, `sampling` (temperature 0, so output
-is deterministic and the correctness gate can compare it), and `expected_output_hash`, which is
-`null` until a reference run fills it. `replay_trace.py` fires each request at its `arrival_s` on
-the client's own clock regardless of what the server is doing — open loop, never closed.
+Since 2026-10-01 it is built from **real public traces**: real arrival times and sessions from
+BurstGPT, real conversation text (with the real assistant replies) from WildChat-1M. The
+previous synthetic corpus (Poisson arrivals over `scripts/bench/prompt_bank.py`, multi-turn by
+prompt concatenation, corpus_version `659ea3b6…`) remains in git history. **Every panel
+measured against the old version is non-comparable with this one** — `compare.py` refuses
+across `corpus_version`, and the noise bands in `knowledge/noise/` do not carry over.
 
-**A class** (`manifest.json` → `classes`) is a name, an SLO (`slo_ttft_ms`, optional
-`slo_tpot_ms`), a nominal arrival rate, and two traces: `seen`, which the loop optimises against,
-and `heldout`, on which a confirmed win must replicate before merge. Every full prompt string and
-session id is disjoint between the splits, but both draw base content from the same small
-`prompt_bank.py` (long_context has two base documents), so what differs today is the unique
-per-request preamble plus the arrival schedule and lengths. Expanding the bank is the real fix,
-and is a new corpus version.
+## A trace
 
-`replay_trace.py` posts each prompt to `/v1/chat/completions` as a single user message, so the
-model's own chat template is applied **server-side** (`--prompt-format raw` restores the old
-`/v1/completions` path). The traces store plain prompt text and stay model-independent: baking
-Gemma's template into the corpus would invalidate every trace the moment Phase 0 picks a
-different model. It is not a cosmetic choice — sent raw, `gemma-4-E2B-it` answers most of these
-prompts with an immediate end-of-turn token, which is why `cold_start/seen` generated 220 tokens
-of its 626-token budget and six of eight `cold_start/heldout` prompts generated nothing at all
-(`kb-20260919-6ef4e6bf`). What templating costs is a variable that is not in the trace — which
-template, applied with which options — so a chat-route panel carries a verified `chat_template`
-fingerprint in its validity block, and `compare.py` refuses across a changed one, across
-`harness_config.prompt_format`, and a noise band no longer gates a run from the other route.
+`<class>/<split>.jsonl`, one request per line: `arrival_s` (offset from the window's first
+request), `session_id`, `turn_index`, `prompt`, `max_tokens`, `sampling` (temperature 0, so
+output is deterministic and the correctness gate can compare it), `expected_output_hash`
+(`null` until a reference run fills it), `build_prompt_tokens` (the request's templated length
+under the build tokenizer, so floor/cap checks need no tokenizer), and — on a multi-turn request
+only — `messages`.
 
-Correlation is unchanged on either route: `session_id` / `turn_index` ride as the `X-Session-Id`
-/ `X-Turn-Index` headers, so a turn 1 reaches the engine on the same session as its turn 0, and
-`X-Trace-Id=<class>-<split>-<nonce>-<index>` is the key its per-request CSV row shares with the
-engine's telemetry row; the nonce is minted per invocation (two replays against one server
-process write into one telemetry file) and recorded in the panel's `harness_config.trace_prefix`,
-so a run's rows are joined by prefix. `sampling` is sent as-is (temperature, top_p, top_k) —
-`top_k` is not an OpenAI-standard field and the chat route carries it exactly as the raw one does.
+- **Turn 0** has no `messages`: `prompt` is the user's first message.
+- **Turn k > 0** carries `messages`, a real WildChat conversation `[user, assistant, …, user]`
+  ending in the user's k-th follow-up, with WildChat's stored assistant replies (from
+  GPT-3.5/GPT-4). `prompt` is the same contents joined by blank lines, for the raw route and
+  the simulator's length model.
+- `max_tokens` is 2048 everywhere, deliberately generous so answers end on their own stop token
+  (the trace's response tokens are NOT used). `expected_output_tokens` is unset until a GPU
+  reference run measures it.
 
-A turn's prompt still carries the full conversation so far, as ONE user message, and that stays
-true under templating: the engine has no conversation store, prefix sharing is what makes the
-repeated prefix cheap, and an honest two-message rendering would need the assistant's reply from
-turn 0 — which the corpus does not record and could not record without tying itself to one
-model's outputs.
+`replay_trace.py` fires each request at its `arrival_s` on the client's own clock — open loop —
+and posts `messages` (or one user message) to `/v1/chat/completions`, so the serving model's
+chat template is applied **server-side**: traces never store templated text and stay
+model-independent. A chat-route panel carries a verified `chat_template` fingerprint (checked
+against a single-message request) and `compare.py` refuses across a changed one.
+`--prompt-format raw` posts `prompt` to `/v1/completions`. `session_id` / `turn_index` ride as
+`X-Session-Id` / `X-Turn-Index`, and `X-Trace-Id=<class>-<split>-<nonce>-<index>` joins each CSV
+row to its telemetry row.
 
-| class | shape | placeholder SLO |
-|---|---|---|
-| `cold_start` | 8 sparse requests to a fresh replica | p95 TTFT < 2000 ms |
-| `steady_interactive` | ~130 mixed-length requests at 4 req/s, 30% of sessions return for a turn 1 | p95 TTFT < 200 ms, TPOT < 50 ms |
-| `long_context` | 40 long prompts at 1 req/s, high KV pressure | p95 TTFT < 1000 ms |
+## Classes
 
-SLO numbers are placeholders pending the plan's Phase 0 decision (recorded in `manifest.notes`).
+| class | window | requests (seen / heldout) | proposed SLO |
+|---|---|---|---|
+| `cold_start` | first 60 requests after a ≥10 min idle gap, all within 20 min, varied lengths | 60 / 60 | p95 TTFT < 5000 ms |
+| `steady_interactive` | a 10-min window of 200–300 requests, no minute above 2× the mean | 238 / 241 | p95 TTFT < 1000 ms, TPOT < 100 ms |
+| `long_context` | 60 consecutive trace requests of ≥3000 tokens | 60 / 60 | p95 TTFT < 3000 ms |
+| `spike` | a minute of 40–150 requests after ten quiet minutes, 5 min lead-in, 3 min tail | 290 / 272 | p95 TTFT < 2000 ms |
+
+SLOs are **proposed 2026-10-01, pending owner confirmation** (also in `manifest.notes`).
+Confirming or changing one is a new corpus version.
+
+**Splits.** `seen` windows come from even weeks of the BurstGPT trace, `heldout` from odd
+weeks — disjoint time, never the same window. No WildChat conversation is used twice anywhere
+in the corpus, so prompts and sessions are disjoint across splits too.
+
+**Rate scale.** Windows are *selected* to fit one replica (each class's criteria above), then
+every inter-arrival is stretched by one factor, `dilation = max(1, rate / target)`, so the burst
+shape is kept exactly. The target is the class's `arrival_rate_rps` (mean rate; the peak minute
+for `spike`). Each trace's factor is recorded in `manifest.json` → `dilation` (hashed into the
+corpus_version); **`replay_trace.py --rate-scale <dilation>` restores the real timing**. Every
+trace in this version has dilation 1.0, i.e. is already in real time. BurstGPT timestamps have
+1 s resolution, so several requests often share an `arrival_s`.
+
+**What a `cold_start` window is, in BurstGPT terms.** Post-idle traffic in BurstGPT is mostly
+night-time (trace-local 00:00–09:00) and mostly API-log requests from scripted clients: of the
+post-gap windows that reach 60 requests within 20 min, almost all are one client firing
+near-identical prompts (e.g. 60 requests of 343–449 tokens in 33 s, or 60 pings of 12–40
+tokens in 12 s). Those are rejected: a window must have request-token CV ≥ 0.3 and at most 60%
+of its requests within ±25% of the median. Only a handful of windows pass (one in the seen
+weeks, two in the heldout weeks), so `cold_start` is "the first organic-looking burst after
+quiet", not a typical one — and its seen and heldout traces are single windows, so treat a
+cold_start p95 as a property of those windows rather than of BurstGPT at large.
+
+**Pairing.** Each BurstGPT session in the window gets one unused WildChat conversation; each
+of its requests gets the conversation turn whose templated prompt length (Qwen3-30B-A3B
+tokenizer, `enable_thinking=False`) is closest in ratio to the trace's `Request tokens`, turns
+strictly increasing within the session. A session longer than 16 requests is split into
+consecutive conversations. API-log requests have no session: each is its own session and may
+land on any turn, so many single requests are mid-conversation turns whose earlier turns are
+not in the trace (a cold prefix). Failed requests (logged with 0 request tokens, 7.3% of
+BurstGPT) are dropped. Returning sessions are rare in the real trace (0–7 per trace).
+
+**Why no Azure split.** The Azure 2024 trace was evaluated as a cross-source held-out and does
+not fit cleanly: it has no session ids (no multi-turn, no prefix reuse); the manifest schema
+has exactly two splits per class, and a third would ripple through `corpus.py`, the replay CLI,
+`compare.py` and the held-out gate; and at 45 req/s mean it needs ~100× thinning, not dilation,
+to fit one replica, so its burst shape cannot be preserved the same way. It is used as a sanity
+check instead (`build_corpus.py --azure-check`):
+
+| trace | mean req/s | inter-arrival CV | per-minute p50 / p99 / max | prompt tokens p50 / p90 / p99 |
+|---|---|---|---|---|
+| BurstGPT_3 (no failures) | 0.52 | 17.2 | 4 / 450 / 917 | 340 / 884 / 3482 |
+| Azure conv 2024 | 45.2 | 1.7 | 2756 / 4499 / 5112 | 928 / 3830 / 6683 |
+
+BurstGPT is far burstier and somewhat shorter-prompted than Azure's conversation service; a
+policy tuned on this corpus should be re-checked against a smoother, longer-context mix.
+
+## Rebuilding
+
+```bash
+uv sync --extra dev --extra corpus                          # pyarrow, for the WildChat shards
+.venv/bin/python scripts/tools/fetch_traces.py               # ~1.6 GB into ~/.cache/inference-server/traces
+PYTHONPATH=src .venv/bin/python scripts/tools/build_corpus.py   # seed 20261001
+```
+
+`fetch_traces.py` pins every URL to a release or revision and every file to a sha256, refuses
+a mismatch, and is idempotent. Raw data never enters git (`TRACE_CACHE` overrides the cache
+dir). The build is deterministic in (seed, cached inputs, tokenizer); `--tokenizer` makes the
+pairing tokenizer a setting, and a different one is a new corpus version.
+`tests/test_research_corpus.py` rebuilds from the cache and asserts the committed bytes (it
+skips when the cache is absent).
 
 ## The rule
 
 `corpus_version` is a sha256 over every trace's hash and the class table (SLOs, rates, paths).
 `load_manifest()` re-hashes each file and refuses the corpus on any mismatch, and `compare.py`
 refuses two panels whose versions differ. So: **never edit a trace or an SLO in place.** Any
-change — a prompt, an arrival, a new class, the placeholder SLOs being decided — is a rebuild that
-produces a new version, and every panel measured against the old version stops being comparable
-to the new ones. That is the point.
+change is a rebuild that produces a new version.
 
-## Adding or changing a class
+## Sources and attribution
 
-1. Edit the class table in `scripts/tools/build_corpus.py` (or `prompt_bank.py` for prompts).
-2. `PYTHONPATH=src python scripts/tools/build_corpus.py` — regenerates every trace and the manifest
-   from the fixed seed.
-3. Commit `corpus/` with the code change. `tests/test_research_corpus.py` asserts the committed
-   data is what the builder produces and that hashes verify.
+- **BurstGPT** — HPMLL, <https://github.com/HPMLL/BurstGPT>, release v2.0, `BurstGPT_3.csv`.
+  Licensed CC-BY-4.0. Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Zhenheng Tang, Rui Guo,
+  Xin Wang, Qiang Wang, Amelie Chi Zhou, Xiaowen Chu. "BurstGPT: A Real-world Workload Dataset
+  to Optimize LLM Serving Systems", arXiv:2401.17644 (2024). Changes: failed rows dropped;
+  windows selected and time-dilated as above.
+- **WildChat-1M** — Allen Institute for AI, <https://huggingface.co/datasets/allenai/WildChat-1M>,
+  revision `7d6490e4`, shards 0–1. Licensed ODC-BY 1.0
+  (<https://opendatacommons.org/licenses/by/1-0/>). Wenting Zhao, Xiang Ren, Jack Hessel,
+  Claire Cardie, Yejin Choi, Yuntian Deng. "WildChat: 1M ChatGPT Interaction Logs in the Wild",
+  ICLR 2024 (arXiv:2405.01470). Changes: English, non-toxic, unflagged, unredacted conversations
+  only; any conversation containing a credential-like string (API keys, tokens, private keys,
+  placeholders included; `SECRET_RE` in `build_corpus.py`) dropped; per-user metadata (IP hashes, location, headers) dropped; conversations truncated at
+  the paired turn.
+- **Azure LLM inference trace 2024** — Microsoft, <https://github.com/Azure/AzurePublicDataset>,
+  `AzureLLMInferenceTrace_conv_1week.csv`. Licensed CC-BY-4.0. Jovan Stojkovic, Chaojie Zhang,
+  Íñigo Goiri, Josep Torrellas, Esha Choukse. "DynamoLLM: Designing LLM Inference Clusters for
+  Performance and Energy Efficiency", HPCA 2025. Used for the statistics above only; nothing
+  from it is in the traces.
+- **Tokenizer** — `Qwen/Qwen3-30B-A3B` (revision `ad44e777`, Apache-2.0), tokenizer files only,
+  used to measure lengths at build time; no tokens are stored.

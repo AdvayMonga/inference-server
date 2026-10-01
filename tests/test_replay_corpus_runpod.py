@@ -18,6 +18,7 @@ from fastapi.responses import StreamingResponse
 
 from inference_server.config import Settings
 from inference_server.research import harness as H
+from inference_server.research.corpus import load_trace
 from inference_server.research.venues import extract_payload
 from inference_server.telemetry import RequestRecord, RowStore
 
@@ -165,6 +166,7 @@ def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path,
 
     assert rcr.main() == 0
     payload = extract_payload(capsys.readouterr().out)
+    n = len(load_trace("cold_start", "seen")[1])
 
     assert proc.terminated, "the server is stopped before the telemetry is read"
     assert payload["hardware"] == "test-gpu"
@@ -181,8 +183,8 @@ def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path,
 
     assert [r["rate_scale"] for r in payload["replays"]] == [50.0, 100.0]
     for rep in payload["replays"]:
-        assert rep["class"] == "cold_start" and rep["summary"]["n_ok"] == 8
-        assert len(rep["rows"]) == 8 and rep["rows"][0]["trace_id"] == f"{rep['trace_prefix']}-0"
+        assert rep["class"] == "cold_start" and rep["summary"]["n_ok"] == n
+        assert len(rep["rows"]) == n and rep["rows"][0]["trace_id"] == f"{rep['trace_prefix']}-0"
         # the join: one telemetry row per replay row, keyed by the same trace id
         assert sorted(t["trace_id"] for t in rep["telemetry_rows"]) == \
             sorted(r["trace_id"] for r in rep["rows"])
@@ -192,7 +194,7 @@ def test_payload_carries_panels_rows_and_joined_telemetry(monkeypatch, tmp_path,
     assert len(prefixes) == 2, "two replays of one trace get two nonces"
 
     # warm-up hit the server (2 requests) but its rows were discarded by the prefix join
-    assert len(app.state.seen) == 2 + 8 + 8
+    assert len(app.state.seen) == 2 + n + n
     warm = [t for t in app.state.seen if t.startswith("warmup-")]
     assert len(warm) == 2
     joined = {t["trace_id"] for r in payload["replays"] for t in r["telemetry_rows"]}
@@ -225,7 +227,8 @@ def test_a_replay_that_blows_up_midway_keeps_the_panels_already_paid_for(
     assert len(payload["panels"]) == 2, "the two that finished are still here"
     assert [r["rate_scale"] for r in payload["replays"]] == [50.0, 100.0, 200.0]
     good, bad = payload["replays"][0], payload["replays"][1]
-    assert good["error"] is None and len(good["rows"]) == 8 and good["telemetry_rows"]
+    n = len(load_trace("cold_start", "seen")[1])
+    assert good["error"] is None and len(good["rows"]) == n and good["telemetry_rows"]
     assert "connection reset" in bad["error"] and bad["rows"] == []
     assert payload["replays"][2]["error"] is None, "the plan continued past the failure"
     assert "1 replay(s) failed: cold_start/seen x100" in payload["error"]
