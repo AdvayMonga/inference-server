@@ -1,0 +1,28 @@
+{
+  "arms": [
+    {
+      "name": "baseline",
+      "run_ids": [],
+      "sha": "8cbef399cb9b8a241d135b87003a7b6309774d9e"
+    },
+    {
+      "name": "treatment",
+      "run_ids": [],
+      "sha": "5fe7f416c1f81b190ec98867d37e6285d7d1898f"
+    }
+  ],
+  "branch": "feat/qwen3-moe",
+  "cost_usd": 0.0,
+  "delta": {},
+  "engine_sha_base": "8cbef399cb9b8a241d135b87003a7b6309774d9e",
+  "finished_at": null,
+  "gates": {},
+  "hypothesis_id": "no-behaviour-change",
+  "id": "exp-20261001-9fe36cac",
+  "no_behaviour_change": "Scoped to existing models only: for model_type gemma4 load_model runs the same forward, pools, graph, compile and quant path as before (one extra AutoConfig read), so nothing previously served changes. It does NOT vouch for the new opt-in qwen3_moe path: that is CPU-parity-tested against HF on a tiny config only; its CUDA kernels and the real 30B checkpoint are unverified until the gpu lane runs.",
+  "notes": "",
+  "regression_test": "",
+  "source": "loop",
+  "started_at": 1790896856.772665,
+  "verdict": "confirmed"
+}
