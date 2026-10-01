@@ -203,7 +203,8 @@ def test_real_stop_set_includes_im_end():
 
 
 @pytest.mark.parametrize("over", [{"mlp_only_layers": [0]}, {"attention_bias": True},
-                                  {"use_sliding_window": True, "sliding_window": 64}])
+                                  {"use_sliding_window": True, "sliding_window": 64},
+                                  {"tie_word_embeddings": True}])
 def test_unsupported_config_is_rejected(over):
     with pytest.raises(ValueError, match="does not support"):
         Qwen3MoeForCausalLM.from_config(_tiny_cfg(**over))

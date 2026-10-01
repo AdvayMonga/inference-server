@@ -19,8 +19,8 @@
 
 ## Models
 - Hand-written forwards: `models/gemma4.py` (Gemma 4) and `models/qwen3_moe.py` (Qwen3-MoE);
-  `CustomTorchBackend` picks one by the HF `model_type`. Qwen3-30B-A3B is the Phase 0 benchmark
-  model for MoE cold start; its path runs without CUDA graphs, torch.compile or int8 for now.
+  `CustomTorchBackend` picks one by the HF `model_type`. Qwen3-30B-A3B is the benchmark model
+  for MoE cold start (owner's Phase 0 decision, 2026-10-01); its path runs without CUDA graphs, torch.compile or int8 for now.
 
 ## The research loop
 - The method is `src/inference_server/research/method/graph.py`: a fixed graph of code, agent

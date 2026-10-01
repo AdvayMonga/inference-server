@@ -1,4 +1,4 @@
-"""Custom-forward Torch backend — uses our hand-written Gemma 4 model.
+"""Custom-forward Torch backend — uses our hand-written Gemma 4 or Qwen3-MoE model.
 
 Drives the full stack: paged KV cache + cross-session prefix sharing under both the
 legacy direct `generate()` / `stream()` path and the `ContinuousBatchScheduler`.

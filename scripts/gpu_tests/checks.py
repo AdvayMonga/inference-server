@@ -45,14 +45,14 @@ def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale, window=1 << 30)
 
 
 def paged_decode_parity() -> tuple[bool, str]:
-    """Decode kernel vs the torch reference: sliding (256) and full (512) head_dim, GQA 8:1."""
+    """Decode kernel vs the torch reference: Gemma 256/512 and Qwen3-MoE 128 head_dim, GQA 8:1."""
     import torch
 
     from inference_server.models.paged_attention_kernel import paged_decode_attention
 
     torch.manual_seed(0)
     results = []
-    for D, num_kv_heads, Hq in [(256, 1, 8), (512, 1, 8), (256, 2, 8)]:
+    for D, num_kv_heads, Hq in [(256, 1, 8), (512, 1, 8), (256, 2, 8), (128, 4, 32)]:
         N, num_blocks, bs = 5, 64, 16
         max_blocks = 8
         seq_lens = torch.tensor([1, 16, 17, 40, 100][:N], dtype=torch.int32, device="cuda")
@@ -127,6 +127,12 @@ def paged_decode_no_recompile() -> tuple[bool, str]:
 
 
 def paged_prefill_parity() -> tuple[bool, str]:
+    """Prefill kernel vs reference at head_dim 64 and 128 (Qwen3-MoE's untiled path)."""
+    results = [_prefill_parity_at(D) for D in (64, 128)]
+    return all(ok for ok, _ in results), " | ".join(f"D={D}: {msg}" for D, (_, msg) in zip((64, 128), results))
+
+
+def _prefill_parity_at(D: int) -> tuple[bool, str]:
     """Prefill kernel (multi-query, no gather) vs a gather + per-query causal-softmax reference:
     varied prefix/suffix lengths incl. a cold row and a 1-token cache-hit row, GQA 8:1."""
     import torch
@@ -135,7 +141,7 @@ def paged_prefill_parity() -> tuple[bool, str]:
 
     torch.manual_seed(0)
     dev = "cuda"
-    Hq, num_kv, D, bs = 8, 1, 64, 16        # GQA 8:1, head_dim 64 (kernel handles any D)
+    Hq, num_kv, bs = 8, 1, 16               # GQA 8:1 (kernel handles any D)
     prefix_lens = [20, 5, 33, 0]            # incl. a cold row (no prefix)
     suffix_lens = [4, 1, 7, 6]              # incl. a 1-token (cache-hit) row
     N = len(prefix_lens)

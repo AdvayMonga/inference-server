@@ -221,6 +221,7 @@ class Qwen3MoeForCausalLM(nn.Module):
             "attention bias": cfg.attention_bias,
             "rope scaling": rope.get("rope_type", "default") != "default",
             "hidden_act": cfg.hidden_act != "silu",
+            "tied embeddings": cfg.tie_word_embeddings,
         }
         bad = [k for k, v in unsupported.items() if v]
         if bad:
