@@ -51,7 +51,7 @@ class FakeAgent:
 
     def __init__(self, output=None):
         self.specs: list[AgentSpec] = []
-        self.output = output or {"kind": "perf", "exactness": "exact", "objection": None}
+        self.output = output or {"exactness": "exact", "note": None}
 
     def __call__(self, spec: AgentSpec) -> AgentReply:
         self.specs.append(spec)
@@ -86,33 +86,41 @@ def test_first_attempt_gets_a_clean_workspace_and_a_deterministic_brief(repo, tm
 def test_a_retry_is_a_fresh_session_on_the_same_workspace_with_the_failure(repo, tmp_path):
     agent, checks = FakeAgent(), iter(["fail", "pass"])
     state = turn(tmp_path)
-    review_1 = lambda i: Result("changes" if i["CheckReport"].outcome == "fail" else "ok", {})  # noqa: E731
+    review_1 = lambda i: Result("fix" if i["CheckReport"].outcome == "fail" else "ok", {})  # noqa: E731
     run_turn(state, stubs(build=Build(repo, "HEAD", state.turn_dir, call=agent),
                           check=lambda _i: Result(next(checks), {"tests": "1 failed"}),
                           review_1=review_1))
     first, second = agent.specs
     assert first.workspace == second.workspace and first.scratch != second.scratch
     assert "# CheckReport (from check, outcome fail)" in second.prompt
-    assert "# Review (from review_1, outcome changes)" in second.prompt
+    assert "# Review (from review_1, outcome fix)" in second.prompt
     assert "# attempt 1" in (second.workspace / "src/inference_server/engine.py").read_text()
 
 
-@pytest.mark.parametrize("output,reason", [
-    ({"kind": "perf", "exactness": "exact", "objection": "measure prefill first"}, "measure prefill"),
-    (None, "build agent failed"),
-])
-def test_an_objection_or_a_failed_agent_stops_for_a_human(repo, tmp_path, output, reason):
-    agent = FakeAgent(output)
-    if output is None:
-        agent = lambda spec: AgentReply(None, 2.0, 200, "error_max_budget_usd")  # noqa: E731
+def test_a_note_is_passed_on_and_the_turn_continues(repo, tmp_path):
+    agent = FakeAgent({"exactness": "exact", "note": "measure prefill first"})
     state = turn(tmp_path)
     run_turn(state, stubs(build=Build(repo, "HEAD", state.turn_dir, call=agent)))
-    assert state.records[-1].node == "ask_human"
-    assert reason in state.latest("Change").objection
+    assert state.latest("Change").note == "measure prefill first"
+    assert state.records[-1].node == "record"
 
 
-def test_the_declared_kind_can_only_be_one_the_loop_may_start():
-    assert OUTPUT_SCHEMA["properties"]["kind"]["enum"] == sorted(KINDS)
+def test_a_crashed_builder_is_run_again_on_the_same_workspace(repo, tmp_path):
+    good, calls = FakeAgent(), []
+
+    def flaky(spec):
+        calls.append(spec)
+        return AgentReply(None, 2.0, 200, "error_max_budget_usd") if len(calls) == 1 else good(spec)
+
+    state = turn(tmp_path)
+    run_turn(state, stubs(build=Build(repo, "HEAD", state.turn_dir, call=flaky)))
+    builds = [r for r in state.records if r.node == "build"]
+    assert [b.outcome for b in builds] == ["crashed", "ok"]
+    assert builds[0].body["error"] == "error_max_budget_usd"
+
+
+def test_the_loop_only_makes_perf_changes():
+    assert set(KINDS) == {"perf"} and "kind" not in OUTPUT_SCHEMA["properties"]
 
 
 def test_knowledge_is_an_empty_seam_until_designed():
@@ -124,7 +132,7 @@ def test_knowledge_is_an_empty_seam_until_designed():
     ("src/inference_server/research/gates.py", False),
     ("../outside.py", False),
     ("tests/test_engine.py", False),          # existing test: no kind may edit it
-    ("tests/test_new_bug.py", True),          # a new test: fix may add it
+    ("tests/test_new_kernel.py", True),       # a new test: may be added
 ])
 def test_the_write_hook_refuses_before_the_write(repo, tmp_path, path, ok):
     ws = tmp_path / "ws"

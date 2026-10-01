@@ -14,12 +14,9 @@ class Kind:
     add_only: tuple[str, ...] = ()    # may create new files only
 
 
-# Only these kinds may be started by the loop; instrument/method/test/infra stay human-only.
+# The loop only makes perf changes for now; every other kind is a human session's work.
 KINDS: dict[str, Kind] = {
-    "perf":     Kind(ENGINE),
-    "fix":      Kind(ENGINE, add_only=("tests/test_*.py",)),
-    "refactor": Kind(ENGINE),
-    "obs":      Kind(ENGINE),
+    "perf": Kind(ENGINE, add_only=("tests/test_*.py",)),   # new tests add coverage, never evidence
 }
 
 # Denied for every kind, even inside an allowed glob: the evaluator and import-time hooks.

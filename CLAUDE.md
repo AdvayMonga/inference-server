@@ -22,15 +22,21 @@
   and human nodes. `method/state.py` saves each turn as append-only JSON and refuses
   out-of-order records. `method/runner.py` walks one turn: it picks each node's inputs (the
   latest record of each type it `takes`), calls it, saves the result; `pause` = supervised mode.
+- The loop makes `perf:` changes only: engine code (`src/inference_server/` minus `research/`)
+  plus new test files; never existing tests, the harness, or anything else. Other kinds are
+  human sessions.
 - The referee is `research/safety/`: `change_kinds.py` (deny-by-default write surfaces),
   `jail.py` (sandbox-runtime settings), `grader.py` (audit + jailed pristine tests).
 - `research/agents/`: `brief.py` renders an agent node's context (its input records, knowledge,
   the graph map); `call.py` is the one place a model is called — Agent SDK CLI inside the srt
   jail, env wiped, write hook on. `research/nodes/` holds one module per node (`build.py`,
-  `check.py`). `check` runs the suite with `-m "not heavy and not needs_host"`: tests marked
+  `check.py`, `review_1.py`). `review_1` runs `/code-review` on the clean tree (a two-commit
+  repo: base, change) read-only; code turns its findings into the verdict. `check` runs the suite with `-m "not heavy and not needs_host"`: tests marked
   `needs_host` need what the jail forbids (held-out corpus, git, sockets) and run in CI only.
-- Agents run inside nodes and never edit `graph.py`; an agent that disagrees raises an
-  objection, which stops the turn for me.
+- Agents run inside nodes and never edit `graph.py`. Failures go back to `build` as context;
+  only a security violation or an anomalous win stops the turn for me. Every agent may leave a
+  `note` for me, which is recorded and never changes the path. Budgets per turn live in
+  `graph.py`: 6 rounds (reviewer send-backs), 2 experiments, a node-visit backstop.
 
 ## Strict referee, free player (the bitter lesson)
 - Harness is code and strict: sandbox, grader, measurement protocol, output equivalence,

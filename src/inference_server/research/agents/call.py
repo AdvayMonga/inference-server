@@ -13,7 +13,8 @@ from ..safety.hooks import WRITE_TOOLS, write_guard
 from ..safety.jail import API_HOST, jail_command, srt_settings
 
 MODEL = "claude-fable-5-1"   # strongest available; agreed 2026-09-28
-TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+BUILD_TOOLS = ["Read", "Grep", "Glob", "Edit", "Write", "Bash"]
+REVIEW_TOOLS = ["Read", "Grep", "Glob", "Bash", "Skill"]   # read-only is the jail's job, not this list
 PASS_ENV = ("PATH", "ANTHROPIC_API_KEY", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_AGENT_SDK_VERSION")
 
 
@@ -29,6 +30,8 @@ class AgentSpec:
     max_budget_usd: float
     timeout_s: float
     readonly: list[Path] = field(default_factory=list)
+    tools: list[str] = field(default_factory=lambda: list(BUILD_TOOLS))
+    writable: bool = True          # False: the jail lets the agent read the workspace, not change it
 
 
 @dataclass
@@ -44,8 +47,10 @@ def _wrapper(spec: AgentSpec, cli: Path) -> Path:
     home, tmp = spec.scratch / "home", spec.scratch / "tmp"   # private to this session
     home.mkdir(parents=True, exist_ok=True)
     tmp.mkdir(exist_ok=True)
-    settings = srt_settings([spec.workspace.resolve(), home.resolve(), tmp.resolve()], Path(sys.prefix),
-                            [API_HOST], readonly=spec.readonly)
+    ws = spec.workspace.resolve()
+    writable = [home.resolve(), tmp.resolve()] + ([ws] if spec.writable else [])
+    readonly = list(spec.readonly) + ([] if spec.writable else [ws])
+    settings = srt_settings(writable, Path(sys.prefix), [API_HOST], readonly=readonly)
     argv = jail_command(settings, spec.scratch / "srt.json", [str(cli)])
     keep = " ".join(f'"{k}=${k}"' for k in PASS_ENV)
     env = (f"{keep} HOME={shlex.quote(str(home))} CLAUDE_CONFIG_DIR={shlex.quote(str(home))} "
@@ -63,7 +68,7 @@ async def _run(spec: AgentSpec) -> AgentReply:
     import claude_agent_sdk
     cli = Path(claude_agent_sdk.__file__).parent / "_bundled" / "claude"
     options = ClaudeAgentOptions(
-        model=MODEL, system_prompt=spec.system, tools=TOOLS, allowed_tools=TOOLS,
+        model=MODEL, system_prompt=spec.system, tools=spec.tools, allowed_tools=spec.tools,
         permission_mode="dontAsk", setting_sources=[], cwd=str(spec.workspace),
         max_turns=spec.max_turns, max_budget_usd=spec.max_budget_usd,
         output_format={"type": "json_schema", "schema": spec.output_schema},

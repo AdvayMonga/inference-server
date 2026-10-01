@@ -70,8 +70,8 @@ def ws(repo, tmp_path):
     ("perf", "README.md", False, False),                                # unlisted = denied
     ("perf", "pyproject.toml", False, False),
     ("perf", "corpus/cold_start/heldout.jsonl", True, False),
-    ("fix", "tests/test_new_bug.py", True, True),                       # fix may add a test
-    ("fix", "tests/test_engine.py", False, False),                      # but never edit one
+    ("perf", "tests/test_new_kernel.py", True, True),                   # may add a test
+    ("perf", "tests/test_engine.py", False, False),                     # never edit one
     ("perf", "src/inference_server/CONFTEST.PY", True, False),          # macOS ignores case
     ("perf", "src/inference_server/models/ruff.toml", True, False),     # would silence lint
     ("perf", "src/inference_server/pyproject.toml", True, False),
@@ -152,7 +152,7 @@ def test_agent_code_under_test_is_jailed(repo, ws, tmp_path, monkeypatch):
     (ws / "tests/test_leak.py").write_text(
         "from inference_server.engine import leaks\n\n"
         "def test_nothing_leaks():\n    assert leaks() == []\n")
-    a = audit(repo, "HEAD", ws, "fix")
+    a = audit(repo, "HEAD", ws, "perf")
     run = pristine_tests(repo, "HEAD", ws, a, tmp_path / "pristine")
     assert run.passed, run.output
 

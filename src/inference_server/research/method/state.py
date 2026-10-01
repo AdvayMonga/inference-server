@@ -28,7 +28,7 @@ class Record:
     outcome: str
     reads: tuple[str, ...]
     body: dict[str, Any]
-    objection: str | None
+    note: str | None             # an agent's suggestion to the human; never changes the path
     graph_version: int
     engine_sha: str
     created_at: str
@@ -60,13 +60,21 @@ class TurnState:
             return graph.ENTRY
         last = self.records[-1]
         nxt = graph.next_node(last.node, last.outcome)
-        cap = nxt and graph.NODES[nxt].max_visits
-        if cap and sum(r.node == nxt for r in self.records) >= cap:
+        if nxt is None:
+            return None
+        rounds = sum((r.node, r.outcome) in graph.ROUNDS for r in self.records)
+        experiments = sum(r.node == "experiment" for r in self.records)
+        if nxt == "build" and rounds > graph.MAX_ROUNDS:
+            return graph.GIVE_UP
+        if experiments >= graph.MAX_EXPERIMENTS and (
+                nxt == "experiment" or (nxt == "build" and last.node == "review_2")):
+            return graph.GIVE_UP   # a revision it could never measure
+        if sum(r.node == nxt for r in self.records) >= graph.MAX_NODE_VISITS:
             return graph.GIVE_UP
         return nxt
 
     def append(self, node: str, outcome: str, body: dict[str, Any], *,
-               reads: tuple[str, ...] = (), objection: str | None = None) -> Record:
+               reads: tuple[str, ...] = (), note: str | None = None) -> Record:
         expected = self.expected_node()
         if expected is None:
             raise StateError(f"turn {self.run_id}/{self.turn} has ended; nothing may follow")
@@ -75,8 +83,6 @@ class TurnState:
         spec = graph.NODES[node]
         if outcome not in spec.outcomes:
             raise StateError(f"{node!r} cannot end with {outcome!r}; allowed {spec.outcomes}")
-        if (outcome == "objection") != bool(objection):
-            raise StateError("an objection outcome needs its reason, and only it may carry one")
         read_types = {self.get(i).type for i in reads}
         missing = set(spec.takes) - read_types
         if missing:
@@ -86,7 +92,7 @@ class TurnState:
             id=f"rec-{uuid.uuid4().hex[:8]}", run_id=self.run_id, turn=self.turn,
             seq=len(self.records),
             node=node, type=spec.gives, outcome=outcome, reads=tuple(reads), body=body,
-            objection=objection, graph_version=graph.GRAPH_VERSION, engine_sha=git_sha(),
+            note=note, graph_version=graph.GRAPH_VERSION, engine_sha=git_sha(),
             created_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         )
         self.turn_dir.mkdir(parents=True, exist_ok=True)
