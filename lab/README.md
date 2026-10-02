@@ -46,6 +46,33 @@ through `ledger.put_blob` and are referenced by their content-hashed path under 
 A held-out record (`config.split == "heldout"`) carries no `raw` and one aggregate per metric
 (`base`, `new`, `delta_pct`, `band_pct`, `verdict`); the writer refuses anything finer.
 
+## Runtime
+
+    python -m lab.session --goal "cut decode step time on the steady_interactive class" --budget 20
+
+One loop: while dollars remain, a fresh agent session gets the goal, the budget left, the last
+ledger records and the tools, and is free. Its shell and file tools run inside the srt jail on an
+exported copy of the engine (no git history, held-out data removed); it may write
+`src/inference_server/` and add `tests/test_*.py`, nothing else. The lab's own tools run out here
+with the referee's rights, snapshot the workspace and write the ledger on every call:
+
+| tool | does |
+|---|---|
+| `test` | lint and the fast suite on a pristine two-commit copy of the workspace, jailed |
+| `profile` | `lab.profile` on the pristine copy, jailed; the bundle goes into the ledger as a blob |
+| `ledger` | read records (this run and earlier ones) |
+| `budget` | dollars left |
+| `restore` | workspace back to a snapshot id (`base` resets) |
+| `note` | a note for the human; recorded, changes nothing |
+| `equiv`, `bench`, `submit` | refuse with the reason until the eval harness is wired |
+
+A session ends when the agent says `stop`, its per-session cap is spent, or it times out. The
+run ends on budget, on `stop`, or on a write-surface violation (the one hard rule). Model cost
+comes from the provider's own accounting; `LAB_MODEL` picks the model, `LAB_AGENT_PROVIDER` the
+provider (only `claude` today, through the Agent SDK CLI; `lab/agent.py` is the seam for others).
+The jail is sandbox-runtime (`npm install -g @anthropic-ai/sandbox-runtime`); `LAB_NO_JAIL=1`
+waives it for tests and a box you trust.
+
 ## GPU arm
 
 One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:

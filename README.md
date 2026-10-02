@@ -36,6 +36,10 @@ What exists today. The rest of the design, and the order it lands in, is in `ENV
 - `python -m lab.ledger`: the append-only raw knowledge base, one JSON line per tool call;
   `seed` imports the hand-written findings in `knowledge/`
 - `lab/corpus.py` and `scripts/corpus/`: the frozen workload corpus built from real public traces
+- `python -m lab.session --goal ... --budget 20`: the environment runtime. One loop: while dollars
+  remain, start an agent session with the goal, the ledger and the tools (`test`, `profile`,
+  `ledger`, `budget`, `restore`, `note`; `bench`, `equiv` and `submit` refuse until the eval
+  harness is wired). The referee is `lab/safety/`: write surfaces, the srt jail, the grader.
 
 ---
 
