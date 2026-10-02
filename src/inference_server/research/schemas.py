@@ -344,6 +344,9 @@ class Experiment:
     # Authorises exactly the treatment sha in `arms`, never a later commit — premerge refuses
     # the record if any engine file changed after that sha.
     no_behaviour_change: str = ""
+    # session.engine_tree_hash at the treatment sha: lets premerge accept a squash merge, whose
+    # commit is not the vouched sha but carries the same engine files and runtime pins.
+    engine_tree: str = ""
     id: str = field(default_factory=lambda: _new_id("exp"))
     started_at: float = field(default_factory=time.time)
     finished_at: float | None = None

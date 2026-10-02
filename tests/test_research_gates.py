@@ -565,3 +565,91 @@ def test_a_correctness_fix_does_not_carry_later_engine_changes_with_it():
                              changed=lambda r, b: ["src/inference_server/sampling.py"],
                              engine=_engine_only)
     assert not ok and "sampling.py" in why
+
+
+def test_a_squash_merge_is_vouched_for_by_its_engine_tree():
+    """A squash merge's commit is not the vouched sha; the engine content is what must match."""
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    claim = Experiment(hypothesis_id="h", engine_sha_base="b", source="loop",
+                       arms=[Arm("treatment", "t1")], verdict="confirmed",
+                       no_behaviour_change="adds an opt-in model", engine_tree="tree-A")
+    kw = dict(ancestor=lambda s, r: False, changed=lambda *_: [], engine=_engine_only)
+
+    ok, why = pm.no_claim_vouches(claim, "main", tree=lambda ref: "tree-A", **kw)
+    assert ok and "t1" in why
+    ok, why = pm.no_claim_vouches(claim, "main", tree=lambda ref: "tree-B", **kw)
+    assert not ok and "engine_tree differs" in why
+
+    claim.engine_tree = ""   # an old record: ancestry is still the only way in
+    ok, why = pm.no_claim_vouches(claim, "main", tree=lambda ref: "tree-A", **kw)
+    assert not ok and "no engine_tree" in why
+
+
+def test_engine_tree_survives_a_squash_and_tracks_engine_files_and_pins(tmp_path):
+    import subprocess
+
+    from inference_server.research.session import engine_tree_hash
+
+    def git(*a):
+        return subprocess.run(["git", *a], cwd=tmp_path, check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def write(path, text):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text)
+
+    lock = '[[package]]\nname = "torch"\nversion = "{t}"\n\n[[package]]\nname = "rich"\nversion = "{r}"\n'
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "t@t"); git("config", "user.name", "t")
+    write("src/inference_server/engine.py", "x = 1\n"); write("uv.lock", lock.format(t="2.0", r="1"))
+    git("add", "."); git("commit", "-qm", "base")
+
+    git("checkout", "-qb", "feat")
+    write("src/inference_server/engine.py", "x = 2\n"); git("commit", "-qam", "one")
+    write("src/inference_server/model.py", "y = 1\n"); git("add", "."); git("commit", "-qm", "two")
+    vouched = git("rev-parse", "HEAD")
+    git("checkout", "-q", "main"); git("merge", "-q", "--squash", "feat"); git("commit", "-qm", "sq")
+    assert git("rev-parse", "HEAD") != vouched
+    assert engine_tree_hash("HEAD", cwd=tmp_path) == engine_tree_hash(vouched, cwd=tmp_path)
+    squashed = engine_tree_hash("HEAD", cwd=tmp_path)
+
+    def after(path, text):
+        write(path, text); git("add", "."); git("commit", "-qm", path)
+        return engine_tree_hash("HEAD", cwd=tmp_path)
+
+    assert after("src/inference_server/research/loop.py", "z\n") == squashed   # not the engine
+    assert after("tests/test_x.py", "z\n") == squashed
+    assert after("uv.lock", lock.format(t="2.0", r="2")) == squashed          # not a runtime pin
+    assert after("uv.lock", lock.format(t="2.1", r="2")) != squashed          # torch moved
+    git("checkout", "-q", vouched, "--", "uv.lock"); git("commit", "-qam", "pin back")
+    assert engine_tree_hash("HEAD", cwd=tmp_path) == squashed
+    assert after("src/inference_server/engine.py", "x = 3\n") != squashed
+
+
+def test_main_passes_a_squash_merged_ab_experiment_only_when_its_engine_tree_matches(
+        monkeypatch, capsys):
+    """The path a real `loop judge` record takes on the main push after a squash merge."""
+    import sys
+
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    green = {g: {"passed": True} for g in ("validity", "sanity", "significance", "correctness",
+                                           "cost")}
+    exp = Experiment(hypothesis_id="h", engine_sha_base="b", source="loop", verdict="confirmed",
+                     arms=[Arm("baseline", "b", ["r1", "r2", "r3"]),
+                           Arm("treatment", "t1", ["r4", "r5", "r6"])], gates=green,
+                     engine_tree="tree-A")
+    monkeypatch.setattr(pm, "changed_files", lambda *a, **k: ["src/inference_server/engine.py"])
+    monkeypatch.setattr(pm, "behavioural", lambda files, **k: list(files))
+    monkeypatch.setattr(pm, "resolve_sha", lambda ref: "squash1")
+    monkeypatch.setattr(pm, "load_experiments", lambda: [exp])
+    monkeypatch.setattr(pm, "is_ancestor", lambda sha, ref: False)   # squash: t1 not in main
+    monkeypatch.setattr(sys, "argv", ["premerge_check.py", "HEAD", "--base", "before"])
+
+    monkeypatch.setattr(pm, "ref_engine_tree", lambda ref: "tree-A")
+    assert pm.main() == 0 and "PASS" in capsys.readouterr().out
+    monkeypatch.setattr(pm, "ref_engine_tree", lambda ref: "tree-B")
+    assert pm.main() == 1

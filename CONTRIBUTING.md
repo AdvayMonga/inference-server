@@ -92,6 +92,13 @@ after it.
 | fixes a bug | `regression_test` + `engine_sha_base` | hand-write it; model on `experiments/exp-20260908-9497648e.json`. The gate **re-runs** the test, so confirm it fails with the fix reverted. |
 | changes no behaviour | a no-claim record | `python -m inference_server.research.loop no-claim --why "..." --sha <sha>` — renames, dead imports, comments, type hints. |
 
+PRs are squash-merged, so the merged commit is never the vouched sha. Each record therefore also
+carries `engine_tree`, a hash of the engine files and runtime pins at that sha; the gate on `main`
+accepts the squash commit when the hashes match. `loop judge` and `loop no-claim` fill it in; for
+a hand-written fix record, add `"engine_tree": "<output of loop engine-tree <sha>>"`. The hash
+covers the whole engine at that sha, so any engine commit after it — even a pure counter — means
+re-running the record at the tip before merging.
+
 ### What the cost gate checks
 
 The fifth gate asks whether the win was paid for somewhere no other gate looks. It compares
