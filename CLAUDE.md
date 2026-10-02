@@ -41,6 +41,12 @@
   (`cold_start`, `steady_interactive`, `long_context`, `spike`) split seen/heldout by alternating
   trace weeks. `scripts/corpus/fetch_traces.py` + `build_corpus.py` rebuild it; the loader is
   `lab/corpus.py`; any change is a new `corpus_version`. See `corpus/README.md`.
+- `python -m lab.session` is the runtime: `lab/session.py` loops sessions over a dollar budget
+  (`lab/budget.py`), `lab/agent.py` is the one place a model is called (Claude via the Agent SDK,
+  provider seam), `lab/tools.py` the agent's metered tools (each snapshots the workspace and writes
+  the ledger), `lab/workspace.py` the exported engine copy with content-addressed snapshots, and
+  `lab/safety/` the referee (surfaces, jail, grader). Lab tools run outside the jail; the agent's
+  own shell and file tools run inside it. `LAB_NO_JAIL=1` waives the jail (tests, trusted box).
 - `python -m lab.vm` drives one persistent GPU VM (`LAB_VM_*` env) on `lab/providers/` verda
   (default, 1x H100 SXM) or crusoe (1x A100): start, setup, run a command on the pushed tree and
   fetch outputs, stop (Verda: hibernate). Credentials stay in env or the provider CLI's config.
