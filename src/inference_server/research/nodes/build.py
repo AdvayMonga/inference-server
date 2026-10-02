@@ -10,7 +10,7 @@ from ..agents.brief import prompt, render
 from ..agents.call import AgentReply, AgentSpec, call_agent
 from ..method.runner import Result
 from ..method.state import Record
-from ..safety.grader import prepare_workspace
+from ..safety.grader import base_files, prepare_workspace
 
 OUTPUT_SCHEMA = {
     "type": "object",
@@ -48,6 +48,7 @@ class Build:
             output_schema=OUTPUT_SCHEMA, max_turns=self.max_turns,
             max_budget_usd=self.max_budget_usd, timeout_s=self.timeout_s,
             readonly=[self.telemetry] if self.telemetry else [],
+            base_files=base_files(self.repo, self.base),
         ))
         body = {"workspace": str(workspace), "base": self.base, "attempt": attempt,
                 "cost_usd": reply.cost_usd, "turns": reply.turns}

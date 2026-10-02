@@ -35,6 +35,7 @@ class AgentSpec:
     readonly: list[Path] = field(default_factory=list)
     tools: list[str] = field(default_factory=lambda: list(BUILD_TOOLS))
     writable: bool = True          # False: the jail lets the agent read the workspace, not change it
+    base_files: frozenset[str] | None = None   # files in the base commit, for the write hook
 
 
 @dataclass
@@ -81,7 +82,7 @@ async def _run(spec: AgentSpec) -> AgentReply:
                        if spec.output_schema else None),
         cli_path=str(_wrapper(spec, cli)),
         env={"CLAUDE_CODE_OAUTH_TOKEN": token} if (token := model_token()) else {},
-        hooks={"PreToolUse": [HookMatcher(matcher=WRITE_TOOLS, hooks=[write_guard(spec.workspace)])]},
+        hooks={"PreToolUse": [HookMatcher(matcher=WRITE_TOOLS, hooks=[write_guard(spec.workspace, spec.base_files)])]},
     )
     reply = AgentReply(None, None, 0, "no result message")
     async for msg in query(prompt=spec.prompt, options=options):

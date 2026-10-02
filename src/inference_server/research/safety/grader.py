@@ -64,6 +64,11 @@ def _base_blobs(repo: Path, base: str) -> dict[str, str]:
     return blobs
 
 
+def base_files(repo: Path, base: str) -> frozenset[str]:
+    """Every path in the base commit."""
+    return frozenset(_base_blobs(repo, base))
+
+
 def _blob_sha(path: Path) -> str:
     data = path.read_bytes()
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()

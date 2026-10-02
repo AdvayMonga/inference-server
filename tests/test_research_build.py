@@ -144,6 +144,15 @@ def test_the_write_hook_refuses_before_the_write(repo, tmp_path, path, ok):
         assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_a_test_added_in_an_earlier_attempt_stays_editable(repo, tmp_path):
+    ws = tmp_path / "ws"
+    shutil.copytree(repo, ws, ignore=shutil.ignore_patterns(".git"))
+    (ws / "tests/test_mine.py").write_text("x = 1\n")              # written by attempt 1
+    base = frozenset(FILES)
+    assert allowed(ws, "tests/test_mine.py", base)                   # still new against base
+    assert not allowed(ws, "tests/test_engine.py", base)             # base tests stay locked
+
+
 @needs_srt
 def test_the_cli_runs_jailed_with_a_wiped_environment(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNPOD_API_KEY", "sk-secret")

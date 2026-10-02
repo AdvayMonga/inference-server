@@ -15,7 +15,9 @@ new test files for the code you write (writing them first can help); you may not
 tests. Writes anywhere else are refused,
 and anything outside that area is reverted by a check you cannot see.
 
-You may read the code, run Python and the tests, and time things locally. Your own measurements
+You may read the code, run Python and the tests, and time things locally. The loop's check runs
+`pytest -q -m "not heavy and not needs_host"`; tests outside that selection need files hidden
+from you and will fail here regardless of your change. Your own measurements
 help you work; they are not evidence. The loop measures the change itself afterwards.
 
 When you finish, declare:

@@ -14,22 +14,28 @@ from .change_kinds import KINDS, may_write
 WRITE_TOOLS = "Write|Edit|MultiEdit|NotebookEdit"
 
 
-def allowed(workspace: Path, file_path: str) -> bool:
-    """A write the loop could make under some kind; the audit later checks the declared one."""
+def allowed(workspace: Path, file_path: str, base_files: frozenset[str] | None = None) -> bool:
+    """A write the loop could make under some kind; the audit later checks the declared one.
+
+    A file is new if the base commit lacks it, so a test the builder added in an earlier
+    attempt stays editable; without `base_files`, fall back to what is on disk.
+    """
     ws = workspace.resolve()
     target = (ws / file_path).resolve()
     if not target.is_relative_to(ws):
         return False
     rel = target.relative_to(ws).as_posix()
-    return any(may_write(k, rel, new_file=not target.exists()) for k in KINDS)
+    new = rel not in base_files if base_files is not None else not target.exists()
+    return any(may_write(k, rel, new_file=new) for k in KINDS)
 
 
-def write_guard(workspace: Path) -> Callable[..., Awaitable[dict[str, Any]]]:
+def write_guard(workspace: Path, base_files: frozenset[str] | None = None
+                ) -> Callable[..., Awaitable[dict[str, Any]]]:
     """A PreToolUse callback that denies writes outside every loop kind's surface."""
     async def hook(input_data: dict[str, Any], _tool_use_id: str | None, _ctx: Any) -> dict[str, Any]:
         tool_input = input_data.get("tool_input", {})
         path = tool_input.get("file_path") or tool_input.get("notebook_path") or ""
-        if allowed(workspace, path):
+        if allowed(workspace, path, base_files):
             return {}
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
