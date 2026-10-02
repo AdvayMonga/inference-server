@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from lab import providers
-from lab.providers import ProviderError, Record
+from lab.providers import ProviderError, Record, env_field
 
 REPO = Path(__file__).resolve().parents[1]
 KNOWN_HOSTS_DIR = Path.home() / ".cache" / "inference-server-lab"
@@ -22,22 +22,18 @@ STOP_TIMEOUT_S = 600.0
 SSH_TIMEOUT_S = 300.0
 
 
-def _env(name: str, default: str):
-    return field(default_factory=lambda: os.environ.get(name, default))
-
-
 @dataclass(frozen=True)
 class VM:
-    """Read from env at construction. The provider supplies GPU type, location and image."""
-    name: str = _env("LAB_VM", "lab-gpu")
-    keyfile: str = _env("LAB_VM_KEYFILE", "~/.ssh/id_ed25519.pub")
-    remote_dir: str = _env("LAB_VM_DIR", "~/inference-server")
+    """Read from env at construction. The provider supplies GPU type, location, image and the login user."""
+    name: str = env_field("LAB_VM", "lab-gpu")
+    keyfile: str = env_field("LAB_VM_KEYFILE", "~/.ssh/id_ed25519.pub")
+    remote_dir: str = env_field("LAB_VM_DIR", "~/inference-server")
+    user: str = env_field("LAB_VM_USER", "")
     provider: object = field(default_factory=lambda: providers.load(os.environ.get("LAB_VM_PROVIDER", "verda")))
-    user: str = field(default="")
 
-    def __post_init__(self):
-        if not self.user:
-            object.__setattr__(self, "user", os.environ.get("LAB_VM_USER", self.provider.default_user))
+    @property
+    def login(self) -> str:
+        return self.user or self.provider.default_user
 
     @property
     def known_hosts(self) -> Path:
@@ -51,10 +47,11 @@ class VM:
 
 
 def _wait(vm: VM, wanted: str, timeout_s: float) -> Record:
+    """Until the provider reports `wanted`; `running` also needs a public ip, which can lag the state."""
     deadline = time.monotonic() + timeout_s
     while True:
         record = vm.provider.get(vm.name)
-        if record is not None and record.state == wanted:
+        if record is not None and record.state == wanted and (wanted != "running" or record.ip):
             return record
         if record is not None and record.state in ("error", "no_capacity"):
             raise ProviderError(f"{vm.name}: {record.detail}")
@@ -69,7 +66,7 @@ def start(vm: VM) -> Record:
     if record is None:
         vm.known_hosts.unlink(missing_ok=True)
         vm.provider.create(vm.name, vm.keyfile)
-    elif record.state == "running":
+    elif record.state == "running" and record.ip:
         return record
     elif record.state in ("stopped", "offline"):
         vm.provider.start(vm.name)
@@ -88,7 +85,7 @@ def stop(vm: VM) -> None:
 def ssh_target(vm: VM, record: Record) -> str:
     if not record.ip:
         raise ProviderError(f"{vm.name} has no public ip yet ({record.detail})")
-    return f"{vm.user}@{record.ip}"
+    return f"{vm.login}@{record.ip}"
 
 
 def ssh(vm: VM, record: Record, command: str, *, check: bool = True, capture: bool = False,

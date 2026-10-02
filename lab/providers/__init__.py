@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,18 @@ class Record:
 
 class ProviderError(RuntimeError):
     """The provider refused; its message is here."""
+
+
+def env_field(name: str, default: str):
+    """A dataclass default read from env at construction, not import."""
+    return field(default_factory=lambda: os.environ.get(name, default))
+
+
+def as_list(payload, what: str) -> list:
+    """An API answer that must be a list, or a ProviderError naming the endpoint."""
+    if not isinstance(payload, list):
+        raise ProviderError(f"{what}: expected a list, got {type(payload).__name__}: {str(payload)[:200]}")
+    return payload
 
 
 def load(name: str):

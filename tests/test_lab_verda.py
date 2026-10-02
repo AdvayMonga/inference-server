@@ -62,6 +62,7 @@ def api(monkeypatch, tmp_path):
     key = tmp_path / "key.pub"
     key.write_text("ssh-ed25519 AAAAtest me@mac\n")
     monkeypatch.setenv("LAB_VM_KEYFILE", str(key))
+    monkeypatch.setattr(labvm, "KNOWN_HOSTS_DIR", tmp_path / "kh")
     monkeypatch.setattr(labvm, "POLL_S", 0.0)
     monkeypatch.setattr(labvm, "START_TIMEOUT_S", 0.2)
     return fake
@@ -124,6 +125,42 @@ def test_no_capacity_is_reported_not_waited_out(api):
                       "instance_type": "1H100.80S.30V", "ip": None}]
     with pytest.raises(ProviderError, match="no_capacity"):
         labvm.start(vm)
+
+
+def test_running_without_ip_is_waited_for(api):
+    api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "running", "created_at": "1",
+                      "instance_type": "1H100.80S.30V", "ip": None}]
+    polls = {"n": 0}
+    original = verda.Verda.get
+    def get(self, name):
+        polls["n"] += 1
+        if polls["n"] >= 3:
+            api.instances[0]["ip"] = "5.6.7.8"
+        return original(self, name)
+    api_get = get
+    import unittest.mock as um
+    with um.patch.object(verda.Verda, "get", api_get):
+        record = labvm.start(labvm.VM(name="lab-gpu"))
+    assert record.ip == "5.6.7.8" and polls["n"] >= 3
+
+
+def test_stop_refuses_offline_with_advice(api):
+    api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "offline", "created_at": "1",
+                      "instance_type": "1H100.80S.30V", "ip": None}]
+    with pytest.raises(ProviderError, match="start.*then.*stop"):
+        labvm.stop(labvm.VM(name="lab-gpu"))
+    assert not any(c[0] == "PUT" for c in api.calls)
+
+
+def test_bad_payloads_are_provider_errors(api, monkeypatch):
+    monkeypatch.setattr(verda.Verda, "_request", lambda self, *a, **k: None)
+    with pytest.raises(ProviderError, match="expected a list"):
+        verda.Verda().get("lab-gpu")
+
+
+def test_missing_keyfile_is_a_provider_error(api, monkeypatch):
+    with pytest.raises(ProviderError, match="LAB_VM_KEYFILE"):
+        verda.Verda().create("lab-gpu", "/nonexistent/key.pub")
 
 
 def test_missing_credentials(monkeypatch):

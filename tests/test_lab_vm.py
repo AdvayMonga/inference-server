@@ -85,9 +85,22 @@ def test_start_starts_a_stopped_vm_and_stop_waits(fake):
     assert kinds.count("create") == 1 and kinds.count("start") == 1 and kinds.count("stop") == 1
 
 
-def test_stop_is_a_no_op_when_absent(fake):
+def test_stop_is_a_no_op_when_absent_or_stopped(fake):
     labvm.stop(labvm.VM(name="t3"))
-    assert all(c[2] != "stop" for c in calls(fake) if c[:2] == ["compute", "vms"])
+    vm = labvm.VM(name="t3b")
+    labvm.start(vm)
+    labvm.stop(vm)
+    labvm.stop(vm)
+    stops = [c for c in calls(fake) if c[:3] == ["compute", "vms", "stop"]]
+    assert stops == [["compute", "vms", "stop", "t3b"]]
+
+
+def test_crusoe_state_accepts_both_spellings(fake):
+    vm = labvm.VM(name="t3c")
+    labvm.start(vm)                                    # the fake writes STATE_RUNNING on create
+    assert vm.provider.get("t3c").state == "running"
+    vm.provider.stop("t3c")                            # and STOPPED on stop
+    assert vm.provider.get("t3c").state == "stopped"
 
 
 def test_run_pushes_runs_in_repo_dir_and_fetches(fake):
@@ -109,10 +122,10 @@ def test_run_returns_the_remote_exit_code_and_still_fetches(fake, monkeypatch):
     assert any(c[0] == "rsync" and c[-2].endswith("lab/runs/") for c in calls(fake))
 
 
-def test_user_defaults_to_the_provider(fake, monkeypatch):
-    assert labvm.VM().user == "ubuntu"
+def test_login_defaults_to_the_provider(fake, monkeypatch):
+    assert labvm.VM().login == "ubuntu"
     monkeypatch.setenv("LAB_VM_USER", "me")
-    assert labvm.VM().user == "me"
+    assert labvm.VM().login == "me"
 
 
 def test_provider_reads_env_at_construction(fake, monkeypatch):

@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lab.providers import ProviderError, Record
+from lab.providers import ProviderError, Record, as_list, env_field
 
 API = "https://api.datacrunch.io/v1"
 RUNNING, STOPPED = "running", "stopped"
@@ -24,15 +24,11 @@ STATES = {"running": RUNNING, "hibernating": STOPPED, "offline": "offline",
           "discontinued": "absent", "deleting": "absent", "notfound": "absent"}
 
 
-def _env(name: str, default: str):
-    return field(default_factory=lambda: os.environ.get(name, default))
-
-
 @dataclass(frozen=True)
 class Verda:
-    type: str = _env("LAB_VM_TYPE", "1H100.80S.30V")
-    location: str = _env("LAB_VM_LOCATION", "FIN-01")
-    image: str = _env("LAB_VM_IMAGE", "ubuntu-24.04-cuda-12.8-open-docker")
+    type: str = env_field("LAB_VM_TYPE", "1H100.80S.30V")
+    location: str = env_field("LAB_VM_LOCATION", "FIN-01")
+    image: str = env_field("LAB_VM_IMAGE", "ubuntu-24.04-cuda-12.8-open-docker")
     disk_gb: int = field(default_factory=lambda: int(os.environ.get("LAB_VM_DISK_GB", "200")))
     default_user: str = "root"
     stop_word: str = "hibernate"
@@ -70,7 +66,7 @@ class Verda:
     # -- lifecycle ----------------------------------------------------------------------
     def _raw(self, name: str) -> dict | None:
         """Verda has no unique names; the hostname is ours, and the newest live match wins."""
-        live = [i for i in self._request("GET", "/instances")
+        live = [i for i in as_list(self._request("GET", "/instances"), "GET /instances")
                 if i.get("hostname") == name and STATES.get(i.get("status"), "") != "absent"]
         return max(live, key=lambda i: i.get("created_at", ""), default=None)
 
@@ -86,12 +82,18 @@ class Verda:
 
     def _ssh_key_id(self, keyfile: str) -> str:
         """The local public key's id at Verda, uploaded on first use."""
-        public = Path(os.path.expanduser(keyfile)).read_text().strip()
-        for key in self._request("GET", "/ssh-keys"):
+        try:
+            public = Path(os.path.expanduser(keyfile)).read_text().strip()
+        except OSError as e:
+            raise ProviderError(f"ssh public key {keyfile}: {e.strerror}; set LAB_VM_KEYFILE")
+        for key in as_list(self._request("GET", "/ssh-keys"), "GET /ssh-keys"):
             if key.get("key", "").split()[:2] == public.split()[:2]:
                 return key["id"]
         created = self._request("POST", "/ssh-keys", {"name": "lab", "key": public})
-        return created if isinstance(created, str) else created["id"]
+        key_id = created if isinstance(created, str) else (created or {}).get("id")
+        if not key_id:
+            raise ProviderError(f"POST /ssh-keys returned no id: {created!r}")
+        return key_id
 
     def create(self, name: str, keyfile: str) -> None:
         self._request("POST", "/instances", {
@@ -100,21 +102,26 @@ class Verda:
             "ssh_key_ids": [self._ssh_key_id(keyfile)],
             "os_volume": {"name": f"{name}-os", "size": self.disk_gb}})
 
-    def _action(self, name: str, action: str, **extra) -> None:
+    def _action(self, name: str, choose) -> None:
+        """One listing, then the action `choose(status)` picks for that same record."""
         raw = self._raw(name)
         if raw is None:
-            raise ProviderError(f"{name}: no instance to {action}")
-        self._request("PUT", "/instances", {"action": action, "id": raw["id"], **extra})
+            raise ProviderError(f"{name}: no instance")
+        action = choose(raw.get("status", ""))
+        self._request("PUT", "/instances", {"action": action, "id": raw["id"]})
 
     def start(self, name: str) -> None:
-        raw = self._raw(name)
-        status = raw.get("status") if raw else None
-        self._action(name, "restore" if status == "hibernating" else "start")
+        self._action(name, lambda status: "restore" if status == "hibernating" else "start")
 
     def stop(self, name: str) -> None:
-        self._action(name, "hibernate")
+        """Hibernate ends GPU billing; it is only accepted from `running`, so an `offline` box is started first."""
+        raw = self._raw(name)
+        if raw is not None and raw.get("status") == "offline":
+            raise ProviderError(f"{name} is shut down (offline), which still bills the GPU; "
+                                f"run `start` then `stop` to hibernate it")
+        self._action(name, lambda status: "hibernate")
 
     def types(self) -> str:
-        avail = self._request("GET", "/instance-availability")
+        avail = as_list(self._request("GET", "/instance-availability"), "GET /instance-availability")
         lines = [f"{a['location_code']}: {', '.join(a['availabilities'])}" for a in avail]
         return "\n".join(lines) + "\n"

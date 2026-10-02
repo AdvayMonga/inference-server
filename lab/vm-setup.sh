@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-time bootstrap of a fresh Crusoe VM for the lab. Idempotent; run via `python -m lab.crusoe setup`.
+# One-time bootstrap of a fresh GPU VM for the lab. Idempotent; run via `python -m lab.vm setup`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 SUDO=$([ "$(id -u)" = 0 ] && echo "" || echo sudo)   # Verda images log in as root

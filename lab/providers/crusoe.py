@@ -5,20 +5,16 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from lab.providers import ProviderError, Record
-
-
-def _env(name: str, default: str):
-    return field(default_factory=lambda: os.environ.get(name, default))
+from lab.providers import ProviderError, Record, env_field
 
 
 @dataclass(frozen=True)
 class Crusoe:
-    type: str = _env("LAB_VM_TYPE", "a100-80gb.1x")
-    location: str = _env("LAB_VM_LOCATION", "us-east1-a")
-    image: str = _env("LAB_VM_IMAGE", "ubuntu22.04-nvidia-slurm:latest")
+    type: str = env_field("LAB_VM_TYPE", "a100-80gb.1x")
+    location: str = env_field("LAB_VM_LOCATION", "us-east1-a")
+    image: str = env_field("LAB_VM_IMAGE", "ubuntu22.04-nvidia-slurm:latest")
     default_user: str = "ubuntu"
     stop_word: str = "stop"
 
