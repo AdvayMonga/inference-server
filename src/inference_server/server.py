@@ -13,7 +13,8 @@ from pydantic import BaseModel
 
 from inference_server import prometheus_metrics
 from inference_server.backends import create_backend
-from inference_server.config import settings, print_hardware_summary
+from inference_server.backends.base import InferenceBackend
+from inference_server.config import Settings, settings, print_hardware_summary
 from inference_server.logging_config import setup_logging
 from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.sampling import SamplingParams
@@ -25,6 +26,7 @@ from inference_server.scheduler import (
 from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.openai_shim import router as openai_router
 from inference_server.telemetry import RowStore
+from inference_server.timeline import Timeline
 from inference_server.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -56,32 +58,29 @@ class GenerateResponse(BaseModel):
     trace_id: str
 
 
-@asynccontextmanager
-async def lifespan(app):
-    """Load model, tokenizer, cache, and batcher at startup."""
-    setup_logging(settings.log_format, getattr(logging, settings.log_level.upper(), logging.INFO))
-    app.state.ready = False
-    print_hardware_summary(settings)
-
+def build_backend(settings: Settings) -> tuple[InferenceBackend, CacheManager]:
+    """Backend with weights loaded and the prefix cache attached. The lab uses this too, so a profile measures what is served."""
     backend = create_backend(settings.backend)
-    tokenizer = Tokenizer(settings.model_name, settings.context_window)
-
-    loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, backend.load_model, settings.model_name)
-
+    backend.load_model(settings.model_name)
     layer_shapes = backend.kv_shape_per_layer() if hasattr(backend, "kv_shape_per_layer") else None
-    kv_dtype = backend.kv_dtype if hasattr(backend, "kv_dtype") else None
     cache_manager = CacheManager(
         num_blocks=settings.kv_cache_num_blocks,
         block_size=settings.kv_cache_block_size,
         eviction_policy=settings.eviction_policy,
         layer_shapes=layer_shapes,
         device=str(getattr(backend, "device", "cpu")),
-        dtype=kv_dtype,
+        dtype=getattr(backend, "kv_dtype", None),
     )
     backend.set_cache_adapter(cache_manager)
+    return backend, cache_manager
 
-    scheduler = ContinuousBatchScheduler(
+
+def build_scheduler(backend: InferenceBackend, settings: Settings, *,
+                    timeline: Timeline | None = None) -> ContinuousBatchScheduler:
+    """The served scheduler configuration; `timeline` overrides TIMELINE_DIR."""
+    if timeline is None and settings.timeline_dir:
+        timeline = Timeline(settings.timeline_dir)
+    return ContinuousBatchScheduler(
         backend,
         max_batch_size=settings.max_batch_size,
         max_queue_size=settings.max_queue_size,
@@ -92,7 +91,21 @@ async def lifespan(app):
         max_queue_wait_s=settings.max_queue_wait_s,
         policy=create_scheduling_policy(settings.scheduling_policy),
         telemetry=RowStore(settings.telemetry_dir) if settings.telemetry_dir else None,
+        timeline=timeline,
     )
+
+
+@asynccontextmanager
+async def lifespan(app):
+    """Load model, tokenizer, cache, and batcher at startup."""
+    setup_logging(settings.log_format, getattr(logging, settings.log_level.upper(), logging.INFO))
+    app.state.ready = False
+    print_hardware_summary(settings)
+
+    tokenizer = Tokenizer(settings.model_name, settings.context_window)
+    loop = asyncio.get_event_loop()
+    backend, cache_manager = await loop.run_in_executor(None, build_backend, settings)
+    scheduler = build_scheduler(backend, settings)
     scheduler.start()
 
     app.state.backend = backend

@@ -68,3 +68,4 @@ select = ["F"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]   # `lab/` lives at the repo root, not under src/

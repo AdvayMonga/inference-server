@@ -16,6 +16,7 @@ from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
 from inference_server.telemetry import RequestRecord, RowStore
+from inference_server.timeline import Timeline
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
-                 telemetry: RowStore | None = None):
+                 telemetry: RowStore | None = None,
+                 timeline: Timeline | None = None):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -213,6 +215,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # lock only, and an unlocked get+set from both threads loses updates permanently.
         # Always innermost, so it cannot invert the backend._lock -> _pending_cv order.
         self._telemetry = telemetry
+        # Event timeline (off by default: a disabled Timeline is a no-op, so no branches here).
+        self._timeline = timeline if timeline is not None else Timeline()
         self._start_ts = time.perf_counter()
         self._session_load: dict[str, int] = {}
         self._session_lock = threading.Lock()
@@ -237,11 +241,15 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._worker = None
         if self._telemetry is not None:
             self._telemetry.close()
+        self._timeline.close()
 
     def enqueue(self, request: ScheduledRequest) -> None:
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
         request.enqueue_ts = time.perf_counter()
         with self._pending_cv:
+            self._timeline.event("enqueue", trace_id=request.trace_id, session_id=request.session_id,
+                                 prompt_tokens=len(request.token_ids), max_tokens=request.max_tokens,
+                                 pending=self._pending_count)
             if self._telemetry is not None:
                 request.record = self._arrival_record(request)
                 with self._session_lock:
@@ -303,6 +311,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_iteration_errors": self._total_iteration_errors,
             "telemetry": (self._telemetry.stats() if self._telemetry is not None
                           else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
+            "timeline": self._timeline.stats(),
             **self._metrics.snapshot(),
         }
 
@@ -318,24 +327,30 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 with self._pending_cv:
                     if self._pending_count == 0 and not self._stop_event.is_set():
                         self._pending_cv.wait(timeout=0.1)
-                if self._stop_event.is_set():
-                    break
+                    if self._pending_count == 0:
+                        continue   # idle tick: nothing to admit, nothing to step
 
+            self._timeline.begin_step()
+            step_t0 = time.perf_counter()
             try:
                 with self.backend._lock:  # serialize against legacy generate/stream
                     # Order matters: admit (lookup-only when chunked) → advance one prefill
                     # chunk (may promote a row to _active with a fresh first_token) → evict
                     # processes those first_tokens this same iter → decode advances active.
-                    self._admit_pending(device)
-                    self._advance_prefill_chunk(device)
-                    self._evict_finished()
+                    with self._timeline.phase("admit"):
+                        self._admit_pending(device)
+                    with self._timeline.phase("prefill_chunk"):
+                        self._advance_prefill_chunk(device)
+                    with self._timeline.phase("evict"):
+                        self._evict_finished()
                     if self._active:
                         self._active_samples += 1
                         self._active_sum += len(self._active)
                         if len(self._active) > self._active_high_water:
                             self._active_high_water = len(self._active)
                         try:
-                            self._decode_step(device)
+                            with self._timeline.phase("decode", batch=len(self._active)):
+                                self._decode_step(device)
                         except Exception as e:
                             # Under genuine KV pressure the NEWEST request should pay, not the
                             # whole batch. Preempt one row (freeing its blocks) and let the next
@@ -345,6 +360,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             else:
                                 raise
                 errors_in_a_row = 0
+                self._step_event(step_t0)
             except Exception as e:
                 # A failed iteration must NOT end the worker. It used to: any exception escaped
                 # to _fail_all and the thread exited, after which the server accepted requests
@@ -359,6 +375,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                  errors_in_a_row)
                     self._fail_all(e)
                     break
+
+    def _step_event(self, t0: float) -> None:
+        if not self._timeline.enabled:
+            return
+        cache = self.backend.cache_adapter
+        with self._pending_lock:
+            pending = self._pending_count
+        self._timeline.event("step", dur_s=time.perf_counter() - t0, active=len(self._active),
+                             prefilling=len(self._prefilling), pending=pending,
+                             kv_free_blocks=cache.free_blocks if cache is not None else None,
+                             active_kv_reserved=self._active_kv_reserved)
 
     # --- Phase 1: process tokens, evict finished rows ---
 
@@ -493,6 +520,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     continue
                 if self._active_kv_reserved + reservation > self.max_active_kv_tokens:
                     self._kv_admit_blocked += 1
+                    self._timeline.event("admit_blocked", reason="active_kv", trace_id=peeked.trace_id)
                     break
 
                 # Cache-pool gate: avoids forced eviction churn.
@@ -511,12 +539,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._reject(peeked, err)
                             continue
                         self._kv_admit_blocked += 1
+                        self._timeline.event("admit_blocked", reason="cache_pool",
+                                             trace_id=peeked.trace_id, needed=needed,
+                                             free=cache.free_blocks)
                         break
 
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
                 if not self.backend.kv_reserve(len(peeked.token_ids), peeked.max_tokens):
                     self._kv_admit_blocked += 1
+                    self._timeline.event("admit_blocked", reason="backend_pools", trace_id=peeked.trace_id)
                     break
 
                 req = peeked
@@ -524,6 +556,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._consume(req, plan)
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
+            self._timeline.event("admit", trace_id=req.trace_id, mode=self.prefill_mode,
+                                 reservation=reservation, queue_wait_s=req.admit_ts - req.enqueue_ts)
             if self.prefill_mode == "batched":
                 to_admit.append(req)  # defer the forward; one prefill_batch after the loop
                 continue
@@ -539,7 +573,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._total_admitted += 1
                     continue
 
-                kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
+                with self._timeline.phase("prefill", trace_id=req.trace_id, tokens=len(req.token_ids)):
+                    kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
                 e = _as_backpressure(e)
@@ -562,7 +597,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         wave (release each reservation) rather than risk partial/leaked state."""
         try:
             self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
-            results = self.backend.prefill_batch([r.token_ids for r in reqs])
+            with self._timeline.phase("prefill_batch", wave=len(reqs),
+                                      tokens=sum(len(r.token_ids) for r in reqs)):
+                results = self.backend.prefill_batch([r.token_ids for r in reqs])
         except Exception as e:
             e = _as_backpressure(e)
             logger.warning("batched prefill rejected (%d reqs): %s", len(reqs), e)
@@ -590,6 +627,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         request.first_token_ts = time.perf_counter()
         self._splice_in(kv, kv_len, device)
         self._active.append(_ActiveRow(request=request, current_token=first_token, real_kv_len=kv_len))
+        self._timeline.event("first_token", trace_id=request.trace_id, kv_len=kv_len,
+                             cache_hit_tokens=request.cache_hit_tokens, active=len(self._active))
 
     # --- Chunked prefill: advance one in-flight prefill by one chunk per iter ---
 
@@ -610,7 +649,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             is_final = (end == len(ids))
 
         try:
-            kv, last_token, kv_len = self.backend.prefill_chunk(chunk, prow.partial_kv, sampling=prow.request.sampling)
+            with self._timeline.phase("prefill_chunk_fwd", trace_id=prow.request.trace_id,
+                                      tokens=len(chunk), final=is_final):
+                kv, last_token, kv_len = self.backend.prefill_chunk(chunk, prow.partial_kv, sampling=prow.request.sampling)
         except Exception as e:
             logger.exception("prefill_chunk failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
@@ -769,6 +810,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _finish_row(self, request: ScheduledRequest, state: str) -> None:
         """Complete the row and hand it to the store. Wall clock is honest at these boundaries:
         every token is host-resident by the time the scheduler sees it, so nothing is in flight."""
+        self._timeline.event("finish", trace_id=request.trace_id, state=state,
+                             tokens_out=len(request.generated))
         rec = request.record
         if rec is None:
             return

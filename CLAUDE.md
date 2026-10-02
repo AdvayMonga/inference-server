@@ -57,3 +57,9 @@
 - The knowledge base informs, never forbids. Only integrity failures (gaming, escaping) become
   hard rules; a bad idea is what the loop is for.
 - When we design the harness, flag anything that drifts from referee into strategy.
+
+## The lab
+- `lab/` is the open environment that replaces the loop (design: `ENVIRONMENT.md`). It imports
+  nothing from `research/`. `python -m lab.profile` writes a raw measurement bundle per run.
+- `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
+  decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.
