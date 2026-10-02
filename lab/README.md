@@ -30,29 +30,38 @@ The engine configuration comes from the same env vars the server reads (`MAX_BAT
 
 ## GPU arm
 
-One persistent Crusoe VM, started and stopped by hand, driven through the `crusoe` CLI. A
-stopped on-demand VM keeps its disk and bills nothing. Auth is the CLI's own
-(`crusoe config init`, or `CRUSOE_ACCESS_KEY_ID` / `CRUSOE_SECRET_KEY` / `CRUSOE_DEFAULT_PROJECT`);
-nothing here stores a key.
+One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:
+`verda` (default; 1x H100 SXM, REST API) or `crusoe` (1x A100 PCIe, `crusoe` CLI). Same
+commands either way:
 
-    python -m lab.crusoe status
-    python -m lab.crusoe start                 # create (first time) or start, wait for ssh
-    python -m lab.crusoe setup                 # lab/vm-setup.sh: venv, CUDA torch, Nsight, counter and clock checks
-    python -m lab.crusoe run --fetch lab/runs -- \
+    python -m lab.vm status
+    python -m lab.vm types                  # what the account can rent right now
+    python -m lab.vm start                  # create (first time) or start, wait for ssh
+    python -m lab.vm setup                  # lab/vm-setup.sh: venv, CUDA torch, Nsight, counter and clock checks
+    python -m lab.vm run --fetch lab/runs -- \
         env BACKEND=custom-cuda python -m lab.profile --requests 8
-    python -m lab.crusoe stop
+    python -m lab.vm stop                   # ends GPU billing; the disk survives
 
 `run` rsyncs the working tree minus `.git` and everything `.gitignore` excludes (what is on disk
 here is what gets measured, secrets and weights stay home), runs the command in the repo dir with
 `.venv/bin` first on PATH, and brings `--fetch` (relative to the repo) back under `lab/runs/`. The
 VM is left running; `stop` is yours. Do not run `uv sync` on the box: it would put CPU torch back.
 
-| env | default | |
-|---|---|---|
-| `LAB_VM` | `lab-gpu` | VM name |
-| `LAB_VM_TYPE` | `a100-80gb.1x` | `python -m lab.crusoe types` lists what the account can rent; single-GPU H100 is not listed by Crusoe at the time of writing |
-| `LAB_VM_LOCATION` | `us-east1-a` | |
-| `LAB_VM_IMAGE` | `ubuntu22.04-nvidia-slurm:latest` | an image with the NVIDIA driver; `crusoe compute images list` |
-| `LAB_VM_USER` | `ubuntu` | |
-| `LAB_VM_KEYFILE` | `~/.ssh/id_ed25519.pub` | public key given to the VM on create |
-| `LAB_VM_DIR` | `~/inference-server` | where the tree lands |
+Credentials never live in the repo. Verda: `VERDA_CLIENT_ID` and `VERDA_CLIENT_SECRET` (console >
+Keys > Cloud API credentials) in your shell. Crusoe: `crusoe config init`.
+
+Verda's `stop` is its hibernate: GPU billing ends, the OS volume stays and is billed as storage;
+Verda's own shutdown keeps billing the GPU and is never used. Verda prices are dynamic; `status`
+shows the current rate.
+
+| env | verda default | crusoe default | |
+|---|---|---|---|
+| `LAB_VM_PROVIDER` | `verda` | | |
+| `LAB_VM` | `lab-gpu` | `lab-gpu` | VM name (Verda: hostname) |
+| `LAB_VM_TYPE` | `1H100.80S.30V` | `a100-80gb.1x` | `types` lists what is rentable |
+| `LAB_VM_LOCATION` | `FIN-01` | `us-east1-a` | |
+| `LAB_VM_IMAGE` | `ubuntu-24.04-cuda-12.8-open-docker` | `ubuntu22.04-nvidia-slurm:latest` | an image with the NVIDIA driver |
+| `LAB_VM_DISK_GB` | `200` | fixed by type | OS volume size (Verda) |
+| `LAB_VM_USER` | `root` | `ubuntu` | |
+| `LAB_VM_KEYFILE` | `~/.ssh/id_ed25519.pub` | same | Verda: uploaded on first use |
+| `LAB_VM_DIR` | `~/inference-server` | same | where the tree lands |

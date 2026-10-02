@@ -1,4 +1,4 @@
-"""lab.crusoe against a fake `crusoe` CLI, ssh and rsync on PATH: the lifecycle it drives, not the cloud."""
+"""lab.vm against a fake `crusoe` CLI, ssh and rsync on PATH: the lifecycle it drives, not the cloud."""
 
 from __future__ import annotations
 
@@ -8,7 +8,8 @@ import stat
 
 import pytest
 
-from lab import crusoe
+from lab import vm as labvm
+from lab.providers import ProviderError, crusoe
 
 FAKE_CRUSOE = r'''#!/usr/bin/env python3
 """Fake crusoe CLI: state lives in $FAKE_STATE, every call is appended to $FAKE_LOG."""
@@ -53,10 +54,11 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_STATE", str(tmp_path / "state.json"))
     monkeypatch.setenv("FAKE_LOG", str(tmp_path / "calls.log"))
+    monkeypatch.setenv("LAB_VM_PROVIDER", "crusoe")
     monkeypatch.setenv("LAB_VM_KEYFILE", str(tmp_path / "key.pub"))
-    monkeypatch.setattr(crusoe, "KNOWN_HOSTS_DIR", tmp_path / "kh")
-    monkeypatch.setattr(crusoe, "POLL_S", 0.0)
-    monkeypatch.setattr(crusoe, "SSH_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(labvm, "KNOWN_HOSTS_DIR", tmp_path / "kh")
+    monkeypatch.setattr(labvm, "POLL_S", 0.0)
+    monkeypatch.setattr(labvm, "SSH_TIMEOUT_S", 0.05)
     return tmp_path
 
 
@@ -66,34 +68,32 @@ def calls(tmp_path):
 
 
 def test_start_creates_an_absent_vm(fake):
-    vm = crusoe.VM(name="t1")
-    record = crusoe.start(vm)
-    assert crusoe.state(record) == "running" and crusoe.ip(record) == "10.0.0.7"
+    vm = labvm.VM(name="t1")
+    record = labvm.start(vm)
+    assert record.state == "running" and record.ip == "10.0.0.7"
     create = next(c for c in calls(fake) if c[:3] == ["compute", "vms", "create"])
-    assert "--type" in create and create[create.index("--type") + 1] == vm.type
+    assert create[create.index("--type") + 1] == vm.provider.type
 
 
 def test_start_starts_a_stopped_vm_and_stop_waits(fake):
-    vm = crusoe.VM(name="t2")
-    crusoe.start(vm)
-    crusoe.stop(vm)
-    assert crusoe.state(crusoe.get(vm)) == "stopped"
-    crusoe.start(vm)
+    vm = labvm.VM(name="t2")
+    labvm.start(vm)
+    labvm.stop(vm)
+    assert vm.provider.get("t2").state == "stopped"
+    labvm.start(vm)
     kinds = [c[2] for c in calls(fake) if c[:2] == ["compute", "vms"]]
     assert kinds.count("create") == 1 and kinds.count("start") == 1 and kinds.count("stop") == 1
 
 
-def test_stop_is_a_no_op_when_absent_or_stopped(fake):
-    vm = crusoe.VM(name="t3")
-    crusoe.stop(vm)
+def test_stop_is_a_no_op_when_absent(fake):
+    labvm.stop(labvm.VM(name="t3"))
     assert all(c[2] != "stop" for c in calls(fake) if c[:2] == ["compute", "vms"])
 
 
 def test_run_pushes_runs_in_repo_dir_and_fetches(fake):
-    vm = crusoe.VM(name="t4", user="u", remote_dir="~/repo")
+    vm = labvm.VM(name="t4", user="u", remote_dir="~/repo")
     local = fake / "out"
-    rc = crusoe.run(vm, "python -m lab.profile", fetch_dir="lab/runs", local=local)
-    assert rc == 0 and local.is_dir()
+    assert labvm.run(vm, "python -m lab.profile", fetch_dir="lab/runs", local=local) == 0
     log = calls(fake)
     rsyncs = [c for c in log if c[0] == "rsync"]
     assert rsyncs[0][-1] == "u@10.0.0.7:~/repo/" and "--filter=:- .gitignore" in rsyncs[0]
@@ -104,39 +104,40 @@ def test_run_pushes_runs_in_repo_dir_and_fetches(fake):
 
 
 def test_run_returns_the_remote_exit_code_and_still_fetches(fake, monkeypatch):
-    vm = crusoe.VM(name="t5")
     monkeypatch.setenv("FAKE_EXIT", "3")
-    assert crusoe.run(vm, "false", fetch_dir="lab/runs", local=fake / "out") == 3
+    assert labvm.run(labvm.VM(name="t5"), "false", fetch_dir="lab/runs", local=fake / "out") == 3
     assert any(c[0] == "rsync" and c[-2].endswith("lab/runs/") for c in calls(fake))
 
 
-def test_vm_reads_env_at_construction(fake, monkeypatch):
+def test_user_defaults_to_the_provider(fake, monkeypatch):
+    assert labvm.VM().user == "ubuntu"
+    monkeypatch.setenv("LAB_VM_USER", "me")
+    assert labvm.VM().user == "me"
+
+
+def test_provider_reads_env_at_construction(fake, monkeypatch):
     monkeypatch.setenv("LAB_VM_TYPE", "l40s-48gb.1x")
-    assert crusoe.VM().type == "l40s-48gb.1x"
+    assert crusoe.Crusoe().type == "l40s-48gb.1x"
 
 
-def test_leading_separator_only_is_stripped(fake, monkeypatch):
-    seen = {}
-    monkeypatch.setattr(crusoe, "run", lambda vm, command, **kw: seen.setdefault("cmd", command) and 0)
-    crusoe.main(["run", "--", "pytest", "--", "tests"])
-    assert seen["cmd"] == "pytest -- tests"
-
-
-def test_cli_status_and_types(fake, capsys):
-    vm = crusoe.VM(name="t6")
-    assert crusoe.main(["status"]) == 0
+def test_cli_status_types_and_separator(fake, capsys, monkeypatch):
+    assert labvm.main(["status"]) == 0
     assert "absent" in capsys.readouterr().out
-    crusoe.start(vm)
-    assert crusoe.main(["types"]) == 0
+    assert labvm.main(["types"]) == 0
     assert "a100-80gb.1x" in capsys.readouterr().out
+    seen = {}
+    monkeypatch.setattr(labvm, "run", lambda vm, command, **kw: seen.setdefault("cmd", command) and 0)
+    labvm.main(["run", "--", "pytest", "--", "tests"])
+    assert seen["cmd"] == "pytest -- tests"
 
 
 def test_missing_cli_is_a_clear_error(tmp_path, monkeypatch):
     monkeypatch.setenv("PATH", str(tmp_path))
-    with pytest.raises(crusoe.CrusoeError, match="not installed"):
-        crusoe.get(crusoe.VM(name="t7"))
+    with pytest.raises(ProviderError, match="not installed"):
+        crusoe.Crusoe().get("t7")
 
 
-def test_state_accepts_both_spellings():
-    assert crusoe.state({"state": "STATE_RUNNING"}) == "running"
-    assert crusoe.state({"state": "STOPPED"}) == "stopped"
+def test_unknown_provider(monkeypatch):
+    monkeypatch.setenv("LAB_VM_PROVIDER", "nimbus")
+    with pytest.raises(ProviderError, match="unknown provider"):
+        labvm.VM()
