@@ -61,7 +61,8 @@
 ## The lab
 - `lab/` is the open environment that replaces the loop (design: `ENVIRONMENT.md`). It imports
   nothing from `research/`. `python -m lab.profile` writes a raw measurement bundle per run.
-- `python -m lab.crusoe` drives one persistent Crusoe VM (`LAB_VM_*` env): start, setup, run a
-  command on the pushed tree and fetch outputs, stop. Keys stay in `CRUSOE_*` env, never the repo.
+- `python -m lab.vm` drives one persistent GPU VM (`LAB_VM_*` env) on `lab/providers/` verda
+  (default, 1x H100 SXM) or crusoe (1x A100): start, setup, run a command on the pushed tree and
+  fetch outputs, stop (Verda: hibernate). Credentials stay in env or the provider CLI's config.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# One-time bootstrap of a fresh Crusoe VM for the lab. Idempotent; run via `python -m lab.crusoe setup`.
+# One-time bootstrap of a fresh GPU VM for the lab. Idempotent; run via `python -m lab.vm setup`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+SUDO=$([ "$(id -u)" = 0 ] && echo "" || echo sudo)   # Verda images log in as root
 
 echo "== GPU"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
@@ -21,8 +22,8 @@ fi
 
 echo "== Nsight"
 if ! command -v nsys >/dev/null || ! command -v ncu >/dev/null; then
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq nsight-systems nsight-compute 2>/dev/null \
+  $SUDO apt-get update -qq
+  $SUDO apt-get install -y -qq nsight-systems nsight-compute 2>/dev/null \
     || echo "Nsight not in apt; install from the CUDA toolkit repo (finding, not failure)"
 fi
 nsys --version 2>/dev/null || true
@@ -35,11 +36,11 @@ if [ -r /proc/driver/nvidia/params ]; then
 fi
 
 echo "== clocks: can we lock them?"
-sudo nvidia-smi -pm 1 >/dev/null 2>&1 && echo "persistence mode: on" || echo "persistence mode: refused"
+$SUDO nvidia-smi -pm 1 >/dev/null 2>&1 && echo "persistence mode: on" || echo "persistence mode: refused"
 max_sm=$(nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader,nounits -i 0 2>/dev/null || echo "")
-if [ -n "$max_sm" ] && sudo nvidia-smi -lgc "$max_sm" >/dev/null 2>&1; then
+if [ -n "$max_sm" ] && $SUDO nvidia-smi -lgc "$max_sm" >/dev/null 2>&1; then
   echo "clock lock: ok (sm ${max_sm} MHz)"
-  sudo nvidia-smi -rgc >/dev/null 2>&1 || true
+  $SUDO nvidia-smi -rgc >/dev/null 2>&1 || true
 else
   echo "clock lock: refused"
 fi
