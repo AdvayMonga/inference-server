@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from inference_server.research.kb import load_experiments  # noqa: E402
 from inference_server.research.schemas import REPO_ROOT  # noqa: E402
+from inference_server.research.session import engine_tree_hash  # noqa: E402
 
 # Paths whose change can alter what the engine does at runtime.
 BEHAVIOURAL_PREFIXES = ("src/inference_server/",)
@@ -174,8 +175,9 @@ def regression_test_passes(node_id: str) -> tuple[bool, str]:
 
 
 def vouches_for(candidate, ref: str, *, ancestor=None, changed=None,
-                engine=None) -> tuple[bool, str]:
+                engine=None, tree=None) -> tuple[bool, str]:
     """Is the one commit this record names in `ref`'s history, with no engine change after it?
+    Or, for a squash merge, does `ref` carry exactly the engine files that commit had?
 
     A record without panels — a correctness fix or a no-behaviour-change claim — vouches for
     ONE commit. Accepting it for anything more lets a record written for a rename, or for a
@@ -186,11 +188,16 @@ def vouches_for(candidate, ref: str, *, ancestor=None, changed=None,
     ancestor = ancestor or is_ancestor
     changed = changed or changed_files
     engine = engine or behavioural
+    tree = tree or ref_engine_tree
     treatment = next((a.sha for a in candidate.arms if a.name == "treatment" and a.sha), "")
     if not treatment:
         return False, f"{candidate.id} names no treatment sha"
     if not ancestor(treatment, ref):
-        return False, f"{candidate.id} vouches for {treatment[:12]}, which is not in {ref}"
+        if squash_of(candidate, ref, tree):
+            return True, treatment
+        return False, (f"{candidate.id} vouches for {treatment[:12]}, which is not in {ref}"
+                       + (", and its engine_tree differs" if candidate.engine_tree else
+                          " (no engine_tree to recognise a squash merge)"))
     drifted = engine(changed(ref, treatment), diff_ref=ref, base=treatment)
     if drifted:
         return False, (f"{candidate.id} vouches for {treatment[:12]}, but engine files changed "
@@ -198,15 +205,25 @@ def vouches_for(candidate, ref: str, *, ancestor=None, changed=None,
     return True, treatment
 
 
+def squash_of(candidate, ref: str, tree=None) -> bool:
+    """`ref` has the engine files and runtime pins the record's commit had (a squash merge)."""
+    return bool(candidate.engine_tree) and (tree or ref_engine_tree)(ref) == candidate.engine_tree
+
+
+def ref_engine_tree(ref: str) -> str:
+    return engine_tree_hash(ref, cwd=REPO_ROOT)
+
+
 def no_claim_vouches(candidate, ref: str, *, ancestor=None, changed=None,
-                     engine=None) -> tuple[bool, str]:
+                     engine=None, tree=None) -> tuple[bool, str]:
     """Does this no-behaviour-change record vouch for `ref`? One commit, nothing after it."""
     if candidate.source != "loop" or not candidate.no_behaviour_change:
         return False, "not a no-claim record"
     ok, why = candidate.authorises_merge()
     if not ok:
         return False, why
-    ok, treatment = vouches_for(candidate, ref, ancestor=ancestor, changed=changed, engine=engine)
+    ok, treatment = vouches_for(candidate, ref, ancestor=ancestor, changed=changed, engine=engine,
+                                tree=tree)
     if not ok:
         return False, treatment
     return True, f"{candidate.id} vouches for {treatment[:12]}: {candidate.no_behaviour_change}"
@@ -299,7 +316,12 @@ def main() -> int:
         if candidate.source != "loop" or not candidate.all_gates_green():
             continue
         for arm in candidate.arms:
-            if arm.name != "treatment" or not arm.sha or not is_ancestor(arm.sha, args.ref):
+            if arm.name != "treatment" or not arm.sha:
+                continue
+            if not is_ancestor(arm.sha, args.ref):
+                if squash_of(candidate, args.ref):   # same engine tree, so nothing drifted
+                    exp = candidate
+                    break
                 continue
             drifted = behavioural(changed_files(args.ref, arm.sha),
                                   diff_ref=args.ref, base=arm.sha)

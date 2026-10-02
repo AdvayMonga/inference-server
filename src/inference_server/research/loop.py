@@ -220,6 +220,7 @@ def cmd_noclaim(args) -> int:
 
     from inference_server.research.kb import save_experiment
     from inference_server.research.schemas import REPO_ROOT, Arm, Experiment
+    from inference_server.research.session import engine_tree_hash
 
     def git(*a: str) -> str:
         return subprocess.run(["git", *a], cwd=REPO_ROOT, capture_output=True, text=True,
@@ -230,12 +231,20 @@ def cmd_noclaim(args) -> int:
     exp = Experiment(hypothesis_id="no-behaviour-change", engine_sha_base=base,
                      arms=[Arm("baseline", base), Arm("treatment", sha)],
                      branch=git("rev-parse", "--abbrev-ref", "HEAD"),
-                     verdict="confirmed", source="loop", no_behaviour_change=args.why)
+                     verdict="confirmed", source="loop", no_behaviour_change=args.why,
+                     engine_tree=engine_tree_hash(sha))
     path = save_experiment(exp)
     print(f"recorded {exp.id}: {sha[:12]} claims no behaviour change — {args.why}")
     print(f"  {path}")
     print(f"  commit this file. The claim covers {sha[:12]} only; any engine change after it "
           f"needs its own record.")
+    return 0
+
+
+def cmd_engine_tree(args) -> int:
+    """Print engine_tree for a sha, for a hand-written correctness-fix record."""
+    from inference_server.research.session import engine_tree_hash
+    print(engine_tree_hash(args.sha))
     return 0
 
 
@@ -345,6 +354,9 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--sha", default="HEAD", help="the commit the claim covers")
     n.add_argument("--base", default="main")
     n.set_defaults(fn=cmd_noclaim)
+
+    e = sub.add_parser("engine-tree", help="engine_tree hash of a sha (for hand-written records)")
+    e.add_argument("sha"); e.set_defaults(fn=cmd_engine_tree)
 
     args = ap.parse_args(argv)
     return args.fn(args)

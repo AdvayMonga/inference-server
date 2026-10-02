@@ -11,8 +11,10 @@ surfaces cannot drift apart again.
 
 from __future__ import annotations
 
+import hashlib
 import math
 import subprocess
+import tomllib
 from dataclasses import asdict, dataclass
 from dataclasses import field as dc_field
 from pathlib import Path
@@ -41,6 +43,24 @@ EXEMPT_PREFIXES = (
     "src/inference_server/static/",
     "docs/", "tests/", "scripts/", "benchmarks/", "knowledge/", "experiments/", "monitoring/",
 )
+
+
+# uv.lock pins that change the engine's numerics. Mirrors premerge_check.py.
+ENGINE_RUNTIME_PACKAGES = ("torch", "triton", "transformers", "accelerate")
+
+
+def engine_tree_hash(ref: str, cwd: Path = REPO_ROOT) -> str:
+    """sha256 of the engine files' blobs and runtime pins at `ref`: identical across a squash."""
+    def git(*a: str) -> str:
+        return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True,
+                              check=True).stdout
+    entries = [ln for ln in git("ls-tree", "-r", ref, "--", *BEHAVIOURAL_PREFIXES).splitlines()
+               if not any(ln.split("\t", 1)[1].startswith(x) for x in EXEMPT_PREFIXES)]
+    lock = git("ls-tree", "--name-only", ref, "--", "uv.lock").strip()
+    pkgs = tomllib.loads(git("show", f"{ref}:uv.lock")).get("package", []) if lock else []
+    pins = sorted({(p["name"], p.get("version", "")) for p in pkgs
+                   if p.get("name") in ENGINE_RUNTIME_PACKAGES})
+    return hashlib.sha256(("\n".join(entries) + "\n" + repr(pins)).encode()).hexdigest()
 
 
 class NotMeasurable(Exception):
@@ -194,6 +214,14 @@ def check_still_measurable(arms: dict[str, list[Vitals]], ref: str = "HEAD") -> 
                 f"not what ran.")
 
 
+def _engine_tree_or_blank(sha: str) -> str:
+    """engine_tree_hash, or "" when git cannot resolve the sha (premerge then needs ancestry)."""
+    try:
+        return engine_tree_hash(sha)
+    except subprocess.CalledProcessError:
+        return ""
+
+
 def judge_group(
     hypothesis: Hypothesis,
     run_group: str,
@@ -242,6 +270,7 @@ def judge_group(
         branch=branch,
         arms=[Arm(baseline, base[-1].validity.engine_sha, [p.validity.run_id for p in base]),
               Arm(treatment, treat[-1].validity.engine_sha, [p.validity.run_id for p in treat])],
+        engine_tree=_engine_tree_or_blank(treat[-1].validity.engine_sha),
         verdict=j.verdict,
         gates=j.to_dict(),
         delta={hypothesis.predicted_metric: j.gates["significance"].evidence or {}},
