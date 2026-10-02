@@ -4,37 +4,28 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "0 7 * * 1"        # Mondays 07:00 UTC — the GPU lane, which nothing else exercises
   workflow_dispatch:
-    inputs:
-      runpod_gpu:
-        description: "RunPod GPU type id for the CUDA gate"
-        default: "NVIDIA GeForce RTX 4090"
+  schedule:
+    - cron: "0 7 * * 1"        # Mondays 07:00 UTC: corpus provenance, which nothing else exercises
 
 permissions:
   contents: read
 
 concurrency:
+  # Pushes to main are keyed by sha so back-to-back merges do not cancel each other's run.
   group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # Which lanes does this change need? The engine and the loop share no imports in either
-  # direction, so a change to one cannot break the other — running both every time is just
-  # waiting. Unknown paths default to the engine lane: safe, not fast.
+  # Does this change touch the corpus or its builder? Everything else always runs the engine lane.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      loop: ${{ steps.classify.outputs.loop }}
-      engine: ${{ steps.classify.outputs.engine }}
-      cuda: ${{ steps.classify.outputs.cuda }}
       corpus: ${{ steps.classify.outputs.corpus }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-
       - id: classify
         env:
           BASE_REF: ${{ github.base_ref }}
@@ -42,276 +33,94 @@ jobs:
           EVENT: ${{ github.event_name }}
         run: |
           set -eu
-          range=""
           if [ "$EVENT" = "workflow_dispatch" ] || [ "$EVENT" = "schedule" ]; then
-            echo "loop=false"   >> "$GITHUB_OUTPUT"
-            echo "engine=false" >> "$GITHUB_OUTPUT"
-            echo "cuda=false"   >> "$GITHUB_OUTPUT"
-            echo "corpus=false" >> "$GITHUB_OUTPUT"   # the corpus lane runs on these events itself
-            echo "$EVENT — GPU and corpus lanes only"
-            exit 0
+            echo "corpus=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
+          range=""
           if [ "$EVENT" = "pull_request" ]; then
             range="origin/$BASE_REF...HEAD"
           elif [ "$EVENT" = "push" ] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             range="$BEFORE...HEAD"
           fi
-
-          if [ -z "$range" ]; then
-            # No diffable range (force push, first push). Run everything.
-            echo "loop=true"   >> "$GITHUB_OUTPUT"
-            echo "engine=true" >> "$GITHUB_OUTPUT"
-            echo "cuda=false"  >> "$GITHUB_OUTPUT"
-            echo "corpus=true" >> "$GITHUB_OUTPUT"
-            echo "no range to diff — running both lanes"
-            exit 0
-          fi
-
-          # Capture before reading: a failure inside process substitution is invisible to
-          # `set -e`, so the loop would read nothing and skip every lane, green. `cat-file -e`
-          # above proves the sha exists, not that it shares history with HEAD.
-          changed=$(mktemp)
-          if ! git diff -z --name-only "$range" > "$changed"; then
-            echo "loop=true"   >> "$GITHUB_OUTPUT"
-            echo "engine=true" >> "$GITHUB_OUTPUT"
-            echo "cuda=true"   >> "$GITHUB_OUTPUT"
-            echo "corpus=true" >> "$GITHUB_OUTPUT"
-            echo "could not diff $range — running everything"
-            exit 0
-          fi
-
-          loop=false
-          engine=false
-          cuda=false
           corpus=false
-          echo "changed files:"
-          # -z: a filename with a space or a glob character must not be split into two.
-          while IFS= read -r -d "" f; do
-            echo "    $f"
-            case "$f" in
-              src/inference_server/research/*|tests/test_research_*|tests/test_determinism.py|tests/test_venues.py|knowledge/*|experiments/*)
-                loop=true ;;
-              src/control_plane/*|tests/test_control_plane.py)
-                loop=true ;;                    # control plane: stdlib-only policy, no torch
-              pyproject.toml|.github/workflows/*)
-                loop=true; engine=true ;;
-              docs/*|runs/*|*.md)
-                ;;                              # never executed, wherever it lives
-              *)
-                engine=true ;;
-            esac
-            case "$f" in
-              src/inference_server/models/*) cuda=true ;;   # only a GPU can run this
-            esac
-            case "$f" in
-              scripts/tools/build_corpus.py|scripts/tools/fetch_traces.py|corpus/*) corpus=true ;;
-            esac
-          done < "$changed"
-          echo "loop=$loop"     >> "$GITHUB_OUTPUT"
-          echo "engine=$engine" >> "$GITHUB_OUTPUT"
-          echo "cuda=$cuda"     >> "$GITHUB_OUTPUT"
+          if [ -z "$range" ] || ! git diff --name-only "$range" > changed.txt; then
+            corpus=true                       # no diffable range: run everything
+          elif grep -qE '^(corpus/|scripts/corpus/|lab/corpus\.py|tests/test_lab_corpus\.py)' changed.txt; then
+            corpus=true
+          fi
           echo "corpus=$corpus" >> "$GITHUB_OUTPUT"
-          echo "lanes: loop=$loop engine=$engine cuda=$cuda corpus=$corpus"
+          echo "corpus lane: $corpus"
 
-  # Installing no torch is the assertion, not an optimisation: if research/ or control_plane/
-  # ever imports the engine, this lane goes red on ModuleNotFoundError. README's "the loop knows
-  # only the panel contract" is otherwise enforced by nothing.
-  loop:
-    needs: changes
-    if: needs.changes.result == 'success' && needs.changes.outputs.loop == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install pytest pytest-asyncio ruff
-      - name: Install the jail the safety tests exercise
-        # Without srt those tests skip and the lane still goes green. Ubuntu 24.04 blocks the
-        # unprivileged user namespaces bubblewrap needs unless AppArmor's restriction is lifted.
-        run: |
-          sudo apt-get install -y --no-install-recommends bubblewrap socat ripgrep
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          npm install -g @anthropic-ai/sandbox-runtime@0.0.77
-      - name: Lint
-        run: ruff check src/inference_server/research src/control_plane tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
-      - name: Tests
-        env:
-          REQUIRE_SRT: "1"    # a missing jail fails the jail tests instead of skipping them
-        run: PYTHONPATH=src pytest -q tests/test_research_*.py tests/test_determinism.py tests/test_venues.py tests/test_control_plane.py
-
-
+  # Lint and the fast suite: engine, lab, control plane. CPU only; model-heavy tests are
+  # deselected by tests/conftest.py and no kernel runs (Triton compiles only on CUDA; the lab's
+  # GPU VM is where kernels get verified, by hand, before a models/ change merges).
   engine:
-    needs: changes
-    if: needs.changes.result == 'success' && needs.changes.outputs.engine == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0          # premerge_check.py diffs against the base branch
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          python-version: "3.11"
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-          activate-environment: true     # later steps run python/ruff/pytest from .venv
-
-      - name: Cache HF hub
-        uses: actions/cache@v6
-        with:
-          # test_tokenizer / test_server pull the public gpt2 tokenizer. No auth, but a live
-          # Hub dependency on every run is flake waiting to happen.
-          path: ~/.cache/huggingface
-          key: hf-${{ runner.os }}
-
-      - name: Install deps
-        # Exactly what uv.lock pins; --locked fails if pyproject.toml and the lock disagree.
-        # Linux resolves torch from the CPU index (pyproject [tool.uv.sources]).
-        run: uv sync --locked --extra dev
-
-      - name: Assert torch stayed on CPU
-        # A lock or source change that quietly pulls the CUDA wheel should fail here, not
-        # double the job's runtime.
-        run: |
-          python -c "import torch, sys; v = torch.__version__; \
-            sys.exit(0) if v.endswith('+cpu') or torch.version.cuda is None \
-            else sys.exit(f'expected a CPU torch wheel, got {v}')"
-
-      - name: Lint
-        run: ruff check .
-
-      - name: Tests
-        # Model-heavy tests are deselected by tests/conftest.py — they need ~10 GB of weights.
-        # This job proves the engine still imports and its logic still holds, nothing about GPUs.
-        run: pytest -q
-
-      - name: Engine changes need an experiment record
-        if: github.event_name == 'pull_request'
-        env:
-          BASE: origin/${{ github.base_ref }}
-        run: python scripts/premerge_check.py HEAD --base "$BASE" --explain
-
-      - name: Alarm — engine change pushed straight to main
-        # The gate above only sees PRs. This cannot prevent a direct push, only make it loud.
-        if: github.event_name == 'push'
-        env:
-          BEFORE: ${{ github.event.before }}
-        run: |
-          case "$BEFORE" in
-            0000000000000000000000000000000000000000|"") echo "no previous sha — skipping"; exit 0 ;;
-          esac
-          git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
-          python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
-
-  # Provenance of corpus/: rebuilds it from the pinned raw traces and asserts the committed bytes.
-  # Every other lane skips those tests (no cache); here a skip is a failure (CORPUS_REQUIRE_RAW).
-  corpus:
-    needs: changes
-    if: >-
-      always() && needs.changes.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
-       needs.changes.outputs.corpus == 'true')
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v7
-
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.11"
           enable-cache: true
           cache-dependency-glob: uv.lock
           activate-environment: true
-
-      - name: Install deps
-        run: uv sync --locked --extra dev --extra corpus
-
-      - name: Cache raw traces
-        # ~2.2 GB. fetch_traces.py pins every file by sha256, so its hash is the cache key.
+      - name: Cache HF hub
         uses: actions/cache@v6
         with:
-          path: ~/.cache/inference-server/traces
-          key: traces-${{ hashFiles('scripts/tools/fetch_traces.py') }}
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}
+      - name: Install deps
+        run: uv sync --locked --extra dev
+      - name: Assert torch stayed on CPU
+        run: |
+          python -c "import torch, sys; v = torch.__version__; \
+            sys.exit(0) if v.endswith('+cpu') or torch.version.cuda is None \
+            else sys.exit(f'expected a CPU torch wheel, got {v}')"
+      - name: Lint
+        run: ruff check .
+      - name: Tests
+        run: pytest -q
 
-      - name: Fetch and verify raw traces
-        run: python scripts/tools/fetch_traces.py
-
-      - name: Corpus provenance tests
-        env:
-          CORPUS_REQUIRE_RAW: "1"
-        run: pytest -q tests/test_research_corpus.py
-
-  # Triton compiles only on CUDA, so this rents a GPU through research/venues.py, which needs
-  # RUNPOD_API_KEY. Manual, not per-PR.
-  gpu:
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+  # Provenance of corpus/: rebuilds it from the pinned raw traces and asserts the committed bytes.
+  corpus:
+    needs: changes
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.corpus == 'true'
     runs-on: ubuntu-latest
-    # Bounds the money. A pod bills until terminated; run_instrument terminates in a finally,
-    # but a runner killed here never runs it — the reap step at the end does.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: "3.11"
-          cache: pip
-      - id: start
-        # The reaper only touches ci-cuda-gate pods started after this.
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Install the launcher only
-        # --no-deps: the pod installs the real dependencies remotely. Installing torch here
-        # would download 200 MB to launch a job that does not use it.
-        run: pip install -e . --no-deps
-
-      - name: Run the CUDA correctness gate
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          activate-environment: true
+      - name: Install deps
+        run: uv sync --locked --extra dev --extra corpus
+      - name: Cache raw traces
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/inference-server/traces
+          key: traces-${{ hashFiles('scripts/corpus/fetch_traces.py') }}
+      - name: Fetch and verify raw traces
+        run: python scripts/corpus/fetch_traces.py
+      - name: Corpus provenance tests
         env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          RUNPOD_GPU: ${{ inputs.runpod_gpu || 'NVIDIA GeForce RTX 4090' }}
-          EVENT: ${{ github.event_name }}
-        run: |
-          if [ -z "${RUNPOD_API_KEY:-}" ]; then
-            echo "RUNPOD_API_KEY is not set in this repo's secrets."
-            echo "Add it (Settings → Secrets → Actions), or run locally:"
-            echo "  RUNPOD_API_KEY=... python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py"
-            # Asked for by hand: fail. On the weekly tick: say so and stop, do not cry wolf.
-            [ "$EVENT" = "schedule" ] && exit 0
-            exit 1
-          fi
-          # One instrument runs every check on one pod; the launcher exits with the verdict.
-          exec python scripts/tools/run_on_runpod.py scripts/gpu_tests/cuda_gate.py \
-            --gpu "$RUNPOD_GPU" --name ci-cuda-gate
+          CORPUS_REQUIRE_RAW: "1"
+        run: pytest -q tests/test_lab_corpus.py
 
-      - name: Reap any pod this job left behind
-        # A job killed by timeout-minutes skips every finally on the runner. Pods named
-        # ci-cuda-gate (CI's name; humans keep the launcher's default) and started since the
-        # job began are terminated here; nothing else is touched. No RUNPOD_API_KEY: nothing
-        # was rented, the reaper says so and exits 0.
-        if: always()
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-        run: python scripts/tools/runpod_reap.py --name ci-cuda-gate --since "${{ steps.start.outputs.at }}"
-
-  # The one check branch protection requires: a skipped lane must not leave a PR blocked
-  # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately
-  # not aggregated here — it is manual and costs money.
+  # The one check branch protection requires. A skipped lane is fine; failed or cancelled is not.
   ci-ok:
-    needs: [changes, loop, engine, corpus]
+    needs: [changes, engine, corpus]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - env:
-          RESULTS: ${{ needs.changes.result }} ${{ needs.loop.result }} ${{ needs.engine.result }} ${{ needs.corpus.result }}
+          RESULTS: ${{ needs.changes.result }} ${{ needs.engine.result }} ${{ needs.corpus.result }}
         run: |
-          echo "changes/loop/engine/corpus: $RESULTS"
+          echo "changes/engine/corpus: $RESULTS"
           case "$RESULTS" in
             *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
           esac
-          if [ "${{ needs.changes.outputs.cuda }}" = "true" ]; then
-            echo "::warning::this PR touches src/inference_server/models/ — CUDA-only code that no lane here can execute. Dispatch the gpu lane before merging."
-          fi
           echo "all lanes green or skipped"

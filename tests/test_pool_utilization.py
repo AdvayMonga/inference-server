@@ -113,7 +113,7 @@ def test_pool_stats_are_reporting_only():
     """
     from pathlib import Path
 
-    from inference_server.research.schemas import REPO_ROOT
+    REPO_ROOT = Path(__file__).resolve().parents[1]
 
     keys = ("pool_utilization", "pool_free_blocks", "pool_total_blocks")
     allowed = {"models/paged_kv_cache.py",     # where they are produced
@@ -121,7 +121,7 @@ def test_pool_stats_are_reporting_only():
     offenders = []
     for py in (Path(REPO_ROOT) / "src" / "inference_server").rglob("*.py"):
         rel = py.relative_to(Path(REPO_ROOT) / "src" / "inference_server").as_posix()
-        if rel in allowed or rel.startswith("research/"):
+        if rel in allowed:
             continue
         text = py.read_text()
         if any(k in text for k in keys):

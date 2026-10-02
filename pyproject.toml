@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inference-server"
 version = "0.1.0"
-description = "LLM inference engine from scratch: continuous batching, paged KV cache, Triton kernels, and a research loop that gates every merge on a measured experiment"
+description = "LLM inference engine from scratch: continuous batching, paged KV cache, Triton kernels, and the lab that measures and improves it"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,16 +26,7 @@ dev = [
     "ruff>=0.4",
     "matplotlib>=3.8",
 ]
-# Modal is a live runner again for one-shot instruments (scripts/gpu_tests/*_modal.py). The
-# sweeps under scripts/archive/modal/ stay archived; see that folder's README to reproduce one.
-modal = [
-    "modal>=1.0",
-]
-# The research loop's agent nodes (research/agents/call.py); the engine never imports it.
-agents = [
-    "claude-agent-sdk>=0.2.161",
-]
-# scripts/tools/fetch_traces.py reads the WildChat parquet shards; nothing else imports it.
+# scripts/corpus/fetch_traces.py reads the WildChat parquet shards; nothing else imports it.
 corpus = [
     "pyarrow>=17",
 ]

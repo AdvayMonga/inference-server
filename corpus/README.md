@@ -1,12 +1,12 @@
 # corpus/ — frozen workload traces
 
-The corpus defines the landscape the research loop searches. Anything not in it is invisible.
+The corpus defines the landscape the lab measures. Anything not in it is invisible.
 
 Since 2026-10-01 it is built from **real public traces**: real arrival times and sessions from
 BurstGPT, real conversation text (with the real assistant replies) from WildChat-1M. The
 previous synthetic corpus (Poisson arrivals over `scripts/bench/prompt_bank.py`, multi-turn by
 prompt concatenation, corpus_version `659ea3b6…`) remains in git history. **Every panel
-measured against the old version is non-comparable with this one** — `compare.py` refuses
+measured against the old version is non-comparable with this one** — the eval harness refuses
 across `corpus_version`, and the noise bands in `knowledge/noise/` do not carry over.
 
 ## A trace
@@ -27,11 +27,11 @@ only — `messages`.
   (the trace's response tokens are NOT used). `expected_output_tokens` is unset until a GPU
   reference run measures it.
 
-`replay_trace.py` fires each request at its `arrival_s` on the client's own clock — open loop —
+An open-loop replayer (the eval harness's job) fires each request at its `arrival_s` on the client's own clock — open loop —
 and posts `messages` (or one user message) to `/v1/chat/completions`, so the serving model's
 chat template is applied **server-side**: traces never store templated text and stay
 model-independent. A chat-route panel carries a verified `chat_template` fingerprint (checked
-against a single-message request) and `compare.py` refuses across a changed one.
+against a single-message request) and a changed one makes two runs non-comparable.
 `--prompt-format raw` posts `prompt` to `/v1/completions`. `session_id` / `turn_index` ride as
 `X-Session-Id` / `X-Turn-Index`, and `X-Trace-Id=<class>-<split>-<nonce>-<index>` joins each CSV
 row to its telemetry row.
@@ -56,7 +56,7 @@ in the corpus, so prompts and sessions are disjoint across splits too.
 every inter-arrival is stretched by one factor, `dilation = max(1, rate / target)`, so the burst
 shape is kept exactly. The target is the class's `arrival_rate_rps` (mean rate; the peak minute
 for `spike`). Each trace's factor is recorded in `manifest.json` → `dilation` (hashed into the
-corpus_version); **`replay_trace.py --rate-scale <dilation>` restores the real timing**. Every
+corpus_version); **a replayer's rate dilation restores the real timing**. Every
 trace in this version has dilation 1.0, i.e. is already in real time. BurstGPT timestamps have
 1 s resolution, so several requests often share an `arrival_s`.
 
@@ -82,7 +82,7 @@ BurstGPT) are dropped. Returning sessions are rare in the real trace (0–7 per 
 **Why no Azure split.** The Azure 2024 trace was evaluated as a cross-source held-out and does
 not fit cleanly: it has no session ids (no multi-turn, no prefix reuse); the manifest schema
 has exactly two splits per class, and a third would ripple through `corpus.py`, the replay CLI,
-`compare.py` and the held-out gate; and at 45 req/s mean it needs ~100× thinning, not dilation,
+the held-out gate; and at 45 req/s mean it needs ~100× thinning, not dilation,
 to fit one replica, so its burst shape cannot be preserved the same way. It is used as a sanity
 check instead (`build_corpus.py --azure-check`):
 
@@ -98,22 +98,22 @@ policy tuned on this corpus should be re-checked against a smoother, longer-cont
 
 ```bash
 uv sync --extra dev --extra corpus                          # pyarrow, for the WildChat shards
-.venv/bin/python scripts/tools/fetch_traces.py               # ~1.6 GB into ~/.cache/inference-server/traces
-PYTHONPATH=src .venv/bin/python scripts/tools/build_corpus.py   # seed 20261001
+.venv/bin/python scripts/corpus/fetch_traces.py              # ~1.6 GB into ~/.cache/inference-server/traces
+.venv/bin/python scripts/corpus/build_corpus.py               # seed 20261001
 ```
 
 `fetch_traces.py` pins every URL to a release or revision and every file to a sha256, refuses
 a mismatch, and is idempotent. Raw data never enters git (`TRACE_CACHE` overrides the cache
 dir). The build is deterministic in (seed, cached inputs, tokenizer); `--tokenizer` makes the
 pairing tokenizer a setting, and a different one is a new corpus version.
-`tests/test_research_corpus.py` rebuilds from the cache and asserts the committed bytes (it
+`tests/test_lab_corpus.py` rebuilds from the cache and asserts the committed bytes (it
 skips when the cache is absent).
 
 ## The rule
 
 `corpus_version` is a sha256 over every trace's hash and the class table (SLOs, rates, paths).
-`load_manifest()` re-hashes each file and refuses the corpus on any mismatch, and `compare.py`
-refuses two panels whose versions differ. So: **never edit a trace or an SLO in place.** Any
+`load_manifest()` re-hashes each file and refuses the corpus on any mismatch, and two
+measurements whose versions differ are not comparable. So: **never edit a trace or an SLO in place.** Any
 change is a rebuild that produces a new version.
 
 ## Sources and attribution

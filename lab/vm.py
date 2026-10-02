@@ -134,6 +134,15 @@ def fetch(vm: VM, record: Record, remote: str, local: Path) -> None:
     _rsync(vm, f"{ssh_target(vm, record)}:{vm.remote_dir}/{remote}/", f"{local}/")
 
 
+def local_sha() -> str | None:
+    """The working tree's HEAD, shipped to the VM as LAB_GIT_SHA because the pushed tree carries no .git."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    except OSError:
+        return None
+    return out.stdout.strip() or None
+
+
 def run(vm: VM, command: str, *, fetch_dir: str | None = None, local: Path | None = None,
         push_tree: bool = True) -> int:
     """Start the VM if needed, push the tree, run `command` in the repo dir with its venv on PATH, fetch `fetch_dir`. Leaves the VM running."""
@@ -141,8 +150,10 @@ def run(vm: VM, command: str, *, fetch_dir: str | None = None, local: Path | Non
     wait_ssh(vm, record)
     if push_tree:
         push(vm, record)
+    sha = local_sha()
+    env = f"LAB_GIT_SHA={sha} " if sha else ""
     t0 = time.monotonic()
-    out = ssh(vm, record, f'cd {vm.remote_dir} && PATH="$PWD/.venv/bin:$PATH" {command}', check=False)
+    out = ssh(vm, record, f'cd {vm.remote_dir} && {env}PATH="$PWD/.venv/bin:$PATH" {command}', check=False)
     print(f"[lab.vm] exit {out.returncode} after {time.monotonic() - t0:.0f}s on {vm.name}",
           file=sys.stderr)
     if fetch_dir:

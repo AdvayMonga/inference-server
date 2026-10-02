@@ -112,7 +112,8 @@ def test_run_pushes_runs_in_repo_dir_and_fetches(fake):
     assert rsyncs[0][-1] == "u@10.0.0.7:~/repo/" and "--filter=:- .gitignore" in rsyncs[0]
     assert rsyncs[1][-2] == "u@10.0.0.7:~/repo/lab/runs/"
     sshs = [c for c in log if c[0] == "ssh"]
-    assert sshs[-1][-1] == 'cd ~/repo && PATH="$PWD/.venv/bin:$PATH" python -m lab.profile'
+    cmd = sshs[-1][-1]
+    assert cmd.startswith("cd ~/repo && LAB_GIT_SHA=") and cmd.endswith('PATH="$PWD/.venv/bin:$PATH" python -m lab.profile')
     assert any(a.startswith("UserKnownHostsFile=") and a.endswith("t4.known_hosts") for a in sshs[-1])
 
 

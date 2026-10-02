@@ -1,9 +1,9 @@
 """The CUDA correctness checks, as plain functions any CUDA box can run.
 
-Both the `*_modal.py` gate scripts and `cuda_gate.py` (the RunPod instrument) call these, so
+`tune_triton_launch.py` and the lab's GPU VM (`python -m lab.vm run -- python scripts/gpu_tests/checks.py`) call these, so
 the gate is one set of checks with two launchers rather than two copies that drift. Each check
 returns `(passed, detail)` and imports torch lazily: this module must import on a laptop with
-no CUDA and no triton, so the gate can be dry-run and the modal scripts stay importable.
+no CUDA and no triton, so the checks can be listed and dry-run from a laptop.
 """
 
 from __future__ import annotations
@@ -191,3 +191,20 @@ CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_no_recompile": paged_decode_no_recompile,
     "paged_prefill_parity": paged_prefill_parity,
 }
+
+
+def main() -> int:
+    """Run every check; exit 1 if any fails. `python scripts/gpu_tests/checks.py [name ...]`."""
+    import sys
+    names = sys.argv[1:] or list(CHECKS)
+    failed = 0
+    for name in names:
+        ok, detail = CHECKS[name]()
+        failed += not ok
+        print(f"[{'ok' if ok else 'FAIL'}] {name}: {detail}")
+    print(f"{len(names) - failed}/{len(names)} checks passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

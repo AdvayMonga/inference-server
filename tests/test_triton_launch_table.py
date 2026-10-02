@@ -254,15 +254,3 @@ def test_a_written_table_is_what_the_engine_loads(tmp_path):
     assert launch_table.load(path, GPU, MODEL) == 1
     assert launch_table.lookup("paged_decode", 8, 256, 16) == {"splits": 4, "num_warps": 2,
                                                                "num_stages": 3}
-
-
-def test_the_launcher_writes_the_pods_table_home(tmp_path):
-    import run_on_runpod as rr
-
-    doc = tune.build_table([], model=MODEL, gpu=GPU, sha="abc1234", run_group="grp-x")
-    written = rr.write_launch_table({"launch_table": doc, "sweep": [{"ms": 1.0}]}, "grp-x",
-                                    tmp_path / "runs", timing_dir=tmp_path / "timing")
-    assert written == [tmp_path / "timing" / "triton-launch-nvidia-a100-80gb-pcie-abc1234.json",
-                       tmp_path / "runs" / "grp-x" / "triton_launch_sweep.json"]
-    assert json.loads(written[0].read_text()) == doc
-    assert json.loads(written[1].read_text()) == [{"ms": 1.0}]
