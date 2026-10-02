@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "corpus_version": "659ea3b61303f70b7777353218e3b58196106167ee295593231188d6b456fa76",
+  "corpus_version": "d687610c9b747717ca3a4f270b5db096df60e0c959b8403dd275c450ab142e79",
   "classes": {
     "cold_start": {
       "name": "cold_start",
-      "description": "The first requests to a fresh replica: few, sparse, mixed short/medium.",
-      "slo_ttft_ms": 2000.0,
+      "description": "The first 60 requests after a >=10 min idle gap in the trace, arriving within 20 min, with varied prompt lengths (not one scripted client): what a replica woken from zero sees.",
+      "slo_ttft_ms": 5000.0,
       "slo_tpot_ms": null,
       "arrival_rate_rps": 0.5,
       "seen": "cold_start/seen.jsonl",
@@ -13,30 +13,51 @@
     },
     "steady_interactive": {
       "name": "steady_interactive",
-      "description": "Warm replica, mixed lengths at a rate that fills the batch; some sessions return for a second turn.",
-      "slo_ttft_ms": 200.0,
-      "slo_tpot_ms": 50.0,
-      "arrival_rate_rps": 4.0,
+      "description": "A steady busy 10-minute window (200-300 requests, no minute above 2x the window mean): a warm replica under real load.",
+      "slo_ttft_ms": 1000.0,
+      "slo_tpot_ms": 100.0,
+      "arrival_rate_rps": 0.5,
       "seen": "steady_interactive/seen.jsonl",
       "heldout": "steady_interactive/heldout.jsonl"
     },
     "long_context": {
       "name": "long_context",
-      "description": "Long prompts only, high KV pressure; where eviction policy matters.",
-      "slo_ttft_ms": 1000.0,
+      "description": "60 consecutive trace requests of >=3000 tokens, paired with long WildChat prompts and histories: prefill and KV pressure.",
+      "slo_ttft_ms": 3000.0,
       "slo_tpot_ms": null,
-      "arrival_rate_rps": 1.0,
+      "arrival_rate_rps": 0.1,
       "seen": "long_context/seen.jsonl",
       "heldout": "long_context/heldout.jsonl"
+    },
+    "spike": {
+      "name": "spike",
+      "description": "A real burst: a minute of 40-150 requests after ten quiet minutes, with five minutes of lead-in and three of tail.",
+      "slo_ttft_ms": 2000.0,
+      "slo_tpot_ms": null,
+      "arrival_rate_rps": 2.5,
+      "seen": "spike/seen.jsonl",
+      "heldout": "spike/heldout.jsonl"
     }
   },
   "files": {
-    "cold_start/heldout.jsonl": "e434ee177bee8218040ae26e999a7450802252c92d2e0548d052e6e09dfcbd92",
-    "cold_start/seen.jsonl": "9c03e43e9509aed2f984f0e464fddb3cdc58a49dc1869692a1cca32232cc0e8c",
-    "long_context/heldout.jsonl": "86a06223626a57ae89511e94f4edbd08695a978dc6f4d8b2f615ca63b671ff2f",
-    "long_context/seen.jsonl": "982acbeeda407051c13601e9227dc6c3d4c425f9084515a7ecf03c757b7af847",
-    "steady_interactive/heldout.jsonl": "c6662fcc41a190721cb24954f97f668f88e64319d6aef4d9423db448fd98d15e",
-    "steady_interactive/seen.jsonl": "ad0a6794b2df381cd1de60e56049be5f916e1f473c217fb0cea85299549a4ada"
+    "cold_start/heldout.jsonl": "a78f93eda0149a2be114b40dd03ab200dce035ccbadc597500c2b6fb1c0e2e62",
+    "cold_start/seen.jsonl": "354b01b314dc9db849f4e0895591b5aee04088db765c2749e29505f7e7c9a3c7",
+    "long_context/heldout.jsonl": "b0aa17e683fdb063cbf0e6e21381bc6ef915e4af8d040a9348bba0b4caf2e9d1",
+    "long_context/seen.jsonl": "a9db8dda5df1606ce2a4b4962c1bc67fff2c02d230b00d05a3d69c0f8db69628",
+    "spike/heldout.jsonl": "78c50cd75b8419efce43028014e41ddf5c3c79102d5fc0e70df0ef97ef486691",
+    "spike/seen.jsonl": "b732b37a752dea9ad7f3760ed414b78de5d8dca7be5b5a612f0e536d1bbaf1d3",
+    "steady_interactive/heldout.jsonl": "f59071050c625de6327d82101e33c4b3733f19719684fbccaff298124eddf869",
+    "steady_interactive/seen.jsonl": "325eb4b5bd20286102ea9355d4b7351057560e36fc7f13357ab82de545aa4f0a"
   },
-  "notes": "SLO values are placeholders pending the plan's Phase 0 decision: steady_interactive carries bench_serving's current p95 TTFT 200ms / TPOT 50ms, cold_start 2000ms TTFT, long_context 1000ms TTFT. Built by scripts/tools/build_corpus.py with seed 20260915; a rebuild with any other input is a new corpus version."
+  "notes": "Real-trace corpus. Timing + sessions: BurstGPT v2.0 BurstGPT_3.csv (HPMLL, CC-BY-4.0). Text: WildChat-1M @7d6490e46228 shards 0-1 (allenai, ODC-BY), English, not toxic/flagged/redacted, no conversation containing a credential-like string (SECRET_RE). Azure LLM inference trace 2024 (CC-BY-4.0) is fetched as a cross-source check only, not a split (no sessions; see corpus/README.md). Tokenizer Qwen/Qwen3-30B-A3B@ad44e777bcd1, chat template enable_thinking=False, prompt cap 16384, max_tokens 2048. Seed 20261001. Splits: seen = even weeks of the trace, heldout = odd weeks. `dilation` per trace: arrival_s = real offset x dilation; replay with --rate-scale <dilation> for real timing. Each request's build_prompt_tokens is its templated length under this tokenizer. SLOs proposed 2026-10-01, pending owner confirmation.",
+  "dilation": {
+    "cold_start/heldout.jsonl": 1.0,
+    "cold_start/seen.jsonl": 1.0,
+    "long_context/heldout.jsonl": 1.0,
+    "long_context/seen.jsonl": 1.0,
+    "spike/heldout.jsonl": 1.0,
+    "spike/seen.jsonl": 1.0,
+    "steady_interactive/heldout.jsonl": 1.0,
+    "steady_interactive/seen.jsonl": 1.0
+  }
 }

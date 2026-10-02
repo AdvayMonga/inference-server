@@ -86,7 +86,7 @@ _ROUTES = {
 
 async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *,
                       headers: dict | None = None, sampling: dict | None = None,
-                      prompt_format: str = "raw") -> Sample:
+                      prompt_format: str = "raw", messages: list[dict] | None = None) -> Sample:
     """One streaming completion call. TTFT = first token chunk; TPOT = mean ITL.
 
     `prompt_format` picks the surface: "raw" -> /v1/completions (unchanged, the default so no
@@ -95,10 +95,13 @@ async def one_request(client: httpx.AsyncClient, prompt: str, max_tokens: int, *
     top_p, top_k) are optional; None keeps the plain temperature-0 request. Both routes accept
     the same three sampling fields, top_k included — it is not OpenAI-standard, and the shim
     carries it on both surfaces precisely so a trace replays identically through either.
+    `messages` (a real conversation) replaces the single user message on the chat route only.
     """
     path, make_body, token_text = _ROUTES[prompt_format]
     body = {**make_body(prompt), "max_tokens": max_tokens, "stream": True, "temperature": 0.0,
             **(sampling or {})}
+    if messages and prompt_format == "chat":
+        body["messages"] = messages
     t0 = time.perf_counter()
     ttft = None
     first_tok_t = last_tok_t = None

@@ -41,14 +41,22 @@ class TraceRequest:
                                                                "top_k": 0})
     expected_output_hash: str | None = None    # filled by a reference run; the correctness oracle
     expected_output_tokens: int | None = None  # ditto; the termination oracle. None = not measured
+    # A real conversation ending in a user turn; None = one user message, `prompt`. When set,
+    # `prompt` is its contents joined by blank lines, for the raw route and the simulator.
+    messages: list[dict[str, str]] | None = None
+    build_prompt_tokens: int | None = None    # templated length under the manifest's tokenizer
+
+    def chat_messages(self) -> list[dict[str, str]]:
+        return self.messages or [{"role": "user", "content": self.prompt}]
 
     def to_dict(self) -> dict[str, Any]:
-        """`expected_output_tokens` is omitted when unset, so a trace written without it is byte-
-        identical to one written before the field existed and the corpus_version does not move.
+        """`expected_output_tokens`, `messages` and `build_prompt_tokens` are omitted when
+        unset, so a trace written without them is byte-identical to one from before they existed.
         `expected_output_hash` keeps serialising its null: it is already in every committed trace."""
         d = asdict(self)
-        if d["expected_output_tokens"] is None:
-            del d["expected_output_tokens"]
+        for k in ("expected_output_tokens", "messages", "build_prompt_tokens"):
+            if d[k] is None:
+                del d[k]
         return d
 
 
@@ -83,28 +91,38 @@ class Manifest:
     classes: dict[str, WorkloadClass]
     files: dict[str, str]        # relative path -> sha256
     notes: str = ""
+    # relative path -> factor every real inter-arrival was stretched by; absent = not recorded
+    dilation: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schema_version": self.schema_version, "corpus_version": self.corpus_version,
-                "classes": {k: asdict(v) for k, v in self.classes.items()},
-                "files": dict(sorted(self.files.items())), "notes": self.notes}
+        d = {"schema_version": self.schema_version, "corpus_version": self.corpus_version,
+             "classes": {k: asdict(v) for k, v in self.classes.items()},
+             "files": dict(sorted(self.files.items())), "notes": self.notes}
+        if self.dilation:
+            d["dilation"] = dict(sorted(self.dilation.items()))
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Manifest":
         return cls(schema_version=d["schema_version"], corpus_version=d["corpus_version"],
                    classes={k: WorkloadClass(**v) for k, v in d["classes"].items()},
-                   files=dict(d["files"]), notes=d.get("notes", ""))
+                   files=dict(d["files"]), notes=d.get("notes", ""),
+                   dilation=dict(d.get("dilation", {})))
 
 
 def file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def corpus_version(files: dict[str, str], classes: dict[str, WorkloadClass]) -> str:
+def corpus_version(files: dict[str, str], classes: dict[str, WorkloadClass],
+                   dilation: dict[str, float] | None = None) -> str:
     """One hash over the sorted (path, sha256) pairs AND the class table, so a changed SLO or
-    rate moves the version as surely as a changed trace byte does."""
+    rate moves the version as surely as a changed trace byte does. A recorded dilation is
+    hashed too; none recorded leaves the hash as it was before the field existed."""
     lines = [f"{p} {h}" for p, h in sorted(files.items())]
     lines += [json.dumps(asdict(c), sort_keys=True) for _, c in sorted(classes.items())]
+    if dilation:
+        lines.append(json.dumps(dilation, sort_keys=True))
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()
 
 
@@ -120,7 +138,8 @@ def read_trace(path: Path) -> list[TraceRequest]:
         return [TraceRequest(**json.loads(line)) for line in f if line.strip()]
 
 
-def build_manifest(classes: dict[str, WorkloadClass], corpus_dir: Path, notes: str = "") -> Manifest:
+def build_manifest(classes: dict[str, WorkloadClass], corpus_dir: Path, notes: str = "",
+                   dilation: dict[str, float] | None = None) -> Manifest:
     """Hash every trace the classes reference and derive the corpus version from the hashes."""
     files = {}
     for c in classes.values():
@@ -128,8 +147,8 @@ def build_manifest(classes: dict[str, WorkloadClass], corpus_dir: Path, notes: s
             rel = c.trace_file(split)
             files[rel] = file_sha256(corpus_dir / rel)
     return Manifest(schema_version=CORPUS_SCHEMA_VERSION,
-                    corpus_version=corpus_version(files, classes),
-                    classes=classes, files=files, notes=notes)
+                    corpus_version=corpus_version(files, classes, dilation),
+                    classes=classes, files=files, notes=notes, dilation=dict(dilation or {}))
 
 
 def load_manifest(corpus_dir: Path = CORPUS_DIR) -> Manifest:
@@ -145,7 +164,9 @@ def load_manifest(corpus_dir: Path = CORPUS_DIR) -> Manifest:
         if actual != expected:
             raise CorpusError(f"trace {rel} sha256 {actual[:12]} != manifest {expected[:12]}: a "
                               f"changed trace is a new corpus version, rebuild the manifest")
-    if corpus_version(m.files, m.classes) != m.corpus_version:
+    if set(m.dilation) - set(m.files):
+        raise CorpusError("manifest dilation names a trace it does not hash")
+    if corpus_version(m.files, m.classes, m.dilation) != m.corpus_version:
         raise CorpusError("manifest corpus_version does not match its own file hashes and "
                           "class table: a changed SLO or rate is a new corpus version too")
     for c in m.classes.values():

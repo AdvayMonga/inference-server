@@ -255,6 +255,21 @@ def test_replay_sends_the_trace_session_turn_and_trace_id_and_its_sampling():
     assert [r.trace_id for r in res.rows] == ["steady_interactive-seen-0", "steady_interactive-seen-1"]
 
 
+def test_a_multi_turn_request_posts_its_real_conversation_on_the_chat_route():
+    msgs = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello!"},
+            {"role": "user", "content": "more"}]
+    trace = [TraceRequest(0.0, "s-1", 1, "hi\n\nhello!\n\nmore", 8, messages=msgs)]
+
+    async def go(fmt):
+        app = _app()
+        async with await _client(app) as client:
+            await rt.run_replay(client, trace, prompt_format=fmt)
+        return app.state.requests[0][1]
+
+    assert asyncio.run(go("chat"))["messages"] == msgs
+    assert asyncio.run(go("raw"))["prompt"] == "hi\n\nhello!\n\nmore"
+
+
 def test_slo_broken_means_no_throughput_within_slo():
     async def go():
         async with await _client(_app(ttft_s=0.05)) as client:

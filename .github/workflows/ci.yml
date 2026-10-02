@@ -29,6 +29,7 @@ jobs:
       loop: ${{ steps.classify.outputs.loop }}
       engine: ${{ steps.classify.outputs.engine }}
       cuda: ${{ steps.classify.outputs.cuda }}
+      corpus: ${{ steps.classify.outputs.corpus }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -46,7 +47,8 @@ jobs:
             echo "loop=false"   >> "$GITHUB_OUTPUT"
             echo "engine=false" >> "$GITHUB_OUTPUT"
             echo "cuda=false"   >> "$GITHUB_OUTPUT"
-            echo "$EVENT — GPU lane only"
+            echo "corpus=false" >> "$GITHUB_OUTPUT"   # the corpus lane runs on these events itself
+            echo "$EVENT — GPU and corpus lanes only"
             exit 0
           fi
           if [ "$EVENT" = "pull_request" ]; then
@@ -60,6 +62,7 @@ jobs:
             echo "loop=true"   >> "$GITHUB_OUTPUT"
             echo "engine=true" >> "$GITHUB_OUTPUT"
             echo "cuda=false"  >> "$GITHUB_OUTPUT"
+            echo "corpus=true" >> "$GITHUB_OUTPUT"
             echo "no range to diff — running both lanes"
             exit 0
           fi
@@ -72,6 +75,7 @@ jobs:
             echo "loop=true"   >> "$GITHUB_OUTPUT"
             echo "engine=true" >> "$GITHUB_OUTPUT"
             echo "cuda=true"   >> "$GITHUB_OUTPUT"
+            echo "corpus=true" >> "$GITHUB_OUTPUT"
             echo "could not diff $range — running everything"
             exit 0
           fi
@@ -79,6 +83,7 @@ jobs:
           loop=false
           engine=false
           cuda=false
+          corpus=false
           echo "changed files:"
           # -z: a filename with a space or a glob character must not be split into two.
           while IFS= read -r -d "" f; do
@@ -98,11 +103,15 @@ jobs:
             case "$f" in
               src/inference_server/models/*) cuda=true ;;   # only a GPU can run this
             esac
+            case "$f" in
+              scripts/tools/build_corpus.py|scripts/tools/fetch_traces.py|corpus/*) corpus=true ;;
+            esac
           done < "$changed"
           echo "loop=$loop"     >> "$GITHUB_OUTPUT"
           echo "engine=$engine" >> "$GITHUB_OUTPUT"
           echo "cuda=$cuda"     >> "$GITHUB_OUTPUT"
-          echo "lanes: loop=$loop engine=$engine cuda=$cuda"
+          echo "corpus=$corpus" >> "$GITHUB_OUTPUT"
+          echo "lanes: loop=$loop engine=$engine cuda=$cuda corpus=$corpus"
 
   # Installing no torch is the assertion, not an optimisation: if research/ or control_plane/
   # ever imports the engine, this lane goes red on ModuleNotFoundError. README's "the loop knows
@@ -198,6 +207,44 @@ jobs:
           git cat-file -e "$BEFORE^{commit}" 2>/dev/null || { echo "$BEFORE not in history (force push?) — skipping"; exit 0; }
           python scripts/premerge_check.py HEAD --base "$BEFORE" --explain
 
+  # Provenance of corpus/: rebuilds it from the pinned raw traces and asserts the committed bytes.
+  # Every other lane skips those tests (no cache); here a skip is a failure (CORPUS_REQUIRE_RAW).
+  corpus:
+    needs: changes
+    if: >-
+      always() && needs.changes.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' ||
+       needs.changes.outputs.corpus == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+          activate-environment: true
+
+      - name: Install deps
+        run: uv sync --locked --extra dev --extra corpus
+
+      - name: Cache raw traces
+        # ~2.2 GB. fetch_traces.py pins every file by sha256, so its hash is the cache key.
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/inference-server/traces
+          key: traces-${{ hashFiles('scripts/tools/fetch_traces.py') }}
+
+      - name: Fetch and verify raw traces
+        run: python scripts/tools/fetch_traces.py
+
+      - name: Corpus provenance tests
+        env:
+          CORPUS_REQUIRE_RAW: "1"
+        run: pytest -q tests/test_research_corpus.py
+
   # Triton compiles only on CUDA, so this rents a GPU through research/venues.py, which needs
   # RUNPOD_API_KEY. Manual, not per-PR.
   gpu:
@@ -253,14 +300,14 @@ jobs:
   # forever. Skipped is fine, failed and cancelled are not. The gpu lane is deliberately
   # not aggregated here — it is manual and costs money.
   ci-ok:
-    needs: [changes, loop, engine]
+    needs: [changes, loop, engine, corpus]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - env:
-          RESULTS: ${{ needs.changes.result }} ${{ needs.loop.result }} ${{ needs.engine.result }}
+          RESULTS: ${{ needs.changes.result }} ${{ needs.loop.result }} ${{ needs.engine.result }} ${{ needs.corpus.result }}
         run: |
-          echo "changes/loop/engine: $RESULTS"
+          echo "changes/loop/engine/corpus: $RESULTS"
           case "$RESULTS" in
             *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
           esac

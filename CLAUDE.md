@@ -37,6 +37,11 @@
   only a security violation or an anomalous win stops the turn for me. Every agent may leave a
   `note` for me, which is recorded and never changes the path. Budgets per turn live in
   `graph.py`: 6 rounds (reviewer send-backs), 2 experiments, a node-visit backstop.
+- The workload corpus (`corpus/`) is built from real public traces: BurstGPT arrivals and
+  sessions, WildChat-1M conversations with their real assistant replies (multi-turn requests
+  carry `messages`), four classes (`cold_start`, `steady_interactive`, `long_context`, `spike`)
+  split seen/heldout by alternating trace weeks. `scripts/tools/fetch_traces.py` +
+  `build_corpus.py` rebuild it; any change is a new `corpus_version`. See `corpus/README.md`.
 
 ## Strict referee, free player (the bitter lesson)
 - Harness is code and strict: sandbox, grader, measurement protocol, output equivalence,
