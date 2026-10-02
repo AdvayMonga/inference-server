@@ -18,12 +18,10 @@ args = sys.argv[1:]
 open(log, "a").write(json.dumps(args) + "\n")
 db = json.load(open(state_path)) if os.path.exists(state_path) else {}
 def save(): json.dump(db, open(state_path, "w"))
-if args[:3] == ["compute", "vms", "get"]:
-    name = args[3]
-    if name not in db:
-        sys.stderr.write(f"vm {name} not found\n"); sys.exit(1)
-    print(json.dumps({"name": name, "state": db[name]["state"], "type": "a100-80gb.1x",
-                      "network_interfaces": [{"ips": [{"public_ipv4": {"address": "10.0.0.7"}}]}]}))
+if args[:3] == ["compute", "vms", "list"]:
+    print(json.dumps([{"name": n, "state": v["state"], "type": "a100-80gb.1x",
+                       "network_interfaces": [{"ips": [{"public_ipv4": {"address": "10.0.0.7"}}]}]}
+                      for n, v in db.items()]))
 elif args[:3] == ["compute", "vms", "create"]:
     db[args[args.index("--name") + 1]] = {"state": "STATE_RUNNING"}; save()
 elif args[:3] == ["compute", "vms", "start"]:
@@ -39,7 +37,8 @@ else:
 FAKE_TOOL = r'''#!/usr/bin/env python3
 import json, os, sys
 open(os.environ["FAKE_LOG"], "a").write(json.dumps([os.path.basename(sys.argv[0])] + sys.argv[1:]) + "\n")
-sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+# FAKE_EXIT applies to the user's command only (the one that cd's into the repo), not to ssh probes
+sys.exit(int(os.environ.get("FAKE_EXIT", "0")) if any(a.startswith("cd ") for a in sys.argv) else 0)
 '''
 
 
@@ -55,6 +54,7 @@ def fake(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_STATE", str(tmp_path / "state.json"))
     monkeypatch.setenv("FAKE_LOG", str(tmp_path / "calls.log"))
     monkeypatch.setenv("LAB_VM_KEYFILE", str(tmp_path / "key.pub"))
+    monkeypatch.setattr(crusoe, "KNOWN_HOSTS_DIR", tmp_path / "kh")
     monkeypatch.setattr(crusoe, "POLL_S", 0.0)
     monkeypatch.setattr(crusoe, "SSH_TIMEOUT_S", 0.05)
     return tmp_path
@@ -96,18 +96,30 @@ def test_run_pushes_runs_in_repo_dir_and_fetches(fake):
     assert rc == 0 and local.is_dir()
     log = calls(fake)
     rsyncs = [c for c in log if c[0] == "rsync"]
-    assert rsyncs[0][-1] == "u@10.0.0.7:~/repo/" and any(a.startswith("--exclude=.git") for a in rsyncs[0])
-    assert rsyncs[1][-2] == "u@10.0.0.7:lab/runs/"
+    assert rsyncs[0][-1] == "u@10.0.0.7:~/repo/" and "--filter=:- .gitignore" in rsyncs[0]
+    assert rsyncs[1][-2] == "u@10.0.0.7:~/repo/lab/runs/"
     sshs = [c for c in log if c[0] == "ssh"]
-    assert sshs[-1][-1] == "cd ~/repo && python -m lab.profile"
+    assert sshs[-1][-1] == 'cd ~/repo && PATH="$PWD/.venv/bin:$PATH" python -m lab.profile'
+    assert any(a.startswith("UserKnownHostsFile=") and a.endswith("t4.known_hosts") for a in sshs[-1])
 
 
-def test_run_reports_remote_exit_code(fake, monkeypatch):
+def test_run_returns_the_remote_exit_code_and_still_fetches(fake, monkeypatch):
     vm = crusoe.VM(name="t5")
-    crusoe.start(vm)
     monkeypatch.setenv("FAKE_EXIT", "3")
-    with pytest.raises(crusoe.CrusoeError):      # wait_ssh cannot reach the box when ssh fails
-        crusoe.run(vm, "true")
+    assert crusoe.run(vm, "false", fetch_dir="lab/runs", local=fake / "out") == 3
+    assert any(c[0] == "rsync" and c[-2].endswith("lab/runs/") for c in calls(fake))
+
+
+def test_vm_reads_env_at_construction(fake, monkeypatch):
+    monkeypatch.setenv("LAB_VM_TYPE", "l40s-48gb.1x")
+    assert crusoe.VM().type == "l40s-48gb.1x"
+
+
+def test_leading_separator_only_is_stripped(fake, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(crusoe, "run", lambda vm, command, **kw: seen.setdefault("cmd", command) and 0)
+    crusoe.main(["run", "--", "pytest", "--", "tests"])
+    assert seen["cmd"] == "pytest -- tests"
 
 
 def test_cli_status_and_types(fake, capsys):

@@ -42,8 +42,10 @@ nothing here stores a key.
         env BACKEND=custom-cuda python -m lab.profile --requests 8
     python -m lab.crusoe stop
 
-`run` rsyncs the working tree (what is on disk here is what gets measured), runs the command in
-it, and brings `--fetch` back under `lab/runs/`. The VM is left running; `stop` is yours.
+`run` rsyncs the working tree minus `.git` and everything `.gitignore` excludes (what is on disk
+here is what gets measured, secrets and weights stay home), runs the command in the repo dir with
+`.venv/bin` first on PATH, and brings `--fetch` (relative to the repo) back under `lab/runs/`. The
+VM is left running; `stop` is yours. Do not run `uv sync` on the box: it would put CPU torch back.
 
 | env | default | |
 |---|---|---|
