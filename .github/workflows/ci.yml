@@ -8,8 +8,12 @@ on:
   schedule:
     - cron: "0 7 * * 1"        # Mondays 07:00 UTC: corpus provenance, which nothing else exercises
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Pushes to main are keyed by sha so back-to-back merges do not cancel each other's run.
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:

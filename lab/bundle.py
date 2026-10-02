@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import asdict
 import platform
 import resource
@@ -32,6 +33,9 @@ def write_json(path: Path, obj: Any) -> None:
 
 
 def git_sha() -> str | None:
+    """LAB_GIT_SHA when lab.vm shipped it (the pushed tree has no .git), else git here, else None."""
+    if os.environ.get("LAB_GIT_SHA"):
+        return os.environ["LAB_GIT_SHA"]
     try:
         out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
     except OSError:

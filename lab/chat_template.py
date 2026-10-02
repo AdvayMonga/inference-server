@@ -7,8 +7,8 @@ tokenizer happens to ship, with whatever `enable_thinking` the shim happens to p
 revision would then move every number in the panel with nothing in the record changing — a
 silent variable swapped for a silent variable.
 
-So the fingerprint rides in the validity block beside `corpus_version` and `device_state`, and
-`compare.py` refuses across it.
+So the fingerprint is recorded beside `corpus_version` and the device state, and two runs with
+different fingerprints are not comparable.
 
 `verify()` closes the last gap. The fingerprint is computed by the CLIENT; the SERVER is what
 actually applies the template. They are the same tokenizer on this box and on the pod (the
@@ -17,9 +17,8 @@ length is checked against the `prompt_tokens` the server reported for a request 
 know. `verified=False` in a panel means the stamp describes a different tokenizer than the one
 that served the run.
 
-transformers is imported lazily and every failure yields None: the loop's CI lane installs
-stdlib only, and an unknown fingerprint must be an ordinary outcome, never an exception. Same
-contract as `harness.device_state_from_env()`.
+transformers is imported lazily and every failure yields None: an unknown fingerprint must be
+an ordinary outcome, never an exception.
 """
 
 from __future__ import annotations
@@ -31,8 +30,8 @@ from typing import Any
 # assumed: it decides whether the template injects a `<|think|>` system turn, which on
 # gemma-4-E2B-it is the difference between a corpus that terminates early and one where every
 # request runs to max_tokens. False since the shim stopped inheriting encode_messages' True
-# default (kb-20260919-9ea56f98); panels either side of that are not comparable, and the
-# fingerprint is what makes compare.py say so.
+# default (kb-20260919-9ea56f98); runs either side of that are not comparable, and the
+# fingerprint is what records it.
 SHIM_ENABLE_THINKING = False
 
 _CACHE: dict[str, Any] = {}

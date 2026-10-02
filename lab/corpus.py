@@ -1,9 +1,9 @@
 """The workload corpus: frozen, hashed traces per workload class, split seen / held-out.
 
-The corpus defines the landscape the loop searches — anything not in it is invisible. Traces are
+The corpus defines the landscape the lab measures — anything not in it is invisible. Traces are
 data committed to `corpus/`, never generated at run time, and every file is hashed into a
-`corpus_version` that travels in the panel's validity block so compare.py can refuse a comparison
-across corpus drift. A modified trace is a new version, never a silent change: `load_manifest`
+`corpus_version` that travels with every measurement so a comparison across corpus drift can be
+refused. A modified trace is a new version, never a silent change: `load_manifest`
 raises on any hash mismatch.
 
 Stdlib only.

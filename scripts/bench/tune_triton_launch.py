@@ -232,8 +232,14 @@ def run_case(case: Case, kv_lens: tuple[int, ...]) -> tuple[float, list[dict[str
 
 
 def git_sha() -> str:
+    """LAB_GIT_SHA when lab.vm shipped it (the pushed tree has no .git), else git here, else unknown."""
+    if os.environ.get("LAB_GIT_SHA"):
+        return os.environ["LAB_GIT_SHA"]
     import subprocess
-    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    except OSError:
+        return "unknown"
     return out.stdout.strip() or "unknown"
 
 

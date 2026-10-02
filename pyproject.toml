@@ -26,10 +26,6 @@ dev = [
     "ruff>=0.4",
     "matplotlib>=3.8",
 ]
-# The lab's agent runtime; the engine never imports it.
-agents = [
-    "claude-agent-sdk>=0.2.161",
-]
 # scripts/corpus/fetch_traces.py reads the WildChat parquet shards; nothing else imports it.
 corpus = [
     "pyarrow>=17",

@@ -30,7 +30,7 @@ Thumbs.db
 *.onnx
 
 # Benchmark outputs
-benchmarks/results/
+knowledge/evidence/benchmarks/results/
 
 # Jupyter
 .ipynb_checkpoints/

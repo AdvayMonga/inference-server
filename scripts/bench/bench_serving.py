@@ -267,7 +267,7 @@ async def main():
     rows = await sweep(args.base_url, rates, args.duration, args.seed)
     report(rows)
 
-    out = Path(args.output) if args.output else Path("benchmarks") / f"serving_{int(time.time())}.csv"
+    out = Path(args.output) if args.output else Path("knowledge/evidence/benchmarks") / f"serving_{int(time.time())}.csv"
     out.parent.mkdir(exist_ok=True)
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))

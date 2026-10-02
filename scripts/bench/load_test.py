@@ -299,11 +299,11 @@ async def main():
     ap.add_argument("--duration", type=float, default=30.0,
                     help="Seconds per concurrency level")
     ap.add_argument("--output", default=None,
-                    help="CSV output path; default benchmarks/load_<ts>.csv")
+                    help="CSV output path; default knowledge/evidence/benchmarks/load_<ts>.csv")
     args = ap.parse_args()
 
     levels = [int(x) for x in args.levels.split(",")]
-    out_dir = Path("benchmarks")
+    out_dir = Path("knowledge/evidence/benchmarks")
     out_dir.mkdir(exist_ok=True)
     out_path = Path(args.output) if args.output else (
         out_dir / f"load_{args.workload}_share-{args.prefix_share}_{int(time.time())}.csv"
