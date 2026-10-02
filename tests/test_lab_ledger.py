@@ -55,3 +55,63 @@ def test_seed_is_lossless_and_idempotent(tmp_path):
     assert ledger.seed(kb, root) == 1 and ledger.seed(kb, root) == 0
     [r] = ledger.records(root)
     assert r["kind"] == "finding" and r["author"] == "human" and r["claim"] == entry
+
+
+def test_root_is_anchored_on_the_repo_not_cwd():
+    assert ledger.ROOT.is_absolute() and ledger.ROOT.parts[-2:] == ("lab", "ledger")
+
+
+def test_heldout_detail_cannot_hide_in_nested_or_extra_fields(tmp_path):
+    nested = {"kind": "submit", "config": {"split": "heldout"},
+              "metrics": {"ttft": {"base": 1, "new": {"per_request": [1, 2]}}}}
+    extra = {"kind": "submit", "config": {"split": "heldout"}, "gates": {"per_request": [1, 2]}}
+    for record in (nested, extra, {"kind": "submit", "config": "heldout"},
+                   {"kind": "submit", "config": {"split": "heldout"}, "metrics": [1, 2]}):
+        with pytest.raises(ledger.LedgerError):
+            ledger.append(record, tmp_path)
+
+
+def test_non_json_values_are_refused_not_coerced(tmp_path):
+    with pytest.raises(ledger.LedgerError, match="lossless"):
+        ledger.append({"kind": "test", "claim": {"s": {1, 2}}}, tmp_path)
+    assert list(ledger.records(tmp_path)) == []
+
+
+def test_torn_final_line_is_skipped_but_corruption_raises(tmp_path):
+    a = ledger.append({"kind": "test"}, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(path.read_text() + '{"kind": "te')
+    assert [r["id"] for r in ledger.records(tmp_path)] == [a["id"]]
+    path.write_text('{"kind": "te\n' + path.read_text())
+    with pytest.raises(ledger.LedgerError):
+        list(ledger.records(tmp_path))
+
+
+def test_dir_blob_hash_distinguishes_layouts_and_empty(tmp_path):
+    a, b, empty = tmp_path / "a", tmp_path / "b", tmp_path / "e"
+    for d in (a, b, empty):
+        d.mkdir()
+    (a / "a").write_bytes(b"bc")
+    (b / "ab").write_bytes(b"c")
+    root = tmp_path / "ledger"
+    rels = {ledger.put_blob(a, root), ledger.put_blob(b, root), ledger.put_blob(empty, root),
+            ledger.put_blob(b"", root)}
+    assert len(rels) == 4
+    assert not list((root / "blobs").glob("*.tmp-*"))
+
+
+def test_seed_reseeds_a_changed_finding(tmp_path):
+    kb = tmp_path / "knowledge"
+    kb.mkdir()
+    (kb / "kb-1.json").write_text(json.dumps({"id": "kb-1", "status": "open"}))
+    root = tmp_path / "ledger"
+    assert ledger.seed(kb, root) == 1
+    (kb / "kb-1.json").write_text(json.dumps({"id": "kb-1", "status": "rejected"}))
+    assert ledger.seed(kb, root) == 1 and ledger.seed(kb, root) == 0
+    assert [r["claim"]["status"] for r in ledger.records(root)] == ["open", "rejected"]
+
+
+def test_ids_use_utc_date_and_long_suffix(tmp_path):
+    r = ledger.append({"kind": "test"}, tmp_path)
+    date, suffix = r["id"].split("-")[1:]
+    assert r["at"].startswith(f"{date[:4]}-{date[4:6]}-{date[6:]}") and len(suffix) == 12
