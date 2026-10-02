@@ -96,6 +96,39 @@ def test_a_surface_violation_stops_the_run(cfg):
     assert "tests/test_engine.py" in sess["violation"]
 
 
+def test_a_bash_only_violation_is_caught_at_session_end(cfg):
+    def script(n, ws: Path):
+        (ws / "pyproject.toml").write_text("")             # no tool call afterwards
+        yield ("reply", AgentReply({"status": "continue", "note": None}, 0.1, 1, None))
+    out = session.run(cfg, ScriptedProvider(script))
+    assert out["sessions"] == 1 and out["stopped"].startswith("security:")
+    assert "pyproject.toml" in next(ledger.records(cfg.ledger_root, kind="session"))["violation"]
+
+
+def test_scratch_files_do_not_stop_the_run(cfg):
+    def script(n, ws: Path):
+        (ws / "lab/runs/x").mkdir(parents=True)
+        (ws / "lab/runs/x/trace.json").write_text("{}")
+        (ws / "notes.txt").write_text("thinking")
+        yield ("call", "test")
+        yield ("reply", AgentReply({"status": "stop", "note": None}, 0.1, 1, None))
+    p = ScriptedProvider(script)
+    out = session.run(cfg, p)
+    assert out["stopped"] == "agent" and dict(p.outputs)["test"].startswith("PASS")
+    assert set(next(ledger.records(cfg.ledger_root, kind="test"))["result"]["scratch_left_out"]) == {"lab/runs/x/trace.json", "notes.txt"}
+
+
+def test_a_raising_provider_is_charged_at_the_cap_and_recorded(cfg):
+    class Raising:
+        name = "raising"
+        def run(self, spec):
+            raise RuntimeError("boom")
+    out = session.run(cfg, Raising())
+    sess = next(ledger.records(cfg.ledger_root, kind="session"))
+    assert sess["error"].startswith("provider raised") and sess["cost"]["estimated"] is True
+    assert sess["cost"]["usd"] == pytest.approx(2.0) and out["spent_usd"] == pytest.approx(2.0)
+
+
 def test_the_budget_ends_the_run_and_resumes(cfg):
     def script(n, ws: Path):
         yield ("reply", AgentReply({"status": "continue", "note": None}, 0.9, 1, None))
@@ -105,6 +138,8 @@ def test_the_budget_ends_the_run_and_resumes(cfg):
     cfg.budget_usd = 3.0
     out2 = session.run(cfg, ScriptedProvider(script))     # one more fits, then the next overshoots
     assert out2["sessions"] == 2 and out2["spent_usd"] == pytest.approx(3.6) and "exceed" in out2["stopped"]
+    ids = [r["session"] for r in ledger.records(cfg.ledger_root, kind="session")]
+    assert ids == [f"{out['run']}-s{i}" for i in (1, 2, 3, 4)]      # numbering continues across resumes
 
 
 def test_an_overspending_provider_is_recorded_and_stopped(cfg):

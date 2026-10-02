@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from lab import ledger
@@ -31,6 +33,11 @@ def test_snapshot_and_restore_round_trip(tmp_path):
     assert (ws.path / "src/inference_server/extra.py").exists() and not (ws.path / "README.md").exists()
     with pytest.raises(FileNotFoundError):
         ws.restore("nope")
+    bundle = ledger.put_blob(b"not a snapshot", root)       # a blob that is not a workspace snapshot
+    before = (ws.path / "src/inference_server/engine.py").read_text()
+    with pytest.raises(FileNotFoundError):
+        ws.restore(Path(bundle).name)
+    assert (ws.path / "src/inference_server/engine.py").read_text() == before     # untouched
 
 
 def test_budget_charges_and_refuses(tmp_path):

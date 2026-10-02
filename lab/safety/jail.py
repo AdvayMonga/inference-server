@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -23,14 +24,16 @@ def required() -> bool:
 
 def settings(writable: list[Path], venv: Path, domains: list[str],
              readonly: tuple[Path, ...] | list[Path] = ()) -> dict:
-    """Write only `writable`; read nothing under home but it, `readonly` and `venv`; reach `domains`."""
+    """Write only `writable`; read nothing under home but it, `readonly`, `venv` and the interpreter; reach `domains`."""
+    # A venv's python is a symlink to the base interpreter, which uv keeps under home.
+    interpreter = {Path(sys.base_prefix).resolve(), Path(sys.executable).resolve().parent.parent}
     return {
         "network": {"allowedDomains": list(domains), "deniedDomains": [],
                     "allowUnixSockets": [], "allowAllUnixSockets": False,
                     "allowLocalBinding": False},
         "filesystem": {
             "denyRead": [str(Path.home())],
-            "allowRead": [str(p) for p in [*writable, *readonly, venv]],
+            "allowRead": [str(p) for p in [*writable, *readonly, venv, *sorted(interpreter)]],
             "allowWrite": [str(p) for p in writable],
             "denyWrite": [],
         },

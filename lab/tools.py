@@ -57,7 +57,7 @@ class Toolbox:
         tests = grader.run_tests(tree) if lint.passed else grader.Run(False, -1, "skipped: lint failed")
         result = {"lint": lint.passed, "tests": tests.passed, "returncode": tests.returncode,
                   "lint_output": lint.output[-2000:], "test_output": tests.output[-4000:],
-                  "changed": snap.files + snap.deleted}
+                  "changed": snap.files + snap.deleted, "scratch_left_out": self.s.workspace.audit().scratch}
         self._record("test", "test", args, result, snap)
         head = "PASS" if lint.passed and tests.passed else "FAIL"
         return f"{head} lint={'ok' if lint.passed else 'fail'} tests={'ok' if tests.passed else 'fail'}\n" \
@@ -95,19 +95,20 @@ class Toolbox:
 
     def restore(self, args: dict) -> str:
         sid = args["snapshot"]
+        self._audited("restore", args)
         self.s.workspace.restore(sid)
-        snap = self.s.workspace.snapshot()
+        snap = self._audited("restore", args)
         self._record("note", "restore", args, {"restored": sid, "now": snap.id}, snap)
         return f"workspace restored to {sid}"
 
     def note(self, args: dict) -> str:
-        snap = self.s.workspace.snapshot()
+        snap = self._audited("note", args)
         self._record("note", "note", args, {"text": args["text"]}, snap)
         return "noted"
 
     def _refused(self, name: str):
         def fn(args: dict) -> str:
-            snap = self.s.workspace.snapshot()
+            snap = self._audited(name, args)
             self._record(name if name in ledger.KINDS else "note", name, args,
                          {"verdict": "refused", "reason": NOT_WIRED[name]}, snap)
             return f"{name} refused: {NOT_WIRED[name]}"

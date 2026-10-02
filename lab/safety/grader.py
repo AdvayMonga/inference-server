@@ -16,9 +16,10 @@ from fnmatch import fnmatch
 from pathlib import Path
 
 from lab.safety import jail
-from lab.safety.surfaces import HIDDEN, may_write
+from lab.safety.surfaces import ALWAYS_DENY, HIDDEN, may_write
 
-IGNORED = ("*/__pycache__/*", "__pycache__/*", "*.pyc", ".pytest_cache/*", ".ruff_cache/*")
+IGNORED = ("*/__pycache__/*", "__pycache__/*", "*.pyc", ".pytest_cache/*", "*/.pytest_cache/*",
+           ".ruff_cache/*", "*/.ruff_cache/*", "*.egg-info/*", ".DS_Store", "*/.DS_Store")
 MAX_FILE_BYTES = 5_000_000
 HF_HUB = Path.home() / ".cache" / "huggingface" / "hub"   # weights only; the token beside it stays unreadable
 
@@ -28,6 +29,7 @@ class Audit:
     added: list[str] = field(default_factory=list)
     modified: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    scratch: list[str] = field(default_factory=list)     # added outside the surface: left out, not a violation
     violations: list[str] = field(default_factory=list)
 
     @property
@@ -74,8 +76,17 @@ def _blob_sha(path: Path) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
 
 
+def base_files(repo: Path, base: str) -> frozenset[str]:
+    return frozenset(_base_blobs(repo, base))
+
+
 def audit(repo: Path, base: str, workspace: Path) -> Audit:
-    """Every difference between `workspace` and `base`, and which ones the agent may not make."""
+    """Every difference between `workspace` and `base`, and which ones the agent may not make.
+
+    Integrity failures are violations: symlinks, hidden files, evaluator config, and any change or
+    deletion of a protected file. A new file outside the surface is scratch: it never reaches the
+    pristine tree, and running the engine in the workspace is allowed to leave it behind.
+    """
     blobs = _base_blobs(repo, base)
     a, seen = Audit(), set()
     for root, dirs, files in os.walk(workspace):
@@ -99,9 +110,13 @@ def audit(repo: Path, base: str, workspace: Path) -> Audit:
                 elif _blob_sha(p) != blobs[rel]:
                     a.modified.append(rel)
     a.deleted = sorted(p for p in blobs if p not in seen and not any(fnmatch(p, h) for h in HIDDEN))
-    for rel in a.added:
+    for rel in list(a.added):
         if not may_write(rel, new_file=True):
-            a.violations.append(f"may not add: {rel}")
+            if any(fnmatch(rel.lower(), p.lower()) for p in ALWAYS_DENY):
+                a.violations.append(f"may not add: {rel}")
+            else:
+                a.added.remove(rel)
+                a.scratch.append(rel)
     for rel in a.modified + a.deleted:
         if not may_write(rel, new_file=False):
             a.violations.append(f"may not change: {rel}")
@@ -170,6 +185,10 @@ def jailed(tree: Path, argv: list[str], *, timeout_s: float, env_extra: dict | N
     try:
         return subprocess.run(jail.wrap(config, tree.with_suffix(".srt.json"), argv), cwd=tree,
                               env=env, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as e:     # a hung suite is a failed run, recorded like any other
+        out = (e.stdout or b"")
+        return subprocess.CompletedProcess(argv, -9, out.decode(errors="replace") if isinstance(out, bytes) else out,
+                                           f"timed out after {timeout_s:.0f}s")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -27,8 +27,10 @@ class Workspace:
         self.repo, self.base, self.path, self.ledger_root = Path(repo), base, Path(path), Path(ledger_root)
 
     def create(self) -> None:
-        if self.path.exists():
-            shutil.rmtree(self.path)
+        """Fresh export; contents are cleared in place so a process whose cwd is the workspace keeps it."""
+        self.path.mkdir(parents=True, exist_ok=True)
+        for child in self.path.iterdir():
+            shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
         grader.export(self.repo, self.base, self.path)
 
     def audit(self) -> Audit:
@@ -54,12 +56,12 @@ class Workspace:
 
     def restore(self, snapshot_id: str) -> None:
         """Back to `base` plus the files of `snapshot_id` ("base" alone resets)."""
+        blob = self.ledger_root / "blobs" / snapshot_id
+        if snapshot_id != "base" and not (blob / ".deleted").is_file():
+            raise FileNotFoundError(f"{snapshot_id} is not a workspace snapshot in {self.ledger_root}")
         self.create()
         if snapshot_id == "base":
             return
-        blob = self.ledger_root / "blobs" / snapshot_id
-        if not blob.is_dir():
-            raise FileNotFoundError(f"no snapshot {snapshot_id} in {self.ledger_root}")
         for p in blob.rglob("*"):
             rel = p.relative_to(blob)
             if p.is_file() and rel.name != ".deleted":

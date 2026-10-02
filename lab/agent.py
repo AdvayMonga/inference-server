@@ -39,6 +39,7 @@ class AgentSpec:
     workspace: Path
     scratch: Path                           # outside the workspace: the CLI's home, jail settings
     tools: list[ToolSpec]
+    base_files: frozenset[str] = frozenset()   # for the write hook: new means not in the base tree
     builtin: list[str] = field(default_factory=lambda: list(BUILTIN_TOOLS))
     max_turns: int = 200
     max_budget_usd: float = 5.0
@@ -52,6 +53,7 @@ class AgentReply:
     cost_usd: float
     turns: int
     error: str | None
+    cost_estimated: bool = False     # no accounting came back; charged at the session cap
 
 
 class Provider(Protocol):
@@ -96,7 +98,7 @@ class ClaudeAgentSDK:
         def adapt(t: ToolSpec):
             async def call(args: dict[str, Any]) -> dict[str, Any]:
                 try:
-                    text = t.fn(args)
+                    text = await asyncio.to_thread(t.fn, args)   # a long test run must not block the transport
                 except Exception as e:          # the agent sees the refusal, the harness keeps going
                     text = f"{t.name} refused: {e}"
                 return {"content": [{"type": "text", "text": text}]}
@@ -111,7 +113,8 @@ class ClaudeAgentSDK:
             cwd=str(spec.workspace), max_turns=spec.max_turns, max_budget_usd=spec.max_budget_usd,
             output_format={"type": "json_schema", "schema": OUTPUT_SCHEMA},
             cli_path=str(self._wrapper(spec, cli)),
-            hooks={"PreToolUse": [HookMatcher(matcher=WRITE_TOOLS, hooks=[write_guard(spec.workspace)])]},
+            hooks={"PreToolUse": [HookMatcher(matcher=WRITE_TOOLS,
+                                              hooks=[write_guard(spec.workspace, spec.base_files)])]},
         )
         reply = AgentReply(None, 0.0, 0, "no result message")
         async for msg in query(prompt=spec.prompt, options=options):
@@ -122,8 +125,11 @@ class ClaudeAgentSDK:
         return reply
 
     def run(self, spec: AgentSpec) -> AgentReply:
+        """Never raises. Without a result message the spend is unknown and is charged at the session cap."""
         spec.scratch.mkdir(parents=True, exist_ok=True)
         try:
             return asyncio.run(asyncio.wait_for(self._run(spec), spec.timeout_s))
         except TimeoutError:
-            return AgentReply(None, 0.0, 0, f"timed out after {spec.timeout_s:.0f}s")
+            return AgentReply(None, spec.max_budget_usd, 0, f"timed out after {spec.timeout_s:.0f}s", True)
+        except Exception as e:
+            return AgentReply(None, spec.max_budget_usd, 0, f"provider failed: {type(e).__name__}: {e}", True)

@@ -12,6 +12,7 @@ from pathlib import Path
 
 from lab import agent, ledger
 from lab.budget import Budget, BudgetExceeded
+from lab.safety import grader
 from lab.tools import Toolbox, clean_pristine
 from lab.workspace import Workspace
 
@@ -70,9 +71,11 @@ def run(cfg: RunConfig, provider: agent.Provider | None = None) -> dict:
     if not ws.path.exists():
         ws.create()
     budget = Budget.resume(cfg.budget_usd, run_id, cfg.ledger_root)
+    done = sum(1 for _ in ledger.records(cfg.ledger_root, run=run_id, kind="session"))
+    base_files = grader.base_files(cfg.repo, base)
     summary = {"run": run_id, "base": base, "sessions": 0, "stopped": None, "spent_usd": budget.spent_usd}
 
-    for n in range(1, cfg.max_sessions + 1):
+    for n in range(done + 1, done + cfg.max_sessions + 1):
         if budget.remaining_usd < MIN_SESSION_USD:
             summary["stopped"] = "budget"
             break
@@ -81,10 +84,13 @@ def run(cfg: RunConfig, provider: agent.Provider | None = None) -> dict:
         snap = ws.snapshot()
         spec = agent.AgentSpec(system=SYSTEM, prompt=brief(cfg, s, snap.id, n), workspace=ws.path,
                                scratch=run_dir / "scratch" / s.session_id, tools=tools.specs(),
-                               max_turns=cfg.max_turns,
+                               base_files=base_files, max_turns=cfg.max_turns,
                                max_budget_usd=min(cfg.session_usd, budget.remaining_usd))
         t0 = time.monotonic()
-        reply = provider.run(spec)
+        try:
+            reply = provider.run(spec)
+        except Exception as e:                  # a provider that raises still gets charged and recorded
+            reply = agent.AgentReply(None, spec.max_budget_usd, 0, f"provider raised: {e}", True)
         clean_pristine(run_dir)
         try:
             budget.charge(reply.cost_usd, s.session_id)
@@ -93,13 +99,16 @@ def run(cfg: RunConfig, provider: agent.Provider | None = None) -> dict:
             budget.spent_usd += reply.cost_usd
             over = str(e)
         end = ws.snapshot()
+        if end.violations and not tools.violation:      # a Bash write outside the surface, with no tool call after
+            tools.violation = "; ".join(end.violations)
         status = (reply.output or {}).get("status") if reply.output else None
         ledger.append({"kind": "session", "run": run_id, "session": s.session_id, "provider": provider.name,
                        "model": spec.model, "snapshot": end.id, "snapshot_blob": end.blob, "patch": end.patch,
-                       "cost": {"usd": reply.cost_usd}, "turns": reply.turns, "seconds": time.monotonic() - t0,
+                       "cost": {"usd": reply.cost_usd, "estimated": reply.cost_estimated},
+                       "turns": reply.turns, "seconds": time.monotonic() - t0,
                        "status": status, "error": reply.error, "violation": tools.violation,
                        "claim": {"note": (reply.output or {}).get("note")}}, cfg.ledger_root)
-        summary["sessions"] = n
+        summary["sessions"] = n - done
         summary["spent_usd"] = budget.spent_usd
         if tools.violation:
             summary["stopped"] = f"security: {tools.violation}"
