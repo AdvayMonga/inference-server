@@ -53,3 +53,6 @@ notes/
 !.claude/agents/
 # Research loop: raw run panels (regenerable, large)
 runs/
+
+# lab ledger: live, not committed for now
+/lab/ledger/

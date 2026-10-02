@@ -28,6 +28,24 @@ The engine configuration comes from the same env vars the server reads (`MAX_BAT
     stats.json     the scheduler's own counters at the end of the run
     meta.json      git sha, torch, device, clock state, engine settings, workload hash, window
 
+## Ledger
+
+`lab/ledger.py`: one JSON line per tool call in `lab/ledger/ledger.jsonl`, the raw knowledge base.
+Not committed for now. Tools write it through `ledger.append`; the agent reads it and never writes it
+(the jail's write surface is `src/inference_server/` only).
+
+    python -m lab.ledger seed                      # import knowledge/*.json as `finding` records
+    python -m lab.ledger list --kind bench         # JSONL; also --session, --snapshot
+    python -m lab.ledger show ev-20261002-7f3a91
+
+A record: `kind` (test, equiv, bench, profile, submit, finding), `session`, `snapshot`,
+`parent_snapshot`, `base`, `change`, `config` (everything the number is a fact about), `metrics`,
+`gates`, `raw`, `cost`, and `claim`, which holds the agent's own hypothesis and note: untrusted, never
+used for a verdict. The writer stamps `id`, `at` and `schema`. Heavy raw files (diffs, bundles) go
+through `ledger.put_blob` and are referenced by their content-hashed path under `blobs/`.
+A held-out record (`config.split == "heldout"`) carries no `raw` and one aggregate per metric
+(`base`, `new`, `delta_pct`, `band_pct`, `verdict`); the writer refuses anything finer.
+
 ## GPU arm
 
 One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:
