@@ -45,7 +45,7 @@ EXEMPT_PREFIXES = (
 )
 
 
-# uv.lock pins that change the engine's numerics. Mirrors premerge_check.py.
+# uv.lock pins that change the engine's numerics. premerge_check.py imports this one.
 ENGINE_RUNTIME_PACKAGES = ("torch", "triton", "transformers", "accelerate")
 
 
@@ -54,8 +54,11 @@ def engine_tree_hash(ref: str, cwd: Path = REPO_ROOT) -> str:
     def git(*a: str) -> str:
         return subprocess.run(["git", *a], cwd=cwd, capture_output=True, text=True,
                               check=True).stdout
-    entries = [ln for ln in git("ls-tree", "-r", ref, "--", *BEHAVIOURAL_PREFIXES).splitlines()
-               if not any(ln.split("\t", 1)[1].startswith(x) for x in EXEMPT_PREFIXES)]
+    # "<blob sha> <path>", mode bits dropped: an exec-bit flip does not change what runs.
+    entries = [f"{meta.split()[2]} {path}" for meta, path in
+               (ln.split("\t", 1) for ln in git("ls-tree", "-r", ref, "--",
+                                                 *BEHAVIOURAL_PREFIXES).splitlines())
+               if not any(path.startswith(x) for x in EXEMPT_PREFIXES)]
     lock = git("ls-tree", "--name-only", ref, "--", "uv.lock").strip()
     pkgs = tomllib.loads(git("show", f"{ref}:uv.lock")).get("package", []) if lock else []
     pins = sorted({(p["name"], p.get("version", "")) for p in pkgs

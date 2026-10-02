@@ -16,6 +16,7 @@ bypass the gate. uv.lock is exempt unless it moves torch, triton, transformers o
 from __future__ import annotations
 
 import argparse
+import functools
 import subprocess
 import sys
 import tomllib
@@ -25,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from inference_server.research.kb import load_experiments  # noqa: E402
 from inference_server.research.schemas import REPO_ROOT  # noqa: E402
-from inference_server.research.session import engine_tree_hash  # noqa: E402
+from inference_server.research.session import ENGINE_RUNTIME_PACKAGES, engine_tree_hash  # noqa: E402
 
 # Paths whose change can alter what the engine does at runtime.
 BEHAVIOURAL_PREFIXES = ("src/inference_server/",)
@@ -36,8 +37,7 @@ EXEMPT_PREFIXES = (
 )
 
 # uv.lock is exempt except for these: a version change here changes the engine's numerics.
-LOCKFILE = "uv.lock"
-ENGINE_RUNTIME_PACKAGES = ("torch", "triton", "transformers", "accelerate")
+LOCKFILE = "uv.lock"   # engine-runtime packages: session.ENGINE_RUNTIME_PACKAGES
 
 
 def changed_files(ref: str, base: str = "main") -> list[str]:
@@ -211,7 +211,13 @@ def squash_of(candidate, ref: str, tree=None) -> bool:
 
 
 def ref_engine_tree(ref: str) -> str:
-    return engine_tree_hash(ref, cwd=REPO_ROOT)
+    return _engine_tree(ref, REPO_ROOT)
+
+
+@functools.lru_cache(maxsize=None)
+def _engine_tree(ref: str, root) -> str:
+    """One hash per (ref, repo) per run, however many records are tried against it."""
+    return engine_tree_hash(ref, cwd=root)
 
 
 def no_claim_vouches(candidate, ref: str, *, ancestor=None, changed=None,

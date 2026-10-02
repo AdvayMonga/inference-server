@@ -332,7 +332,6 @@ def test_drift_prefixes_match_the_merge_gate():
 
     assert session.BEHAVIOURAL_PREFIXES == pm.BEHAVIOURAL_PREFIXES
     assert session.EXEMPT_PREFIXES == pm.EXEMPT_PREFIXES
-    assert session.ENGINE_RUNTIME_PACKAGES == pm.ENGINE_RUNTIME_PACKAGES
 
 
 # ---------------------------------------------------------------- derived headline metrics

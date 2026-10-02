@@ -626,3 +626,30 @@ def test_engine_tree_survives_a_squash_and_tracks_engine_files_and_pins(tmp_path
     git("checkout", "-q", vouched, "--", "uv.lock"); git("commit", "-qam", "pin back")
     assert engine_tree_hash("HEAD", cwd=tmp_path) == squashed
     assert after("src/inference_server/engine.py", "x = 3\n") != squashed
+
+
+def test_main_passes_a_squash_merged_ab_experiment_only_when_its_engine_tree_matches(
+        monkeypatch, capsys):
+    """The path a real `loop judge` record takes on the main push after a squash merge."""
+    import sys
+
+    from inference_server.research.schemas import Arm, Experiment
+
+    pm = _premerge()
+    green = {g: {"passed": True} for g in ("validity", "sanity", "significance", "correctness",
+                                           "cost")}
+    exp = Experiment(hypothesis_id="h", engine_sha_base="b", source="loop", verdict="confirmed",
+                     arms=[Arm("baseline", "b", ["r1", "r2", "r3"]),
+                           Arm("treatment", "t1", ["r4", "r5", "r6"])], gates=green,
+                     engine_tree="tree-A")
+    monkeypatch.setattr(pm, "changed_files", lambda *a, **k: ["src/inference_server/engine.py"])
+    monkeypatch.setattr(pm, "behavioural", lambda files, **k: list(files))
+    monkeypatch.setattr(pm, "resolve_sha", lambda ref: "squash1")
+    monkeypatch.setattr(pm, "load_experiments", lambda: [exp])
+    monkeypatch.setattr(pm, "is_ancestor", lambda sha, ref: False)   # squash: t1 not in main
+    monkeypatch.setattr(sys, "argv", ["premerge_check.py", "HEAD", "--base", "before"])
+
+    monkeypatch.setattr(pm, "ref_engine_tree", lambda ref: "tree-A")
+    assert pm.main() == 0 and "PASS" in capsys.readouterr().out
+    monkeypatch.setattr(pm, "ref_engine_tree", lambda ref: "tree-B")
+    assert pm.main() == 1

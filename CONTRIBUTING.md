@@ -95,7 +95,9 @@ after it.
 PRs are squash-merged, so the merged commit is never the vouched sha. Each record therefore also
 carries `engine_tree`, a hash of the engine files and runtime pins at that sha; the gate on `main`
 accepts the squash commit when the hashes match. `loop judge` and `loop no-claim` fill it in; for
-a hand-written fix record, add `"engine_tree": "<output of loop engine-tree <sha>>"`.
+a hand-written fix record, add `"engine_tree": "<output of loop engine-tree <sha>>"`. The hash
+covers the whole engine at that sha, so any engine commit after it — even a pure counter — means
+re-running the record at the tip before merging.
 
 ### What the cost gate checks
 
