@@ -1,6 +1,6 @@
 # corpus/ — frozen workload traces
 
-The corpus defines the landscape the research loop searches. Anything not in it is invisible.
+The corpus defines the landscape the lab measures. Anything not in it is invisible.
 
 Since 2026-10-01 it is built from **real public traces**: real arrival times and sessions from
 BurstGPT, real conversation text (with the real assistant replies) from WildChat-1M. The
@@ -98,15 +98,15 @@ policy tuned on this corpus should be re-checked against a smoother, longer-cont
 
 ```bash
 uv sync --extra dev --extra corpus                          # pyarrow, for the WildChat shards
-.venv/bin/python scripts/tools/fetch_traces.py               # ~1.6 GB into ~/.cache/inference-server/traces
-PYTHONPATH=src .venv/bin/python scripts/tools/build_corpus.py   # seed 20261001
+.venv/bin/python scripts/corpus/fetch_traces.py              # ~1.6 GB into ~/.cache/inference-server/traces
+.venv/bin/python scripts/corpus/build_corpus.py               # seed 20261001
 ```
 
 `fetch_traces.py` pins every URL to a release or revision and every file to a sha256, refuses
 a mismatch, and is idempotent. Raw data never enters git (`TRACE_CACHE` overrides the cache
 dir). The build is deterministic in (seed, cached inputs, tokenizer); `--tokenizer` makes the
 pairing tokenizer a setting, and a different one is a new corpus version.
-`tests/test_research_corpus.py` rebuilds from the cache and asserts the committed bytes (it
+`tests/test_lab_corpus.py` rebuilds from the cache and asserts the committed bytes (it
 skips when the cache is absent).
 
 ## The rule

@@ -1,7 +1,7 @@
 # lab
 
 The environment that measures, and later grades, changes to the engine. Design in
-`ENVIRONMENT.md` at the repo root. Imports nothing from `src/inference_server/research/`.
+`ENVIRONMENT.md` at the repo root.
 
 ## Contract with the engine
 

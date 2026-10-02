@@ -1,4 +1,4 @@
-# A torch/triton/transformers/accelerate bump is an engine change: premerge_check.py refuses it
+# A torch/triton/transformers/accelerate bump is an engine change: it changes the numerics, so it gets measured
 # without an experiment record. Everything else in uv.lock merges on green CI.
 version: 2
 updates:

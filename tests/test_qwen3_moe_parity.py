@@ -221,7 +221,7 @@ def test_chat_template_disables_thinking():
     """The shim's enable_thinking=False renders Qwen3's empty think block, so answers start at once."""
     from transformers import AutoTokenizer
 
-    from inference_server.research import chat_template
+    from lab import chat_template
     try:
         tk = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B", local_files_only=True)
     except OSError:

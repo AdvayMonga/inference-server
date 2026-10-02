@@ -1,7 +1,7 @@
 """Download the raw inputs of the real-trace corpus into a local cache, pinned and verified.
 
     uv sync --extra dev --extra corpus
-    .venv/bin/python scripts/tools/fetch_traces.py [--cache ~/.cache/inference-server/traces]
+    .venv/bin/python scripts/corpus/fetch_traces.py [--cache ~/.cache/inference-server/traces]
 
 Idempotent: a file already present with the pinned sha256 is not fetched again; a mismatch is
 re-downloaded once and then refused. Raw data never enters git — only the built corpus does.

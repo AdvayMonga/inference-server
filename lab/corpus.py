@@ -6,7 +6,7 @@ data committed to `corpus/`, never generated at run time, and every file is hash
 across corpus drift. A modified trace is a new version, never a silent change: `load_manifest`
 raises on any hash mismatch.
 
-Stdlib only — the loop CI lane installs nothing else.
+Stdlib only.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from inference_server.research.schemas import REPO_ROOT
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 CORPUS_SCHEMA_VERSION = 1
 CORPUS_DIR = REPO_ROOT / "corpus"

@@ -4,16 +4,12 @@ One JSON file per finding. This is the loop's memory and the source of truth for
 decision; `loop index` renders a local, untracked view of it to `archive/DECISIONS.md`.
 
 ```bash
-python -m inference_server.research.loop kb --status rejected     # the dead ends — read first
-python -m inference_server.research.loop kb --tags prefill cache  # what is known about an area
-python -m inference_server.research.loop kb --regime cold_start   # what applies to a workload class
-python -m inference_server.research.loop kb --suspended           # what the loop cannot measure right now
-python -m inference_server.research.loop kb --situation model=gemma-4-e4b,hardware=A100-80GB   # what covers my situation
-python -m inference_server.research.loop index                    # regenerate archive/DECISIONS.md
+python -m lab.ledger seed                       # import these findings into the lab's ledger
+python -m lab.ledger list --kind finding        # read them back, one JSON line each
 ```
 
 Edit the JSON, never the markdown. The record type is `KnowledgeEntry` in
-[`research/schemas.py`](../src/inference_server/research/schemas.py).
+`lab/ledger.py`.
 
 | field | meaning |
 |---|---|
@@ -84,8 +80,8 @@ rather than entries in the base. Each one has a `knowledge/` entry that tells it
 
 | dir | what | written by | read by |
 |---|---|---|---|
-| `timing/` | the simulator's fitted `TimingModel` coefficients, keyed `<model>-<hardware>-<sha>` | `scripts/tools/fit_timing_from_runs.py` | `research/simulator.py` |
-| `noise/` | the measured run-to-run spread with NOTHING changed, keyed `<harness>-<class>-<model>-<hardware>` | `loop band --run-group <null group>` | `research/compare.py` — a delta inside the band is `inconclusive`, never a win |
+| `timing/` | the simulator's fitted `TimingModel` coefficients, keyed `<model>-<hardware>-<sha>` | retired with the loop (2026-10-02); data kept | nothing now |
+| `noise/` | the measured run-to-run spread with NOTHING changed, keyed `<harness>-<class>-<model>-<hardware>` | retired with the loop (2026-10-02); data kept | the lab's eval harness, once wired: a delta inside the band is `inconclusive`, never a win |
 
 A band applies to exactly the situation it names: `find_band` matches harness, workload class,
 model and hardware together and has no nearest-entry fallback, for the same reason `covers()`

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from inference_server.research.corpus import (
+from lab.corpus import (
     CORPUS_DIR,
     SPLITS,
     CorpusError,
@@ -27,7 +27,7 @@ from inference_server.research.corpus import (
     write_trace,
 )
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "corpus"))
 import build_corpus as bc  # noqa: E402
 
 CLASSES = ("cold_start", "steady_interactive", "long_context", "spike")
@@ -37,7 +37,7 @@ HAVE_RAW = all(os.path.exists(RAW / f) for f in (bc.BURSTGPT_CSV, bc.WILDCHAT_JS
 # CI's corpus lane sets CORPUS_REQUIRE_RAW=1: there a missing cache must fail, never skip.
 REQUIRE_RAW = os.environ.get("CORPUS_REQUIRE_RAW") == "1"
 needs_raw = pytest.mark.skipif(not HAVE_RAW and not REQUIRE_RAW, reason=f"raw traces absent "
-                               f"from {RAW}; run scripts/tools/fetch_traces.py")
+                               f"from {RAW}; run scripts/corpus/fetch_traces.py")
 BUDGET_FLOOR = 1024
 CONTEXT = 32768             # Qwen3-30B-A3B native context: prompt + budget must fit
 

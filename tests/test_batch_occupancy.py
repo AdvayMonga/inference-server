@@ -91,38 +91,3 @@ async def test_no_decode_steps_reports_zero_not_a_crash():
         assert stats["active_high_water"] == 0
     finally:
         await sched.stop()
-
-
-def test_panel_carries_occupancy_and_concurrency_is_not_queue_depth():
-    """The panel's `concurrency_observed` used to be fed pending_high_water — queue depth — while
-    LOOP.md lists that field as catching 'claiming a concurrency the run never reached'. It was
-    reporting the opposite of what it claimed."""
-    from inference_server.research import harness as H
-
-    sched_stats = {"active_high_water": 42, "active_mean": 31.5, "decode_steps": 900,
-                   "pending_high_water": 2985}
-    v = H.build_validity("bench_serving", {"rates": "128"}, n_samples=5,
-                         workload_regime="cache_miss_heavy",
-                         concurrency_observed=sched_stats["active_high_water"])
-    panel = H.panel_from_stats(v, scheduler_stats=sched_stats)
-
-    assert panel.active_high_water == 42
-    assert panel.active_mean == 31.5
-    assert panel.decode_steps == 900
-    assert panel.validity.concurrency_observed == 42, "must be occupancy, not the 2985 queued"
-    panel.validate()
-
-
-def test_old_panels_without_occupancy_still_load():
-    """Adding an optional field must not strand 42 existing panels: PANEL_VERSION did not move,
-    because a field that was not recorded cannot change a measurement that was already taken."""
-    from inference_server.research.schemas import PANEL_VERSION, Validity, Vitals
-
-    v = Validity(engine_sha="abc", dirty=False, harness="bench_serving",
-                 harness_config={"rates": "2"}, workload_regime="cache_miss_heavy",
-                 n_samples=5, run_group="old")
-    old = Vitals(validity=v, ttft_p95=100.0)
-
-    assert old.panel_version == PANEL_VERSION
-    assert old.active_high_water is None and old.active_mean is None
-    old.validate()

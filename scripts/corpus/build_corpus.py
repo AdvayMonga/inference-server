@@ -1,8 +1,8 @@
 """Build the frozen workload corpus from real public traces, deterministically, then commit it.
 
     uv sync --extra dev --extra corpus
-    .venv/bin/python scripts/tools/fetch_traces.py            # once: raw inputs into the cache
-    PYTHONPATH=src .venv/bin/python scripts/tools/build_corpus.py [--seed 20261001]
+    .venv/bin/python scripts/corpus/fetch_traces.py           # once: raw inputs into the cache
+    .venv/bin/python scripts/corpus/build_corpus.py [--seed 20261001]
 
 Timing and sessions come from BurstGPT (`BurstGPT_3.csv`): every arrival, its session (API-log
 requests have none and become one-request sessions) and its `Request tokens`. Text comes from
@@ -32,11 +32,11 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fetch_traces import DEFAULT_CACHE, QWEN3_REV, WILDCHAT_JSONL, WILDCHAT_REV  # noqa: E402
-from inference_server.research.corpus import (  # noqa: E402
+from lab.corpus import (  # noqa: E402
     SPLITS,
     Manifest,
     TraceRequest,

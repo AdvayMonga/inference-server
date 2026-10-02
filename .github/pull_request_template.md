@@ -4,22 +4,12 @@
 ## Why
 
 
-## Evidence for the engine change
-<!-- A diff under src/inference_server/ (not research/, not static/) needs ONE of these
-     committed on this branch, or premerge_check.py refuses the merge. Prose here is not one
-     of them. Each record vouches for ONE commit, with no engine change after it.
-     Delete the rows that don't apply; see CONTRIBUTING.md.
-
-  faster        A/B experiment, five green gates. Do NOT rebase after measuring.
-  bug fix       a record with regression_test + engine_sha_base. The gate RE-RUNS the test;
-                confirm it fails with the fix reverted.
-  no behaviour  loop no-claim --why "..." --sha <sha>   (rename, dead import, comment)
-
-     Touched no engine file? Say so — the gate passes on its own. -->
+## Evidence
+<!-- A change under src/inference_server/ is measured, not argued: link the profile bundle,
+     the benchmark under knowledge/evidence/, or the ledger record, and say what config and
+     machine it ran on. Touched no engine file? Say so. -->
 
 
-## Verification
-<!-- What you actually ran, and what it does NOT cover. "pytest -q" says nothing about GPU
-     paths: the model-heavy tests are deselected and no CI lane can launch a kernel. If this
-     touches src/inference_server/models/, dispatch the gpu lane. -->
-
+## Checks
+- [ ] `pytest -q` and `ruff check .` pass locally
+- [ ] models/ change: `scripts/gpu_tests/checks.py` run on the lab's GPU VM

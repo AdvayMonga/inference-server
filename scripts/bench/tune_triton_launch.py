@@ -5,8 +5,8 @@ The engine reads the table at model load via CUSTOM_BACKEND_LAUNCH_TABLE (models
 — never at first call, so tuning adds nothing to cold start. A key with no entry launches
 exactly as before. Why a sweep at all: knowledge/kb-20260905-a474d802.json.
 
-    RUNPOD_API_KEY=... MODEL_NAME=google/gemma-4-E4B-it MAX_BATCH_SIZE=256 \\
-        scripts/tools/run_on_runpod.py scripts/bench/tune_triton_launch.py --gpu 'NVIDIA A100 80GB PCIe'
+    python -m lab.vm run -- env MODEL_NAME=google/gemma-4-E4B-it MAX_BATCH_SIZE=256 \\
+        python scripts/bench/tune_triton_launch.py                       # on the lab's GPU VM
     PYTHONPATH=src python scripts/bench/tune_triton_launch.py          # directly, on a CUDA box
 
 Env: MODEL_NAME (attention shapes from its config.json, no weights), MAX_BATCH_SIZE +
@@ -231,31 +231,17 @@ def run_case(case: Case, kv_lens: tuple[int, ...]) -> tuple[float, list[dict[str
     return default_ms, rows
 
 
-def _stamp_device_state() -> None:
-    """RESEARCH_DEVICE_STATE from the venue, or queried here when run directly."""
-    if os.environ.get("RESEARCH_DEVICE_STATE"):
-        return
+def git_sha() -> str:
     import subprocess
-
-    import torch
-
-    from inference_server.research.determinism import query_device
-
-    state = query_device(lambda cmd: subprocess.run(cmd, capture_output=True, text=True))
-    state.cuda_version = torch.version.cuda
-    os.environ["RESEARCH_DEVICE_STATE"] = json.dumps(state.to_dict())
+    out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True)
+    return out.stdout.strip() or "unknown"
 
 
 def main() -> int:
-    from inference_server.research import harness as H
-    from inference_server.research.schemas import git_sha
-    from inference_server.research.venues import emit_payload
-
     import torch
 
     if not torch.cuda.is_available():
         print("[tune] no CUDA device; nothing to tune")
-        print(emit_payload({"panels": [], "error": "no CUDA device"}))
         return 1
 
     import triton
@@ -267,7 +253,6 @@ def main() -> int:
 
     torch.set_grad_enabled(False)
     torch.manual_seed(0)
-    _stamp_device_state()
     model = os.environ.get("MODEL_NAME", DEFAULT_MODEL)
     gpu = torch.cuda.get_device_name(0)
     block_size = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
@@ -292,7 +277,7 @@ def main() -> int:
               f"default {default_ms:.4f} ms -> {best}", flush=True)
 
     sha = git_sha()
-    doc = build_table(entries, model=model, gpu=gpu, sha=sha, run_group=H.run_group())
+    doc = build_table(entries, model=model, gpu=gpu, sha=sha, run_group=f"tune-{sha[:8]}")
     out = Path(os.environ.get("TUNE_OUT") or TIMING_DIR / table_filename(gpu, sha))
     print(f"[tune] {len(entries)} of {len(cases)} keys beat the default launch; "
           f"table -> {write_table(doc, out)}")
@@ -305,12 +290,7 @@ def main() -> int:
            "decode_tol": DECODE_TOL, "prefill_tol": PREFILL_TOL,
            "timer": "do_bench_cudagraph (decode) / do_bench (prefill), median",
            "torch": torch.__version__, "triton": triton.__version__}
-    panel = H.panel_from_stats(H.build_validity(
-        "tune_triton_launch", cfg, n_samples=sum(r["ms"] is not None for r in sweep),
-        workload_regime="synthetic",
-        notes=f"{len(entries)}/{len(cases)} keys tuned; kernel-isolated, not end to end"))
-    H.emit(panel, label="tune_triton_launch")
-    print(emit_payload({"panels": [panel.to_dict()], "launch_table": doc, "sweep": sweep}))
+    print(json.dumps({"config": cfg, "keys": len(cases), "tuned": len(entries), "table": str(out)}))
     return 0
 
 

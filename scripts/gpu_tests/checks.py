@@ -1,9 +1,9 @@
 """The CUDA correctness checks, as plain functions any CUDA box can run.
 
-Both the `*_modal.py` gate scripts and `cuda_gate.py` (the RunPod instrument) call these, so
+`tune_triton_launch.py` and the lab's GPU VM (`python -m lab.vm run -- python scripts/gpu_tests/checks.py`) call these, so
 the gate is one set of checks with two launchers rather than two copies that drift. Each check
 returns `(passed, detail)` and imports torch lazily: this module must import on a laptop with
-no CUDA and no triton, so the gate can be dry-run and the modal scripts stay importable.
+no CUDA and no triton, so the checks can be listed and dry-run from a laptop.
 """
 
 from __future__ import annotations

@@ -157,8 +157,7 @@ What carries over as ideas and data: the measured findings in `knowledge/` as se
 clock state travels with every number (determinism) and cost is counted from process start
 (accounting); the corpus, regenerated as templated traces.
 
-`research/` stays untouched as the baseline for the head to head. Once the scoreboard has that
-first row, it is deleted in one PR.
+`research/` was removed on 2026-10-02 (tag `archive/research-loop` keeps it for the head to head).
 
 ## Order
 
