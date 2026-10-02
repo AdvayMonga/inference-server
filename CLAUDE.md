@@ -64,5 +64,8 @@
 - `python -m lab.vm` drives one persistent GPU VM (`LAB_VM_*` env) on `lab/providers/` verda
   (default, 1x H100 SXM) or crusoe (1x A100): start, setup, run a command on the pushed tree and
   fetch outputs, stop (Verda: hibernate). Credentials stay in env or the provider CLI's config.
+- `lab/ledger.py` is the raw knowledge base: append-only JSONL, one record per tool call, written by
+  tools only; `claim` holds the agent's untrusted words; held-out records carry one aggregate per metric.
+  `python -m lab.ledger seed` imports `knowledge/` as `finding` records. `lab/ledger/` is gitignored.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.
