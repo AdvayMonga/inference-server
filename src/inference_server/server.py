@@ -25,6 +25,7 @@ from inference_server.scheduler import (
 from inference_server.scheduling_policy import create_scheduling_policy
 from inference_server.openai_shim import router as openai_router
 from inference_server.telemetry import RowStore
+from inference_server.timeline import Timeline
 from inference_server.tokenizer import Tokenizer
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,7 @@ async def lifespan(app):
         max_queue_wait_s=settings.max_queue_wait_s,
         policy=create_scheduling_policy(settings.scheduling_policy),
         telemetry=RowStore(settings.telemetry_dir) if settings.telemetry_dir else None,
+        timeline=Timeline(settings.timeline_dir) if settings.timeline_dir else None,
     )
     scheduler.start()
 
