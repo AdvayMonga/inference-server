@@ -247,6 +247,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
         request.enqueue_ts = time.perf_counter()
         with self._pending_cv:
+            self._timeline.event("enqueue", trace_id=request.trace_id, session_id=request.session_id,
+                                 prompt_tokens=len(request.token_ids), max_tokens=request.max_tokens,
+                                 pending=self._pending_count)
             if self._telemetry is not None:
                 request.record = self._arrival_record(request)
                 with self._session_lock:
@@ -264,9 +267,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._pending_count += 1
             if self._pending_count > self._pending_high_water:
                 self._pending_high_water = self._pending_count
-            self._timeline.event("enqueue", trace_id=request.trace_id, session_id=request.session_id,
-                                 prompt_tokens=len(request.token_ids), max_tokens=request.max_tokens,
-                                 pending=self._pending_count)
             self._pending_cv.notify()
 
     async def submit(self, request: ScheduledRequest) -> list[int]:
@@ -327,8 +327,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 with self._pending_cv:
                     if self._pending_count == 0 and not self._stop_event.is_set():
                         self._pending_cv.wait(timeout=0.1)
-                if self._stop_event.is_set():
-                    break
+                    if self._pending_count == 0:
+                        continue   # idle tick: nothing to admit, nothing to step
 
             self._timeline.begin_step()
             step_t0 = time.perf_counter()

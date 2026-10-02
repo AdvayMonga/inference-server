@@ -1,17 +1,10 @@
-"""One directory per profile run, with the raw outputs of every layer and the provenance they were taken under.
-
-    events.jsonl   engine event timeline (scheduler decisions, phases, per step)
-    trace.json     torch.profiler chrome trace; phase ranges carry the step id
-    memory.json    device allocator stats and peak host RSS
-    gpu.csv        nvidia-smi samples at 100ms (CUDA hosts only)
-    stats.json     the scheduler's own counters at the end of the run
-    meta.json      git sha, torch, device, clock state, workload hash, wall clock window
-"""
+"""One directory per profile run: the raw outputs of every layer plus the provenance they were taken under (files: lab/README.md)."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 import platform
 import resource
 import subprocess
@@ -39,7 +32,10 @@ def write_json(path: Path, obj: Any) -> None:
 
 
 def git_sha() -> str | None:
-    out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True)
+    except OSError:
+        return None
     return out.stdout.strip() if out.returncode == 0 else None
 
 
@@ -61,10 +57,12 @@ def device_memory(device: str) -> dict:
     return out
 
 
-def meta(device: str, prompts: list[list[int]], max_tokens: int, t0: float, t1: float,
-         **extra: Any) -> dict:
+def meta(device: str, settings: Any, prompts: list[list[int]], max_tokens: int, t0: float,
+         t1: float, **extra: Any) -> dict:
+    """A number is a fact about a config, so the engine settings travel with every bundle."""
     return {"git_sha": git_sha(), "torch": torch.__version__, "python": sys.version.split()[0],
             "platform": platform.platform(), "device": device, "gpu": gpu.query(),
+            "settings": asdict(settings),
             "workload_hash": workload_hash(prompts, max_tokens), "requests": len(prompts),
             "max_tokens": max_tokens, "window": {"start": t0, "end": t1, "wall_s": t1 - t0},
             **extra}

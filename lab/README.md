@@ -17,4 +17,13 @@ The environment that measures, and later grades, changes to the engine. Design i
 
     python -m lab.profile --backend custom-mps --requests 8 --max-tokens 32 --out lab/runs
 
-Writes one bundle directory per run (see `lab/bundle.py` for the files). Raw files only.
+The engine configuration comes from the same env vars the server reads (`MAX_BATCH_SIZE`,
+`PREFILL_MODE`, ...), so a profile measures what is served; `--backend` and `--model` override
+`BACKEND` and `MODEL_NAME`. Writes one bundle directory per run, raw files only:
+
+    events.jsonl   engine event timeline: scheduler decisions and phases, per step
+    trace.json     torch.profiler chrome trace; phase ranges carry the step id
+    memory.json    device allocator stats and peak host RSS
+    gpu.csv        nvidia-smi samples at 100 ms (CUDA hosts only)
+    stats.json     the scheduler's own counters at the end of the run
+    meta.json      git sha, torch, device, clock state, engine settings, workload hash, window

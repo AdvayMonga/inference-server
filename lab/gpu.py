@@ -46,7 +46,13 @@ class Sampler:
     def stop(self) -> None:
         if self._proc is None:
             return
-        self._proc.terminate()
-        self._proc.wait(timeout=5)
-        self._file.close()
-        self._proc = None
+        try:
+            self._proc.terminate()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+                self._proc.wait()
+        finally:
+            self._file.close()
+            self._proc = None

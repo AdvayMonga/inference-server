@@ -43,6 +43,16 @@ def test_events_and_phases_carry_the_step(tmp_path):
     assert tl.stats() == {"enabled": True, "step": 2, "events_written": 3, "events_dropped": 0}
 
 
+def test_events_after_close_are_counted_as_dropped(tmp_path):
+    tl = Timeline(tmp_path)
+    tl.event("a")
+    tl.close()
+    tl.event("b")
+    tl.close()
+    assert tl.stats()["events_written"] == 1 and tl.stats()["events_dropped"] == 1
+    assert len(_events(tmp_path)) == 1
+
+
 def test_phase_records_failure(tmp_path):
     tl = Timeline(tmp_path)
     with pytest.raises(RuntimeError):
@@ -83,6 +93,31 @@ async def test_scheduler_writes_the_request_lifecycle(tmp_path):
     assert max(e["active"] for e in step_rows) == 3
     assert {e["name"] for e in ev if e["kind"] == "phase"} >= {"admit", "evict", "decode", "prefill"}
     assert sched.stats()["timeline"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_idle_ticks_write_nothing(tmp_path):
+    sched = ContinuousBatchScheduler(StubBackend(), max_batch_size=1, timeline=Timeline(tmp_path))
+    sched.start()
+    await asyncio.sleep(0.35)      # several idle ticks of the 0.1s wait
+    await sched.stop()
+    assert sched.stats()["timeline"]["step"] == 0
+    assert (tmp_path / "events.jsonl").read_text() == ""
+
+
+@pytest.mark.asyncio
+async def test_queue_full_rejection_has_an_enqueue_event(tmp_path):
+    tl = Timeline(tmp_path)
+    sched = ContinuousBatchScheduler(StubBackend(), max_batch_size=1, max_queue_size=1, timeline=tl)
+    loop = asyncio.get_running_loop()
+    first = ScheduledRequest(token_ids=[1], max_tokens=1, session_id="a", future=loop.create_future())
+    second = ScheduledRequest(token_ids=[1], max_tokens=1, session_id="b", future=loop.create_future())
+    sched.enqueue(first)                      # worker not started: it stays pending and fills the queue
+    with pytest.raises(Exception):
+        sched.enqueue(second)
+    tl.close()
+    mine = [(e["kind"], e.get("state")) for e in _events(tmp_path) if e.get("trace_id") == second.trace_id]
+    assert mine == [("enqueue", None), ("finish", "rejected_429")]
 
 
 @pytest.mark.asyncio

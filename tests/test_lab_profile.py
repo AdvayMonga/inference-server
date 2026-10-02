@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from inference_server.config import Settings
 from lab import bundle, gpu, profile
 from tests.stub_backend import StubBackend
 
@@ -13,8 +14,8 @@ from tests.stub_backend import StubBackend
 @pytest.mark.asyncio
 async def test_bundle_is_complete(tmp_path):
     prompts = profile.synthetic_prompts(4, 8)
-    out = await profile.run(StubBackend(), prompts, max_tokens=3, out=tmp_path, warmup=1,
-                            max_batch_size=4)
+    settings = Settings(max_batch_size=4)
+    out = await profile.run(StubBackend(), settings, prompts, max_tokens=3, out=tmp_path, warmup=1)
     names = {p.name for p in out.iterdir()}
     assert set(bundle.FILES) <= names
     assert ("gpu.csv" in names) == gpu.available()
@@ -23,6 +24,7 @@ async def test_bundle_is_complete(tmp_path):
     assert meta["requests"] == 4 and meta["max_tokens"] == 3 and meta["failed"] == 0
     assert meta["workload_hash"] == bundle.workload_hash(prompts, 3)
     assert meta["device"] == "cpu" and meta["window"]["wall_s"] > 0 and meta["torch"]
+    assert meta["settings"]["max_batch_size"] == 4
 
     trace = json.loads((out / "trace.json").read_text())
     names_in_trace = {e.get("name", "") for e in trace["traceEvents"]}

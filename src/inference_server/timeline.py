@@ -1,11 +1,4 @@
-"""Engine event timeline: one JSONL line per scheduler event, and a named profiler range per phase.
-
-The step id is the join key. Every event carries the scheduler step it happened in, and every
-phase range in a torch.profiler trace is named with the same step, so a kernel timing in the
-trace sits inside the scheduler decision that caused it. Timestamps are wall clock so they line
-up with the profiler trace and GPU samples taken by other tools. Off unless given a directory;
-writes never touch the scheduler thread.
-"""
+"""Engine event timeline: one JSONL event per scheduler decision and a profiler range per phase, keyed by step id."""
 
 from __future__ import annotations
 
@@ -24,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class Timeline:
-    """Append-only `events.jsonl` in `directory`, drained by one background thread. `Timeline()` is off."""
+    """Appends `events.jsonl` in `directory` from one background thread. `Timeline()` is off and a no-op."""
 
     _STOP = object()
 
@@ -33,10 +26,12 @@ class Timeline:
         self.step = 0
         self.events_written = 0
         self.events_dropped = 0
+        self._closed = False
         if not self.enabled:
             return
         self.path = Path(directory) / "events.jsonl"
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = open(self.path, "a")          # fails here, at construction, not in the writer
         self._q: queue.Queue = queue.Queue(maxsize=max_queue)
         self._thread = threading.Thread(target=self._drain, name="timeline-writer", daemon=True)
         self._thread.start()
@@ -45,7 +40,11 @@ class Timeline:
         self.step += 1
 
     def event(self, kind: str, **fields: Any) -> None:
+        """Wall-clock timestamp, so rows line up with profiler traces and GPU samples from other tools."""
         if not self.enabled:
+            return
+        if self._closed:
+            self.events_dropped += 1
             return
         try:
             self._q.put_nowait({"ts": time.time(), "step": self.step, "kind": kind, **fields})
@@ -53,8 +52,8 @@ class Timeline:
             self.events_dropped += 1
 
     def phase(self, name: str, **labels: Any):
-        """Wrap a block: a profiler range named `name step=N ...` plus one `phase` event with host duration."""
-        if not self.enabled:
+        """A profiler range named `name step=N ...` around the block, plus one `phase` event with host duration."""
+        if not self.enabled or self._closed:
             return contextlib.nullcontext()
         return _Phase(self, name, labels)
 
@@ -63,13 +62,16 @@ class Timeline:
                 "events_written": self.events_written, "events_dropped": self.events_dropped}
 
     def close(self) -> None:
-        """Flush everything queued and stop the writer. Idempotent."""
-        if self.enabled and self._thread.is_alive():
-            self._q.put(self._STOP)
-            self._thread.join()
+        """Flush everything queued and stop the writer. Idempotent; later events are counted as dropped."""
+        if not self.enabled or self._closed:
+            return
+        self._closed = True
+        self._q.put(self._STOP)
+        self._thread.join()
 
     def _drain(self) -> None:
-        with open(self.path, "a") as f:
+        failed_before = False
+        with self._file as f:
             while True:
                 item = self._q.get()
                 if item is self._STOP:
@@ -79,7 +81,9 @@ class Timeline:
                     self.events_written += 1
                 except Exception:
                     self.events_dropped += 1
-                    logger.exception("timeline write failed for %s", self.path)
+                    if not failed_before:
+                        failed_before = True
+                        logger.exception("timeline write failed for %s; dropping", self.path)
 
 
 class _Phase:
