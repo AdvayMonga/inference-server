@@ -46,6 +46,15 @@ def _lock(root: Path):
             fcntl.flock(lf, fcntl.LOCK_UN)
 
 
+def _mentions_heldout(obj: Any) -> bool:
+    """A `"split": "heldout"` anywhere in a nested value, so held-out data can't slip in under another field."""
+    if isinstance(obj, dict):
+        return obj.get("split") == "heldout" or any(_mentions_heldout(v) for v in obj.values())
+    if isinstance(obj, list):
+        return any(_mentions_heldout(v) for v in obj)
+    return False
+
+
 def _check(record: dict) -> None:
     """Integrity rules only: known kind, writer-owned fields, no held-out detail beyond one aggregate per metric."""
     if record.get("kind") not in KINDS:
@@ -55,8 +64,12 @@ def _check(record: dict) -> None:
     config = record.get("config")
     if config is not None and not isinstance(config, dict):
         raise LedgerError("config must be an object")
-    if (config or {}).get("split") != "heldout":
+    # `claim` is untrusted text that may name the split; everything else marks the record held-out
+    if not _mentions_heldout({k: v for k, v in record.items() if k != "claim"}):
         return
+    if (config or {}).get("split") != "heldout":
+        raise LedgerError("held-out data must be declared with config.split == 'heldout' and written as "
+                          "top-level config + metrics, not nested under another field")
     extra = record.keys() - HELDOUT_FIELDS
     if extra:
         raise LedgerError(f"held-out records may only carry {sorted(HELDOUT_FIELDS)}; got {sorted(extra)}")
