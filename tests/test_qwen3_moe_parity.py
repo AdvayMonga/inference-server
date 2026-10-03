@@ -220,9 +220,11 @@ def test_full_model_matches_hf():
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
     name = "Qwen/Qwen3-30B-A3B"
     hf_full = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16, device_map="cuda").eval()
-    model = Qwen3MoeForCausalLM.from_state_dict(AutoConfig.from_pretrained(name), hf_full.state_dict()).eval()
+    model = Qwen3MoeForCausalLM.from_state_dict(AutoConfig.from_pretrained(name), hf_full.state_dict()).to("cuda").eval()   # rope buffers are not in the state dict
     ids = AutoTokenizer.from_pretrained(name)("The capital of France is", return_tensors="pt").input_ids.cuda()
     with torch.no_grad():
         a, b = model(ids).float(), hf_full(ids).logits.float()
-    assert torch.equal(a[0, -1].argmax(), b[0, -1].argmax())
-    assert (a - b).abs().mean() < 1e-2
+    # bf16 drift vs HF is ~0.1 mean |logit| on an H200 with the old expert loop too; bound what matters.
+    assert torch.equal(a.argmax(-1), b.argmax(-1))
+    kl = torch.nn.functional.kl_div(a.log_softmax(-1), b.log_softmax(-1), log_target=True, reduction="none")
+    assert kl.sum(-1).max() < 2e-2
