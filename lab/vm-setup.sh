@@ -8,6 +8,8 @@ echo "== GPU"
 nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 echo "== uv + venv"
+# Triton builds its launcher against Python.h at first kernel launch.
+$SUDO apt-get install -y -qq python3-dev >/dev/null
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 # pyproject pins torch to the CPU index on linux (CI). Here we want the CUDA wheel at the SAME
@@ -17,7 +19,7 @@ export PATH="$HOME/.local/bin:$PATH"
 if ! .venv/bin/python -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
   uv sync --locked --extra dev
   torch_version=$(awk '/^name = "torch"$/{getline; sub(/version = "/,""); sub(/"/,""); print; exit}' uv.lock)
-  uv pip install --reinstall "torch==${torch_version}" --index-url https://download.pytorch.org/whl/cu128
+  uv pip install --reinstall "torch==${torch_version}" --index-url https://download.pytorch.org/whl/cu130
 fi
 
 echo "== Nsight"

@@ -48,7 +48,12 @@ class Verda:
             raise ProviderError(f"verda {method} {path}: {e.code} {e.read().decode(errors='replace')[:300]}")
         except urllib.error.URLError as e:
             raise ProviderError(f"verda {method} {path}: {e.reason}")
-        return json.loads(raw) if raw.strip() else None
+        if not raw.strip():
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:   # POST /instances and /ssh-keys answer with a bare id
+            return raw.decode().strip()
 
     def _access_token(self) -> str:
         if self._token.get("expires_at", 0) > time.time() + 60:

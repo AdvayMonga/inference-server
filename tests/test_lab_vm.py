@@ -155,3 +155,17 @@ def test_unknown_provider(monkeypatch):
     monkeypatch.setenv("LAB_VM_PROVIDER", "nimbus")
     with pytest.raises(ProviderError, match="unknown provider"):
         labvm.VM()
+
+
+def test_ssh_uses_the_private_half_of_the_keyfile(fake, monkeypatch):
+    monkeypatch.setenv("LAB_VM_KEYFILE", "~/.ssh/lab_ed25519.pub")
+    opts = labvm.VM().ssh_opts
+    assert opts[:2] == ["-i", os.path.expanduser("~/.ssh/lab_ed25519")]
+
+
+def test_rsync_quotes_a_keyfile_path_with_spaces(fake, monkeypatch):
+    import shlex
+    monkeypatch.setenv("LAB_VM_KEYFILE", "/Users/A B/.ssh/lab key.pub")
+    labvm.run(labvm.VM(name="t5"), "true")
+    e = next(c for c in calls(fake) if c[0] == "rsync")[3]
+    assert shlex.split(e)[1:3] == ["-i", "/Users/A B/.ssh/lab key"]
