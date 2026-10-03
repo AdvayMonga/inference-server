@@ -117,7 +117,7 @@ def wait_ssh(vm: VM, record: Record) -> None:
 
 
 def _rsync(vm: VM, *args: str) -> None:
-    out = subprocess.run(["rsync", "-az", "-e", f"ssh {' '.join(vm.ssh_opts)}", *args],
+    out = subprocess.run(["rsync", "-az", "-e", f"ssh {shlex.join(vm.ssh_opts)}", *args],
                          capture_output=True, text=True)
     if out.returncode != 0:
         raise ProviderError(f"rsync {args[-2]} -> {args[-1]}: {out.stderr.strip()}")
