@@ -133,10 +133,10 @@ class Qwen3SparseMoE(nn.Module):
         flat = x.reshape(-1, H)
         weights, experts = route(self.gate(flat), self.top_k, self.norm_topk_prob)
         E = self.experts.gate_up_proj.shape[0]
-        flat_e = experts.view(-1)
-        order = torch.argsort(flat_e, stable=True)          # (token, slot) pairs grouped by expert
+        sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
-        offs = torch.bincount(flat_e, minlength=E).cumsum(0).to(torch.int32)   # group ends, on device
+        # Group ends, on device (bincount would sync to size its output).
+        offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
         gate, up = torch._grouped_mm(flat[tok], self.experts.gate_up_proj.transpose(-2, -1),
                                      offs=offs).chunk(2, dim=-1)
         y = torch._grouped_mm(F.silu(gate) * up, self.experts.down_proj.transpose(-2, -1), offs=offs)
