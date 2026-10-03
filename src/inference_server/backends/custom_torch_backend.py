@@ -18,12 +18,10 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
 from typing import Generator
 
 import torch
 
-from inference_server import canary
 from inference_server.backends.base import InferenceBackend, stop_token_ids
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
@@ -262,6 +260,7 @@ class CustomTorchBackend(InferenceBackend):
             self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
 
         self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
+        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name), "max_position_embeddings", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
@@ -349,8 +348,6 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graph_on = self.device.type == "cuda" and not moe and \
             os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
         self._prefill_graphs: dict = {}
-        if canary.active("slow_start"):
-            time.sleep(20.0)
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
@@ -693,8 +690,6 @@ class CustomTorchBackend(InferenceBackend):
         CUDA: `batched_kv` is a persistent `BatchedDecodeState` — block tables live as GPU
         tensors, so the per-step hot path is pure GPU (no Python rebuild). CPU/MPS: a
         `list[PagedKVCache]` gathered into a left-padded masked SDPA (portable reference)."""
-        if canary.active("slow_decode"):
-            time.sleep(0.003)
         if self.device.type == "cuda":
             state = batched_kv
             n = state.n_rows
@@ -1052,32 +1047,30 @@ class CustomTorchBackend(InferenceBackend):
         return True
 
     def kv_release(self, prompt_len: int, max_tokens: int) -> None:
-        if canary.active("kv_leak"):
-            return
         fps = self._kv_footprints(prompt_len, max_tokens)
         for i in range(len(self.pools)):
             self._reserved[i] -= fps[i]
 
     @torch.inference_mode()
     def score_logprobs(self, token_ids: list[int], top_k: int = 20) -> list[dict[int, float] | None]:
-        """Teacher-forced scoring for the output-equivalence check: entry i (i >= 1) is the model's
-        distribution before token i, as {token i: logprob} plus the top-k; entry 0 is None (vLLM's
-        `prompt_logprobs` shape). A plain full-sequence forward under the scheduler's lock: no KV cache,
-        no graphs, so it scores what the weights compute, not a serving fast path."""
+        """Teacher-forced prompt logprobs in vLLM's shape (entry 0 None): one plain forward under the lock, no cache or graphs."""
         if len(token_ids) < 2:
             return [None] * len(token_ids)
+        limit = getattr(self, "max_positions", 0)
+        if limit and len(token_ids) > limit:
+            raise ValueError(f"{len(token_ids)} tokens exceed the model's {limit} positions")
         ids = torch.tensor([token_ids], device=self.device)
         with self._lock:
             logits = self.model(ids)[0, :-1]          # row i predicts token i + 1
         out: list[dict[int, float] | None] = [None]
         for s in range(0, logits.shape[0], 512):
             lp = torch.log_softmax(logits[s:s + 512].float(), dim=-1)
-            nxt = ids[0, s + 1:s + 1 + lp.shape[0]]
-            tok_lp = lp.gather(1, nxt[:, None])[:, 0].tolist()
+            nxt = ids[0, s + 1:s + 1 + lp.shape[0]].tolist()        # one sync per chunk, not per row
+            tok_lp = lp.gather(1, torch.tensor(nxt, device=lp.device)[:, None])[:, 0].tolist()
             top_v, top_i = lp.topk(min(top_k, lp.shape[-1]), dim=-1)
             for r, (vs, ix) in enumerate(zip(top_v.tolist(), top_i.tolist())):
                 d = dict(zip(ix, vs))
-                d[int(nxt[r])] = tok_lp[r]
+                d[nxt[r]] = tok_lp[r]
                 out.append(d)
         return out
 

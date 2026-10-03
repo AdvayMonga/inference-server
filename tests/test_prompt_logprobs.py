@@ -10,32 +10,12 @@ from fastapi.testclient import TestClient
 
 from inference_server.openai_shim import router
 
-VOCAB, EOS = 1000, 997
 SEQ = [5, 17, 300, 42, 8, 99, 123, 7, 55, 600, 3]
 
 
 @pytest.fixture(scope="module")
-def tiny_dir(tmp_path_factory):
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast, Qwen3MoeConfig, Qwen3MoeForCausalLM as HF
-
-    d = tmp_path_factory.mktemp("tiny_qwen3_moe_score")
-    torch.manual_seed(0)
-    cfg = Qwen3MoeConfig(vocab_size=VOCAB, hidden_size=64, num_hidden_layers=2, num_attention_heads=4,
-                         num_key_value_heads=2, head_dim=16, num_experts=8, num_experts_per_tok=2,
-                         moe_intermediate_size=32, norm_topk_prob=True, tie_word_embeddings=False,
-                         rope_parameters={"rope_type": "default", "rope_theta": 1e6},
-                         max_position_embeddings=512, eos_token_id=EOS, pad_token_id=0, bos_token_id=1)
-    HF._from_config(cfg, dtype=torch.bfloat16).save_pretrained(d)
-    vocab = {f"t{i}": i for i in range(VOCAB - 2)} | {"<think>": VOCAB - 2, "</think>": VOCAB - 1}
-    tk = Tokenizer(models.WordLevel(vocab, unk_token="t0"))
-    tk.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
-    PreTrainedTokenizerFast(tokenizer_object=tk).save_pretrained(d)
-    return str(d)
-
-
-@pytest.fixture(scope="module")
-def backend(tiny_dir):
+def backend(tiny_qwen3_moe_dir):
+    tiny_dir = tiny_qwen3_moe_dir
     from inference_server.backends.custom_torch_backend import CustomTorchBackend
     with pytest.MonkeyPatch.context() as mp:
         mp.setenv("CUSTOM_BACKEND_BLOCKS", "64")
@@ -45,7 +25,8 @@ def backend(tiny_dir):
     return b
 
 
-def test_scores_match_hf_logits(backend, tiny_dir):
+def test_scores_match_hf_logits(backend, tiny_qwen3_moe_dir):
+    tiny_dir = tiny_qwen3_moe_dir
     from transformers import AutoModelForCausalLM
     hf = AutoModelForCausalLM.from_pretrained(tiny_dir, dtype=torch.bfloat16).eval()
     with torch.inference_mode():
@@ -63,9 +44,13 @@ class _StubBackend:
         return [None] + [{t: -0.5, t + 1: -1.5} for t in ids[1:]]
 
 
+class _Tok:
+    vocab_size, context_window = 1000, 8
+
+
 def _client(backend):
     app = FastAPI(); app.include_router(router)
-    app.state.scheduler = object(); app.state.tokenizer = object(); app.state.backend = backend
+    app.state.scheduler = object(); app.state.tokenizer = _Tok(); app.state.backend = backend
     return TestClient(app)
 
 
@@ -80,3 +65,22 @@ def test_shim_returns_vllm_shaped_prompt_logprobs():
 def test_shim_refuses_scoring_without_backend_support():
     r = _client(object()).post("/v1/completions", json={"prompt": [3, 9], "prompt_logprobs": 2})
     assert r.status_code == 501
+
+
+def test_scoring_echoes_the_trace_header_and_rejects_streaming():
+    c = _client(_StubBackend())
+    r = c.post("/v1/completions", json={"prompt": [3, 9], "prompt_logprobs": 2}, headers={"X-Trace-Id": "abc"})
+    assert r.status_code == 200 and r.headers["X-Trace-Id"] == "abc"
+    r = c.post("/v1/completions", json={"prompt": [3, 9], "prompt_logprobs": 2, "stream": True})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("prompt", [[], [999999], [-1], list(range(9))])
+def test_pretokenized_prompts_are_validated(prompt):
+    r = _client(_StubBackend()).post("/v1/completions", json={"prompt": prompt, "prompt_logprobs": 2})
+    assert r.status_code == 400
+
+
+def test_scoring_refuses_sequences_past_the_model_positions(backend):
+    with pytest.raises(ValueError):
+        backend.score_logprobs(list(range(1, 600)))

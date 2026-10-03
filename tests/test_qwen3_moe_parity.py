@@ -17,38 +17,16 @@ from inference_server.models.gemma4 import KVCache
 from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM, route
 
 REAL_DIR = Path(__file__).parent / "fixtures" / "qwen3-30b-a3b"   # config.json + generation_config.json
-VOCAB = 1000
-EOS = 997
+from tests.conftest import TINY_EOS as EOS, TINY_VOCAB as VOCAB, tiny_qwen3_moe_cfg as _tiny_cfg  # noqa: E402
+
 # Shared 6-token prefix; odd lengths so a repeat is a partial prefix hit. A FULL hit (prompt a
 # multiple of the block size) re-feeds the last token in CustomTorchBackend.prefill() — known bug.
 PROMPTS = [[5, 17, 300, 42, 8, 99, 123, 7, 55], [5, 17, 300, 42, 8, 99, 600]]
 
 
-def _tiny_cfg(**over):
-    from transformers import Qwen3MoeConfig
-    kw = dict(vocab_size=VOCAB, hidden_size=64, num_hidden_layers=2, num_attention_heads=4,
-              num_key_value_heads=2, head_dim=16, num_experts=8, num_experts_per_tok=2,
-              moe_intermediate_size=32, norm_topk_prob=True, tie_word_embeddings=False,
-              rope_parameters={"rope_type": "default", "rope_theta": 1e6},
-              max_position_embeddings=512, eos_token_id=EOS, pad_token_id=0, bos_token_id=1)
-    kw.update(over)
-    return Qwen3MoeConfig(**kw)
-
-
 @pytest.fixture(scope="module")
-def tiny_dir(tmp_path_factory):
-    """Tiny HF checkpoint + tokenizer on disk, loadable by from_pretrained and the backend."""
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast, Qwen3MoeForCausalLM as HF
-
-    d = tmp_path_factory.mktemp("tiny_qwen3_moe")
-    torch.manual_seed(0)
-    HF._from_config(_tiny_cfg(), dtype=torch.bfloat16).save_pretrained(d)
-    vocab = {f"t{i}": i for i in range(VOCAB - 2)} | {"<think>": VOCAB - 2, "</think>": VOCAB - 1}
-    tk = Tokenizer(models.WordLevel(vocab, unk_token="t0"))
-    tk.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
-    PreTrainedTokenizerFast(tokenizer_object=tk).save_pretrained(d)
-    return str(d)
+def tiny_dir(tiny_qwen3_moe_dir):
+    return tiny_qwen3_moe_dir
 
 
 @pytest.fixture(scope="module")

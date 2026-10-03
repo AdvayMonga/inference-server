@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 
 import torch
 
-from inference_server import canary
 from inference_server.backends.base import InferenceBackend
 from inference_server.models.paged_kv_cache import KVCacheExhausted
 from inference_server.metrics import MetricsTracker
@@ -144,7 +143,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  telemetry: RowStore | None = None,
                  timeline: Timeline | None = None):
         self.backend = backend
-        self.max_batch_size = max(1, max_batch_size - 1) if canary.active("admit_fewer") else max_batch_size
+        self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
         # 0 means "no explicit cap"; we use a huge sentinel so checks are uniform.
         self.max_active_kv_tokens = max_active_kv_tokens if max_active_kv_tokens > 0 else 2**31

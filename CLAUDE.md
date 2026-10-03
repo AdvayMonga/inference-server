@@ -47,6 +47,10 @@
   the ledger), `lab/workspace.py` the exported engine copy with content-addressed snapshots, and
   `lab/safety/` the referee (surfaces, jail, grader). Lab tools run outside the jail; the agent's
   own shell and file tools run inside it. `LAB_NO_JAIL=1` waives the jail (tests, trusted box).
+- `python -m lab.canary <names>` serves the engine with deliberate regressions patched in from
+  outside, for proving the eval harness's coverage. `/v1/completions` accepts token-id prompts and
+  vLLM's `prompt_logprobs: k` (teacher-forced scoring via `CustomTorchBackend.score_logprobs`),
+  the output-equivalence surface the harness uses.
 - `python -m lab.vm` drives one persistent GPU VM (`LAB_VM_*` env) on `lab/providers/` verda
   (default, 1x H100 SXM) or crusoe (1x A100): start, setup, run a command on the pushed tree and
   fetch outputs, stop (Verda: hibernate). Credentials stay in env or the provider CLI's config.

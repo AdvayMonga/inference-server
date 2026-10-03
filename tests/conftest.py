@@ -26,6 +26,37 @@ _HEAVY_MODULES = {
 }
 
 
+TINY_VOCAB, TINY_EOS = 1000, 997
+
+
+def tiny_qwen3_moe_cfg(**over):
+    from transformers import Qwen3MoeConfig
+    kw = dict(vocab_size=TINY_VOCAB, hidden_size=64, num_hidden_layers=2, num_attention_heads=4,
+              num_key_value_heads=2, head_dim=16, num_experts=8, num_experts_per_tok=2,
+              moe_intermediate_size=32, norm_topk_prob=True, tie_word_embeddings=False,
+              rope_parameters={"rope_type": "default", "rope_theta": 1e6},
+              max_position_embeddings=512, eos_token_id=TINY_EOS, pad_token_id=0, bos_token_id=1)
+    kw.update(over)
+    return Qwen3MoeConfig(**kw)
+
+
+@pytest.fixture(scope="session")
+def tiny_qwen3_moe_dir(tmp_path_factory):
+    """Tiny HF Qwen3-MoE checkpoint + tokenizer on disk, loadable by from_pretrained and the backend."""
+    import torch
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from transformers import PreTrainedTokenizerFast, Qwen3MoeForCausalLM as HF
+
+    d = tmp_path_factory.mktemp("tiny_qwen3_moe")
+    torch.manual_seed(0)
+    HF._from_config(tiny_qwen3_moe_cfg(), dtype=torch.bfloat16).save_pretrained(d)
+    vocab = {f"t{i}": i for i in range(TINY_VOCAB - 2)} | {"<think>": TINY_VOCAB - 2, "</think>": TINY_VOCAB - 1}
+    tk = Tokenizer(models.WordLevel(vocab, unk_token="t0"))
+    tk.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    PreTrainedTokenizerFast(tokenizer_object=tk).save_pretrained(d)
+    return str(d)
+
+
 def pytest_configure(config):
     config.addinivalue_line("markers", "heavy: loads a real model (GBs of RAM); run alone")
     config.addinivalue_line(

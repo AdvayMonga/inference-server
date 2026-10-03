@@ -111,3 +111,7 @@ class Tokenizer:
     @property
     def vocab_size(self) -> int:
         return self._tokenizer.vocab_size
+
+    @property
+    def context_window(self) -> int:
+        return self._context_window
