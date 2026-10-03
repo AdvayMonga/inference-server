@@ -175,7 +175,10 @@ def test_restore_and_profile_tools(cfg, monkeypatch):
     prof = next(ledger.records(cfg.ledger_root, kind="profile"))
     assert prof["result"]["bundle"].startswith("blobs/") and (cfg.ledger_root / prof["result"]["bundle"] / "meta.json").exists()
     assert "--requests" in calls[0] and "2" in calls[0]
-    assert "bundle at" in dict(p.outputs)["profile"]
+    assert "bundle at lab/runs/" in dict(p.outputs)["profile"]
+    copy = ws / prof["result"]["workspace_copy"]
+    assert (copy / "meta.json").exists()                      # readable from inside the jail
+    assert prof["result"]["workspace_copy"].startswith("lab/runs/")   # scratch: never part of the change
 
 
 def test_cli_parses(monkeypatch, cfg):

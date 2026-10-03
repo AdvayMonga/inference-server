@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from lab.safety import jail
+from lab.safety.grader import HF_HUB
 from lab.safety.hooks import WRITE_TOOLS, write_guard
 
 API_HOST = "api.anthropic.com"
@@ -79,12 +80,17 @@ class ClaudeAgentSDK:
         home.mkdir(parents=True, exist_ok=True)
         tmp.mkdir(exist_ok=True)
         ws = spec.workspace.resolve()
-        config = jail.settings([home.resolve(), tmp.resolve(), ws], Path(sys.prefix), [API_HOST])
+        weights = [HF_HUB] if HF_HUB.exists() else []      # model weights read-only; the token beside them stays hidden
+        cli_tmp = Path(f"/private/tmp/claude-{os.getuid()}")   # the CLI's own per-project scratch; Bash fails without it
+        cli_tmp.mkdir(parents=True, exist_ok=True)
+        config = jail.settings([home.resolve(), tmp.resolve(), ws, cli_tmp.resolve()], Path(sys.prefix),
+                               [API_HOST], readonly=weights)
         argv = jail.wrap(config, spec.scratch / "srt.json", [str(cli)])
         keep = " ".join(f'"{k}=${k}"' for k in PASS_ENV)
         env = (f"{keep} HOME={shlex.quote(str(home))} CLAUDE_CONFIG_DIR={shlex.quote(str(home))} "
                f"TMPDIR={shlex.quote(str(tmp))} PYTHONPATH={shlex.quote(str(ws / 'src'))} "
-               f"PYTHONDONTWRITEBYTECODE=1")
+               f"PYTHONDONTWRITEBYTECODE=1 HF_HUB_CACHE={shlex.quote(str(HF_HUB))} HF_HUB_OFFLINE=1 "
+               f"HF_HOME={shlex.quote(str(tmp / 'hf-home'))}")
         script = spec.scratch / "cli.sh"
         script.write_text(f"#!/bin/sh\nexec env -i {env} {shlex.join(argv)} \"$@\"\n")
         script.chmod(0o700)

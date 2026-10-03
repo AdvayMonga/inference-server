@@ -74,13 +74,19 @@ class Toolbox:
         proc = (self.s.profile_runner or default_profile_runner)(tree, argv)
         bundles = sorted(out.glob("*")) if out.exists() else []
         blob = ledger.put_blob(bundles[-1], self.s.ledger_root) if bundles else ""
-        result = {"returncode": proc.returncode, "bundle": blob, "seconds": time.monotonic() - t0,
-                  "output": (proc.stdout + proc.stderr)[-3000:]}
+        visible = ""
+        if blob:   # a copy inside the workspace: the ledger is outside the jail, so the agent could not read it there
+            dest = self.s.workspace.path / "lab" / "runs" / Path(blob).name
+            shutil.rmtree(dest, ignore_errors=True)
+            shutil.copytree(bundles[-1], dest)
+            visible = str(Path("lab") / "runs" / Path(blob).name)
+        result = {"returncode": proc.returncode, "bundle": blob, "workspace_copy": visible,
+                  "seconds": time.monotonic() - t0, "output": (proc.stdout + proc.stderr)[-3000:]}
         self._record("profile", "profile", args, result, snap)
         if proc.returncode != 0 or not blob:
             return f"profile failed ({proc.returncode}):\n{result['output']}"
-        return f"bundle at {self.s.ledger_root / blob}\n" + "\n".join(
-            f"  {p.name}" for p in sorted((self.s.ledger_root / blob).iterdir()))
+        return f"bundle at {visible} (in your workspace; left out of your change)\n" + "\n".join(
+            f"  {p.name}" for p in sorted(dest.iterdir()))
 
     def ledger_tool(self, args: dict) -> str:
         match = {k: v for k, v in args.items() if k in ("kind", "session", "snapshot", "tool") and v}
