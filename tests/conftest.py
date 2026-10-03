@@ -65,8 +65,13 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     for item in items:
-        if item.module.__name__.rsplit(".", 1)[-1] in _HEAVY_MODULES:
+        name = item.module.__name__.rsplit(".", 1)[-1]
+        if name in _HEAVY_MODULES:
             item.add_marker(pytest.mark.heavy)
+        if name.startswith("test_lab_"):
+            # The lab's own tests drive git, subprocesses and the ledger: the referee's jail
+            # forbids all three, and the agent's change cannot touch lab/ anyway.
+            item.add_marker(pytest.mark.needs_host)
 
     if config.getoption("-m"):
         return  # caller chose explicitly; respect it
