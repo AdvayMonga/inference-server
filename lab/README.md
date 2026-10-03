@@ -61,6 +61,7 @@ with the referee's rights, snapshot the workspace and write the ledger on every 
 | `test` | lint and the fast suite on a pristine two-commit copy of the workspace, jailed |
 | `profile` | `lab.profile` on the pristine copy, jailed; the bundle goes into the ledger as a blob |
 | `ledger` | read records (this run and earlier ones) |
+| `knowledge` | measured findings, raw: `knowledge/*.json` is seeded as `finding` records at run start (new or changed files only); filter by query, status, tag |
 | `budget` | dollars left |
 | `restore` | workspace back to a snapshot id (`base` resets) |
 | `note` | a note for the human; recorded, changes nothing |

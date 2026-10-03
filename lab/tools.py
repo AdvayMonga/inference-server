@@ -94,6 +94,23 @@ class Toolbox:
         last = int(args.get("last") or 20)
         return "\n".join(json.dumps(r) for r in rows[-last:]) or "(no records)"
 
+    def knowledge(self, args: dict) -> str:
+        """Measured findings (`finding` records: knowledge/ seeded at run start, later ones as they land), raw."""
+        q, status, tag = (args.get("query") or "").lower(), args.get("status"), args.get("tag")
+        rows = []
+        for r in ledger.records(self.s.ledger_root, kind="finding"):
+            claim = r.get("claim")
+            c = claim if isinstance(claim, dict) else {"text": claim}
+            if status and c.get("status") != status:
+                continue
+            if tag and tag not in (c.get("tags") or []):
+                continue
+            if q and q not in json.dumps(c).lower():
+                continue
+            rows.append({"record": r["id"], "source": r.get("source"), "author": r.get("author"), "finding": c})
+        last = int(args.get("last") or 20)
+        return "\n".join(json.dumps(x) for x in rows[-last:]) or "(no findings match)"
+
     def budget(self, args: dict) -> str:
         b = self.s.budget
         return json.dumps({"cap_usd": b.cap_usd, "spent_usd": round(b.spent_usd, 4),
@@ -133,6 +150,11 @@ class Toolbox:
                      {"type": "object", "properties": {"kind": {"type": "string"}, "session": {"type": "string"},
                                                        "snapshot": {"type": "string"}, "tool": {"type": "string"},
                                                        "last": {"type": "integer"}}}, self.ledger_tool),
+            ToolSpec("knowledge", "Measured findings about this engine (hand-written ones and any recorded since), "
+                     "raw. Filter by a text query, a status or a tag; newest last.",
+                     {"type": "object", "properties": {"query": {"type": "string"}, "status": {"type": "string"},
+                                                       "tag": {"type": "string"}, "last": {"type": "integer"}}},
+                     self.knowledge),
             ToolSpec("budget", "Dollars left in this run.", obj, self.budget),
             ToolSpec("restore", "Put the workspace back to a snapshot id from the ledger ('base' resets it).",
                      {"type": "object", "required": ["snapshot"], "properties": {"snapshot": {"type": "string"}}}, self.restore),

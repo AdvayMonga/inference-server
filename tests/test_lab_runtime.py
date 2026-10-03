@@ -187,3 +187,28 @@ def test_cli_parses(monkeypatch, cfg):
     session.main(["--goal", "g", "--budget", "3", "--base", "HEAD", "--max-sessions", "2"])
     assert seen["cfg"].goal == "g" and seen["cfg"].budget_usd == 3.0 and seen["cfg"].max_sessions == 2
     assert json.dumps({"ok": 1})
+
+
+def test_knowledge_is_seeded_at_run_start_and_filterable(cfg):
+    kdir = cfg.repo / "knowledge"
+    kdir.mkdir()
+    (kdir / "kb-1.json").write_text(json.dumps({"id": "kb-1", "status": "confirmed", "tags": ["kv", "decode"],
+                                                 "summary": "Split-K decode attention cut TPOT 9% at batch 16"}))
+    (kdir / "kb-2.json").write_text(json.dumps({"id": "kb-2", "status": "open", "tags": ["prefill"],
+                                                 "summary": "Prefill graphs untested on long prompts"}))
+    def script(n, ws: Path):
+        yield ("call", "knowledge", {})
+        yield ("call", "knowledge", {"query": "split-k"})
+        yield ("call", "knowledge", {"status": "open"})
+        yield ("call", "knowledge", {"tag": "nothing-here"})
+        yield ("reply", AgentReply({"status": "stop", "note": None}, 0.1, 1, None))
+    p = ScriptedProvider(script)
+    session.run(cfg, p)
+    outs = [o for name, o in p.outputs if name == "knowledge"]
+    assert len(outs[0].splitlines()) == 2
+    assert json.loads(outs[1])["finding"]["id"] == "kb-1"
+    assert json.loads(outs[2])["finding"]["id"] == "kb-2"
+    assert outs[3] == "(no findings match)"
+    assert len(list(ledger.records(cfg.ledger_root, kind="finding"))) == 2
+    session.run(cfg, ScriptedProvider(lambda n, ws: iter([("reply", AgentReply({"status": "stop", "note": None}, 0.1, 1, None))])))
+    assert len(list(ledger.records(cfg.ledger_root, kind="finding"))) == 2     # unchanged files are not seeded twice

@@ -71,6 +71,7 @@ def run(cfg: RunConfig, provider: agent.Provider | None = None) -> dict:
     if not ws.path.exists():
         ws.create()
     budget = Budget.resume(cfg.budget_usd, run_id, cfg.ledger_root)
+    ledger.seed(Path(cfg.repo) / "knowledge", cfg.ledger_root)   # new or changed findings only; read by `knowledge`
     done = sum(1 for _ in ledger.records(cfg.ledger_root, run=run_id, kind="session"))
     base_files = grader.base_files(cfg.repo, base)
     summary = {"run": run_id, "base": base, "sessions": 0, "stopped": None, "spent_usd": budget.spent_usd}
