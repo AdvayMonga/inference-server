@@ -1,0 +1,32 @@
+{
+  "created_at": 1791004951.0465999,
+  "evidence": [
+    {
+      "ledger_id": "ev-20261003-2c872aa321db"
+    }
+  ],
+  "id": "kb-20261003-e5f6edc1",
+  "mechanism": "A VM with root sees the driver directly; containers do not.",
+  "regime": "cold_start",
+  "status": "open",
+  "summary": "First lab GPU session, 2026-10-03, Verda 1H200.141S.44V in FIN-02 ($4.83/h), image ubuntu-24.04-cuda-12.8-open-docker, driver 580.126.09, torch 2.14.0+cu130, login as root. Facts about the venue: `nvidia-smi -lgc 1980,1980` succeeds (root on a VM), so measurement clock state is controllable, unlike the container venues; `nsys` 2024.6 ships in the image; `apt-get install nsight-compute` works and `ncu` 2025.1.1 reads SM throughput counters (73.8% on a 4096x4096 matmul) with no permission error; the per-100ms nvidia-smi sampler (gpu.csv) works. `scripts/gpu_tests/checks.py`: 4/4 paged-attention parity checks pass on H200. Setup from a fresh VM takes about a minute with uv. Known problem (PR #83): Verda hibernate removes the instance from GET /instances, so `lab.vm stop` never sees `stopped`; end a session by deleting the instance and its OS volume. The passphrase-protected default ssh key fails under BatchMode; use a passphrase-free key (`LAB_VM_KEYFILE=~/.ssh/lab_ed25519.pub`).",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "venue",
+    "gpu",
+    "measurement",
+    "harness"
+  ],
+  "title": "Verda 1x H200 VM: clocks lock, Nsight Compute counters read, nsys present; hibernate hides the instance",
+  "transfer_checked": null,
+  "triggers": [
+    "choosing a GPU venue for measurement",
+    "nsys/ncu or clock locking refused somewhere else"
+  ],
+  "updated_at": 1791004951.0465999,
+  "validity_range": {
+    "hardware": "H200",
+    "provider": "verda"
+  }
+}

@@ -125,7 +125,8 @@ def _rsync(vm: VM, *args: str) -> None:
 
 def push(vm: VM, record: Record) -> None:
     """The working tree, minus .git and everything .gitignore excludes (secrets, weights, venvs, runs)."""
-    _rsync(vm, "--delete", "--exclude=.git", "--filter=:- .gitignore",
+    # .venv is named explicitly: a gitignore-only exclusion did not protect it from --delete on the VM.
+    _rsync(vm, "--delete", "--exclude=.git", "--exclude=.venv", "--exclude=__pycache__", "--filter=:- .gitignore",
            f"{REPO}/", f"{ssh_target(vm, record)}:{vm.remote_dir}/")
 
 
