@@ -118,7 +118,7 @@ class Qwen3Experts(nn.Module):
 
 
 class Qwen3SparseMoE(nn.Module):
-    """Router + experts. v1: loop over the experts that received tokens; no fused kernel."""
+    """Router + experts as two grouped GEMMs over expert-sorted tokens; no host sync."""
 
     def __init__(self, hidden_size: int, moe_intermediate: int, num_experts: int, top_k: int,
                  norm_topk_prob: bool, dtype: torch.dtype = torch.bfloat16):
@@ -132,13 +132,16 @@ class Qwen3SparseMoE(nn.Module):
         B, S, H = x.shape
         flat = x.reshape(-1, H)
         weights, experts = route(self.gate(flat), self.top_k, self.norm_topk_prob)
-        out = torch.zeros_like(flat)
-        for e in experts.unique().tolist():   # host sync: data-dependent, not CUDA-graph capturable
-            tok, slot = (experts == e).nonzero(as_tuple=True)
-            gate, up = F.linear(flat[tok], self.experts.gate_up_proj[e]).chunk(2, dim=-1)
-            y = F.linear(F.silu(gate) * up, self.experts.down_proj[e]) * weights[tok, slot, None]
-            out.index_add_(0, tok, y.to(out.dtype))
-        return out.view(B, S, H)
+        E = self.experts.gate_up_proj.shape[0]
+        sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
+        tok = order // self.top_k
+        # Group ends, on device (bincount would sync to size its output).
+        offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
+        gate, up = torch._grouped_mm(flat[tok], self.experts.gate_up_proj.transpose(-2, -1),
+                                     offs=offs).chunk(2, dim=-1)
+        y = torch._grouped_mm(F.silu(gate) * up, self.experts.down_proj.transpose(-2, -1), offs=offs)
+        y = y * weights.view(-1)[order, None]
+        return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
 
 
 class Qwen3DecoderLayer(nn.Module):

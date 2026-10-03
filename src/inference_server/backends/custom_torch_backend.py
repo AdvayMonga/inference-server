@@ -250,7 +250,7 @@ class CustomTorchBackend(InferenceBackend):
             from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM as model_cls
         else:
             raise ValueError(f"CustomTorchBackend supports gemma4 and qwen3_moe, not {model_type!r}")
-        # The MoE expert loop syncs to the host per layer, so graphs / compile / int8 stay Gemma-only.
+        # Graphs / compile / int8 stay Gemma-only until measured on qwen3_moe (its MoE no longer syncs).
         moe = model_type == "qwen3_moe"
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)

@@ -70,9 +70,10 @@ def test_route_matches_hf_router():
 
 
 def test_moe_block_matches_hf(hf, ours):
-    x = torch.randn(2, 9, 64, dtype=torch.bfloat16)
-    with torch.no_grad():
-        assert torch.equal(ours.model.layers[0].mlp(x), hf.model.layers[0].mlp(x))
+    x = torch.randn(2, 9, 64, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():   # grouped GEMM vs HF's per-expert loop: same math, bf16 rounding may differ
+        ref = hf.model.layers[0].mlp(x)
+        torch.testing.assert_close(ours.model.layers[0].mlp(x), ref, atol=1e-2 * ref.abs().max().item(), rtol=1.6e-2)
 
 
 # ---------------------------------------------------------------- full forward
@@ -80,7 +81,7 @@ def test_moe_block_matches_hf(hf, ours):
 def test_logits_match_hf(hf, ours):
     ids = torch.tensor(PROMPTS[0]).unsqueeze(0)
     with torch.no_grad():
-        torch.testing.assert_close(ours(ids), hf(ids).logits, atol=1e-3, rtol=0)
+        torch.testing.assert_close(ours(ids), hf(ids).logits, atol=5e-3, rtol=0)
 
 
 def test_logits_index_selects_one_row(ours):
@@ -219,9 +220,11 @@ def test_full_model_matches_hf():
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
     name = "Qwen/Qwen3-30B-A3B"
     hf_full = AutoModelForCausalLM.from_pretrained(name, dtype=torch.bfloat16, device_map="cuda").eval()
-    model = Qwen3MoeForCausalLM.from_state_dict(AutoConfig.from_pretrained(name), hf_full.state_dict()).eval()
+    model = Qwen3MoeForCausalLM.from_state_dict(AutoConfig.from_pretrained(name), hf_full.state_dict()).to("cuda").eval()   # rope buffers are not in the state dict
     ids = AutoTokenizer.from_pretrained(name)("The capital of France is", return_tensors="pt").input_ids.cuda()
     with torch.no_grad():
         a, b = model(ids).float(), hf_full(ids).logits.float()
-    assert torch.equal(a[0, -1].argmax(), b[0, -1].argmax())
-    assert (a - b).abs().mean() < 1e-2
+    # bf16 drift vs HF is ~0.1 mean |logit| on an H200 with the old expert loop too; bound what matters.
+    assert torch.equal(a.argmax(-1), b.argmax(-1))
+    kl = torch.nn.functional.kl_div(a.log_softmax(-1), b.log_softmax(-1), log_target=True, reduction="none")
+    assert kl.sum(-1).max() < 2e-2
