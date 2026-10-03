@@ -155,3 +155,9 @@ def test_unknown_provider(monkeypatch):
     monkeypatch.setenv("LAB_VM_PROVIDER", "nimbus")
     with pytest.raises(ProviderError, match="unknown provider"):
         labvm.VM()
+
+
+def test_ssh_uses_the_private_half_of_the_keyfile(fake, monkeypatch):
+    monkeypatch.setenv("LAB_VM_KEYFILE", "~/.ssh/lab_ed25519.pub")
+    opts = labvm.VM().ssh_opts
+    assert opts[:2] == ["-i", os.path.expanduser("~/.ssh/lab_ed25519")]

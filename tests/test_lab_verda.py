@@ -174,3 +174,13 @@ def test_token_is_cached(api):
     p = verda.Verda()
     p._access_token(); p._access_token()
     assert api.tokens == 1
+
+
+def test_request_returns_a_bare_id_as_text(monkeypatch):
+    """POST /instances and /ssh-keys answer with the new id as plain text, not JSON."""
+    class Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"9b5d9aa3-9056-4223-bcb5-f5f92a1e6d35\n"
+    monkeypatch.setattr(verda.urllib.request, "urlopen", lambda req, timeout: Resp())
+    assert verda.Verda()._request("POST", "/instances", {}, auth=False) == "9b5d9aa3-9056-4223-bcb5-f5f92a1e6d35"

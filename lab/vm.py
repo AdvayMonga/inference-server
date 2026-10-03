@@ -42,7 +42,8 @@ class VM:
 
     @property
     def ssh_opts(self) -> list[str]:
-        return ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
+        identity = os.path.expanduser(self.keyfile.removesuffix(".pub"))   # the private half of the uploaded key
+        return ["-i", identity, "-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=10", "-o", f"UserKnownHostsFile={self.known_hosts}"]
 
 
