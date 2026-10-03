@@ -52,6 +52,8 @@ explicit = true
 
 [tool.ruff]
 line-length = 100
+# Agent snapshots and run outputs are data, not code to lint.
+extend-exclude = ["lab/ledger", "lab/runs"]
 target-version = "py311"
 
 [tool.ruff.lint]
