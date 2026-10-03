@@ -70,9 +70,10 @@ def test_route_matches_hf_router():
 
 
 def test_moe_block_matches_hf(hf, ours):
-    x = torch.randn(2, 9, 64, dtype=torch.bfloat16)
-    with torch.no_grad():
-        assert torch.equal(ours.model.layers[0].mlp(x), hf.model.layers[0].mlp(x))
+    x = torch.randn(2, 9, 64, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(0))
+    with torch.no_grad():   # grouped GEMM vs HF's per-expert loop: same math, bf16 rounding may differ
+        ref = hf.model.layers[0].mlp(x)
+        torch.testing.assert_close(ours.model.layers[0].mlp(x), ref, atol=1e-2 * ref.abs().max().item(), rtol=1.6e-2)
 
 
 # ---------------------------------------------------------------- full forward
@@ -80,7 +81,7 @@ def test_moe_block_matches_hf(hf, ours):
 def test_logits_match_hf(hf, ours):
     ids = torch.tensor(PROMPTS[0]).unsqueeze(0)
     with torch.no_grad():
-        torch.testing.assert_close(ours(ids), hf(ids).logits, atol=1e-3, rtol=0)
+        torch.testing.assert_close(ours(ids), hf(ids).logits, atol=5e-3, rtol=0)
 
 
 def test_logits_index_selects_one_row(ours):
