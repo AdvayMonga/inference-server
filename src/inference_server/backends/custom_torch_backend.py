@@ -260,6 +260,7 @@ class CustomTorchBackend(InferenceBackend):
             self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
 
         self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
+        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name), "max_position_embeddings", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
@@ -1049,6 +1050,29 @@ class CustomTorchBackend(InferenceBackend):
         fps = self._kv_footprints(prompt_len, max_tokens)
         for i in range(len(self.pools)):
             self._reserved[i] -= fps[i]
+
+    @torch.inference_mode()
+    def score_logprobs(self, token_ids: list[int], top_k: int = 20) -> list[dict[int, float] | None]:
+        """Teacher-forced prompt logprobs in vLLM's shape (entry 0 None): one plain forward under the lock, no cache or graphs."""
+        if len(token_ids) < 2:
+            return [None] * len(token_ids)
+        limit = getattr(self, "max_positions", 0)
+        if limit and len(token_ids) > limit:
+            raise ValueError(f"{len(token_ids)} tokens exceed the model's {limit} positions")
+        ids = torch.tensor([token_ids], device=self.device)
+        with self._lock:
+            logits = self.model(ids)[0, :-1]          # row i predicts token i + 1
+        out: list[dict[int, float] | None] = [None]
+        for s in range(0, logits.shape[0], 512):
+            lp = torch.log_softmax(logits[s:s + 512].float(), dim=-1)
+            nxt = ids[0, s + 1:s + 1 + lp.shape[0]].tolist()        # one sync per chunk, not per row
+            tok_lp = lp.gather(1, torch.tensor(nxt, device=lp.device)[:, None])[:, 0].tolist()
+            top_v, top_i = lp.topk(min(top_k, lp.shape[-1]), dim=-1)
+            for r, (vs, ix) in enumerate(zip(top_v.tolist(), top_i.tolist())):
+                d = dict(zip(ix, vs))
+                d[nxt[r]] = tok_lp[r]
+                out.append(d)
+        return out
 
     def is_eos(self, token_id: int) -> bool:
         return token_id in self._eos_ids

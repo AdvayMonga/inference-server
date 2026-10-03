@@ -46,14 +46,15 @@ class ChatCompletionRequest(BaseModel):
 
 
 class CompletionRequest(BaseModel):
-    """OpenAI text-completion body. Unknown fields (stop, n, logprobs, ...) are ignored."""
-    prompt: str | list[str]
+    """OpenAI text-completion body; `prompt_logprobs: k` (vLLM's) scores the prompt instead of generating."""
+    prompt: str | list[str] | list[int]
     model: str = "inference-server"
     max_tokens: int = 128
     stream: bool = False
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+    prompt_logprobs: int | None = None
 
 
 def _correlation(request: Request, auto_prefix: str) -> tuple[str, int, str]:
@@ -69,7 +70,22 @@ def _correlation(request: Request, auto_prefix: str) -> tuple[str, int, str]:
 
 def _prompt_str(p: str | list[str]) -> str:
     """Normalize prompt to a single string (batched prompts unsupported — take the first)."""
+    if isinstance(p, list) and not p:
+        raise HTTPException(status_code=400, detail="prompt is empty")
     return p[0] if isinstance(p, list) else p
+
+
+def _token_ids(ids: list[int], tokenizer) -> list[int]:
+    """A pre-tokenized prompt gets the checks tokenizer.encode would have made."""
+    if not ids:
+        raise HTTPException(status_code=400, detail="prompt is empty")
+    vocab = getattr(tokenizer, "vocab_size", None)
+    if vocab is not None and any(t < 0 or t >= vocab for t in ids):
+        raise HTTPException(status_code=400, detail=f"token id outside the vocabulary of {vocab}")
+    window = getattr(tokenizer, "context_window", None)
+    if window is not None and len(ids) > window:
+        raise HTTPException(status_code=400, detail=f"{len(ids)} tokens exceed the context window of {window}")
+    return list(ids)
 
 
 def _chunk(cid: str, created: int, model: str, text: str, finish: str | None) -> str:
@@ -108,6 +124,32 @@ async def _stream(req: ScheduledRequest, tokenizer, cid: str, created: int, mode
         yield "data: [DONE]\n\n"
 
 
+async def _score(request: Request, body: CompletionRequest, token_ids: list[int], loop) -> dict:
+    """Teacher-forced scoring (vLLM `prompt_logprobs` shape) for the output-equivalence check."""
+    backend = getattr(request.app.state, "backend", None)
+    if backend is None or not hasattr(backend, "score_logprobs"):
+        raise HTTPException(status_code=501, detail="this backend cannot score prompt logprobs")
+    if body.stream:
+        raise HTTPException(status_code=400, detail="prompt_logprobs cannot be streamed")
+    k = max(1, min(int(body.prompt_logprobs), 100))
+    try:
+        scored = await loop.run_in_executor(None, backend.score_logprobs, token_ids, k)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    entries = []
+    for d in scored:
+        if d is None:
+            entries.append(None)
+            continue
+        ranked = sorted(d.items(), key=lambda kv: -kv[1])
+        entries.append({str(t): {"logprob": lp, "rank": r + 1} for r, (t, lp) in enumerate(ranked)})
+    return {"id": f"cmpl-{next(_ids)}", "object": "text_completion", "created": int(time.time()),
+            "model": body.model,
+            "choices": [{"text": "", "index": 0, "logprobs": None, "finish_reason": "length",
+                         "prompt_logprobs": entries}],
+            "usage": {"prompt_tokens": len(token_ids), "completion_tokens": 0, "total_tokens": len(token_ids)}}
+
+
 @router.post("/v1/completions")
 async def completions(body: CompletionRequest, request: Request, response: Response):
     """Text completion over the continuous-batch scheduler — the open-loop bench surface."""
@@ -115,15 +157,22 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
     tokenizer = request.app.state.tokenizer
     loop = asyncio.get_running_loop()
 
-    prompt = _prompt_str(body.prompt)
-    try:
-        token_ids = await loop.run_in_executor(None, tokenizer.encode, prompt)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    session_id, turn_index, trace_id = _correlation(request, "bench")
+    if isinstance(body.prompt, list) and body.prompt and isinstance(body.prompt[0], int):
+        token_ids = _token_ids(body.prompt, tokenizer)          # pre-tokenized, as vLLM accepts
+    else:
+        prompt = _prompt_str(body.prompt)
+        try:
+            token_ids = await loop.run_in_executor(None, tokenizer.encode, prompt)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    if body.prompt_logprobs is not None:
+        if trace_id:
+            response.headers["X-Trace-Id"] = trace_id
+        return await _score(request, body, token_ids, loop)
 
     sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
     cid = f"cmpl-{next(_ids)}"
-    session_id, turn_index, trace_id = _correlation(request, "bench")
     created = int(time.time())
 
     if body.stream:

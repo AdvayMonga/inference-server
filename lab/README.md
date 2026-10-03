@@ -73,6 +73,17 @@ provider (only `claude` today, through the Agent SDK CLI; `lab/agent.py` is the 
 The jail is sandbox-runtime (`npm install -g @anthropic-ai/sandbox-runtime`); `LAB_NO_JAIL=1`
 waives it for tests and a box you trust.
 
+## Canaries
+
+    python -m lab.canary slow_decode,kv_leak --port 8000
+
+Serves the engine with deliberate regressions applied from outside (`lab/canary.py`
+monkeypatches the backend and scheduler in the server process; the engine tree never changes,
+so the player cannot edit a canary away). The eval harness must flag every one; a canary nothing
+catches is a blind spot. `slow_decode` (+3 ms per step), `slow_start` (+20 s after load),
+`kv_leak` (reservations never freed), `admit_fewer` (one fewer row per admission pass, config
+unchanged in stats).
+
 ## GPU arm
 
 One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:
