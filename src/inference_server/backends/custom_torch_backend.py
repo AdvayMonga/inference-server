@@ -250,7 +250,8 @@ class CustomTorchBackend(InferenceBackend):
             from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM as model_cls
         else:
             raise ValueError(f"CustomTorchBackend supports gemma4 and qwen3_moe, not {model_type!r}")
-        # compile / int8 stay Gemma-only until measured on qwen3_moe; CUDA graphs cover both.
+        # compile / int8 stay Gemma-only until measured on qwen3_moe. Decode graphs are verified on it;
+        # the opt-in prefill graph is not output-checked there yet.
         moe = model_type == "qwen3_moe"
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
