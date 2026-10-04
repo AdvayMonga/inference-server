@@ -17,6 +17,9 @@ import torch.nn.functional as F
 from inference_server.models.gemma4 import GemmaRotaryEmbedding, _skip_param_init, apply_rotary
 
 
+_ST_DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
+
+
 class Qwen3RMSNorm(nn.Module):
     """HF Qwen3 RMSNorm: normalise in fp32, cast back, THEN scale by the weight."""
 
@@ -253,11 +256,11 @@ class Qwen3MoeForCausalLM(nn.Module):
         """Allocate on `device`, then stream every checkpoint shard straight into the parameters, in parallel."""
         import collections
         import glob
+        import json
         import os
         from concurrent.futures import ThreadPoolExecutor
 
         from huggingface_hub import snapshot_download
-        from safetensors import safe_open
         from transformers import AutoConfig
 
         path = model_name if os.path.isdir(model_name) else snapshot_download(model_name)
@@ -279,10 +282,20 @@ class Qwen3MoeForCausalLM(nn.Module):
             return params[f"{head}.mlp.experts.gate_up_proj"][int(e), half]
 
         def load(shard: str) -> list[str]:
-            with torch.no_grad(), safe_open(shard, framework="pt", device="cpu") as f:   # no_grad is per-thread
-                for key in f.keys():
-                    target(key).copy_(f.get_tensor(key))
-                return list(f.keys())
+            """One large read per shard (parallel across threads, unlike mmap faults), then zero-copy views."""
+            buf = bytearray(os.path.getsize(shard))
+            with open(shard, "rb", buffering=0) as f:
+                f.readinto(memoryview(buf))
+            n = int.from_bytes(buf[:8], "little")
+            header = json.loads(buf[8:8 + n])
+            header.pop("__metadata__", None)
+            data = torch.frombuffer(buf, dtype=torch.uint8)[8 + n:]
+            with torch.no_grad():   # no_grad is per-thread
+                for key, h in header.items():
+                    start, end = h["data_offsets"]
+                    t = data[start:end].view(_ST_DTYPES[h["dtype"]]).view(h["shape"])
+                    target(key).copy_(t)
+            return list(header)
 
         shards = sorted(glob.glob(os.path.join(path, "*.safetensors")))
         with ThreadPoolExecutor(workers) as pool:
