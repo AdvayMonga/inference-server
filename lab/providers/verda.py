@@ -1,7 +1,7 @@
 """Verda (ex DataCrunch) through its REST API (auth: VERDA_CLIENT_ID / VERDA_CLIENT_SECRET from the console).
 
-`stop` here is Verda's hibernate: compute billing ends, the OS volume stays and is billed as storage.
-Verda's own `shutdown` keeps billing the GPU, so it is never used.
+`stop` deletes the instance and its OS volume. Verda's hibernate hides the instance from GET /instances,
+so it cannot be restored through this API, and `shutdown` keeps billing the GPU. Setup reruns on each new VM.
 """
 
 from __future__ import annotations
@@ -26,12 +26,15 @@ STATES = {"running": RUNNING, "hibernating": STOPPED, "offline": "offline",
 
 @dataclass(frozen=True)
 class Verda:
-    type: str = env_field("LAB_VM_TYPE", "1H100.80S.30V")
-    location: str = env_field("LAB_VM_LOCATION", "FIN-01")
+    type: str = env_field("LAB_VM_TYPE", "1H200.141S.44V")       # the GPU BlameGraph's gate is calibrated on
+    location: str = env_field("LAB_VM_LOCATION", "FIN-02")
     image: str = env_field("LAB_VM_IMAGE", "ubuntu-24.04-cuda-12.8-open-docker")
-    disk_gb: int = field(default_factory=lambda: int(os.environ.get("LAB_VM_DISK_GB", "200")))
+    disk_gb: int = field(default_factory=lambda: int(os.environ.get("LAB_VM_DISK_GB", "400")))   # 30B weights
     default_user: str = "root"
-    stop_word: str = "hibernate"
+    stop_word: str = "delete"
+    stop_deletes: bool = True
+    poll_s: float = 5.0
+    delete_timeout_s: float = 300.0
     _token: dict = field(default_factory=dict, compare=False)
 
     # -- http ---------------------------------------------------------------------------
@@ -119,12 +122,19 @@ class Verda:
         self._action(name, lambda status: "restore" if status == "hibernating" else "start")
 
     def stop(self, name: str) -> None:
-        """Hibernate ends GPU billing; it is only accepted from `running`, so an `offline` box is started first."""
+        """Delete the instance, wait until it is gone, then delete its OS volume; all billing ends."""
         raw = self._raw(name)
-        if raw is not None and raw.get("status") == "offline":
-            raise ProviderError(f"{name} is shut down (offline), which still bills the GPU; "
-                                f"run `start` then `stop` to hibernate it")
-        self._action(name, lambda status: "hibernate")
+        if raw is None:
+            return
+        self._request("PUT", "/instances", {"action": "delete", "id": raw["id"]})
+        for _ in range(int(self.delete_timeout_s / max(self.poll_s, 1e-3)) + 1):
+            if self._raw(name) is None:
+                break
+            time.sleep(self.poll_s)
+        else:
+            raise ProviderError(f"{name}: instance still listed after {self.delete_timeout_s:.0f}s")
+        if raw.get("os_volume_id"):
+            self._request("PUT", "/volumes", {"action": "delete", "id": raw["os_volume_id"], "is_permanent": True})
 
     def types(self) -> str:
         avail = as_list(self._request("GET", "/instance-availability"), "GET /instance-availability")

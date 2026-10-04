@@ -87,7 +87,7 @@ unchanged in stats).
 ## GPU arm
 
 One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:
-`verda` (default; 1x H100 SXM, REST API) or `crusoe` (1x A100 PCIe, `crusoe` CLI). Same
+`verda` (default; 1x H200, REST API) or `crusoe` (1x A100 PCIe, `crusoe` CLI). Same
 commands either way:
 
     python -m lab.vm status
@@ -96,7 +96,7 @@ commands either way:
     python -m lab.vm setup                  # lab/vm-setup.sh: venv, CUDA torch, Nsight, counter and clock checks
     python -m lab.vm run --fetch lab/runs -- \
         env BACKEND=custom-cuda python -m lab.profile --requests 8
-    python -m lab.vm stop                   # ends GPU billing; the disk survives
+    python -m lab.vm stop                   # ends all billing (Verda: deletes the VM and its disk)
 
 `run` rsyncs the working tree minus `.git` and everything `.gitignore` excludes (what is on disk
 here is what gets measured, secrets and weights stay home), runs the command in the repo dir with
@@ -106,18 +106,19 @@ VM is left running; `stop` is yours. Do not run `uv sync` on the box: it would p
 Credentials never live in the repo. Verda: `VERDA_CLIENT_ID` and `VERDA_CLIENT_SECRET` (console >
 Keys > Cloud API credentials) in your shell. Crusoe: `crusoe config init`.
 
-Verda's `stop` is its hibernate: GPU billing ends, the OS volume stays and is billed as storage;
-Verda's own shutdown keeps billing the GPU and is never used. Verda prices are dynamic; `status`
-shows the current rate.
+Verda's `stop` deletes the instance and its OS volume: Verda's hibernate hides the instance from
+its own API so it cannot be restored, and its shutdown keeps billing the GPU. Each session therefore
+starts on a fresh VM; `setup` takes about a minute plus weight downloads. The image ships nvcc 12.8,
+which vLLM's DeepGEMM FP8 path refuses (needs 12.9+; serve with `VLLM_USE_DEEP_GEMM=0`).
 
 | env | verda default | crusoe default | |
 |---|---|---|---|
 | `LAB_VM_PROVIDER` | `verda` | | |
 | `LAB_VM` | `lab-gpu` | `lab-gpu` | VM name (Verda: hostname) |
-| `LAB_VM_TYPE` | `1H100.80S.30V` | `a100-80gb.1x` | `types` lists what is rentable |
-| `LAB_VM_LOCATION` | `FIN-01` | `us-east1-a` | |
+| `LAB_VM_TYPE` | `1H200.141S.44V` | `a100-80gb.1x` | `types` lists what is rentable |
+| `LAB_VM_LOCATION` | `FIN-02` | `us-east1-a` | |
 | `LAB_VM_IMAGE` | `ubuntu-24.04-cuda-12.8-open-docker` | `ubuntu22.04-nvidia-slurm:latest` | an image with the NVIDIA driver |
-| `LAB_VM_DISK_GB` | `200` | fixed by type | OS volume size (Verda) |
+| `LAB_VM_DISK_GB` | `400` | fixed by type | OS volume size (Verda) |
 | `LAB_VM_USER` | `root` | `ubuntu` | |
-| `LAB_VM_KEYFILE` | `~/.ssh/id_ed25519.pub` | same | Verda: uploaded on first use |
+| `LAB_VM_KEYFILE` | `~/.ssh/lab_ed25519.pub` | same | must have no passphrase (ssh runs in BatchMode); Verda: uploaded on first use |
 | `LAB_VM_DIR` | `~/inference-server` | same | where the tree lands |

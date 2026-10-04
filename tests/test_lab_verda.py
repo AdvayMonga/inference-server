@@ -34,6 +34,9 @@ class FakeApi:
             return None
         if path == "/instances" and method == "PUT":
             inst = next(i for i in self.instances if i["id"] == body["id"])
+            if body["action"] == "delete":
+                self.instances.remove(inst)
+                return None
             inst["status"] = {"hibernate": "hibernating", "restore": "running", "start": "running"}[body["action"]]
             inst["ip"] = "1.2.3.4" if inst["status"] == "running" else None
             return None
@@ -42,8 +45,10 @@ class FakeApi:
         if path == "/ssh-keys" and method == "POST":
             self.keys.append({"id": "k1", "name": body["name"], "key": body["key"]})
             return "k1"
+        if path == "/volumes" and method == "PUT":
+            return None
         if path == "/instance-availability":
-            return [{"location_code": "FIN-01", "availabilities": ["1H100.80S.30V"]}]
+            return [{"location_code": "FIN-01", "availabilities": ["1H200.141S.44V"]}]
         raise AssertionError((method, path))
 
     def finish_provisioning(self):
@@ -76,8 +81,8 @@ def test_create_uploads_the_local_key_once_and_deploys(api):
     posts = [c for c in api.calls if c[0] == "POST" and c[1] == "/ssh-keys"]
     assert len(posts) == 1 and posts[0][2]["key"].startswith("ssh-ed25519 AAAAtest")
     deploy = next(c[2] for c in api.calls if c[0] == "POST" and c[1] == "/instances")
-    assert deploy["instance_type"] == "1H100.80S.30V" and deploy["location_code"] == "FIN-01"
-    assert deploy["ssh_key_ids"] == ["k1"] and deploy["os_volume"]["size"] == 200
+    assert deploy["instance_type"] == "1H200.141S.44V" and deploy["location_code"] == "FIN-02"
+    assert deploy["ssh_key_ids"] == ["k1"] and deploy["os_volume"]["size"] == 400
 
 
 def test_states_map_and_newest_live_instance_wins(api):
@@ -85,7 +90,7 @@ def test_states_map_and_newest_live_instance_wins(api):
     api.instances = [
         {"id": "old", "hostname": "lab-gpu", "status": "discontinued", "created_at": "2026-01-01"},
         {"id": "new", "hostname": "lab-gpu", "status": "hibernating", "created_at": "2026-02-01",
-         "instance_type": "1H100.80S.30V", "ip": None},
+         "instance_type": "1H200.141S.44V", "ip": None},
     ]
     rec = p.get("lab-gpu")
     assert rec.state == "stopped" and rec.ip is None and "hibernating" in rec.detail
@@ -94,12 +99,15 @@ def test_states_map_and_newest_live_instance_wins(api):
     assert p.get("lab-gpu").state == "running"
 
 
-def test_stop_hibernates_never_shuts_down(api):
-    p = verda.Verda()
-    api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "running", "created_at": "1", "ip": "1.2.3.4"}]
+def test_stop_deletes_instance_then_volume(api, monkeypatch):
+    p = verda.Verda(poll_s=0)
+    api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "running", "created_at": "1", "ip": "1.2.3.4",
+                      "os_volume_id": "vol-1"}]
     p.stop("lab-gpu")
-    assert api.calls[-1][2]["action"] == "hibernate"
-    assert all(c[2] is None or c[2].get("action") != "shutdown" for c in api.calls)
+    puts = [c for c in api.calls if c[0] == "PUT"]
+    assert puts[0] == ("PUT", "/instances", {"action": "delete", "id": "x"})
+    assert puts[1] == ("PUT", "/volumes", {"action": "delete", "id": "vol-1", "is_permanent": True})
+    assert all((c[2] or {}).get("action") not in ("shutdown", "hibernate") for c in api.calls if c[0] == "PUT")
 
 
 def test_start_waits_for_provisioning_then_ssh_target(api, monkeypatch):
@@ -122,14 +130,14 @@ def test_start_waits_for_provisioning_then_ssh_target(api, monkeypatch):
 def test_no_capacity_is_reported_not_waited_out(api):
     vm = labvm.VM(name="lab-gpu")
     api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "no_capacity", "created_at": "1",
-                      "instance_type": "1H100.80S.30V", "ip": None}]
+                      "instance_type": "1H200.141S.44V", "ip": None}]
     with pytest.raises(ProviderError, match="no_capacity"):
         labvm.start(vm)
 
 
 def test_running_without_ip_is_waited_for(api):
     api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "running", "created_at": "1",
-                      "instance_type": "1H100.80S.30V", "ip": None}]
+                      "instance_type": "1H200.141S.44V", "ip": None}]
     polls = {"n": 0}
     original = verda.Verda.get
     def get(self, name):
@@ -142,14 +150,6 @@ def test_running_without_ip_is_waited_for(api):
     with um.patch.object(verda.Verda, "get", api_get):
         record = labvm.start(labvm.VM(name="lab-gpu"))
     assert record.ip == "5.6.7.8" and polls["n"] >= 3
-
-
-def test_stop_refuses_offline_with_advice(api):
-    api.instances = [{"id": "x", "hostname": "lab-gpu", "status": "offline", "created_at": "1",
-                      "instance_type": "1H100.80S.30V", "ip": None}]
-    with pytest.raises(ProviderError, match="start.*then.*stop"):
-        labvm.stop(labvm.VM(name="lab-gpu"))
-    assert not any(c[0] == "PUT" for c in api.calls)
 
 
 def test_bad_payloads_are_provider_errors(api, monkeypatch):
