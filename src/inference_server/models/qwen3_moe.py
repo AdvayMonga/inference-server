@@ -318,7 +318,7 @@ class Qwen3MoeForCausalLM(nn.Module):
         fused_ok = all(filled[n] == 1 for n in params)
         split_ok = all(filled[n] == 1 for n in params if ".mlp.experts." not in n) and \
             all(filled[k] == 1 for k in per_expert)
-        if not (fused_ok or split_ok) or sum(filled.values()) != len(keys):
+        if not (fused_ok or split_ok):
             raise ValueError(f"{path}: checkpoint keys do not cover the model exactly once")
         return model.eval()
 

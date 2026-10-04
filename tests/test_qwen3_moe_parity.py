@@ -82,6 +82,19 @@ def test_from_safetensors_matches_from_hf(tiny_dir, ours):
     assert fast.keys() == ref.keys() and all(torch.equal(fast[k], ref[k]) for k in ref)
 
 
+def test_from_safetensors_reads_a_fused_expert_checkpoint(tiny_dir, ours, tmp_path):
+    """The tiny fixture stores experts one by one (as the Hub does); this one stores the fused stacks."""
+    import shutil
+
+    from safetensors.torch import save_file
+    d = tmp_path / "fused"
+    shutil.copytree(tiny_dir, d, ignore=shutil.ignore_patterns("*.safetensors*"))
+    ref = ours.state_dict()
+    save_file({k: v.contiguous() for k, v in ref.items()}, d / "model.safetensors", metadata={"format": "pt"})
+    fast = Qwen3MoeForCausalLM.from_safetensors(str(d)).state_dict()
+    assert all(torch.equal(fast[k], ref[k]) for k in ref)
+
+
 def test_from_safetensors_refuses_a_missing_tensor(tiny_dir, tmp_path):
     import shutil
 
