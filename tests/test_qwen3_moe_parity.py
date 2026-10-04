@@ -76,6 +76,26 @@ def test_moe_block_matches_hf(hf, ours):
         torch.testing.assert_close(ours.model.layers[0].mlp(x), ref, atol=1e-2 * ref.abs().max().item(), rtol=1.6e-2)
 
 
+def test_from_safetensors_matches_from_hf(tiny_dir, ours):
+    fast = Qwen3MoeForCausalLM.from_safetensors(str(tiny_dir)).state_dict()
+    ref = ours.state_dict()
+    assert fast.keys() == ref.keys() and all(torch.equal(fast[k], ref[k]) for k in ref)
+
+
+def test_from_safetensors_refuses_a_missing_tensor(tiny_dir, tmp_path):
+    import shutil
+
+    from safetensors.torch import load_file, save_file
+    d = tmp_path / "broken"
+    shutil.copytree(tiny_dir, d)
+    shard = next(d.glob("*.safetensors"))
+    sd = load_file(shard)
+    sd.pop("model.layers.1.mlp.experts.3.up_proj.weight")
+    save_file(sd, shard, metadata={"format": "pt"})
+    with pytest.raises(ValueError, match="exactly once"):
+        Qwen3MoeForCausalLM.from_safetensors(str(d))
+
+
 # ---------------------------------------------------------------- full forward
 
 def test_logits_match_hf(hf, ours):

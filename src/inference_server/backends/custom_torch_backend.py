@@ -259,7 +259,10 @@ class CustomTorchBackend(InferenceBackend):
         if moe:   # Qwen's think markers; ids 100/101 are ordinary characters in its vocab
             self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
 
-        self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
+        if moe:   # shards stream straight onto the device; no HF model built in host memory first
+            self.model = model_cls.from_safetensors(model_name, device=self.device)
+        else:
+            self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
         self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name), "max_position_embeddings", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
