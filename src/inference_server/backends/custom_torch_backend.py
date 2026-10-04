@@ -250,7 +250,7 @@ class CustomTorchBackend(InferenceBackend):
             from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM as model_cls
         else:
             raise ValueError(f"CustomTorchBackend supports gemma4 and qwen3_moe, not {model_type!r}")
-        # Graphs / compile / int8 stay Gemma-only until measured on qwen3_moe (its MoE no longer syncs).
+        # compile / int8 stay Gemma-only until measured on qwen3_moe; CUDA graphs cover both.
         moe = model_type == "qwen3_moe"
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -312,7 +312,7 @@ class CustomTorchBackend(InferenceBackend):
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
-        self._graph_on = self.device.type == "cuda" and not moe and \
+        self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and not moe and \
             os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
@@ -345,7 +345,7 @@ class CustomTorchBackend(InferenceBackend):
         # K=1 CUDA-graph prefill — replays the forward instead of paying ~73ms eager dispatch
         # (the unloaded-TTFT floor). Captured lazily per suffix bucket on first use (capture is
         # ~seconds, unlike torch.compile). Flag-gated OFF until verified; deploy unaffected.
-        self._prefill_graph_on = self.device.type == "cuda" and not moe and \
+        self._prefill_graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
         self._prefill_graphs: dict = {}
 
