@@ -252,12 +252,13 @@ class Qwen3MoeForCausalLM(nn.Module):
 
     @classmethod
     def from_safetensors(cls, model_name: str, device: str | torch.device = "cpu",
-                         dtype: torch.dtype = torch.bfloat16, workers: int = 8) -> "Qwen3MoeForCausalLM":
+                         dtype: torch.dtype = torch.bfloat16, workers: int = 16) -> "Qwen3MoeForCausalLM":
         """Allocate on `device`, then stream every checkpoint shard straight into the parameters, in parallel."""
         import collections
         import glob
         import json
         import os
+        import threading
         from concurrent.futures import ThreadPoolExecutor
 
         from huggingface_hub import snapshot_download
@@ -281,20 +282,30 @@ class Qwen3MoeForCausalLM(nn.Module):
             half = slice(0, inter) if proj == "gate_proj" else slice(inter, 2 * inter)
             return params[f"{head}.mlp.experts.gate_up_proj"][int(e), half]
 
+        local = threading.local()
+
         def load(shard: str) -> list[str]:
-            """One large read per shard (parallel across threads, unlike mmap faults), then zero-copy views."""
-            buf = bytearray(os.path.getsize(shard))
-            with open(shard, "rb", buffering=0) as f:
-                f.readinto(memoryview(buf))
-            n = int.from_bytes(buf[:8], "little")
-            header = json.loads(buf[8:8 + n])
-            header.pop("__metadata__", None)
-            data = torch.frombuffer(buf, dtype=torch.uint8)[8 + n:]
-            with torch.no_grad():   # no_grad is per-thread
-                for key, h in header.items():
-                    start, end = h["data_offsets"]
-                    t = data[start:end].view(_ST_DTYPES[h["dtype"]]).view(h["shape"])
-                    target(key).copy_(t)
+            """Per tensor: pread into this thread's reused host buffer, copy to the device. No fresh host memory per shard."""
+            fd = os.open(shard, os.O_RDONLY)
+            try:
+                n = int.from_bytes(os.pread(fd, 8, 0), "little")
+                header = json.loads(os.pread(fd, n, 8))
+                header.pop("__metadata__", None)
+                with torch.no_grad():   # no_grad is per-thread
+                    for key, h in sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0]):
+                        start, end = h["data_offsets"]
+                        if getattr(local, "buf", None) is None or local.buf.numel() < end - start:
+                            local.buf = torch.empty(end - start, dtype=torch.uint8)
+                        chunk = local.buf[:end - start]
+                        view, done = memoryview(chunk.numpy()), 0
+                        while done < end - start:   # preadv may return short
+                            got = os.preadv(fd, [view[done:]], 8 + n + start + done)
+                            if got <= 0:
+                                raise ValueError(f"{shard}: truncated at {key}")
+                            done += got
+                        target(key).copy_(chunk.view(_ST_DTYPES[h["dtype"]]).view(h["shape"]))
+            finally:
+                os.close(fd)
             return list(header)
 
         shards = sorted(glob.glob(os.path.join(path, "*.safetensors")))
