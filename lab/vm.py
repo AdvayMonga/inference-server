@@ -26,7 +26,7 @@ SSH_TIMEOUT_S = 300.0
 class VM:
     """Read from env at construction. The provider supplies GPU type, location, image and the login user."""
     name: str = env_field("LAB_VM", "lab-gpu")
-    keyfile: str = env_field("LAB_VM_KEYFILE", "~/.ssh/id_ed25519.pub")
+    keyfile: str = env_field("LAB_VM_KEYFILE", "~/.ssh/lab_ed25519.pub")   # passphrase-free: BatchMode cannot unlock one
     remote_dir: str = env_field("LAB_VM_DIR", "~/inference-server")
     user: str = env_field("LAB_VM_USER", "")
     provider: object = field(default_factory=lambda: providers.load(os.environ.get("LAB_VM_PROVIDER", "verda")))
@@ -75,11 +75,16 @@ def start(vm: VM) -> Record:
 
 
 def stop(vm: VM) -> None:
-    """Ends GPU billing (Crusoe: stop; Verda: hibernate). The disk survives; this is how a session ends."""
+    """Ends GPU billing. Crusoe: stop, disk kept. Verda: delete instance and disk (its hibernate cannot be restored)."""
     record = vm.provider.get(vm.name)
     if record is None or record.state == "stopped":
         return
     vm.provider.stop(vm.name)
+    if getattr(vm.provider, "stop_deletes", False):
+        if vm.provider.get(vm.name) is not None:
+            raise ProviderError(f"{vm.name} still exists after delete")
+        vm.known_hosts.unlink(missing_ok=True)
+        return
     _wait(vm, "stopped", STOP_TIMEOUT_S)
 
 

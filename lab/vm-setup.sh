@@ -22,6 +22,10 @@ if ! .venv/bin/python -c "import torch; assert torch.cuda.is_available()" 2>/dev
   uv pip install --reinstall "torch==${torch_version}" --index-url https://download.pytorch.org/whl/cu130
 fi
 
+echo "== CUDA toolkit"
+# The image's nvcc decides what JIT-compiling libraries can do: vLLM's DeepGEMM FP8 path needs nvcc >= 12.9.
+nvcc --version 2>/dev/null | tail -1 || ls /usr/local/cuda/bin/nvcc 2>/dev/null || echo "nvcc: not on PATH"
+
 echo "== Nsight"
 if ! command -v nsys >/dev/null || ! command -v ncu >/dev/null; then
   $SUDO apt-get update -qq
