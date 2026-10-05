@@ -9,6 +9,7 @@ nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 echo "== uv + venv"
 # Triton builds its launcher against Python.h at first kernel launch.
+$SUDO apt-get update -qq >/dev/null   # a fresh image has no package lists
 $SUDO apt-get install -y -qq python3-dev >/dev/null
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
