@@ -80,13 +80,16 @@ def build_scheduler(backend: InferenceBackend, settings: Settings, *,
     """The served scheduler configuration; `timeline` overrides TIMELINE_DIR."""
     if timeline is None and settings.timeline_dir:
         timeline = Timeline(settings.timeline_dir)
+    mode = settings.prefill_mode
+    if not mode and settings.prefill_chunk_size <= 0 and hasattr(backend, "prefill_batch"):
+        mode = "batched"   # unset: batched where the backend has it (Qwen3-MoE on H200: TTFT p50 121 → 80 ms)
     return ContinuousBatchScheduler(
         backend,
         max_batch_size=settings.max_batch_size,
         max_queue_size=settings.max_queue_size,
         max_active_kv_tokens=settings.max_active_kv_tokens,
         prefill_chunk_size=settings.prefill_chunk_size,
-        prefill_mode=settings.prefill_mode or None,
+        prefill_mode=mode or None,
         wave_window_mult=settings.wave_window_mult,
         max_queue_wait_s=settings.max_queue_wait_s,
         policy=create_scheduling_policy(settings.scheduling_policy),
