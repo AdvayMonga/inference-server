@@ -591,6 +591,19 @@ class PagedKVCache:
         self.seq_lens[layer_idx] = seq_len + S_new
         self._evict(layer_idx)  # free blocks now fully out of the sliding window
 
+    def truncate(self, n: int) -> None:
+        """Drop positions >= n and release blocks past them (spec-decode rollback; full-attention pools only)."""
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            bt = self.block_tables[L]
+            keep = (n + pool.block_size - 1) // pool.block_size
+            for bid in bt[keep:]:
+                if bid >= 0:
+                    pool.release(bid)
+            del bt[keep:]
+            self.seq_lens[L] = min(self.seq_lens[L], n)
+
     def free_all(self) -> None:
         """Release this session's references; blocks return to pool when refcount hits 0."""
         for layer_idx in range(self.num_layers):
@@ -750,6 +763,31 @@ class BatchedDecodeState:
         self.seq_lens = self.seq_lens[keep_t]
         self.n_alloc = self.n_alloc[keep_t]
         self.evicted = self.evicted[keep_t]
+
+    def row_cache(self, idx: int) -> "PagedKVCache":
+        """Row `idx` as a PagedKVCache view over the same blocks (no refcount change); pair with set_row."""
+        pkv = PagedKVCache(self.pools)
+        n, L0 = int(self.n_alloc[idx].item()), int(self.seq_lens[idx].item())
+        for L, pool in enumerate(self.pools):
+            if pool is not None:
+                pkv.block_tables[L] = self.block_tables[L][idx, :n].tolist()
+                pkv.seq_lens[L] = L0
+        for L in self._sliding:
+            pkv.evicted[L] = int(self.evicted[idx].item())
+        return pkv
+
+    def set_row(self, idx: int, pkv: "PagedKVCache") -> None:
+        """Write a row_cache view (grown or truncated) back as row `idx`."""
+        n = max(len(pkv.block_tables[L]) for L, p in enumerate(self.pools) if p is not None)
+        for L, pool in enumerate(self.pools):
+            if pool is None:
+                continue
+            bt = pkv.block_tables[L]
+            self.block_tables[L] = self._grow_cols(self.block_tables[L], n)
+            self.block_tables[L][idx] = -1   # -1 past this layer's blocks: never released or read
+            self.block_tables[L][idx, :len(bt)] = torch.tensor(bt, dtype=torch.long, device=self.device)
+        self.seq_lens[idx] = pkv.seq_len
+        self.n_alloc[idx] = n
 
     def prepare_step(self) -> None:
         """Alloc a block for every boundary-crossing row in every layer (once per step)."""
