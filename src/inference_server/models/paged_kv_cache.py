@@ -241,9 +241,9 @@ def _chain(prev: bytes, chunk) -> bytes:
 
 
 def _to_host(t: torch.Tensor) -> torch.Tensor:
-    """Detached host copy of one block (pinned on CUDA so copy-back can be async)."""
+    """Host copy of one block. On CUDA: pinned and non-blocking, ordered on the stream before any reuse or restore."""
     if t.is_cuda:
-        return torch.empty(t.shape, dtype=t.dtype, pin_memory=True).copy_(t)
+        return torch.empty(t.shape, dtype=t.dtype, pin_memory=True).copy_(t, non_blocking=True)
     return t.clone()
 
 
@@ -260,10 +260,10 @@ class HostTier:
         if digest in self.entries:
             self.entries.move_to_end(digest)
             return
-        entry = {L: (_to_host(pools[L].k[b]), _to_host(pools[L].v[b])) for L, b in blocks.items()}
-        n = sum(k.nbytes + v.nbytes for k, v in entry.values())
-        if n > self.max_bytes:
+        n = sum(pools[L].k[b].nbytes + pools[L].v[b].nbytes for L, b in blocks.items())
+        if n > self.max_bytes:   # sized before copying: never pay for a block the budget can't hold
             return
+        entry = {L: (_to_host(pools[L].k[b]), _to_host(pools[L].v[b])) for L, b in blocks.items()}
         while self.bytes + n > self.max_bytes:
             _, old = self.entries.popitem(last=False)
             self.bytes -= sum(k.nbytes + v.nbytes for k, v in old.values())
