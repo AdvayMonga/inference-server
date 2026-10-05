@@ -33,6 +33,10 @@ WILDCHAT_SHARDS = ("train-00000-of-00014.parquet", "train-00001-of-00014.parquet
 
 # (cache-relative path, url, sha256)
 SOURCES: list[tuple[str, str, str]] = [
+    ("burstgpt/BurstGPT_1.csv", f"{BURSTGPT}/BurstGPT_1.csv",
+     "4bb3783693d0a435686fbfc885615d2349bd067239079fa4b749f2e679e12122"),
+    ("burstgpt/BurstGPT_2.csv", f"{BURSTGPT}/BurstGPT_2.csv",
+     "44bf5942b03fca42c01a226a545ad3a750ec62688faecd67b6831c56a8928bf7"),
     ("burstgpt/BurstGPT_3.csv", f"{BURSTGPT}/BurstGPT_3.csv",
      "2299986a07388aa303ec2c41d1131e756db650a39ed6ef9dfe7cc3d7f9a43b8f"),
     ("azure/AzureLLMInferenceTrace_conv_1week.csv",

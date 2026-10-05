@@ -44,9 +44,25 @@ row to its telemetry row.
 | `steady_interactive` | a 10-min window of 200–300 requests, no minute above 2× the mean | 238 / 241 | p95 TTFT < 1000 ms, TPOT < 100 ms |
 | `long_context` | 60 consecutive trace requests of ≥3000 tokens | 60 / 60 | p95 TTFT < 3000 ms |
 | `spike` | a minute of 40–150 requests after ten quiet minutes, 5 min lead-in, 3 min tail | 290 / 272 | p95 TTFT < 2000 ms |
+| `mixed_1`–`mixed_3` | 20 real minutes crossing regimes (see below), one trace day each | 938 / 1060, 596 / 384, 1029 / 1231 | per request, by its `regime` |
 
 SLOs are **proposed 2026-10-01, pending owner confirmation** (also in `manifest.notes`).
 Confirming or changing one is a new corpus version.
+
+**Mixed classes.** Real traffic switches regimes; these test the switching. Each is a 20-minute
+window holding at least 20 post-idle, 20 burst and 50 steady requests, with steady traffic in at
+least 10 of its minutes and request-token CV ≥ 0.3 (so not one scripted client's burst), capped
+at 1.1 req/s and 150 in any minute so one replica can take it in real time. Each mixed class
+comes from a different trace day, so the three together are one GPU-hour of replay per split.
+Every request carries `regime`, the class whose SLO judges it, labelled from its context in the
+whole trace, first match wins: prompt ≥ 3000 tokens → `long_context`; one of the first 60
+requests within 20 min after a ≥ 10 min gap → `cold_start`; arriving in a burst minute (≥ 40
+requests, ≥ 6× the median and > 2× the max of the ten minutes before) → `spike`; else
+`steady_interactive`. Mixed classes have no class SLO (`slo_ttft_ms` is null). Windows that fit
+are rare: three days pass in each split, so these are those days, not a sample. To find them
+the mixed classes also draw on BurstGPT's two earlier files, which have no session ids (so the
+mixed traces are nearly all single requests), on `BurstGPT_3`'s clock (earlier months are
+negative times), so one week numbering splits every class.
 
 **Splits.** `seen` windows come from even weeks of the BurstGPT trace, `heldout` from odd
 weeks — disjoint time, never the same window. No WildChat conversation is used twice anywhere
@@ -98,7 +114,7 @@ policy tuned on this corpus should be re-checked against a smoother, longer-cont
 
 ```bash
 uv sync --extra dev --extra corpus                          # pyarrow, for the WildChat shards
-.venv/bin/python scripts/corpus/fetch_traces.py              # ~1.6 GB into ~/.cache/inference-server/traces
+.venv/bin/python scripts/corpus/fetch_traces.py              # ~1.8 GB into ~/.cache/inference-server/traces
 .venv/bin/python scripts/corpus/build_corpus.py               # seed 20261001
 ```
 
@@ -118,7 +134,8 @@ change is a rebuild that produces a new version.
 
 ## Sources and attribution
 
-- **BurstGPT** — HPMLL, <https://github.com/HPMLL/BurstGPT>, release v2.0, `BurstGPT_3.csv`.
+- **BurstGPT** — HPMLL, <https://github.com/HPMLL/BurstGPT>, release v2.0, `BurstGPT_3.csv`
+  (all classes) and `BurstGPT_1.csv`, `BurstGPT_2.csv` (mixed classes only).
   Licensed CC-BY-4.0. Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Zhenheng Tang, Rui Guo,
   Xin Wang, Qiang Wang, Amelie Chi Zhou, Xiaowen Chu. "BurstGPT: A Real-world Workload Dataset
   to Optimize LLM Serving Systems", arXiv:2401.17644 (2024). Changes: failed rows dropped;

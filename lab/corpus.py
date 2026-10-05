@@ -45,6 +45,7 @@ class TraceRequest:
     # `prompt` is its contents joined by blank lines, for the raw route and the simulator.
     messages: list[dict[str, str]] | None = None
     build_prompt_tokens: int | None = None    # templated length under the manifest's tokenizer
+    regime: str | None = None                 # mixed classes: the class whose SLO judges this request
 
     def chat_messages(self) -> list[dict[str, str]]:
         return self.messages or [{"role": "user", "content": self.prompt}]
@@ -54,7 +55,7 @@ class TraceRequest:
         unset, so a trace written without them is byte-identical to one from before they existed.
         `expected_output_hash` keeps serialising its null: it is already in every committed trace."""
         d = asdict(self)
-        for k in ("expected_output_tokens", "messages", "build_prompt_tokens"):
+        for k in ("expected_output_tokens", "messages", "build_prompt_tokens", "regime"):
             if d[k] is None:
                 del d[k]
         return d
@@ -64,7 +65,7 @@ class TraceRequest:
 class WorkloadClass:
     name: str
     description: str
-    slo_ttft_ms: float
+    slo_ttft_ms: float | None     # None: judged per request by its `regime` class's SLO
     slo_tpot_ms: float | None
     arrival_rate_rps: float
     seen: str          # trace path, relative to the corpus dir
@@ -77,6 +78,8 @@ class WorkloadClass:
 
     def within_slo(self, ttft_p95_ms: float, tpot_p95_ms: float | None) -> bool:
         """The class SLO judges a run: p95 TTFT under its ceiling, and p95 TPOT when one is set."""
+        if self.slo_ttft_ms is None:
+            raise CorpusError(f"class {self.name} has no class SLO: judge each request by its regime")
         if ttft_p95_ms >= self.slo_ttft_ms:
             return False
         if self.slo_tpot_ms is not None and (tpot_p95_ms is None or tpot_p95_ms >= self.slo_tpot_ms):

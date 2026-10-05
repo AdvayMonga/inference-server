@@ -39,9 +39,10 @@
   removed on 2026-10-02; tag `archive/research-loop` keeps it. `python -m lab.profile` writes a
   raw measurement bundle per run.
 - The workload corpus (`corpus/`) is built from real public traces: BurstGPT arrivals and
-  sessions, WildChat-1M conversations with their real assistant replies, four classes
-  (`cold_start`, `steady_interactive`, `long_context`, `spike`) split seen/heldout by alternating
-  trace weeks. `scripts/corpus/fetch_traces.py` + `build_corpus.py` rebuild it; the loader is
+  sessions, WildChat-1M conversations with their real assistant replies, four regime classes
+  (`cold_start`, `steady_interactive`, `long_context`, `spike`) plus three `mixed_*` classes (20 real
+  minutes crossing regimes, each request labelled with the `regime` whose SLO judges it), split
+  seen/heldout by alternating trace weeks. `scripts/corpus/fetch_traces.py` + `build_corpus.py` rebuild it; the loader is
   `lab/corpus.py`; any change is a new `corpus_version`. See `corpus/README.md`.
 - `python -m lab.session` is the runtime: `lab/session.py` loops sessions over a dollar budget
   (`lab/budget.py`), `lab/agent.py` is the one place a model is called (Claude via the Agent SDK,

@@ -30,10 +30,13 @@ from lab.corpus import (
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "corpus"))
 import build_corpus as bc  # noqa: E402
 
-CLASSES = ("cold_start", "steady_interactive", "long_context", "spike")
+REGIMES = ("cold_start", "steady_interactive", "long_context", "spike")
+MIXED_CLASSES = ("mixed_1", "mixed_2", "mixed_3")
+CLASSES = REGIMES + MIXED_CLASSES
 RAW = bc.DEFAULT_CACHE
 # os.path.exists, not Path.exists: False rather than a raise when the jail denies the read
-HAVE_RAW = all(os.path.exists(RAW / f) for f in (bc.BURSTGPT_CSV, bc.WILDCHAT_JSONL))
+HAVE_RAW = all(os.path.exists(RAW / f)
+               for f in (bc.BURSTGPT_CSV, *bc.BURSTGPT_EARLIER, bc.WILDCHAT_JSONL))
 # CI's corpus lane sets CORPUS_REQUIRE_RAW=1: there a missing cache must fail, never skip.
 REQUIRE_RAW = os.environ.get("CORPUS_REQUIRE_RAW") == "1"
 needs_raw = pytest.mark.skipif(not HAVE_RAW and not REQUIRE_RAW, reason=f"raw traces absent "
@@ -69,7 +72,8 @@ def test_committed_corpus_verifies_and_every_class_is_non_empty():
     for name in CLASSES:
         for split in SPLITS:
             _, trace = load_trace(name, split, CORPUS_DIR)
-            assert 50 <= len(trace) <= 400, f"{name}/{split}: enough for a p95, still reviewable"
+            hi = 1.1 * bc.MIXED_WINDOW_S if name in MIXED_CLASSES else 400
+            assert 50 <= len(trace) <= hi, f"{name}/{split}: enough for a p95, still reviewable"
             assert trace[0].arrival_s == 0.0
             assert all(a.arrival_s <= b.arrival_s for a, b in zip(trace, trace[1:]))
     assert "pending owner confirmation" in m.notes, "SLOs are proposals until the owner decides"
@@ -119,6 +123,15 @@ def test_every_request_respects_the_floor_the_cap_and_the_context():
             assert n is not None and bc.MIN_TARGET <= n <= bc.PROMPT_CAP, (name, r.session_id, n)
             assert r.max_tokens >= BUDGET_FLOOR, (name, r.session_id)
             assert n + r.max_tokens <= CONTEXT, (name, r.session_id)
+
+
+@pytest.mark.needs_host
+def test_only_mixed_requests_carry_a_regime_and_it_names_a_class():
+    for name in CLASSES:
+        for r in _all(name):
+            assert (r.regime in REGIMES) if name in MIXED_CLASSES else r.regime is None, (name, r.regime)
+    m = load_manifest(CORPUS_DIR)
+    assert all(m.classes[n].slo_ttft_ms is None for n in MIXED_CLASSES), "judged per request"
 
 
 @pytest.mark.needs_host
@@ -237,6 +250,14 @@ def test_unset_expected_output_tokens_is_not_serialised(tmp_path):
     assert read_trace(tmp_path / "t.jsonl")[0].expected_output_tokens is None
 
 
+def test_regime_is_written_only_when_set(tmp_path):
+    write_trace(tmp_path / "t.jsonl", [TraceRequest(0.0, "s", 0, "hi", 16),
+                                       TraceRequest(1.0, "s", 0, "hi", 16, regime="spike")])
+    a, b = [json.loads(x) for x in (tmp_path / "t.jsonl").read_text().splitlines()]
+    assert "regime" not in a and b["regime"] == "spike"
+    assert read_trace(tmp_path / "t.jsonl")[1].regime == "spike"
+
+
 def test_a_trace_that_carries_the_field_writes_and_reads_it(tmp_path):
     write_trace(tmp_path / "t.jsonl", [TraceRequest(0.0, "s", 0, "hi", 16,
                                                     expected_output_tokens=3)])
@@ -251,6 +272,8 @@ def test_class_slo_judgement():
     assert not both.within_slo(199.0, None), "a TPOT ceiling with no TPOT measured is not met"
     ttft_only = WorkloadClass("y", "", 2000.0, None, 0.5, "a", "b")
     assert ttft_only.within_slo(1999.0, None)
+    with pytest.raises(CorpusError, match="regime"):
+        WorkloadClass("m", "", None, None, 1.1, "a", "b").within_slo(1.0, None)
     with pytest.raises(CorpusError):
         both.trace_file("test")
 
@@ -333,6 +356,48 @@ def test_pick_window_stays_inside_one_week_of_its_split():
         bc.pick_window(arr[:62], spec, "heldout", random.Random(0))
 
 
+def _mixed_trace(per_min=7, spike=50, tokens=None):
+    """Quiet, then 20 busy minutes from t=1200: post-idle requests, steady ones, a burst at
+    minute 35, and a late request so a window can start at 1200."""
+    tokens = tokens or (lambda i: MIXED[i % 10])
+    arr, i = [A(0.0, "", 100)], 0
+    for m in range(20, 40):
+        n = spike if m == 35 else per_min
+        for k in range(n):
+            arr.append(A(m * 60.0 + k * 59.0 / n, "", tokens(i)))
+            i += 1
+    return arr + [A(3000.0, "", 100)]
+
+
+def test_regimes_label_by_context_and_long_wins():
+    arr = _mixed_trace()
+    arr[5] = A(arr[5].t, "", 4000)
+    lab = bc.regimes(arr)
+    assert lab[5] == "long_context" and lab[1] == "cold_start" and lab[60] == "cold_start"
+    assert lab[61] == "steady_interactive" and lab[0] == "steady_interactive"
+    in_burst = {r for a, r in zip(arr, lab) if int(a.t // 60) == 35 and a.tokens < 3000}
+    assert in_burst == {"spike"}
+
+
+def test_mixed_window_needs_every_regime_spread_out_and_one_replica():
+    spec = SPEC["mixed_1"]
+    wins = list(bc._windows_mixed(_mixed_trace(), spec))
+    assert wins and all(a.regime for w in wins for a in w)
+    assert any(w[0].t == 1200.0 and len(w) == 19 * 7 + 50 for w in wins)
+    assert not list(bc._windows_mixed(_mixed_trace(tokens=lambda i: 300), spec)), "scripted"
+    assert not list(bc._windows_mixed(_mixed_trace(spike=200), spec)), "peak over one replica"
+    assert not list(bc._windows_mixed(_mixed_trace(per_min=3), spec)), "too thin to mix"
+
+
+def test_pick_window_avoids_days_already_taken():
+    import random
+    spec = SPEC["mixed_1"]
+    arr = _mixed_trace()
+    assert bc.pick_window(arr, spec, "seen", random.Random(0))
+    with pytest.raises(SystemExit):
+        bc.pick_window(arr, spec, "seen", random.Random(0), frozenset({0}))
+
+
 def test_dilation_stretches_only_windows_faster_than_target():
     fast = [A(i * 0.5, "", 1) for i in range(61)]                         # 2 rps vs 0.5
     assert bc.dilation(fast, SPEC["cold_start"]) == 4.0
@@ -397,5 +462,6 @@ def test_keep_rejects_a_conversation_that_contains_a_key():
     assert bc._keep(row("Try checking the import path."))
     for secret in ("openai.api_key = 'sk-" + "A1b2C3d4E5f6G7h8I9j0K1l2'",
                    "sk-" + "X" * 40, "AKIA" + "ABCDEFGHIJKLMNOP", "ghp_" + "a" * 36,
-                   "-----BEGIN RSA " + "PRIVATE KEY-----", "hf_" + "b" * 34):
+                   "-----BEGIN RSA " + "PRIVATE KEY-----", "hf_" + "b" * 34,
+                   "M" + "T" * 25 + "." + "a" * 6 + "." + "b" * 30):
         assert not bc._keep(row(secret)), secret
