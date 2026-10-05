@@ -55,3 +55,22 @@ def test_small_sliding_pool_supports_long_requests():
     b._reserved = [0, 0]
     assert b.kv_reserve(2000, 100) is True   # 2100 tokens: full=132≤200, sliding=min(132,3)=3≤4
     assert b._reserved == [132, 3]
+
+
+def test_capacity_error_only_when_a_pool_can_never_fit():
+    b = _backend()
+    assert b.kv_capacity_error(80, 20) is None
+    b._reserved = [10, 0, 0]                  # a full pool that is merely busy is not an error
+    assert b.kv_capacity_error(80, 20) is None
+    assert b.kv_capacity_error(900, 100) == (
+        "request needs 1000 KV tokens (prompt + max_tokens) but the cache holds 160")
+
+
+def test_capacity_error_on_a_sliding_pool_smaller_than_its_window():
+    b = CustomTorchBackend(device="cpu")
+    sliding = BlockPool(2, 16, 1, 8, torch.float32, torch.device("cpu"), window=32)  # needs 3 blocks
+    b.pools = [sliding]
+    b._reserved = [0]
+    assert b.kv_capacity_error(10, 10) is None                 # 20 tokens → 2 blocks fit
+    assert b.kv_capacity_error(900, 100) == (                  # capped at the window, still > 2
+        "request needs 48 KV tokens (prompt + max_tokens) but the cache holds 32")

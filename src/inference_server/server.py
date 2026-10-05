@@ -21,6 +21,7 @@ from inference_server.sampling import SamplingParams
 from inference_server.scheduler import (
     ContinuousBatchScheduler,
     QueueFullError,
+    RequestTooLargeError,
     ScheduledRequest,
 )
 from inference_server.scheduling_policy import create_scheduling_policy
@@ -209,6 +210,8 @@ async def generate(request: GenerateRequest):
             scheduler.enqueue(req)
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e))
+        except RequestTooLargeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         start_time = time.perf_counter()
         return StreamingResponse(
             event_stream(req, tokenizer, len(token_ids), start_time),
@@ -226,6 +229,8 @@ async def generate(request: GenerateRequest):
         generated_ids = await scheduler.submit(req)
     except QueueFullError as e:
         raise HTTPException(status_code=429, detail=str(e))
+    except RequestTooLargeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     total_time = time.perf_counter() - start_time
 
     output_text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)

@@ -25,6 +25,10 @@ class QueueFullError(Exception):
     """Raised by submit() when the pending queue has no capacity."""
 
 
+class RequestTooLargeError(Exception):
+    """Raised by submit() when the request cannot fit even an empty KV cache."""
+
+
 def _as_backpressure(exc: BaseException) -> BaseException:
     """Running out of KV blocks is overload, not a crash — surface it as a queue rejection
     (429) so it is counted and served as backpressure instead of an engine failure."""
@@ -255,6 +259,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 with self._session_lock:
                     self._session_load[request.session_id] = \
                         self._session_load.get(request.session_id, 0) + 1
+            too_large = self.backend.kv_capacity_error(len(request.token_ids), request.max_tokens)
+            if too_large:  # would never fit, so waiting would only stall the queue behind it
+                self._total_rejected += 1
+                self._finish_row(request, "rejected_400")
+                raise RequestTooLargeError(too_large)
             if self._pending_count >= self.max_queue_size:
                 self._total_rejected += 1
                 self._finish_row(request, "rejected_429")

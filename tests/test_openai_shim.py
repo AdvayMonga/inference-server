@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from inference_server.openai_shim import router
-from inference_server.scheduler import QueueFullError
+from inference_server.scheduler import QueueFullError, RequestTooLargeError
 
 
 class FakeTokenizer:
@@ -34,22 +34,22 @@ class FakeTokenizer:
 
 class FakeScheduler:
     """Returns a fixed 3-token completion; streams it through the request's token_queue."""
-    def __init__(self, full=False):
-        self.full = full
+    def __init__(self, full=False, exc=None):
+        self.exc = exc or (QueueFullError("queue full") if full else None)
         self.out = [ord("a"), ord("b"), ord("c")]
         self.seen = []          # every ScheduledRequest handed to us, in order
 
     def submit(self, req):
-        if self.full:
-            raise QueueFullError("queue full")
+        if self.exc:
+            raise self.exc
         self.seen.append(req)
         fut = asyncio.get_event_loop().create_future()
         fut.set_result(self.out)
         return fut
 
     def enqueue(self, req):
-        if self.full:
-            raise QueueFullError("queue full")
+        if self.exc:
+            raise self.exc
         self.seen.append(req)
         for t in self.out:
             req.token_queue.put_nowait(t)
@@ -259,6 +259,17 @@ def test_429_carries_the_trace_id_on_both_routes_streaming_and_not():
             assert r.status_code == 429 and r.headers["X-Trace-Id"] == "steady-seen-41"
             r = client.post(path, json={**body, "stream": stream})
             assert r.status_code == 429 and len(r.headers["X-Trace-Id"]) == 32   # minted
+
+
+def test_request_too_large_is_400_on_both_routes_streaming_and_not():
+    """A request that can never fit the KV cache is the client's error, not backpressure."""
+    client = TestClient(_app(FakeScheduler(exc=RequestTooLargeError("needs 9 KV tokens but the cache holds 4"))))
+    for path, body in (("/v1/completions", {"prompt": "hi", "max_tokens": 5}),
+                       ("/v1/chat/completions", CHAT_BODY)):
+        for stream in (False, True):
+            r = client.post(path, json={**body, "stream": stream}, headers=HEADERS)
+            assert r.status_code == 400 and r.headers["X-Trace-Id"] == "steady-seen-41"
+            assert "cache holds 4" in r.json()["detail"]
 
 
 def test_both_routes_carry_the_corpus_sampling_block_identically():
