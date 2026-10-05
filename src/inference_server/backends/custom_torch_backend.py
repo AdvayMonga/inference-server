@@ -287,7 +287,7 @@ class CustomTorchBackend(InferenceBackend):
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
         # Unset CUSTOM_BACKEND_BLOCKS on CUDA: size from free memory after the weights, like vLLM.
-        from inference_server.config import settings
+        from inference_server.config import resolve_context_window, settings
         from inference_server.models.paged_kv_cache import auto_num_blocks
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
         sliding_env = os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS")
@@ -334,7 +334,7 @@ class CustomTorchBackend(InferenceBackend):
         # rows with max_batch=256), which dominated TPOT at the low concurrency the SLO lives at.
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
-        self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
+        self._graph_max_cols = (resolve_context_window(model_name, settings.context_window) + bsz - 1) // bsz
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and not moe and \
