@@ -39,8 +39,8 @@ class Settings:
     # 0 = derive from max_batch_size * context_window (effectively unbounded).
     max_active_kv_tokens: int = 0
     # Prefill strategy: "monolithic" (one forward on admit) or "chunked" (V-A: interleave one
-    # prefill chunk + one decode step per iter, kills HOL blocking). "" = derive from chunk_size
-    # (back-compat: chunk_size>0 → chunked). Future strategies: mixed_batch, disaggregated.
+    # prefill chunk + one decode step per iter, kills HOL blocking) or "batched". "" = derive:
+    # chunk_size>0 → chunked, else batched on custom-* backends, else monolithic.
     prefill_mode: str = ""
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
