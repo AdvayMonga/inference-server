@@ -1055,6 +1055,14 @@ class CustomTorchBackend(InferenceBackend):
         for i in range(len(self.pools)):
             self._reserved[i] -= fps[i]
 
+    def kv_capacity_error(self, prompt_len: int, max_tokens: int) -> str | None:
+        for fp, pool in zip(self._kv_footprints(prompt_len, max_tokens), self.pools):
+            if pool is not None and fp > pool.num_blocks:
+                needed = min(prompt_len + max_tokens, fp * pool.block_size)
+                return (f"request needs {needed} KV tokens (prompt + max_tokens) but the cache "
+                        f"holds {pool.num_blocks * pool.block_size}")
+        return None
+
     @torch.inference_mode()
     def score_logprobs(self, token_ids: list[int], top_k: int = 20) -> list[dict[int, float] | None]:
         """Teacher-forced prompt logprobs in vLLM's shape (entry 0 None): one plain forward under the lock, no cache or graphs."""

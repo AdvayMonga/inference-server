@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from inference_server.sampling import SamplingParams
-from inference_server.scheduler import QueueFullError, ScheduledRequest
+from inference_server.scheduler import QueueFullError, RequestTooLargeError, ScheduledRequest
 
 router = APIRouter()
 _ids = itertools.count(1)  # request-id / session-id counter (no RNG needed)
@@ -186,6 +186,9 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:
+            raise HTTPException(status_code=400, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _stream(req, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -200,6 +203,9 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         generated_ids = await scheduler.submit(req)
     except QueueFullError as e:
         raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
+    except RequestTooLargeError as e:
+        raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
@@ -284,6 +290,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:
+            raise HTTPException(status_code=400, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _chat_stream(req, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -298,6 +307,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         generated_ids = await scheduler.submit(req)
     except QueueFullError as e:
         raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
+    except RequestTooLargeError as e:
+        raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
     text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
     n = len(generated_ids)
