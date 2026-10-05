@@ -107,3 +107,10 @@ def test_missing_cli_and_missing_key(tmp_path, monkeypatch):
         nebius.Nebius().get("g")
     with pytest.raises(ProviderError, match="LAB_VM_KEYFILE"):
         nebius.Nebius(subnet="s").create("g", "/nope/key.pub")
+
+
+def test_project_is_passed_as_parent_id_on_list_and_create(fake, monkeypatch):
+    monkeypatch.setenv("LAB_VM_PROJECT", "project-x")
+    labvm.start(labvm.VM(name="g"))
+    scoped = [c for c in calls(fake) if c[2:3] in (["list"], ["create"])]
+    assert scoped and all(c[c.index("--parent-id") + 1] == "project-x" for c in scoped)

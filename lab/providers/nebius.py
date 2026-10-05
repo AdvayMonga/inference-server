@@ -27,7 +27,7 @@ class Nebius:
 
     def _cli(self, *args: str) -> str:
         argv = ["nebius", *args]
-        if self.project and args[:1] in (["compute"], ["vpc"]) and args[2:3] in (["list"], ["create"]):
+        if self.project and args[:1] in (("compute",), ("vpc",)) and args[2:3] in (("list",), ("create",)):
             argv += ["--parent-id", self.project]
         try:
             out = subprocess.run(argv, capture_output=True, text=True)
