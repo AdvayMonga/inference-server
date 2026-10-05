@@ -184,6 +184,49 @@ async def test_scheduler_greedy_matches_hf(backend, hf):
     assert [free_before[i] - p.free_count for i, p in enumerate(backend.pools)] == [held] * 2
 
 
+async def test_unfittable_request_rejected_at_once_and_does_not_block_the_queue(backend):
+    """64 blocks of 2 = 128 tokens per pool: 9 + 200 can never fit, so it fails at submit."""
+    import time
+
+    from inference_server.scheduler import ContinuousBatchScheduler, RequestTooLargeError, ScheduledRequest
+
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        big = ScheduledRequest(token_ids=list(PROMPTS[0]), max_tokens=200, session_id="big",
+                               future=loop.create_future())
+        with pytest.raises(RequestTooLargeError, match="needs 209 KV tokens .* holds 128"):
+            sched.enqueue(big)
+        t0 = time.perf_counter()
+        ok = ScheduledRequest(token_ids=list(PROMPTS[1]), max_tokens=4, session_id="ok",
+                              future=loop.create_future())
+        out = await asyncio.wait_for(sched.submit(ok), timeout=10)
+    finally:
+        await sched.stop()
+    assert out and time.perf_counter() - t0 < 10
+    assert sched.stats()["total_rejected"] == 1 and sched._kv_admit_blocked == 0
+    assert backend._reserved == [0, 0]
+
+
+async def test_request_that_only_does_not_fit_now_waits_then_runs(backend):
+    """Two 9 + 60 requests are 35 blocks each: one fits the 64-block pool, both together don't."""
+    from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=list(PROMPTS[0]), max_tokens=60, session_id=f"w{i}",
+                                 future=loop.create_future()) for i in range(2)]
+        outs = await asyncio.gather(*(sched.submit(r) for r in reqs))
+    finally:
+        await sched.stop()
+    assert all(outs) and sched.stats()["total_rejected"] == 0
+    assert sched._kv_admit_blocked > 0
+    assert backend._reserved == [0, 0]
+
+
 # ---------------------------------------------------------------- config handling
 
 def test_from_config_reads_the_real_30b_config(monkeypatch):

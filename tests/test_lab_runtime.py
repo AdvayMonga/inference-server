@@ -187,3 +187,15 @@ def test_cli_parses(monkeypatch, cfg):
     session.main(["--goal", "g", "--budget", "3", "--base", "HEAD", "--max-sessions", "2"])
     assert seen["cfg"].goal == "g" and seen["cfg"].budget_usd == 3.0 and seen["cfg"].max_sessions == 2
     assert json.dumps({"ok": 1})
+
+
+def test_heldout_results_go_through_the_aggregate_only_writer(cfg):
+    from lab.tools import Toolbox
+    snap = type("Snap", (), {"id": "x", "blob": "blobs/a", "patch": "blobs/b"})()
+    sess = type("S", (), {"run_id": "r", "session_id": "s", "ledger_root": cfg.ledger_root})()
+    tb = Toolbox(sess)
+    m = {"ttft_p50_ms": {"base": 800, "new": 700, "delta_pct": -12.5, "band_pct": 3, "verdict": "win"}}
+    rec = tb._record_heldout("submit", "submit", {}, {"class": "steady_interactive"}, m, snap)
+    assert rec["config"]["split"] == "heldout" and "result" not in rec
+    with pytest.raises(ledger.LedgerError):
+        tb._record("submit", "submit", {}, {"split": "heldout", "per_request": [1]}, snap)

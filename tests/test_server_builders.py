@@ -18,3 +18,14 @@ def test_build_scheduler_applies_settings():
 def test_lifespan_is_an_async_context_manager():
     cm = lifespan(object())
     assert hasattr(cm, "__aenter__") and not inspect.iscoroutine(cm)
+
+
+def test_unset_prefill_mode_is_batched_where_the_backend_supports_it():
+    class Batching(StubBackend):
+        def prefill_batch(self, *a, **k):
+            raise NotImplementedError
+
+    assert build_scheduler(Batching(), Settings()).prefill_mode == "batched"
+    assert build_scheduler(Batching(), Settings(prefill_chunk_size=256)).prefill_mode == "chunked"
+    assert build_scheduler(Batching(), Settings(prefill_mode="monolithic")).prefill_mode == "monolithic"
+    assert build_scheduler(StubBackend(), Settings()).prefill_mode == "monolithic"

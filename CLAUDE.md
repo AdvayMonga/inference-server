@@ -20,7 +20,9 @@
 ## Models
 - Hand-written forwards: `models/gemma4.py` (Gemma 4) and `models/qwen3_moe.py` (Qwen3-MoE);
   `CustomTorchBackend` picks one by the HF `model_type`. Qwen3-30B-A3B is the benchmark model
-  for MoE cold start (owner's Phase 0 decision, 2026-10-01); its path runs decode CUDA graphs (2026-10-04) but not torch.compile or int8 yet.
+  (owner's Phase 0 decision, 2026-10-01); its path runs decode CUDA graphs (2026-10-04) but not torch.compile or int8 yet.
+- Direction (2026-10-04): one engine that adapts to load across every corpus class; cold start is
+  one class among them, no longer the headline. The headline metric is not decided yet.
 
 ## Strict referee, free player (the bitter lesson)
 - Harness is code and strict: sandbox, grader, measurement protocol, output equivalence,

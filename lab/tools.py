@@ -34,6 +34,14 @@ class Toolbox:
                 "patch": snapshot.patch, "result": result, "cost": {"usd": usd}}
         return ledger.append(body, self.s.ledger_root)
 
+    def _record_heldout(self, kind: str, tool: str, args: dict, config: dict, metrics: dict, snapshot,
+                        usd: float = 0.0) -> dict:
+        """A held-out result: top-level config + one aggregate per metric, the only shape the ledger accepts."""
+        body = {"kind": kind, "run": self.s.run_id, "session": self.s.session_id, "tool": tool, "args": args,
+                "snapshot": snapshot.id, "snapshot_blob": snapshot.blob, "patch": snapshot.patch,
+                "config": {**config, "split": "heldout"}, "metrics": metrics, "cost": {"usd": usd}}
+        return ledger.append(body, self.s.ledger_root)
+
     def _audited(self, tool: str, args: dict):
         """Snapshot, and stop the run on a surface violation: integrity failures are the one hard rule."""
         snap = self.s.workspace.snapshot()

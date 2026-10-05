@@ -44,7 +44,9 @@ A record: `kind` (test, equiv, bench, profile, submit, finding), `session`, `sna
 used for a verdict. The writer stamps `id`, `at` and `schema`. Heavy raw files (diffs, bundles) go
 through `ledger.put_blob` and are referenced by their content-hashed path under `blobs/`.
 A held-out record (`config.split == "heldout"`) carries no `raw` and one aggregate per metric
-(`base`, `new`, `delta_pct`, `band_pct`, `verdict`); the writer refuses anything finer.
+(`base`, `new`, `delta_pct`, `band_pct`, `verdict`); the writer refuses anything finer. A `"split":
+"heldout"` anywhere else in a record (outside `claim`) is refused, so held-out data can't hide under
+`result`; tools write held-out results with `Toolbox._record_heldout`.
 
 ## Runtime
 

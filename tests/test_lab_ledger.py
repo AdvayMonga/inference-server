@@ -23,11 +23,27 @@ def test_append_stamps_and_reads_back(tmp_path):
     {"kind": "submit", "config": {"split": "heldout"}, "raw": {"per_request": "blobs/x"}},
     {"kind": "submit", "config": {"split": "heldout"},
      "metrics": {"ttft_p50_ms": {"delta_pct": -3, "by_class": {"cold_start": -9}}}},
+    # held-out data nested where the guard used to look away: under result, args, or a list
+    {"kind": "submit", "result": {"split": "heldout", "per_request": [1, 2, 3]}},
+    {"kind": "bench", "args": {"split": "heldout"}, "result": {"metrics": {}}},
+    {"kind": "submit", "result": {"runs": [{"split": "heldout", "rows": "blobs/x"}]}},
 ])
 def test_rejects(tmp_path, record):
     with pytest.raises(ledger.LedgerError):
         ledger.append(record, tmp_path)
     assert list(ledger.records(tmp_path)) == []
+
+
+def test_a_tool_record_shaped_like_tools_record_cannot_carry_heldout(tmp_path):
+    record = {"kind": "submit", "run": "r", "session": "s", "tool": "submit", "args": {}, "snapshot": "x",
+              "snapshot_blob": "blobs/a", "patch": "blobs/b", "cost": {"usd": 0},
+              "result": {"split": "heldout", "metrics": {"ttft_p50_ms": {"delta_pct": -3}}}}
+    with pytest.raises(ledger.LedgerError):
+        ledger.append(record, tmp_path)
+
+
+def test_claim_may_name_the_split(tmp_path):
+    ledger.append({"kind": "note", "claim": {"text": "checked", "split": "heldout"}}, tmp_path)
 
 
 def test_heldout_aggregate_is_allowed(tmp_path):

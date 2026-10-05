@@ -264,7 +264,7 @@ class CustomTorchBackend(InferenceBackend):
             self.model = model_cls.from_safetensors(model_name, device=self.device)
         else:
             self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
-        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name), "max_position_embeddings", 0) or 0)
+        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name).get_text_config(), "max_position_embeddings", 0) or 0)   # Gemma 4 keeps it on the text config
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
@@ -700,7 +700,9 @@ class CustomTorchBackend(InferenceBackend):
             state.prepare_step()  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
-            if self._graph_on:
+            # Rows past context_window outgrow the static block tables; run that step eagerly.
+            fits = next(t for t in state.block_tables if t is not None).shape[1] <= self._graph_max_cols
+            if self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
             else:
@@ -1054,6 +1056,14 @@ class CustomTorchBackend(InferenceBackend):
         fps = self._kv_footprints(prompt_len, max_tokens)
         for i in range(len(self.pools)):
             self._reserved[i] -= fps[i]
+
+    def kv_capacity_error(self, prompt_len: int, max_tokens: int) -> str | None:
+        for fp, pool in zip(self._kv_footprints(prompt_len, max_tokens), self.pools):
+            if pool is not None and fp > pool.num_blocks:
+                needed = min(prompt_len + max_tokens, fp * pool.block_size)
+                return (f"request needs {needed} KV tokens (prompt + max_tokens) but the cache "
+                        f"holds {pool.num_blocks * pool.block_size}")
+        return None
 
     @torch.inference_mode()
     def score_logprobs(self, token_ids: list[int], top_k: int = 20) -> list[dict[int, float] | None]:
