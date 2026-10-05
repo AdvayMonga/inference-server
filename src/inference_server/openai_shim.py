@@ -79,7 +79,7 @@ def _token_ids(ids: list[int], tokenizer) -> list[int]:
     """A pre-tokenized prompt gets the checks tokenizer.encode would have made."""
     if not ids:
         raise HTTPException(status_code=400, detail="prompt is empty")
-    vocab = getattr(tokenizer, "vocab_size", None)
+    vocab = getattr(tokenizer, "n_tokens", None)   # incl. added special tokens; vocab_size excludes them
     if vocab is not None and any(t < 0 or t >= vocab for t in ids):
         raise HTTPException(status_code=400, detail=f"token id outside the vocabulary of {vocab}")
     window = getattr(tokenizer, "context_window", None)
