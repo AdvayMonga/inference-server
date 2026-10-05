@@ -39,4 +39,7 @@ def load(name: str):
     if name == "crusoe":
         from lab.providers import crusoe
         return crusoe.Crusoe()
-    raise ProviderError(f"unknown provider {name!r}; LAB_VM_PROVIDER is verda or crusoe")
+    if name == "nebius":
+        from lab.providers import nebius
+        return nebius.Nebius()
+    raise ProviderError(f"unknown provider {name!r}; LAB_VM_PROVIDER is verda, nebius or crusoe")

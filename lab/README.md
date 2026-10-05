@@ -87,7 +87,7 @@ unchanged in stats).
 ## GPU arm
 
 One persistent VM, started and stopped by hand, on the cloud `LAB_VM_PROVIDER` names:
-`verda` (default; 1x H200, REST API) or `crusoe` (1x A100 PCIe, `crusoe` CLI). Same
+`verda` (default; 1x H200, REST API), `nebius` (1x H200, `nebius` CLI) or `crusoe` (1x A100 PCIe, `crusoe` CLI). Same
 commands either way:
 
     python -m lab.vm status
@@ -104,7 +104,13 @@ here is what gets measured, secrets and weights stay home), runs the command in 
 VM is left running; `stop` is yours. Do not run `uv sync` on the box: it would put CPU torch back.
 
 Credentials never live in the repo. Verda: `VERDA_CLIENT_ID` and `VERDA_CLIENT_SECRET` (console >
-Keys > Cloud API credentials) in your shell. Crusoe: `crusoe config init`.
+Keys > Cloud API credentials) in your shell. Nebius: `nebius profile create`. Crusoe: `crusoe config init`.
+
+Nebius: `stop` is a real stop (boot disk kept, GPU billing ends) and `start` resumes it. The VM is
+created with a `lab` user from cloud-init (Nebius refuses root). Platform `gpu-h200-sxm`, preset
+`1gpu-16vcpu-200gb` (`LAB_VM_PLATFORM`, `LAB_VM_TYPE`), image family `ubuntu24.04-cuda13.0`
+(`LAB_VM_IMAGE`), the project's first subnet unless `LAB_VM_SUBNET` is set, `LAB_VM_PROJECT` for a
+project other than the profile's.
 
 Verda's `stop` deletes the instance and its OS volume: Verda's hibernate hides the instance from
 its own API so it cannot be restored, and its shutdown keeps billing the GPU. Each session therefore
