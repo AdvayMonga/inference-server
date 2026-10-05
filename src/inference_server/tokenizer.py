@@ -4,13 +4,15 @@ import re
 
 from transformers import AutoTokenizer
 
+from inference_server.config import resolve_context_window
+
 
 class Tokenizer:
     """Wraps HuggingFace tokenizer with validation and context window enforcement."""
 
     def __init__(self, model_name: str, context_window: int):
         self._tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self._context_window = context_window
+        self._context_window = resolve_context_window(model_name, context_window)
         self._template_prefix_len = self._calc_template_prefix_len()
 
     def _calc_template_prefix_len(self) -> int:
