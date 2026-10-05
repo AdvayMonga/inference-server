@@ -49,6 +49,9 @@ class Settings:
     # reorder within to group similar prompt lengths. 0 = strict policy order (default; measured
     # inert below the queued regime — 83-91% of waves are K=1 there).
     wave_window_mult: int = 0
+    # N-gram speculative decoding (greedy rows only) while active rows <= this; 0 = off.
+    spec_ngram_max_rows: int = 0
+    spec_ngram_k: int = 4  # draft tokens verified per speculative step
     # Cross-session prefix cache. It holds refcounts on real KV blocks, so it needs BOTH a
     # count cap (host memory for the key tuples) and a share-of-pool cap (device blocks) —
     # otherwise a warm cache starves live requests and alloc() fails on the request path.
@@ -120,6 +123,8 @@ def load_settings() -> Settings:
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
+        spec_ngram_max_rows=int(os.environ.get("SPEC_NGRAM_MAX_ROWS", Settings.spec_ngram_max_rows)),
+        spec_ngram_k=int(os.environ.get("SPEC_NGRAM_K", Settings.spec_ngram_k)),
         max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
         prefix_cache_impl=os.environ.get("PREFIX_CACHE_IMPL", Settings.prefix_cache_impl),
         prefix_cache_max_entries=int(os.environ.get(

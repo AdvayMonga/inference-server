@@ -725,6 +725,41 @@ class CustomTorchBackend(InferenceBackend):
             next_tokens = sample_batched(last, sampling_per_row)
         return next_tokens, batched_kv
 
+    @property
+    def can_speculate(self) -> bool:
+        """verify_greedy's rollback cannot restore sliding-window evictions, so full-attention models only."""
+        return all(p is None or p.window is None for p in self.pools)
+
+    @torch.no_grad()
+    def verify_greedy(self, batched_kv, row_idx, tokens):
+        """Speculative verify for one row: forward [current, *draft] (eager), accept the longest
+        greedy-matching draft prefix + one bonus token, roll back the rejected KV. Returns the
+        accepted tokens followed by the bonus; the row's KV then ends after the last accepted one."""
+        cuda = self.device.type == "cuda"
+        cache = batched_kv.row_cache(row_idx) if cuda else batched_kv[row_idx]
+        start, S = cache.seq_len, len(tokens)
+        ids = torch.tensor([tokens], device=self.device)
+        pos = torch.arange(start, start + S, device=self.device).unsqueeze(0)
+        try:
+            if cuda:
+                self._ensure_scratch()
+                ctx = _PrefillCtx([cache], self.pools, [start], [S], self.device, scratch=self._scratch)
+                logits = self.model(ids, position_ids=pos, paged_ctx=ctx)
+            else:
+                logits = self.model(ids, position_ids=pos, kv_cache=cache)
+            preds = logits[0].argmax(-1).tolist()
+            n = 0
+            while n < S - 1 and tokens[n + 1] == preds[n]:
+                n += 1
+            cache.truncate(start + 1 + n)
+        except BaseException:
+            cache.truncate(start)   # leave the row as it was, incl. blocks allocated mid-forward
+            raise
+        finally:
+            if cuda:
+                batched_kv.set_row(row_idx, cache)
+        return tokens[1:n + 1] + [preds[n]]
+
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
 
     def _capture_graph(self, bucket: int) -> None:
