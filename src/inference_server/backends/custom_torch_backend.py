@@ -700,7 +700,9 @@ class CustomTorchBackend(InferenceBackend):
             state.prepare_step()  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
-            if self._graph_on:
+            # Rows past context_window outgrow the static block tables; run that step eagerly.
+            fits = next(t for t in state.block_tables if t is not None).shape[1] <= self._graph_max_cols
+            if self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
             else:
