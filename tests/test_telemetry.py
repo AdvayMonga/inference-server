@@ -211,7 +211,7 @@ def test_a_row_that_never_decodes_reports_no_width(tmp_path):
 
 
 def test_every_terminal_state_is_named():
-    assert set(TERMINAL_STATES) == {"ok", "rejected_429", "expired", "preempted", "error"}
+    assert set(TERMINAL_STATES) == {"ok", "rejected_429", "rejected_400", "expired", "preempted", "error"}
 
 
 # --------------------------------------------------------------------------- store

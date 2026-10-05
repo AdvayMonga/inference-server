@@ -189,6 +189,10 @@ class InferenceBackend(ABC):
         """Release a reservation taken by kv_reserve (request finished / rejected / failed)."""
         ...
 
+    def kv_capacity_error(self, prompt_len: int, max_tokens: int) -> str | None:
+        """Why this request can never fit even an empty cache, or None if it could."""
+        return None
+
     @property
     def device_str(self) -> str:
         """Device identifier for tensor creation by the scheduler."""

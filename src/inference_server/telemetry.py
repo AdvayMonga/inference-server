@@ -18,7 +18,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-TERMINAL_STATES = ("ok", "rejected_429", "expired", "preempted", "error")
+TERMINAL_STATES = ("ok", "rejected_429", "rejected_400", "expired", "preempted", "error")
 
 
 @dataclass
