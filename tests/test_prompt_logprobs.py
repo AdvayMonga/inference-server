@@ -75,6 +75,12 @@ def test_scoring_echoes_the_trace_header_and_rejects_streaming():
     assert r.status_code == 400
 
 
+def test_scoring_a_full_window_prompt_ignores_max_tokens():
+    """Scoring generates nothing, so the prompt + max_tokens check does not apply."""
+    r = _client(_StubBackend()).post("/v1/completions", json={"prompt": list(range(8)), "prompt_logprobs": 2})
+    assert r.status_code == 200
+
+
 @pytest.mark.parametrize("prompt", [[], [999999], [-1], list(range(9))])
 def test_pretokenized_prompts_are_validated(prompt):
     r = _client(_StubBackend()).post("/v1/completions", json={"prompt": prompt, "prompt_logprobs": 2})

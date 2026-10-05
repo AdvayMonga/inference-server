@@ -277,3 +277,29 @@ def test_both_routes_carry_the_corpus_sampling_block_identically():
     assert (raw.sampling.temperature, raw.sampling.top_p, raw.sampling.top_k) == (0.7, 0.9, 40)
     assert (chat.sampling.temperature, chat.sampling.top_p, chat.sampling.top_k) == (0.7, 0.9, 40)
     assert raw.sampling == chat.sampling
+
+
+class WindowTokenizer(FakeTokenizer):
+    context_window = 10
+
+
+def test_prompt_plus_max_tokens_over_the_window_is_400_on_both_routes():
+    """vLLM's request-time check; the decode graphs' block tables are only context_window wide."""
+    client = TestClient(_app(FakeScheduler(), WindowTokenizer()))
+    for path, body, budget in (("/v1/completions", {"prompt": "hi"}, "max_tokens"),
+                               ("/v1/chat/completions", CHAT_BODY, "max_tokens"),
+                               ("/v1/chat/completions", CHAT_BODY, "max_completion_tokens")):
+        r = client.post(path, json={**body, budget: 9})
+        assert r.status_code == 400, path
+        assert r.json()["detail"] == (
+            "This model's maximum context length is 10 tokens. However, you requested 11 tokens "
+            "(2 in the messages, 9 in the completion). Please reduce the length of the messages "
+            "or completion.")
+        assert client.post(path, json={**body, budget: 8}).status_code == 200   # exactly at the limit
+
+
+def test_window_check_applies_to_the_default_max_tokens_and_streaming():
+    client = TestClient(_app(FakeScheduler(), WindowTokenizer()))
+    assert client.post("/v1/completions", json={"prompt": "hi"}).status_code == 400   # default 128
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 9, "stream": True})
+    assert r.status_code == 400
