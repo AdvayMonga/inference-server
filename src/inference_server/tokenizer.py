@@ -113,5 +113,10 @@ class Tokenizer:
         return self._tokenizer.vocab_size
 
     @property
+    def n_tokens(self) -> int:
+        """Every valid id, including added special tokens (Qwen: 151669, vs vocab_size 151643)."""
+        return len(self._tokenizer)
+
+    @property
     def context_window(self) -> int:
         return self._context_window

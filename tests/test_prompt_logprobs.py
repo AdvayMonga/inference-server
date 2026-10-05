@@ -45,7 +45,7 @@ class _StubBackend:
 
 
 class _Tok:
-    vocab_size, context_window = 1000, 8
+    vocab_size, n_tokens, context_window = 990, 1000, 8      # ids 990-999: added special tokens
 
 
 def _client(backend):
@@ -90,3 +90,8 @@ def test_pretokenized_prompts_are_validated(prompt):
 def test_scoring_refuses_sequences_past_the_model_positions(backend):
     with pytest.raises(ValueError):
         backend.score_logprobs(list(range(1, 600)))
+
+
+def test_added_special_token_ids_are_accepted():
+    r = _client(_StubBackend()).post("/v1/completions", json={"prompt": [3, 995], "prompt_logprobs": 2})
+    assert r.status_code == 200
