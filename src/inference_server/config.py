@@ -60,6 +60,8 @@ class Settings:
     prefix_cache_impl: str = "radix"
     prefix_cache_max_entries: int = 1024
     prefix_cache_block_fraction: float = 0.5
+    # Host-memory tier for blocks the radix prefix cache evicts; byte budget, 0 = off.
+    kv_host_tier_bytes: int = 0
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
@@ -126,6 +128,7 @@ def load_settings() -> Settings:
             "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),
         prefix_cache_block_fraction=float(os.environ.get(
             "PREFIX_CACHE_BLOCK_FRACTION", Settings.prefix_cache_block_fraction)),
+        kv_host_tier_bytes=int(os.environ.get("KV_HOST_TIER_BYTES", Settings.kv_host_tier_bytes)),
         model_name=os.environ.get("MODEL_NAME", Settings.model_name),
         device=os.environ.get("DEVICE", Settings.device),
         backend_name=os.environ.get("BACKEND", Settings.backend_name),
