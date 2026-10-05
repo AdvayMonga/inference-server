@@ -20,6 +20,8 @@ Storage layout per pool: `[num_blocks, num_kv_heads, block_size, head_dim]`
 
 from __future__ import annotations
 
+import hashlib
+from array import array
 from collections import OrderedDict
 
 import torch
@@ -233,10 +235,58 @@ class PrefixCache:
         }
 
 
+def _chain(prev: bytes, chunk) -> bytes:
+    """Digest of a whole aligned prefix, chained block by block (root = b"")."""
+    return hashlib.blake2b(prev + array("q", chunk).tobytes(), digest_size=16).digest()
+
+
+def _to_host(t: torch.Tensor) -> torch.Tensor:
+    """Host copy of one block. On CUDA: pinned and non-blocking, ordered on the stream before any reuse or restore."""
+    if t.is_cuda:
+        return torch.empty(t.shape, dtype=t.dtype, pin_memory=True).copy_(t, non_blocking=True)
+    return t.clone()
+
+
+class HostTier:
+    """LRU host-memory copies of blocks the radix cache evicted, keyed by prefix digest."""
+
+    def __init__(self, max_bytes: int):
+        self.max_bytes = max_bytes
+        self.entries: "OrderedDict[bytes, dict[int, tuple[torch.Tensor, torch.Tensor]]]" = OrderedDict()
+        self.bytes = 0
+        self.offloads = self.hits = self.blocks_restored = self.fallbacks = 0
+
+    def put(self, digest: bytes, pools, blocks: dict[int, int]) -> None:
+        if digest in self.entries:
+            self.entries.move_to_end(digest)
+            return
+        n = sum(pools[L].k[b].nbytes + pools[L].v[b].nbytes for L, b in blocks.items())
+        if n > self.max_bytes:   # sized before copying: never pay for a block the budget can't hold
+            return
+        entry = {L: (_to_host(pools[L].k[b]), _to_host(pools[L].v[b])) for L, b in blocks.items()}
+        while self.bytes + n > self.max_bytes:
+            _, old = self.entries.popitem(last=False)
+            self.bytes -= sum(k.nbytes + v.nbytes for k, v in old.values())
+        self.entries[digest] = entry
+        self.bytes += n
+        self.offloads += 1
+
+    def get(self, digest: bytes):
+        entry = self.entries.get(digest)
+        if entry is not None:
+            self.entries.move_to_end(digest)
+        return entry
+
+    def stats(self) -> dict:
+        return {"entries": len(self.entries), "bytes": self.bytes, "max_bytes": self.max_bytes,
+                "offloads": self.offloads, "hits": self.hits,
+                "blocks_restored": self.blocks_restored, "fallbacks": self.fallbacks}
+
+
 class _RadixNode:
     """One block-sized chunk of a cached prefix. Path from root = the aligned prefix."""
 
-    __slots__ = ("chunk", "children", "blocks", "parent", "last_used")
+    __slots__ = ("chunk", "children", "blocks", "parent", "last_used", "digest")
 
     def __init__(self, chunk=(), parent=None):
         self.chunk = chunk
@@ -244,6 +294,7 @@ class _RadixNode:
         self.children: dict[tuple, "_RadixNode"] = {}
         self.blocks: dict[int, int] = {}      # layer_idx -> block id for THIS chunk
         self.last_used = 0
+        self.digest = b""                     # prefix digest; set only when a host tier is on
 
 
 class RadixPrefixCache:
@@ -259,11 +310,14 @@ class RadixPrefixCache:
     instead of building an O(prompt^2) pile of prefix tuples.
     """
 
+    host: HostTier | None = None    # host-memory tier for evicted blocks; None = off
+
     def __init__(self, pools: list[BlockPool | None], max_entries: int = 1024,
-                 max_block_fraction: float = 0.5):
+                 max_block_fraction: float = 0.5, host_bytes: int = 0):
         self.pools = pools
         self.block_size = next(p.block_size for p in pools if p is not None)
         self._live = [i for i, p in enumerate(pools) if p is not None]
+        self.host = HostTier(host_bytes) if host_bytes > 0 else None
         self.root = _RadixNode()
         live = [pools[i].num_blocks for i in self._live]
         # One node holds one block per layer, so for the trie the block watermark IS the node
@@ -302,6 +356,8 @@ class RadixPrefixCache:
             stack.extend(n.children.values())
         if best is None:
             return 0
+        if self.host is not None:
+            self.host.put(best.digest, self.pools, best.blocks)
         freed = 0
         for layer_idx, bid in best.blocks.items():
             if self.pools[layer_idx].release(bid):
@@ -328,13 +384,48 @@ class RadixPrefixCache:
             for layer_idx, bid in node.blocks.items():
                 per_layer[layer_idx].append(bid)
             matched += bs
-        if matched == 0:
-            return 0, {}
-        self.hits += 1
         for layer_idx, bids in per_layer.items():
             for bid in bids:
                 self.pools[layer_idx].acquire(bid)
+        if self.host is not None:
+            matched = self._restore(token_ids, node, matched, per_layer)
+        if matched == 0:
+            return 0, {}
+        self.hits += 1
         return matched, per_layer
+
+    def _restore(self, token_ids, node, matched: int, per_layer: dict[int, list[int]]) -> int:
+        """Extend a device match with host-tier blocks: alloc, copy back. All or nothing."""
+        bs, h, found = self.block_size, node.digest, []
+        for i in range(matched // bs, len(token_ids) // bs):
+            h = _chain(h, token_ids[i * bs:(i + 1) * bs])
+            entry = self.host.get(h)
+            if entry is None:
+                break
+            found.append(entry)
+        if not found:
+            return matched
+        new: dict[int, list[int]] = {L: [] for L in self._live}
+        try:   # device-matched blocks are already acquired, so reclaim here cannot free them
+            for _ in found:
+                for L in self._live:
+                    new[L].append(self.pools[L].alloc())
+        except KVCacheExhausted:
+            for L, bids in new.items():
+                for bid in bids:
+                    self.pools[L].release(bid)
+            self.host.fallbacks += 1
+            return matched              # not enough device blocks: recompute the suffix
+        for j, entry in enumerate(found):
+            for L in self._live:
+                k, v = entry[L]
+                self.pools[L].k[new[L][j]].copy_(k, non_blocking=True)
+                self.pools[L].v[new[L][j]].copy_(v, non_blocking=True)
+        for L in self._live:
+            per_layer[L].extend(new[L])
+        self.host.hits += 1
+        self.host.blocks_restored += len(found)
+        return matched + len(found) * bs
 
     def store(self, token_ids: list[int], block_tables: list[list[int]]) -> None:
         bs = self.block_size
@@ -365,6 +456,8 @@ class RadixPrefixCache:
                 if self._nodes >= self._capacity():
                     return                       # cannot make room; stop growing the trie
                 child = _RadixNode(chunk=key, parent=node)
+                if self.host is not None:
+                    child.digest = _chain(node.digest, key)
                 for layer_idx in self._live:
                     bid = block_tables[layer_idx][i]
                     child.blocks[layer_idx] = bid
@@ -385,7 +478,8 @@ class RadixPrefixCache:
 
     def stats(self) -> dict:
         free, total = _tightest_pool([self.pools[i] for i in self._live])
-        return {
+        host = {"host": self.host.stats()} if self.host is not None else {}
+        return host | {
             "impl": "radix",
             "entries": self._nodes, "max_entries": self.max_entries,
             "lookups": self.lookups, "hits": self.hits,
