@@ -88,6 +88,16 @@ def _token_ids(ids: list[int], tokenizer) -> list[int]:
     return list(ids)
 
 
+def check_context(prompt_tokens: int, max_tokens: int, tokenizer) -> None:
+    """400 when prompt + completion would exceed the context window (vLLM's check and wording)."""
+    window = getattr(tokenizer, "context_window", None)
+    if window is not None and prompt_tokens + max_tokens > window:
+        raise HTTPException(status_code=400, detail=(
+            f"This model's maximum context length is {window} tokens. However, you requested "
+            f"{prompt_tokens + max_tokens} tokens ({prompt_tokens} in the messages, {max_tokens} in "
+            f"the completion). Please reduce the length of the messages or completion."))
+
+
 def _chunk(cid: str, created: int, model: str, text: str, finish: str | None) -> str:
     """One streaming SSE chunk in OpenAI text_completion format."""
     payload = {
@@ -170,6 +180,7 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         if trace_id:
             response.headers["X-Trace-Id"] = trace_id
         return await _score(request, body, token_ids, loop)
+    check_context(len(token_ids), body.max_tokens, tokenizer)   # scoring generates nothing, so it skips this
 
     sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
     cid = f"cmpl-{next(_ids)}"
@@ -274,6 +285,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         raise HTTPException(status_code=400, detail=str(e))
 
     max_tokens = body.output_budget
+    check_context(len(token_ids), max_tokens, tokenizer)
     sampling = SamplingParams(temperature=body.temperature, top_p=body.top_p, top_k=body.top_k)
     cid = f"chatcmpl-{next(_ids)}"
     session_id, turn_index, trace_id = _correlation(request, "chat")

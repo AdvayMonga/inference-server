@@ -25,7 +25,7 @@ from inference_server.scheduler import (
     ScheduledRequest,
 )
 from inference_server.scheduling_policy import create_scheduling_policy
-from inference_server.openai_shim import router as openai_router
+from inference_server.openai_shim import check_context, router as openai_router
 from inference_server.telemetry import RowStore
 from inference_server.timeline import Timeline
 from inference_server.tokenizer import Tokenizer
@@ -193,6 +193,7 @@ async def generate(request: GenerateRequest):
     loop = asyncio.get_running_loop()
 
     token_ids = await loop.run_in_executor(None, tokenizer.encode_chat, request.text, request.thinking)
+    check_context(len(token_ids), request.max_tokens, tokenizer)
 
     sampling = SamplingParams(
         temperature=request.temperature, top_p=request.top_p, top_k=request.top_k,

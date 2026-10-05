@@ -97,7 +97,7 @@ async def inject_fake_backend():
     scheduler.start()
 
     app.state.backend = backend
-    app.state.tokenizer = Tokenizer("gpt2", 100)
+    app.state.tokenizer = Tokenizer("gpt2", 1024)   # prompt + default max_tokens (512) must fit
     app.state.scheduler = scheduler
     app.state.cache_adapter = cache_adapter
 
@@ -150,6 +150,18 @@ async def test_metrics_endpoint(client):
     assert "inference_ttft_seconds" in body                        # histogram family
     assert "inference_active_batch_size" in body                   # gauge (refreshed at scrape)
     assert "inference_http_request_duration_seconds" in body        # middleware histogram
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_prompt_plus_max_tokens_over_the_window(client):
+    """vLLM's 400: the decode graphs' block tables are context_window wide."""
+    app.state.tokenizer._context_window = 10            # "Hello world" is 2 gpt2 tokens
+    r = await client.post("/generate", json={"text": "Hello world", "max_tokens": 9})
+    assert r.status_code == 400
+    assert r.json()["detail"].startswith("This model's maximum context length is 10 tokens. "
+                                         "However, you requested 11 tokens (2 in the messages, 9 in")
+    r = await client.post("/generate", json={"text": "Hello world", "max_tokens": 8})
+    assert r.status_code == 200 and r.json()["tokens_generated"] == 8
 
 
 @pytest.mark.asyncio
