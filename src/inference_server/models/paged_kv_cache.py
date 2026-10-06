@@ -244,7 +244,7 @@ def _to_host(t: torch.Tensor) -> torch.Tensor:
     """Host copy of one block. On CUDA: pinned and non-blocking, ordered on the stream before any reuse or restore."""
     if t.is_cuda:
         return torch.empty(t.shape, dtype=t.dtype, pin_memory=True).copy_(t, non_blocking=True)
-    return t.clone()
+    return t.to("cpu", copy=True)
 
 
 class HostTier:
@@ -884,17 +884,14 @@ def auto_num_blocks(
     layers: list[tuple[int, int, bool]], block_size: int, elem_size: int,
     sliding_blocks: int | None = None,
 ) -> int:
-    """Blocks per full pool that fit in `fraction * free_bytes - reserve_bytes`.
-
-    `layers` = (num_kv_heads, head_dim, is_sliding) per KV-owning layer. Sliding pools get the same
-    count unless `sliding_blocks` pins them. Capped so a pool stays under 2^31 elements (the Triton
-    kernels compute pool offsets in int32).
-    """
+    """Blocks per full pool fitting `fraction * free - reserve`; sliding pools match unless pinned; int32-safe pool size."""
     def cost(sliding: bool) -> int:
         return sum(2 * h * block_size * d * elem_size for h, d, s in layers if s == sliding)
 
+    if not layers:
+        raise ValueError("no KV-owning layers to size pools for")
     budget = int(fraction * free_bytes) - reserve_bytes
-    if sliding_blocks is None:
+    if sliding_blocks is None or cost(False) == 0:   # pinned sliding count, or an all-sliding model
         per_block = cost(False) + cost(True)
     else:
         budget -= sliding_blocks * cost(True)

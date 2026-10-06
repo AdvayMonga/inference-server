@@ -95,13 +95,14 @@ class _PrefillingRow:
     partial_kv: object | None    # KV so far; None if no cache hit and no chunk fed yet
 
 
-def ngram_draft(ctx: list[int], k: int, max_n: int = 3) -> list[int]:
-    """Prompt-lookup draft: the k tokens after the latest earlier occurrence of ctx's last n tokens (n = max_n..1)."""
-    if k <= 0:
+def ngram_draft(ctx: list[int], k: int, max_n: int = 3, window: int = 2048) -> list[int]:
+    """Prompt-lookup draft: the k tokens after the latest earlier occurrence of ctx's last n tokens, scanning the last `window`."""
+    if k <= 0 or len(ctx) < 2:
         return []
+    lo = max(0, len(ctx) - window)
     for n in range(min(max_n, len(ctx) - 1), 0, -1):
         tail = ctx[-n:]
-        for i in range(len(ctx) - n - 1, -1, -1):
+        for i in range(len(ctx) - n - 1, lo - 1, -1):
             if ctx[i:i + n] == tail:
                 return ctx[i + n:i + n + k]
     return []
@@ -788,7 +789,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         drafts = [ngram_draft(r.request.token_ids + r.request.generated,
                               min(self.spec_k, r.request.max_tokens - len(r.request.generated) - 1))
                   for r in self._active]
-        return drafts if any(drafts) else None
+        return drafts if all(drafts) else None      # a draft-less row would pay an eager forward for nothing
 
     def _spec_step(self, drafts: list[list[int]]) -> None:
         """Verify each row's draft in its own eager forward (v1: one row at a time)."""
@@ -799,9 +800,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
             row.accepted, row.current_token = out[:-1], out[-1]
             row.real_kv_len += len(out)
             req = row.request
-            req.decode_width_sum += 1
+            width = len(self._active)                 # same definition as the batched path
+            req.decode_width_sum += width
             req.decode_width_steps += 1
-            req.decode_width_max = max(req.decode_width_max, 1)
+            req.decode_width_max = max(req.decode_width_max, width)
             self.policy.on_tokens_processed(req, len(out))
 
     # --- Cross-thread helpers ---

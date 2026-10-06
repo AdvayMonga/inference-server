@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 # unlike the DECODE ladder where each bucket costs a ~140s compile.
 _PREFILL_BUCKETS = (64, 128, 192, 256, 384, 512, 768, 1024)
 
-# Held back from auto-sized KV pools for activations, CUDA graphs and workspace (beyond 1 - fraction).
+# Held back from auto-sized KV pools for activations, CUDA graphs and workspace (beyond 1 - fraction);
+# score_logprobs adds a full [context, vocab] logits tensor on top, so that is reserved too.
 _KV_RESERVE_BYTES = 4 << 30
 
 
@@ -298,7 +299,10 @@ class CustomTorchBackend(InferenceBackend):
             attns = [layer.self_attn for layer in self.model.model.layers]
             layers = [(a.num_kv_heads, a.head_dim, a.sliding_window is not None)
                       for a in attns if not a.is_kv_shared]
-            n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES,
+            from inference_server.config import resolve_context_window
+            window = resolve_context_window(model_name, settings.context_window)
+            logits_bytes = window * self.model.embed_tokens.num_embeddings * elem_size
+            n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES + logits_bytes,
                                        layers, bsz, elem_size, int(sliding_env) if sliding_env else None)
         else:
             n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
@@ -760,9 +764,7 @@ class CustomTorchBackend(InferenceBackend):
 
     @torch.no_grad()
     def verify_greedy(self, batched_kv, row_idx, tokens):
-        """Speculative verify for one row: forward [current, *draft] (eager), accept the longest
-        greedy-matching draft prefix + one bonus token, roll back the rejected KV. Returns the
-        accepted tokens followed by the bonus; the row's KV then ends after the last accepted one."""
+        """Verify one row's draft in an eager forward; returns accepted tokens plus one bonus token, KV rolled back past them."""
         cuda = self.device.type == "cuda"
         cache = batched_kv.row_cache(row_idx) if cuda else batched_kv[row_idx]
         start, S = cache.seq_len, len(tokens)
