@@ -268,7 +268,9 @@ class CustomTorchBackend(InferenceBackend):
             self.model = model_cls.from_safetensors(model_name, device=self.device)
         else:
             self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
-        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name).get_text_config(), "max_position_embeddings", 0) or 0)   # Gemma 4 keeps it on the text config
+        text_cfg = AutoConfig.from_pretrained(model_name).get_text_config()   # Gemma 4 keeps these on the text config
+        self.max_positions = int(getattr(text_cfg, "max_position_embeddings", 0) or 0)
+        self.vocab_size = int(getattr(text_cfg, "vocab_size", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
@@ -301,7 +303,7 @@ class CustomTorchBackend(InferenceBackend):
                       for a in attns if not a.is_kv_shared]
             from inference_server.config import resolve_context_window
             window = resolve_context_window(model_name, settings.context_window)
-            logits_bytes = window * self.model.embed_tokens.num_embeddings * elem_size
+            logits_bytes = window * self.vocab_size * elem_size
             n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES + logits_bytes,
                                        layers, bsz, elem_size, int(sliding_env) if sliding_env else None)
         else:
