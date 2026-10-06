@@ -49,3 +49,19 @@ def test_eos_token_id(tokenizer):
 
 def test_vocab_size(tokenizer):
     assert tokenizer.vocab_size > 0
+
+
+def test_context_window_explicit_wins_else_model_positions_capped(monkeypatch):
+    from types import SimpleNamespace
+
+    from transformers import AutoConfig
+
+    from inference_server.config import resolve_context_window
+    positions = {"gemma": 131072, "qwen": 40960, "small": 2048, "none": None}
+    monkeypatch.setattr(AutoConfig, "from_pretrained", lambda name: SimpleNamespace(
+        get_text_config=lambda: SimpleNamespace(max_position_embeddings=positions[name])))
+    assert resolve_context_window("qwen", 4096) == 4096       # CONTEXT_WINDOW set: used as is
+    assert resolve_context_window("gemma", 0) == 32768
+    assert resolve_context_window("qwen", 0) == 32768
+    assert resolve_context_window("small", 0) == 2048
+    assert resolve_context_window("none", 0) == 8192

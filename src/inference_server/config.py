@@ -32,7 +32,7 @@ class Settings:
     port: int = 8000
 
     # Batching
-    max_batch_size: int = 32
+    max_batch_size: int = 256  # vLLM's max_num_seqs; KV admission, not the row cap, should bind
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
@@ -66,7 +66,7 @@ class Settings:
     device: str = "auto"  # "auto", "cuda", "mps", or "cpu"
     backend_name: str = ""  # explicit backend override (e.g. "custom-cuda"); empty = derive from device
     max_tokens: int = 512
-    context_window: int = 8192
+    context_window: int = 0  # 0 = the model's max positions, capped (resolve_context_window)
 
     # KV Cache
     kv_cache_memory_fraction: float = 0.9
@@ -106,6 +106,15 @@ class Settings:
     def backend(self) -> str:
         """Backend name for create_backend(). Explicit BACKEND override wins; else device."""
         return self.backend_name or self.resolved_device
+
+
+def resolve_context_window(model_name: str, explicit: int) -> int:
+    """Explicit CONTEXT_WINDOW wins; else the model's max_position_embeddings, capped at 32k."""
+    if explicit:
+        return explicit
+    from transformers import AutoConfig
+    n = getattr(AutoConfig.from_pretrained(model_name).get_text_config(), "max_position_embeddings", 0)
+    return min(n or 8192, 32768)
 
 
 def load_settings() -> Settings:
