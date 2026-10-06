@@ -3,10 +3,10 @@
 
 The engine reads the table at model load via CUSTOM_BACKEND_LAUNCH_TABLE (models/launch_table.py)
 — never at first call, so tuning adds nothing to cold start. A key with no entry launches
-exactly as before. Why a sweep at all: knowledge/kb-20260905-a474d802.json.
+exactly as before. Why a sweep at all: BlameGraph knowledge/kb-20260905-a474d802.json.
 
     python -m lab.vm run -- env MODEL_NAME=google/gemma-4-E4B-it MAX_BATCH_SIZE=256 \\
-        python scripts/bench/tune_triton_launch.py                       # on the lab's GPU VM
+        python scripts/bench/tune_triton_launch.py      # from BlameGraph: the environment's GPU VM
     PYTHONPATH=src python scripts/bench/tune_triton_launch.py          # directly, on a CUDA box
 
 Env: MODEL_NAME (attention shapes from its config.json, no weights), MAX_BATCH_SIZE +
@@ -45,7 +45,7 @@ DECODE_TOL = checks.TOL          # paged_decode_parity's bound
 PREFILL_TOL = 1e-2               # paged_prefill_parity's bound
 MIN_GAIN = 1.05                  # a config must beat the default launch by 5% to earn an entry
 FULL = 1 << 30                   # the kernels' "no window" sentinel
-TIMING_DIR = REPO / "knowledge" / "timing"
+TIMING_DIR = REPO / "runs" / "timing"      # evidence; file it in BlameGraph knowledge/ if it holds
 DEFAULT_MODEL = "google/gemma-4-E4B-it"
 
 

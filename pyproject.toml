@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inference-server"
 version = "0.1.0"
-description = "LLM inference engine from scratch: continuous batching, paged KV cache, Triton kernels, and the lab that measures and improves it"
+description = "LLM inference engine from scratch: continuous batching, paged KV cache, Triton kernels"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -26,14 +26,6 @@ dev = [
     "ruff>=0.16.9",
     "matplotlib>=3.8",
 ]
-# The lab's Claude provider (lab/agent.py); the engine never imports it.
-agents = [
-    "claude-agent-sdk>=0.2.161",
-]
-# scripts/corpus/fetch_traces.py reads the WildChat parquet shards; nothing else imports it.
-corpus = [
-    "pyarrow>=17",
-]
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"
@@ -52,8 +44,6 @@ explicit = true
 
 [tool.ruff]
 line-length = 100
-# Agent snapshots and run outputs are data, not code to lint.
-extend-exclude = ["lab/ledger", "lab/runs"]
 target-version = "py311"
 
 [tool.ruff.lint]
@@ -65,4 +55,4 @@ select = ["F"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["."]   # `lab/` lives at the repo root, not under src/
+pythonpath = ["."]   # tests import tests.stub_backend
