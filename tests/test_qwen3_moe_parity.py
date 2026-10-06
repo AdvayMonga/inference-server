@@ -273,18 +273,16 @@ def test_backend_rejects_unknown_model_type(tmp_path):
 
 
 def test_chat_template_disables_thinking():
-    """The shim's enable_thinking=False renders Qwen3's empty think block, so answers start at once."""
+    """enable_thinking=False (what the shim passes) renders Qwen3's empty think block, so answers start at once."""
     from transformers import AutoTokenizer
 
-    from lab import chat_template
     try:
         tk = AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B", local_files_only=True)
     except OSError:
         pytest.skip("Qwen3-30B-A3B tokenizer not in the local HF cache")
     text = tk.apply_chat_template([{"role": "user", "content": "hi"}], add_generation_prompt=True,
-                                  enable_thinking=chat_template.SHIM_ENABLE_THINKING, tokenize=False)
+                                  enable_thinking=False, tokenize=False)
     assert text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
-    assert chat_template.fingerprint("Qwen/Qwen3-30B-A3B")["enable_thinking"] is False
 
 
 # ---------------------------------------------------------------- the real model

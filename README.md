@@ -1,8 +1,8 @@
 # Inference Server
 
-A single-GPU LLM inference engine written from scratch in Python, and the lab that improves it:
-an open environment where an agent gets a goal, a budget, tools and memory, and is measured by
-a strict referee. Gemma 4 and Qwen3-MoE on PyTorch. The design is in [`ENVIRONMENT.md`](ENVIRONMENT.md).
+A single-GPU LLM inference engine written from scratch in Python. Gemma 4 and Qwen3-MoE on PyTorch.
+The environment that measures and improves it (the agent lab, workloads, load regimes, correctness gate,
+referee, GPU VMs) lives in [BlameGraph](https://github.com/AdvayMonga/BlameGraph).
 
 ---
 
@@ -24,22 +24,6 @@ a strict referee. Gemma 4 and Qwen3-MoE on PyTorch. The design is in [`ENVIRONME
 - Sliding-window p50/p95/p99 on `/scheduler/stats`; Prometheus `/metrics` + Grafana (`monitoring/`)
 - Per-request telemetry rows (`TELEMETRY_DIR`) and the engine event timeline (`TIMELINE_DIR`):
   one JSONL event per scheduler decision and a profiler range per phase, keyed by step id
-
-## The lab (`lab/`)
-
-What exists today. The rest of the design, and the order it lands in, is in `ENVIRONMENT.md`.
-
-- `python -m lab.profile`: the engine in process under torch.profiler, writing a raw bundle per run
-  (events, chrome trace, memory, GPU samples, provenance)
-- `python -m lab.vm`: one persistent GPU VM on Verda (default, 1x H100 SXM) or Crusoe: start,
-  setup, run a command on the pushed tree, fetch outputs, stop
-- `python -m lab.ledger`: the append-only raw knowledge base, one JSON line per tool call;
-  `seed` imports the hand-written findings in `knowledge/`
-- `lab/corpus.py` and `scripts/corpus/`: the frozen workload corpus built from real public traces
-- `python -m lab.session --goal ... --budget 20`: the environment runtime. One loop: while dollars
-  remain, start an agent session with the goal, the ledger and the tools (`test`, `profile`,
-  `ledger`, `budget`, `restore`, `note`; `bench`, `equiv` and `submit` refuse until the eval
-  harness is wired). The referee is `lab/safety/`: write surfaces, the srt jail, the grader.
 
 ---
 
@@ -73,32 +57,26 @@ Key knobs (all in `.env.example`): `BACKEND=custom-cuda`, `PREFILL_MODE=batched|
 
 | file | what it is |
 |---|---|
-| [`ENVIRONMENT.md`](ENVIRONMENT.md) | the lab: why the loop went, what the referee is, what gets built next |
-| [`lab/README.md`](lab/README.md) | the lab's tools and their contract with the engine |
 | [`CLAUDE.md`](CLAUDE.md) | how to work with Claude on this project |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | branch → PR → `ci-ok` → merge |
-| [`corpus/README.md`](corpus/README.md) | the frozen workload traces and their versioning |
-| [`knowledge/README.md`](knowledge/README.md) | the measured findings, and the evidence behind them |
-| [`scripts/README.md`](scripts/README.md) | benchmarks, probes and GPU checks |
+| [`scripts/README.md`](scripts/README.md) | launch tuning, GPU checks, smoke |
 
 ---
 
 ## Repository layout
 
 ```
-src/inference_server/     the engine; knows nothing about the lab
+src/inference_server/     the engine; knows nothing about the environment
 src/control_plane/        router and global prefix index (multi-replica; not wired yet)
-lab/                      the environment: profile, vm, ledger, corpus loader, providers/
-corpus/                   frozen workload traces per class, seen / held-out, hashed
-knowledge/                findings, one JSON each, plus evidence/ (experiment records, sweep CSVs)
-scripts/                  bench/, probes/, gpu_tests/, corpus/, hooks/, tools/
+scripts/                  bench/tune_triton_launch.py, gpu_tests/, hooks/, tools/smoke_custom.py
 monitoring/               Prometheus + Grafana
 docs/papers/              reading notes on what this borrows from
-tests/                    engine, control plane and lab tests; model-heavy ones opt in with -m heavy
+tests/                    engine and control plane tests; model-heavy ones opt in with -m heavy
 ```
 
-The research loop that preceded the lab (`src/inference_server/research/`, the merge gate, the
-simulator) was removed on 2026-10-02; tag `archive/research-loop` holds it.
+The research loop (`src/inference_server/research/`, the merge gate, the simulator) was removed on
+2026-10-02 (tag `archive/research-loop`); the lab, corpus and knowledge base moved to BlameGraph on
+2026-10-06 (tag `archive/pre-split`).
 
 Out of scope by design: model registry, LoRA, multi-tenant auth, gateway features. The
 `session_id` threading and the `InferenceBackend` / `SchedulerInterface` / `CacheManager` seams

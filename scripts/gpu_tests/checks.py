@@ -1,6 +1,6 @@
 """The CUDA correctness checks, as plain functions any CUDA box can run.
 
-`tune_triton_launch.py` and the lab's GPU VM (`python -m lab.vm run -- python scripts/gpu_tests/checks.py`) call these, so
+`tune_triton_launch.py` and the environment's GPU VM (from BlameGraph: `python -m lab.vm run -- python scripts/gpu_tests/checks.py`) call these, so
 the gate is one set of checks with two launchers rather than two copies that drift. Each check
 returns `(passed, detail)` and imports torch lazily: this module must import on a laptop with
 no CUDA and no triton, so the checks can be listed and dry-run from a laptop.

@@ -1,6 +1,6 @@
 # Contributing
 
-The engine is measured, not argued about. The lab (`ENVIRONMENT.md`) is where that happens.
+The engine is measured, not argued about. The environment ([BlameGraph](https://github.com/AdvayMonga/BlameGraph)) is where that happens.
 
 ## Setup
 
@@ -10,7 +10,7 @@ git config core.hooksPath scripts/hooks     # pre-push runs CI's lint + tests in
 ```
 
 `uv.lock` pins every dependency; Linux takes the CPU torch wheel, macOS the PyPI one (MPS).
-The GPU VM (`python -m lab.vm setup`) installs the CUDA wheel at the same locked version.
+The GPU VM (BlameGraph's `python -m lab.vm setup`) installs the CUDA wheel at the same locked version.
 
 The hook needs the venv on `PATH` and says so rather than passing silently. `git push
 --no-verify` or `SKIP_HOOKS=1 git push` when you mean it.
@@ -26,21 +26,17 @@ agent get it twice.
 
 ## CI
 
-`ci-ok` is the only required check. Two lanes feed it:
-
-| lane | runs | what |
-|---|---|---|
-| `engine` | always | ruff and the full fast suite: engine, control plane, lab. CPU only; model-heavy tests are deselected and no kernel runs. |
-| `corpus` | when `corpus/`, `scripts/corpus/`, `lab/corpus.py` or its test change; weekly | rebuilds the corpus from the pinned raw traces and asserts the committed bytes. |
+`ci-ok` is the only required check. One lane feeds it: `engine`, ruff and the full fast suite (engine and
+control plane). CPU only; model-heavy tests are deselected and no kernel runs.
 
 Triton compiles only on CUDA, so no lane can execute a kernel. Before merging anything under
-`src/inference_server/models/`, run the checks in `scripts/gpu_tests/checks.py` on the lab's
-GPU VM: `python -m lab.vm run -- python scripts/gpu_tests/checks.py`.
+`src/inference_server/models/`, run the checks in `scripts/gpu_tests/checks.py` on the environment's
+GPU VM, from BlameGraph: `python -m lab.vm run -- python scripts/gpu_tests/checks.py`.
 
 ## Evidence for an engine change
 
 Today: a PR with the measurement behind it (a profile bundle, a benchmark CSV under
-`knowledge/evidence/`, or a ledger record) and a reviewer who reads it. The lab's `submit` tool
+BlameGraph's `knowledge/evidence/`, or a ledger record) and a reviewer who reads it. The lab's `submit` tool
 will make this mechanical once the eval harness is wired; until then the number in the PR body
 is the claim and the reviewer is the gate.
 

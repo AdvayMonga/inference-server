@@ -29,9 +29,6 @@ Thumbs.db
 *.pt
 *.onnx
 
-# Benchmark outputs
-knowledge/evidence/benchmarks/results/
-
 # Jupyter
 .ipynb_checkpoints/
 
@@ -54,5 +51,3 @@ notes/
 # Research loop: raw run panels (regenerable, large)
 runs/
 
-# lab ledger: live, not committed for now
-/lab/ledger/
