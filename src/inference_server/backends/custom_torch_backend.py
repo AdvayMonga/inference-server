@@ -291,7 +291,7 @@ class CustomTorchBackend(InferenceBackend):
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
-        from inference_server.config import settings
+        from inference_server.config import resolve_context_window, settings
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
         cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
         self.prefix_cache = cache_cls(
@@ -315,7 +315,7 @@ class CustomTorchBackend(InferenceBackend):
         # rows with max_batch=256), which dominated TPOT at the low concurrency the SLO lives at.
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
-        self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
+        self._graph_max_cols = (resolve_context_window(model_name, settings.context_window) + bsz - 1) // bsz
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and not moe and \
