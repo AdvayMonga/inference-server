@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 # unlike the DECODE ladder where each bucket costs a ~140s compile.
 _PREFILL_BUCKETS = (64, 128, 192, 256, 384, 512, 768, 1024)
 
-# Held back from auto-sized KV pools for activations, CUDA graphs and workspace (beyond 1 - fraction).
+# Held back from auto-sized KV pools for activations, CUDA graphs and workspace (beyond 1 - fraction);
+# score_logprobs adds a full [context, vocab] logits tensor on top, so that is reserved too.
 _KV_RESERVE_BYTES = 4 << 30
 
 
@@ -267,7 +268,9 @@ class CustomTorchBackend(InferenceBackend):
             self.model = model_cls.from_safetensors(model_name, device=self.device)
         else:
             self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
-        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name).get_text_config(), "max_position_embeddings", 0) or 0)   # Gemma 4 keeps it on the text config
+        text_cfg = AutoConfig.from_pretrained(model_name).get_text_config()   # Gemma 4 keeps these on the text config
+        self.max_positions = int(getattr(text_cfg, "max_position_embeddings", 0) or 0)
+        self.vocab_size = int(getattr(text_cfg, "vocab_size", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
@@ -298,7 +301,10 @@ class CustomTorchBackend(InferenceBackend):
             attns = [layer.self_attn for layer in self.model.model.layers]
             layers = [(a.num_kv_heads, a.head_dim, a.sliding_window is not None)
                       for a in attns if not a.is_kv_shared]
-            n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES,
+            from inference_server.config import resolve_context_window
+            window = resolve_context_window(model_name, settings.context_window)
+            logits_bytes = window * self.vocab_size * elem_size
+            n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES + logits_bytes,
                                        layers, bsz, elem_size, int(sliding_env) if sliding_env else None)
         else:
             n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
