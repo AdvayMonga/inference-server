@@ -48,7 +48,14 @@ jobs:
 
   # The one check branch protection requires. A skipped lane is fine; failed or cancelled is not.
   ci-ok:
-XX
+    needs: [engine]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ needs.engine.result }}
+        run: |
+          echo "engine: $RESULTS"
           case "$RESULTS" in
             *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
           esac
