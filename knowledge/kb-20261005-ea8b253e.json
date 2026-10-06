@@ -1,0 +1,33 @@
+{
+  "created_at": 1791253807.231213,
+  "evidence": [
+    {
+      "url": "https://github.com/AdvayMonga/BlameGraph/blob/c0b01b27ca8397c155c19a0120cbf79a8b905405/CLAUDE.md"
+    }
+  ],
+  "id": "kb-20261005-ea8b253e",
+  "mechanism": "8-bit weights (FP8 or INT8 per-channel with dynamic activations) stay within answer-level noise; 4-bit GPTQ costs ~2% on knowledge-heavy multiple choice.",
+  "regime": null,
+  "status": "open",
+  "summary": "BlameGraph correctness gate, full tier (18,606 items: MMLU-Pro 12,032, MATH 5,000, MBPP 974, needle 600), pooled task score vs the BF16 batch-invariant vLLM reference, thinking off, 2026-10-05. Qwen/Qwen3-30B-A3B-FP8: 1.0009 with VLLM_USE_DEEP_GEMM=0, 1.0034 with DeepGEMM on (KL mean 3.4e-3 / 4.9e-3). nytopop/Qwen3-30B-A3B.w8a8 (compressed-tensors INT8 W8A8, experts quantized): loads in 15 s, 0.9993, KL 5.1e-3. Qwen/Qwen3-30B-A3B-GPTQ-Int4: 0.9869, fails the 99% rule; loss is in MMLU-Pro (0.9807, McNemar p 3e-5), MATH/MBPP/needle alone would pass; KL 1.7e-2. JunHowie/Qwen3-30B-A3B-GPTQ-Int8 cannot load on vLLM 0.30 (act-order GPTQ MoE experts: no parameter 'w2_g_idx'). FP8 and INT8 each lose and gain ~800 answers in balance.",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "quantization",
+    "correctness",
+    "gpu"
+  ],
+  "title": "Qwen3-30B-A3B quantized checkpoints on vLLM 0.30, H200: FP8 and INT8 W8A8 keep >=99% accuracy, GPTQ-Int4 does not; GPTQ-Int8 does not load",
+  "transfer_checked": null,
+  "triggers": [
+    "before shipping a quantized Qwen3-30B-A3B path",
+    "a vLLM upgrade (GPTQ-Int8 MoE support may change)"
+  ],
+  "updated_at": 1791253807.231213,
+  "validity_range": {
+    "backend": "vllm-0.30.0",
+    "concurrency": 128,
+    "hardware": "H200",
+    "model": "Qwen3-30B-A3B"
+  }
+}

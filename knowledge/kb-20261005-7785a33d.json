@@ -1,0 +1,36 @@
+{
+  "created_at": 1791253807.231213,
+  "evidence": [
+    {
+      "url": "https://github.com/AdvayMonga/BlameGraph/blob/c0b01b27ca8397c155c19a0120cbf79a8b905405/CLAUDE.md"
+    }
+  ],
+  "id": "kb-20261005-7785a33d",
+  "mechanism": "Images differ in CUDA toolkit and headers; kernels that JIT at load (DeepGEMM, Triton) depend on them.",
+  "regime": null,
+  "status": "open",
+  "summary": "Verda 1H200.141S.44V image (2026-10-04): nvcc 12.8, so vLLM 0.30's DeepGEMM JIT asserts (needs >= 12.9) and FP8 must run with VLLM_USE_DEEP_GEMM=0; python3.12-dev missing, so Triton's launcher build fails until it is installed. Nebius gpu-h200-sxm image (2026-10-05): nvcc 13.0, DeepGEMM JITs, driver 580.173.02 (Verda 580.126.09); clocks lock at 1980 MHz on both. Open observation: plain vLLM BF16 (not batch-invariant) matched the batch-invariant reference exactly on Nebius at concurrency 128 (18,602/18,606 answers, KL 0.0), but on Verda at concurrency 32 diverged on 466/490 MMLU-Pro answers; the reference itself reproduced across both venues. Cause not isolated (venue/driver vs concurrency).",
+  "superseded_by": null,
+  "supersedes": null,
+  "tags": [
+    "venue",
+    "gpu",
+    "harness",
+    "quantization"
+  ],
+  "title": "GPU venue images: Verda H200 image lacks DeepGEMM-capable nvcc and Python.h; Nebius H200 image has nvcc 13.0",
+  "transfer_checked": null,
+  "triggers": [
+    "choosing a GPU venue for FP8 work",
+    "a run that needs DeepGEMM",
+    "plain BF16 at concurrency 32 vs 128 on one VM"
+  ],
+  "updated_at": 1791253807.231213,
+  "validity_range": {
+    "hardware": "H200",
+    "provider": [
+      "verda",
+      "nebius"
+    ]
+  }
+}
