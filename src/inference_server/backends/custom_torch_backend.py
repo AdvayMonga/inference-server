@@ -294,10 +294,16 @@ class CustomTorchBackend(InferenceBackend):
         from inference_server.config import resolve_context_window, settings
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
         cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
+        host = {}
+        if settings.kv_host_tier_bytes:
+            if cache_cls is not RadixPrefixCache:
+                raise ValueError("KV_HOST_TIER_BYTES needs PREFIX_CACHE_IMPL=radix")
+            host = {"host_bytes": settings.kv_host_tier_bytes}
         self.prefix_cache = cache_cls(
             pools=self.pools,
             max_entries=settings.prefix_cache_max_entries,
             max_block_fraction=settings.prefix_cache_block_fraction,
+            **host,
         )
 
         # Tuned Triton launch table (scripts/bench/tune_triton_launch.py). Read here, before any
