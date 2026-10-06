@@ -83,6 +83,7 @@ class _ActiveRow:
     request: ScheduledRequest
     current_token: int       # token to feed next forward pass
     real_kv_len: int         # actual KV cache length for this row
+    accepted: list[int] = field(default_factory=list)  # spec-decode tokens to emit before current_token
 
 
 @dataclass
@@ -92,6 +93,18 @@ class _PrefillingRow:
     matched: int                 # cached prefix length from lookup
     tokens_fed: int              # tokens currently in partial_kv (starts == matched)
     partial_kv: object | None    # KV so far; None if no cache hit and no chunk fed yet
+
+
+def ngram_draft(ctx: list[int], k: int, max_n: int = 3) -> list[int]:
+    """Prompt-lookup draft: the k tokens after the latest earlier occurrence of ctx's last n tokens (n = max_n..1)."""
+    if k <= 0:
+        return []
+    for n in range(min(max_n, len(ctx) - 1), 0, -1):
+        tail = ctx[-n:]
+        for i in range(len(ctx) - n - 1, -1, -1):
+            if ctx[i:i + n] == tail:
+                return ctx[i + n:i + n + k]
+    return []
 
 
 def plan_wave(window: list["ScheduledRequest"], k: int) -> list["ScheduledRequest"]:
@@ -145,7 +158,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
                  telemetry: RowStore | None = None,
-                 timeline: Timeline | None = None):
+                 timeline: Timeline | None = None,
+                 spec_max_rows: int = 0,
+                 spec_k: int = 4):
         self.backend = backend
         self.max_batch_size = max_batch_size
         self.max_queue_size = max_queue_size
@@ -175,6 +190,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # 0 disables the deadline.
         self.max_queue_wait_s = max_queue_wait_s
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
+        # N-gram speculative decoding for greedy rows while active rows <= spec_max_rows (0 = off).
+        if spec_max_rows > 0 and not getattr(backend, "can_speculate", False):
+            logger.warning("spec decode requested but %s cannot speculate; off", type(backend).__name__)
+            spec_max_rows = 0
+        self.spec_max_rows = spec_max_rows
+        self.spec_k = spec_k
+        self._spec_drafted = 0
+        self._spec_accepted = 0
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
         self._pending_count = 0
@@ -318,6 +341,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_expired": self._total_expired,
             "max_queue_wait_s": self.max_queue_wait_s,
             "total_iteration_errors": self._total_iteration_errors,
+            "spec_max_rows": self.spec_max_rows,
+            "spec_drafted": self._spec_drafted,
+            "spec_accepted": self._spec_accepted,
             "telemetry": (self._telemetry.stats() if self._telemetry is not None
                           else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
             "timeline": self._timeline.stats(),
@@ -403,17 +429,18 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # Walk indices high→low so popping doesn't shift earlier indices
         to_evict: list[int] = []
         for i, row in enumerate(self._active):
-            tok = row.current_token
+            toks, row.accepted = row.accepted + [row.current_token], []
+            for tok in toks:  # stops are honoured inside an accepted spec run
+                if self.backend.is_eos(tok):
+                    to_evict.append(i)
+                    break
 
-            if self.backend.is_eos(tok):
-                to_evict.append(i)
-                continue
+                row.request.generated.append(tok)
+                self._stream_token(row.request, tok)
 
-            row.request.generated.append(tok)
-            self._stream_token(row.request, tok)
-
-            if len(row.request.generated) >= row.request.max_tokens:
-                to_evict.append(i)
+                if len(row.request.generated) >= row.request.max_tokens:
+                    to_evict.append(i)
+                    break
 
         for i in reversed(to_evict):
             row = self._active[i]
@@ -713,6 +740,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
     # --- Phase 3: batched decode step ---
 
     def _decode_step(self, device: str) -> None:
+        drafts = self._spec_drafts()
+        if drafts is not None:
+            self._spec_step(drafts)
+            return
         batch_size = len(self._active)
         current_tokens = torch.tensor(
             [[r.current_token] for r in self._active],
@@ -746,6 +777,32 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if batch_size > req.decode_width_max:
                 req.decode_width_max = batch_size
             self.policy.on_tokens_processed(req, 1)
+
+    def _spec_drafts(self) -> list[list[int]] | None:
+        """Per-row drafts when speculation applies this step (low load, all greedy, any draft), else None."""
+        if not 0 < len(self._active) <= self.spec_max_rows:
+            return None
+        if any(r.request.sampling.temperature > 0 for r in self._active):
+            return None
+        # generated already ends with current_token; cap k so the run cannot pass max_tokens.
+        drafts = [ngram_draft(r.request.token_ids + r.request.generated,
+                              min(self.spec_k, r.request.max_tokens - len(r.request.generated) - 1))
+                  for r in self._active]
+        return drafts if any(drafts) else None
+
+    def _spec_step(self, drafts: list[list[int]]) -> None:
+        """Verify each row's draft in its own eager forward (v1: one row at a time)."""
+        for i, (row, draft) in enumerate(zip(self._active, drafts)):
+            out = self.backend.verify_greedy(self._batched_kv, i, [row.current_token] + draft)
+            self._spec_drafted += len(draft)
+            self._spec_accepted += len(out) - 1
+            row.accepted, row.current_token = out[:-1], out[-1]
+            row.real_kv_len += len(out)
+            req = row.request
+            req.decode_width_sum += 1
+            req.decode_width_steps += 1
+            req.decode_width_max = max(req.decode_width_max, 1)
+            self.policy.on_tokens_processed(req, len(out))
 
     # --- Cross-thread helpers ---
 
