@@ -877,3 +877,29 @@ def make_pools_for_gemma(
                 window=attn.sliding_window,  # sliding layers evict out-of-window blocks; full layers don't
             ))
     return pools
+
+
+def auto_num_blocks(
+    free_bytes: int, fraction: float, reserve_bytes: int,
+    layers: list[tuple[int, int, bool]], block_size: int, elem_size: int,
+    sliding_blocks: int | None = None,
+) -> int:
+    """Blocks per full pool that fit in `fraction * free_bytes - reserve_bytes`.
+
+    `layers` = (num_kv_heads, head_dim, is_sliding) per KV-owning layer. Sliding pools get the same
+    count unless `sliding_blocks` pins them. Capped so a pool stays under 2^31 elements (the Triton
+    kernels compute pool offsets in int32).
+    """
+    def cost(sliding: bool) -> int:
+        return sum(2 * h * block_size * d * elem_size for h, d, s in layers if s == sliding)
+
+    budget = int(fraction * free_bytes) - reserve_bytes
+    if sliding_blocks is None:
+        per_block = cost(False) + cost(True)
+    else:
+        budget -= sliding_blocks * cost(True)
+        per_block = cost(False)
+    n = budget // per_block
+    if n < 1:
+        raise RuntimeError(f"no device memory left for the KV cache ({free_bytes / 2**30:.1f} GiB free)")
+    return min(n, (2**31 - 1) // max(h * block_size * d for h, d, _ in layers))
