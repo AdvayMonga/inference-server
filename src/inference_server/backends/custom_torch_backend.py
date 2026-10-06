@@ -39,6 +39,9 @@ logger = logging.getLogger(__name__)
 # unlike the DECODE ladder where each bucket costs a ~140s compile.
 _PREFILL_BUCKETS = (64, 128, 192, 256, 384, 512, 768, 1024)
 
+# Held back from auto-sized KV pools for activations, CUDA graphs and workspace (beyond 1 - fraction).
+_KV_RESERVE_BYTES = 4 << 30
+
 
 def _decode_buckets(max_rows: int, coarse: bool = False) -> tuple[int, ...]:
     """Row buckets for decode CUDA graphs.
@@ -283,13 +286,30 @@ class CustomTorchBackend(InferenceBackend):
 
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
-        n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
-        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
+        # Unset CUSTOM_BACKEND_BLOCKS on CUDA: size from free memory after the weights, like vLLM.
+        from inference_server.config import settings
+        from inference_server.models.paged_kv_cache import auto_num_blocks
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
+        sliding_env = os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS")
+        elem_size = next(self.model.parameters()).element_size()
+        if "CUSTOM_BACKEND_BLOCKS" not in os.environ and self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            free, _ = torch.cuda.mem_get_info(self.device)
+            attns = [layer.self_attn for layer in self.model.model.layers]
+            layers = [(a.num_kv_heads, a.head_dim, a.sliding_window is not None)
+                      for a in attns if not a.is_kv_shared]
+            n_blocks = auto_num_blocks(free, settings.kv_cache_memory_fraction, _KV_RESERVE_BYTES,
+                                       layers, bsz, elem_size, int(sliding_env) if sliding_env else None)
+        else:
+            n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
+        sliding_blocks = int(sliding_env or n_blocks)
         self.pools = make_pools_for_gemma(
             self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
+        kv_gb = sum(2 * p.k.numel() * elem_size for p in self.pools if p is not None) / 1e9
+        logger.info("KV pools: %d blocks/full pool, %d/sliding pool (block %d), %.2f GB",
+                    n_blocks, sliding_blocks, bsz, kv_gb)
 
         from inference_server.config import resolve_context_window, settings
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
