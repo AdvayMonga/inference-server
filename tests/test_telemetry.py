@@ -15,7 +15,7 @@ from dataclasses import asdict
 import pytest
 
 from inference_server.scheduler import ContinuousBatchScheduler, QueueFullError, ScheduledRequest
-from inference_server.telemetry import TERMINAL_STATES, RequestRecord, RowStore
+from inference_server.telemetry import SCHEMA_VERSION, TERMINAL_STATES, RequestRecord, RowStore
 from tests.test_chunked_prefill import FakeChunkBackend
 
 
@@ -93,7 +93,7 @@ def test_expired_row(tmp_path):
     try:
         req = _req(loop)
         sched.enqueue(req)
-        req.enqueue_ts = time.perf_counter() - 10.0
+        req.enqueue_ts = req.arrival_ts = time.perf_counter() - 10.0
         sched._shed_expired()
     finally:
         loop.close()
@@ -211,7 +211,160 @@ def test_a_row_that_never_decodes_reports_no_width(tmp_path):
 
 
 def test_every_terminal_state_is_named():
-    assert set(TERMINAL_STATES) == {"ok", "rejected_429", "rejected_400", "expired", "preempted", "error"}
+    assert set(TERMINAL_STATES) == {"ok", "rejected_429", "rejected_400", "expired", "preempted", "error",
+                                    "cancelled", "aborted"}
+
+
+# --------------------------------------------------------------------------- clocks and definitions
+
+@pytest.mark.asyncio
+async def test_arrival_is_epoch_seconds_back_dated_to_http_receipt(tmp_path):
+    """arrival_ts is wall clock at receipt; TTFT and total run from receipt, all on perf_counter."""
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), telemetry=store)
+    sched.start()
+    req = _req(asyncio.get_running_loop(), max_tokens=4)
+    req.arrival_ts = time.perf_counter() - 2.0          # the handler stamped it 2 s ago (tokenizing)
+    await sched.submit(req)
+    await sched.stop()
+    (row,) = _rows(store)
+    assert abs(row["arrival_ts"] - (time.time() - 2.0)) < 0.5
+    assert row["ttft_s"] >= 2.0 and row["total_s"] >= row["ttft_s"]
+    assert row["queue_wait_s"] < 1.0                     # the queue starts at enqueue, not receipt
+    assert row["replica_age_s"] < 0                      # receipt came before this scheduler existed
+    # TPOT = (E2E - TTFT) / (n - 1), exactly the environment's definition
+    assert row["tpot_s"] == pytest.approx((row["total_s"] - row["ttft_s"]) / (row["tokens_out"] - 1))
+    assert row["schema_version"] == SCHEMA_VERSION
+
+
+class _EosFirstBackend(FakeChunkBackend):
+    def is_eos(self, token_id):
+        return token_id == self.FIRST_TOKEN
+
+
+class _EosSecondBackend(FakeChunkBackend):
+    def is_eos(self, token_id):
+        return token_id == self.FIRST_TOKEN + 1
+
+
+@pytest.mark.asyncio
+async def test_eos_first_answer_has_no_ttft(tmp_path):
+    """TTFT is to the first REAL token: an answer that is only EOS has none."""
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(_EosFirstBackend(), telemetry=store)
+    sched.start()
+    assert await sched.submit(_req(asyncio.get_running_loop())) == []
+    await sched.stop()
+    (row,) = _rows(store)
+    assert row["terminal_state"] == "ok" and row["tokens_out"] == 0
+    assert row["ttft_s"] is None and row["tpot_s"] is None and row["prefill_s"] is not None
+
+
+@pytest.mark.asyncio
+async def test_decode_steps_counts_forward_passes_including_the_eos_step(tmp_path):
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(_EosSecondBackend(), telemetry=store)
+    sched.start()
+    assert len(await sched.submit(_req(asyncio.get_running_loop(), max_tokens=8))) == 1
+    await sched.stop()
+    (row,) = _rows(store)
+    assert row["tokens_out"] == 1 and row["decode_steps"] == 1 and row["tpot_s"] is None
+
+
+# --------------------------------------------------------------------------- cache hits
+
+class _HitsBackend(FakeChunkBackend):
+    def prefill_batch(self, prompts, session_ids=None):
+        self.last_batch_cache_hit_tokens = [len(p) - 1 for p in prompts]
+        return super().prefill_batch(prompts, session_ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend,mode,hit", [
+    (FakeChunkBackend(), "monolithic", 0),
+    (_HitsBackend(), "batched", 3),           # per-row hits reported by the backend
+    (FakeChunkBackend(), "batched", None),    # backend reported none: unknown, not 0
+])
+async def test_cache_hits_are_reported_per_mode_never_a_made_up_zero(tmp_path, backend, mode, hit):
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(backend, prefill_mode=mode, telemetry=store)
+    sched.start()
+    await sched.submit(_req(asyncio.get_running_loop()))
+    await sched.stop()
+    (row,) = _rows(store)
+    assert row["prefill_mode"] == mode and row["cache_hit_tokens"] == hit
+
+
+def test_rejected_before_admission_has_no_cache_lookup(tmp_path):
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), max_queue_size=1, telemetry=store)
+    loop = asyncio.new_event_loop()
+    try:
+        sched.enqueue(_req(loop, session_id="a"))
+        with pytest.raises(QueueFullError):
+            sched.enqueue(_req(loop, session_id="b"))
+    finally:
+        loop.close()
+    (row,) = _rows(store)
+    assert row["cache_hit_tokens"] is None and row["prefill_mode"] is None
+
+
+# --------------------------------------------------------------------------- cancelled / aborted
+
+def test_cancelled_rows_stop_decoding_and_say_so(tmp_path):
+    """A client that went away: an active row is evicted next step, a pending one never runs."""
+    store = RowStore(tmp_path)
+    backend = FakeChunkBackend()
+    sched = ContinuousBatchScheduler(backend, max_batch_size=1, telemetry=store)
+    loop = asyncio.new_event_loop()
+    try:
+        active, queued = _req(loop, session_id="active", max_tokens=100), _req(loop, session_id="queued")
+        sched._loop = loop                   # phases driven directly; _resolve needs a loop
+        sched.enqueue(active)
+        sched._admit_pending("cpu")
+        sched._evict_finished()
+        sched._decode_step("cpu")
+        sched.enqueue(queued)
+        active.cancelled = queued.cancelled = True
+        sched._evict_finished()
+        sched._admit_pending("cpu")
+        assert sched.stats()["active_size"] == 0 and sched.stats()["pending_depth"] == 0
+        assert sched.stats()["total_completed"] == 0
+    finally:
+        loop.close()
+    rows = {r["session_id"]: r for r in _rows(store)}
+    assert rows["active"]["terminal_state"] == "cancelled" and rows["active"]["tokens_out"] == 1
+    assert rows["queued"]["terminal_state"] == "cancelled" and rows["queued"]["queue_wait_s"] is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_submit_marks_the_request(tmp_path):
+    sched = ContinuousBatchScheduler(FakeChunkBackend())       # not started: stays pending
+    req = _req(asyncio.get_running_loop())
+    task = asyncio.ensure_future(sched.submit(req))
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert req.cancelled
+
+
+@pytest.mark.asyncio
+async def test_stop_aborts_what_is_still_queued(tmp_path):
+    store = RowStore(tmp_path)
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), telemetry=store)
+    loop = asyncio.get_running_loop()
+    sched.start()
+    sched._stop_event.set()                  # worker exits before it can admit anything
+    await asyncio.sleep(0.2)
+    req = _req(loop)
+    sched.enqueue(req)
+    await sched.stop()
+    with pytest.raises(RuntimeError, match="scheduler stopped"):
+        await req.future
+    (row,) = _rows(store)
+    assert row["terminal_state"] == "aborted"
+    assert sched.stats()["pending_depth"] == 0
 
 
 # --------------------------------------------------------------------------- store
@@ -238,6 +391,31 @@ def test_one_sqlite_file_per_run_and_rows_round_trip(tmp_path):
     assert row["queue_wait_s"] == 0.5 and row["prefill_s"] == 0.5 and row["decode_s"] == 2.0
     assert row["ttft_s"] == 1.0 and row["total_s"] == 3.0 and row["tpot_s"] == 0.5
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([a.path.name, b.path.name])
+
+
+def _meta(store: RowStore) -> dict:
+    conn = sqlite3.connect(store.path)
+    try:
+        return dict(conn.execute("SELECT key, value FROM meta"))
+    finally:
+        conn.close()
+
+
+def test_meta_table_carries_counts_and_schema_and_late_rows_count_as_dropped(tmp_path):
+    store = RowStore(tmp_path)
+    store.put(_record(trace_id="a"))
+    store.close()
+    store.put(_record(trace_id="late"))      # after close nobody drains: counted, not lost silently
+    assert store.rows_dropped == 1
+    assert _meta(store) == {"schema_version": SCHEMA_VERSION, "run_id": store.run_id,
+                            "rows_written": 1, "rows_dropped": 0, "closed": 1}
+
+
+def test_meta_records_queue_drops_at_close(tmp_path):
+    store = RowStore(tmp_path)
+    store.rows_dropped = 3                   # as if the queue had been full three times
+    store.close()
+    assert _meta(store)["rows_dropped"] == 3
 
 
 def test_full_queue_drops_and_counts_instead_of_blocking(tmp_path):

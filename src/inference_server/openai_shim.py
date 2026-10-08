@@ -111,10 +111,12 @@ async def _stream(req: ScheduledRequest, tokenizer, cid: str, created: int, mode
                   prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
     """Stream one OpenAI chunk per generated token, then finish_reason + usage + [DONE]."""
     n = 0
+    ended = False
     try:
         while True:
             tok_id = await req.token_queue.get()
             if tok_id is None:
+                ended = True
                 break
             text = tokenizer.decode_token(tok_id)
             n += 1
@@ -123,6 +125,7 @@ async def _stream(req: ScheduledRequest, tokenizer, cid: str, created: int, mode
         if req.future.done() and req.future.exception():
             raise req.future.exception()  # type: ignore[misc]
     finally:
+        req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
         finish = "length" if n >= max_tokens else "stop"
         yield _chunk(cid, created, model, "", finish)
         usage_payload = {
@@ -163,6 +166,7 @@ async def _score(request: Request, body: CompletionRequest, token_ids: list[int]
 @router.post("/v1/completions")
 async def completions(body: CompletionRequest, request: Request, response: Response):
     """Text completion over the continuous-batch scheduler — the open-loop bench surface."""
+    arrival = time.perf_counter()
     scheduler = request.app.state.scheduler
     tokenizer = request.app.state.tokenizer
     loop = asyncio.get_running_loop()
@@ -190,7 +194,7 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
-            trace_id=trace_id, turn_index=turn_index,
+            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
         )
         try:
             scheduler.enqueue(req)
@@ -208,7 +212,7 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
-        trace_id=trace_id, turn_index=turn_index,
+        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
     )
     try:
         generated_ids = await scheduler.submit(req)
@@ -243,11 +247,13 @@ async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int,
                        prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
     """Role delta first (clients key off it), then one content delta per token, then usage."""
     n = 0
+    ended = False
     try:
         yield _chat_chunk(cid, created, model, {"role": "assistant", "content": ""}, None)
         while True:
             tok_id = await req.token_queue.get()
             if tok_id is None:
+                ended = True
                 break
             text = tokenizer.decode_token(tok_id)
             n += 1
@@ -256,6 +262,7 @@ async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int,
         if req.future.done() and req.future.exception():
             raise req.future.exception()  # type: ignore[misc]
     finally:
+        req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
         yield _chat_chunk(cid, created, model, {}, "length" if n >= max_tokens else "stop")
         usage_payload = {
             "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
@@ -269,6 +276,7 @@ async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int,
 @router.post("/v1/chat/completions")
 async def chat_completions(body: ChatCompletionRequest, request: Request, response: Response):
     """Chat completion over the continuous-batch scheduler — the frontend-facing surface."""
+    arrival = time.perf_counter()
     scheduler = request.app.state.scheduler
     tokenizer = request.app.state.tokenizer
     loop = asyncio.get_running_loop()
@@ -295,7 +303,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
-            trace_id=trace_id, turn_index=turn_index,
+            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
         )
         try:
             scheduler.enqueue(req)
@@ -313,7 +321,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
-        trace_id=trace_id, turn_index=turn_index,
+        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
     )
     try:
         generated_ids = await scheduler.submit(req)

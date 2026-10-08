@@ -55,7 +55,7 @@ class GenerateResponse(BaseModel):
     ttft_ms: float
     total_ms: float
     prompt_tokens: int
-    cache_hit_tokens: int
+    cache_hit_tokens: int | None
     trace_id: str
 
 
@@ -161,10 +161,12 @@ async def event_stream(
 ) -> AsyncGenerator[str, None]:
     """SSE stream sourced from an already-enqueued request's token_queue."""
     first = True
+    ended = False
     try:
         while True:
             tok_id = await req.token_queue.get()
             if tok_id is None:
+                ended = True
                 break
             text = tokenizer.decode_token(tok_id)
             if first:
@@ -182,12 +184,14 @@ async def event_stream(
         if req.future.done() and req.future.exception():
             raise req.future.exception()  # type: ignore[misc]
     finally:
+        req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
         yield "data: [DONE]\n\n"
 
 
 @app.post("/generate")
 async def generate(request: GenerateRequest):
     """Generate text — routes through the continuous-batch scheduler."""
+    arrival = time.perf_counter()
     scheduler = app.state.scheduler
     tokenizer = app.state.tokenizer
     loop = asyncio.get_running_loop()
@@ -206,6 +210,7 @@ async def generate(request: GenerateRequest):
             session_id=request.session_id, future=loop.create_future(),
             token_queue=token_queue, priority=request.priority,
             sampling=sampling, trace_id=request.trace_id, turn_index=request.turn_index,
+            arrival_ts=arrival,
         )
         try:
             scheduler.enqueue(req)
@@ -223,7 +228,7 @@ async def generate(request: GenerateRequest):
         token_ids=token_ids, max_tokens=request.max_tokens,
         session_id=request.session_id, future=loop.create_future(),
         priority=request.priority, sampling=sampling,
-        trace_id=request.trace_id, turn_index=request.turn_index,
+        trace_id=request.trace_id, turn_index=request.turn_index, arrival_ts=arrival,
     )
     start_time = time.perf_counter()
     try:

@@ -22,8 +22,10 @@ referee, GPU VMs) lives in [BlameGraph](https://github.com/AdvayMonga/BlameGraph
 - FastAPI + SSE, `session_id` threaded end to end; OpenAI shim (`/v1/completions`,
   `/v1/chat/completions`, `/v1/models`). No built-in UI
 - Sliding-window p50/p95/p99 on `/scheduler/stats`; Prometheus `/metrics` + Grafana (`monitoring/`)
-- Per-request telemetry rows (`TELEMETRY_DIR`) and the engine event timeline (`TIMELINE_DIR`):
-  one JSONL event per scheduler decision and a profiler range per phase, keyed by step id
+- Per-request telemetry rows (`TELEMETRY_DIR`: one SQLite file per run, `requests` keyed by the
+  client's `X-Trace-Id` plus a `meta` table with schema version and drop counts) and the engine
+  event timeline (`TIMELINE_DIR`): one JSONL event per scheduler decision and a profiler range per
+  phase, keyed by step id
 
 ---
 
