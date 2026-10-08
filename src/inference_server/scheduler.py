@@ -46,9 +46,10 @@ class ScheduledRequest:
     future: asyncio.Future
     token_queue: asyncio.Queue | None = None
     generated: list[int] = field(default_factory=list)
-    cache_hit_tokens: int = 0   # set by scheduler after prefill
+    cache_hit_tokens: int | None = None  # set by scheduler after prefill; None = not reported
     arrival_seq: int = 0        # set by scheduler at enqueue (monotonic)
     priority: int = 0           # higher = more important; tiebreak field for policies
+    arrival_ts: float = 0.0     # perf_counter at HTTP receipt (set by the handler); enqueue_ts if 0
     enqueue_ts: float = 0.0     # set by scheduler at enqueue (perf_counter)
     first_token_ts: float = 0.0 # set when first token is produced
     admit_ts: float = 0.0       # set when the scheduler picks it up — splits TTFT into
@@ -62,6 +63,7 @@ class ScheduledRequest:
     decode_width_sum: int = 0
     decode_width_steps: int = 0
     decode_width_max: int = 0
+    cancelled: bool = False     # set by the HTTP side when the client goes away
 
     def __post_init__(self):
         if not self.trace_id:
@@ -243,6 +245,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._pending_cv.notify_all()
         await asyncio.get_running_loop().run_in_executor(None, self._worker.join)
         self._worker = None
+        exc = RuntimeError("scheduler stopped")
+        self._fail_inflight(exc, state="aborted")   # worker has exited: safe from this thread
+        self._fail_pending(exc, state="aborted")
         if self._telemetry is not None:
             self._telemetry.close()
         self._timeline.close()
@@ -250,6 +255,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def enqueue(self, request: ScheduledRequest) -> None:
         """Synchronously enqueue. Raises QueueFullError if no capacity."""
         request.enqueue_ts = time.perf_counter()
+        if not request.arrival_ts:
+            request.arrival_ts = request.enqueue_ts
         with self._pending_cv:
             self._timeline.event("enqueue", trace_id=request.trace_id, session_id=request.session_id,
                                  prompt_tokens=len(request.token_ids), max_tokens=request.max_tokens,
@@ -280,7 +287,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     async def submit(self, request: ScheduledRequest) -> list[int]:
         self.enqueue(request)
-        return await request.future
+        try:
+            return await request.future
+        except asyncio.CancelledError:
+            request.cancelled = True
+            raise
 
     def stats(self) -> dict:
         with self._pending_lock:
@@ -401,26 +412,30 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _evict_finished(self) -> None:
         """Process each active row's current_token, evict finished rows."""
         # Walk indices high→low so popping doesn't shift earlier indices
-        to_evict: list[int] = []
+        to_evict: list[tuple[int, str]] = []
         for i, row in enumerate(self._active):
             tok = row.current_token
 
+            if row.request.cancelled:
+                to_evict.append((i, "cancelled"))
+                continue
+
             if self.backend.is_eos(tok):
-                to_evict.append(i)
+                to_evict.append((i, "ok"))
                 continue
 
             row.request.generated.append(tok)
             self._stream_token(row.request, tok)
 
             if len(row.request.generated) >= row.request.max_tokens:
-                to_evict.append(i)
+                to_evict.append((i, "ok"))
 
-        for i in reversed(to_evict):
+        for i, state in reversed(to_evict):
             row = self._active[i]
             self.policy.on_request_finished(row.request)
-            self._evict_row(i)
+            self._evict_row(i, state=state)
 
-    def _evict_row(self, idx: int, resolve: bool = True) -> None:
+    def _evict_row(self, idx: int, resolve: bool = True, state: str = "ok") -> None:
         row = self._active.pop(idx)
         self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
         self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
@@ -437,7 +452,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._attention_mask[idx + 1:],
                 ], dim=0)
         if resolve:
-            self._resolve(row.request)
+            self._resolve(row.request, state)
 
     def _consume(self, request: "ScheduledRequest", plan: list) -> None:
         """Remove `request` from the policy and from this wave's plan (caller holds the lock)."""
@@ -448,7 +463,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     # --- Phase 2: admit new requests ---
 
     def _shed_expired(self) -> None:
-        """Reject every request past the admission deadline, wherever it sits in the queue.
+        """Reject every request past the admission deadline (or cancelled), wherever it sits in the queue.
 
         Expiry used to be checked only against peek_next(). That is equivalent to shedding all
         stale work only if the head is always the oldest request, and no policy here orders that
@@ -460,14 +475,19 @@ class ContinuousBatchScheduler(SchedulerInterface):
         Runs once per admission pass, over the pending set. O(pending) against a decode step that
         costs milliseconds, so the sweep is free in comparison.
         """
-        if self.max_queue_wait_s <= 0:
-            return
         now = time.perf_counter()
         # Under the same lock enqueue() holds: it mutates the policy's pending set and
         # _pending_count, so sweeping without it races an arriving request.
         with self._pending_cv:
             for req in self.policy.pending():
-                if not req.enqueue_ts or now - req.enqueue_ts <= self.max_queue_wait_s:
+                if req.cancelled:                  # client gone before admission: never run it
+                    self.policy.pick(req)
+                    self._pending_count -= 1
+                    self.policy.on_request_finished(req)
+                    self._reject(req, RuntimeError("client disconnected"), state="cancelled")
+                    continue
+                if (self.max_queue_wait_s <= 0 or not req.enqueue_ts
+                        or now - req.enqueue_ts <= self.max_queue_wait_s):
                     continue
                 waited = now - req.enqueue_ts
                 self.policy.pick(req)
@@ -606,6 +626,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         wave (release each reservation) rather than risk partial/leaked state."""
         try:
             self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
+            self.backend.last_batch_cache_hit_tokens = None   # never read a previous wave's hits
             with self._timeline.phase("prefill_batch", wave=len(reqs),
                                       tokens=sum(len(r.token_ids) for r in reqs)):
                 results = self.backend.prefill_batch([r.token_ids for r in reqs])
@@ -618,8 +639,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
             return
-        for req, (kv, first_token, kv_len) in zip(reqs, results):
-            req.cache_hit_tokens = 0  # batched path does a full prefill (no prefix-cache lookup)
+        hits = self.backend.last_batch_cache_hit_tokens
+        if hits is None or len(hits) != len(reqs):
+            hits = [None] * len(reqs)                  # backend did not report per-row hits
+        for req, (kv, first_token, kv_len), hit in zip(reqs, results, hits):
+            req.cache_hit_tokens = hit
             self._promote_to_decode(req, kv, kv_len, first_token, device)
             self._total_admitted += 1
 
@@ -754,13 +778,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
             return
         self._loop.call_soon_threadsafe(request.token_queue.put_nowait, token)
 
-    def _resolve(self, request: ScheduledRequest) -> None:
+    def _resolve(self, request: ScheduledRequest, state: str = "ok") -> None:
         if self._loop is None:
             return
         result = list(request.generated)
-        self._total_completed += 1
-        self._finish_row(request, "ok")
-        if request.first_token_ts > 0 and request.enqueue_ts > 0:
+        self._finish_row(request, state)
+        if state == "ok":
+            self._total_completed += 1
+        if state == "ok" and request.first_token_ts > 0 and request.enqueue_ts > 0:
             now = time.perf_counter()
             ttft = request.first_token_ts - request.enqueue_ts
             total = now - request.enqueue_ts
@@ -802,7 +827,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         free = cache.free_blocks if cache is not None else None
         return RequestRecord(
             trace_id=request.trace_id, session_id=request.session_id,
-            turn_index=request.turn_index, arrival_ts=time.time(),
+            turn_index=request.turn_index,
+            # One wall/monotonic pair, back-dated to HTTP receipt: no duration mixes the two clocks.
+            arrival_ts=time.time() - (time.perf_counter() - request.arrival_ts),
             pending_depth=self._pending_count,
             active_size=len(self._active) + len(self._prefilling),
             max_batch_size=self.max_batch_size,
@@ -813,7 +840,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             # session's first turn sees only OTHER sessions.
             concurrent_sessions=len(self._session_load),
             prompt_tokens=len(request.token_ids),
-            replica_age_s=request.enqueue_ts - self._start_ts,
+            replica_age_s=request.arrival_ts - self._start_ts,
         )
 
     def _finish_row(self, request: ScheduledRequest, state: str) -> None:
@@ -835,7 +862,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                    tokens_out=len(request.generated), cache_hit_tokens=request.cache_hit_tokens,
                    decode_width_sum=request.decode_width_sum,
                    decode_width_steps=request.decode_width_steps,
-                   decode_width_max=request.decode_width_max)
+                   decode_width_max=request.decode_width_max, arrival_mono=request.arrival_ts,
+                   prefill_mode=self.prefill_mode if request.admit_ts else None)
         self._telemetry.put(rec)
 
     def _preempt_newest(self, exc: BaseException) -> None:
@@ -852,7 +880,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             f"preempted under KV pressure after {len(row.request.generated)} tokens"),
             state="preempted")
 
-    def _fail_inflight(self, exc: BaseException) -> None:
+    def _fail_inflight(self, exc: BaseException, state: str | None = None) -> None:
         """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.
 
         The blocks matter: the old _fail_all cleared _active without routing through
@@ -868,7 +896,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 except Exception:
                     logger.exception("failed to release KV for a dropped row")
             self.policy.on_request_finished(row.request)
-            self._reject(row.request, exc)
+            self._reject(row.request, exc, state=state)
         for prow in self._prefilling:
             self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
             free = getattr(prow.partial_kv, "free_all", None)
@@ -878,12 +906,22 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 except Exception:
                     logger.exception("failed to release partial prefill KV")
             self.policy.on_request_finished(prow.request)
-            self._reject(prow.request, exc)
+            self._reject(prow.request, exc, state=state)
         self._active.clear()
         self._prefilling.clear()
         self._active_kv_reserved = 0
         self._batched_kv = None
         self._attention_mask = None
 
+    def _fail_pending(self, exc: BaseException, state: str | None = None) -> None:
+        """Reject everything still queued, so no caller waits forever and every request gets a row."""
+        with self._pending_cv:
+            for req in self.policy.pending():
+                self.policy.pick(req)
+                self._pending_count -= 1
+                self.policy.on_request_finished(req)
+                self._reject(req, exc, state=state)
+
     def _fail_all(self, exc: BaseException) -> None:
         self._fail_inflight(exc)
+        self._fail_pending(exc)

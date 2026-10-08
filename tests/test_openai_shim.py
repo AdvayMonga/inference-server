@@ -314,3 +314,63 @@ def test_window_check_applies_to_the_default_max_tokens_and_streaming():
     assert client.post("/v1/completions", json={"prompt": "hi"}).status_code == 400   # default 128
     r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 9, "stream": True})
     assert r.status_code == 400
+
+
+async def test_x_trace_id_joins_the_row_and_the_timeline(tmp_path):
+    """End to end on the real scheduler: the client's X-Trace-Id is the row's and the events' trace_id."""
+    import sqlite3
+
+    import httpx
+
+    from inference_server.scheduler import ContinuousBatchScheduler
+    from inference_server.telemetry import RowStore
+    from inference_server.timeline import Timeline
+    from tests.test_chunked_prefill import FakeChunkBackend
+
+    store, tl = RowStore(tmp_path / "rows"), Timeline(tmp_path / "tl")
+    sched = ContinuousBatchScheduler(FakeChunkBackend(), telemetry=store, timeline=tl)
+    sched.start()
+    transport = httpx.ASGITransport(app=_app(sched))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+        r = await client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 3},
+                              headers={"X-Trace-Id": "bg-7", "X-Session-Id": "s1"})
+    await sched.stop()
+    assert r.status_code == 200 and r.headers["X-Trace-Id"] == "bg-7"
+    conn = sqlite3.connect(store.path)
+    (row,) = conn.execute("SELECT trace_id, session_id, terminal_state FROM requests").fetchall()
+    conn.close()
+    assert row == ("bg-7", "s1", "ok")
+    events = [json.loads(line) for line in (tmp_path / "tl" / "events.jsonl").read_text().splitlines()]
+    mine = [e["kind"] for e in events if e.get("trace_id") == "bg-7"]
+    assert mine[0] == "enqueue" and mine[-1] == "finish" and "first_token" in mine
+
+
+async def test_a_dropped_stream_cancels_its_request():
+    """Starlette cancels the body task when the client disconnects; the request must be flagged."""
+    from inference_server.openai_shim import _chat_stream, _stream
+    from inference_server.scheduler import ScheduledRequest
+
+    for gen in (_stream, _chat_stream):
+        loop = asyncio.get_running_loop()
+        req = ScheduledRequest(token_ids=[1], max_tokens=5, session_id="s", future=loop.create_future(),
+                               token_queue=asyncio.Queue())
+        req.token_queue.put_nowait(ord("a"))
+        task = asyncio.ensure_future(_drain(gen(req, FakeTokenizer(), "id", 0, "m", 1, 5)))
+        await asyncio.sleep(0.05)               # one token streamed, now waiting for the next
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, RuntimeError):
+            pass
+        assert req.cancelled
+
+    done = ScheduledRequest(token_ids=[1], max_tokens=5, session_id="s",
+                            future=asyncio.get_running_loop().create_future(), token_queue=asyncio.Queue())
+    done.token_queue.put_nowait(None)
+    await _drain(_stream(done, FakeTokenizer(), "id", 0, "m", 1, 5))
+    assert not done.cancelled                   # a stream that ended normally is not a cancel
+
+
+async def _drain(agen):
+    async for _ in agen:
+        pass

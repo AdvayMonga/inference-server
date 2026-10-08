@@ -47,6 +47,7 @@ class InferenceBackend(ABC):
 
     cache_adapter: "CacheManager | None" = None
     last_cache_hit_tokens: int = 0  # tokens served from cache on the most recent request
+    last_batch_cache_hit_tokens: list[int] | None = None  # per row of the last prefill_batch
 
     def set_cache_adapter(self, adapter: "CacheManager") -> None:
         """Attach a CacheManager for prefix caching. Optional."""

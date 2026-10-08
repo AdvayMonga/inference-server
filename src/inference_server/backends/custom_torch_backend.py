@@ -536,6 +536,7 @@ class CustomTorchBackend(InferenceBackend):
             matched.append(m)
             suffixes.append(p[m:])
         self.last_cache_hit_tokens = matched[-1] if matched else 0
+        self.last_batch_cache_hit_tokens = list(matched)
 
         Smax = max(len(s) for s in suffixes)
         Pmax = max(matched) if matched else 0
@@ -614,6 +615,7 @@ class CustomTorchBackend(InferenceBackend):
                     self._capture_all_prefill_graphs()
                 if any(k[0] == bucket for k in self._prefill_graphs):
                     self.last_cache_hit_tokens = matched0
+                    self.last_batch_cache_hit_tokens = [matched0]
                     return [self._replay_prefill(p, bucket, matched0, shared0)]
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
@@ -626,6 +628,7 @@ class CustomTorchBackend(InferenceBackend):
             matched.append(m)
             suffixes.append(p[m:])
         self.last_cache_hit_tokens = matched[-1] if matched else 0
+        self.last_batch_cache_hit_tokens = list(matched)
 
         Smax = max(len(s) for s in suffixes)
         input_ids = torch.zeros(len(prompts), Smax, dtype=torch.long, device=dev)
