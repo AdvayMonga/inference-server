@@ -45,5 +45,9 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
+- Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
+  BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
+  `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
+  its own launch and gates that config with its own equiv. Ships empty: one config for everything.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.
