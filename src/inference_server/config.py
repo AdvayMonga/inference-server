@@ -36,7 +36,7 @@ class Settings:
     port: int = 8000
 
     # Batching
-    max_batch_size: int = 32
+    max_batch_size: int = 128     # rows decoded together; the KV pools are sized from free memory
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
@@ -63,7 +63,7 @@ class Settings:
     # "dict" only matches complete previously-stored prompts. Kept switchable for A/B.
     prefix_cache_impl: str = "radix"
     prefix_cache_max_entries: int = 1024
-    prefix_cache_block_fraction: float = 0.5
+    prefix_cache_block_fraction: float = 0.9   # cached blocks are reclaimed on demand (BlockPool.alloc)
 
     # Model
     model_name: str = "google/gemma-4-E2B-it"
@@ -97,7 +97,7 @@ class Settings:
     # Reserved for multi-user extension (ignored for now)
     max_concurrent_sessions: int = 1
     per_session_memory_limit_mb: int = 0  # 0 = unlimited
-    scheduling_policy: str = "fcfs"  # "fcfs"; future: "fair", "priority"
+    scheduling_policy: str = "fair"  # "fair" (VTC: least-served session first) or "fcfs"
 
     @property
     def resolved_device(self) -> str:

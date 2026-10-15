@@ -45,6 +45,12 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
+- Serving defaults (2026-10-15, not yet measured on a GPU): on CUDA the KV pools take
+  `KV_CACHE_MEMORY_FRACTION` (0.9) of the memory the weights leave free (`CUSTOM_BACKEND_BLOCKS` overrides; it
+  was a fixed 512 blocks, ~8k tokens of Qwen3-30B-A3B's KV); the prefix cache may hold 0.9 of a pool (reclaimed
+  on demand); `MAX_BATCH_SIZE` 128; scheduling policy `fair` (VTC). Streaming requests wait for their first token
+  before the 200, so one shed or preempted before it is a 429; a failure after tokens ends the stream without a
+  finish reason or [DONE].
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in

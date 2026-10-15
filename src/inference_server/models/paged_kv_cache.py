@@ -713,6 +713,14 @@ class BatchedDecodeState:
             self.evicted[r] = keep_from[r]
 
 
+def blocks_for_budget(model, budget_bytes: int, block_size: int) -> int:
+    """Blocks per pool that fit `budget_bytes` across every layer owning K/V (K and V, the model's dtype)."""
+    elem = torch.empty((), dtype=next(model.parameters()).dtype).element_size()
+    per_block = sum(2 * layer.self_attn.num_kv_heads * block_size * layer.self_attn.head_dim * elem
+                    for layer in model.model.layers if not layer.self_attn.is_kv_shared)
+    return max(1, budget_bytes // per_block)
+
+
 def make_pools_for_gemma(
     model, num_blocks_per_pool: int = 1024, block_size: int = 16,
     sliding_blocks: int | None = None,

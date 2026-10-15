@@ -283,15 +283,26 @@ class CustomTorchBackend(InferenceBackend):
 
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
-        n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
-        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
+        from inference_server.config import settings
+        from inference_server.models.paged_kv_cache import blocks_for_budget
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
+        if os.environ.get("CUSTOM_BACKEND_BLOCKS"):
+            n_blocks = int(os.environ["CUSTOM_BACKEND_BLOCKS"])
+        elif self.device.type == "cuda":
+            # From what the weights left free: a fixed 512 blocks held ~8k tokens of Qwen3-30B-A3B's
+            # KV on a 141 GB H200. The rest of the free memory is for activations and CUDA graphs.
+            free, _ = torch.cuda.mem_get_info(self.device)
+            n_blocks = blocks_for_budget(self.model, int(free * settings.kv_cache_memory_fraction), bsz)
+            logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free)", n_blocks, bsz,
+                        100 * settings.kv_cache_memory_fraction, free / 2**30)
+        else:
+            n_blocks = 512
+        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
         self.pools = make_pools_for_gemma(
             self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
-        from inference_server.config import settings
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
         cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
         self.prefix_cache = cache_cls(
