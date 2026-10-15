@@ -128,8 +128,8 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
 # Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
 PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
 
-# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel; above it CUTLASS's grouped GEMM.
-MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "0"))   # off: device assert under load, 2026-10-15
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
