@@ -155,6 +155,7 @@ class _PrefillCtx:
         self.caches = caches                       # list[PagedKVCache], one per row
         self.pools = pools
         self._suffix = suffix_lens                 # python list of per-row real suffix lengths
+        self._prefix = list(prefix_lens)           # and cached prefix lengths (prefill_attention.sdpa_prefill)
         self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
         self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
         self.device = device

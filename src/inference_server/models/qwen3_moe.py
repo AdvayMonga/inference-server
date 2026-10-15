@@ -10,6 +10,8 @@ lm_head, no softcap. Module names mirror HF's state_dict keys so loading is one 
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -67,13 +69,17 @@ class Qwen3Attention(nn.Module):
             from inference_server.models.paged_attention_kernel import (
                 paged_decode_attention, paged_prefill_attention,
             )
+            from inference_server.models.prefill_attention import sdpa_prefill
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
-                bt = paged_ctx.block_table_tensor(kv_layer_idx)
-                out = paged_prefill_attention(q.transpose(1, 2), pool.k, pool.v, bt,
-                                              paged_ctx.prefix_lens, paged_ctx.suffix_lens,
-                                              scale=self.scale)
+                if PREFILL_ATTN == "sdpa" and hasattr(paged_ctx, "caches"):   # eager prefill; the graph ctx has no caches
+                    out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
+                else:
+                    bt = paged_ctx.block_table_tensor(kv_layer_idx)
+                    out = paged_prefill_attention(q.transpose(1, 2), pool.k, pool.v, bt,
+                                                  paged_ctx.prefix_lens, paged_ctx.suffix_lens,
+                                                  scale=self.scale)
             else:
                 bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
                 out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=self.scale)
@@ -109,6 +115,9 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
         weights = weights / weights.sum(dim=-1, keepdim=True)
     return weights.to(router_logits.dtype), experts
 
+
+# Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
+PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
