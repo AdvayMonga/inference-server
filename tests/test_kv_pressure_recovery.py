@@ -339,3 +339,38 @@ def test_radix_capacity_is_the_block_watermark_not_the_entry_count():
     st = pc.stats()
     assert st["blocks_held"] > 64
     assert st["blocks_held"] <= 400
+
+
+def _scan_lru_leaf(pc):
+    """The old eviction choice: walk the whole trie for the least recently used leaf."""
+    best, stack = None, [pc.root]
+    while stack:
+        n = stack.pop()
+        if n is not pc.root and not n.children and (best is None or n.last_used < best.last_used):
+            best = n
+        stack.extend(n.children.values())
+    return best
+
+
+def test_radix_evicts_the_same_leaf_as_a_full_scan_under_random_load():
+    """The leaf heap must pick exactly the leaf the full-trie scan picks, through stores, lookups and evictions."""
+    import random
+    rng = random.Random(0)
+    pools = [_pool(120)]
+    pc = RadixPrefixCache(pools, max_block_fraction=0.5)
+    real, checked = pc._evict_lru_leaf, []
+
+    def checked_evict():
+        want = _scan_lru_leaf(pc)
+        freed = real()
+        assert want is None or want.parent is None, "a different leaf was evicted"
+        checked.append(want)
+        return freed
+    pc._evict_lru_leaf = checked_evict
+    prefixes = [list(range(p * 1000, p * 1000 + BS * rng.randint(1, 4))) for p in range(6)]
+    for i in range(400):
+        prompt = rng.choice(prefixes) + list(range(10**6 + i * 97, 10**6 + i * 97 + BS * rng.randint(1, 3)))
+        _run_prompt(pools, pc, prompt)
+        if rng.random() < 0.3:
+            pc.lookup(rng.choice(prefixes) + [7] * BS)
+    assert len(checked) > 100 and pc.stats()["blocks_held"] <= pc.stats()["max_blocks"]
