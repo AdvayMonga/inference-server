@@ -1,0 +1,5 @@
+# Launch profiles (profiles.py). [general] applies to every launch; a table named after a regime (e.g.
+# [long_prompt_short_output]) is applied over it when that regime is served on its own. Keys are the engine's env
+# settings (config.py, backends); values are strings or numbers. An empty file means one config for everything.
+
+[general]

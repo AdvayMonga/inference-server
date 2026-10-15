@@ -5,9 +5,13 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from inference_server import profiles
+
 # Load .env if present (local-dev convenience). No-op in prod where the
 # orchestrator (Modal, Docker, k8s) injects env vars directly.
 load_dotenv()
+# The launch profile (profiles.toml) over the launch env, before anything reads it.
+profiles.apply()
 
 
 def _detect_device() -> str:
