@@ -128,6 +128,9 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
 # Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
 PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
 
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel; above it CUTLASS's grouped GEMM.
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
 
@@ -210,13 +213,22 @@ class Qwen3SparseMoE(nn.Module):
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
-        h = self.experts.gate_up(flat[tok], offs)
-        if on:
+        M = tok.numel()
+        if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
+            # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).
+            from inference_server.models import moe_kernel
+            sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
+            h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
             act = fused.silu_mul(h)
+            y = moe_kernel.moe_gemm(act, None, self.experts.down_proj, sorted_ids, expert_ids, M)
         else:
-            gate, up = h.chunk(2, dim=-1)
-            act = F.silu(gate) * up
-        y = self.experts.down(act, offs)
+            h = self.experts.gate_up(flat[tok], offs)
+            if on:
+                act = fused.silu_mul(h)
+            else:
+                gate, up = h.chunk(2, dim=-1)
+                act = F.silu(gate) * up
+            y = self.experts.down(act, offs)
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
 
