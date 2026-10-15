@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from inference_server.models import fused
 from inference_server.models.gemma4 import GemmaRotaryEmbedding, _skip_param_init, apply_rotary
 
 
@@ -31,6 +32,8 @@ class Qwen3RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda and fused._on(x):
+            return fused.rmsnorm(x, self.weight, self.eps)
         x32 = x.float()
         x32 = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
         return self.weight * x32.to(x.dtype)
@@ -58,11 +61,17 @@ class Qwen3Attention(nn.Module):
 
     def forward(self, x, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         B, S, _ = x.shape
-        q = self.q_norm(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim))
-        k = self.k_norm(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
-        q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hq, S, D]
-        k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
+        if x.is_cuda and fused._on(x):          # head norm + rotary in one launch each
+            q = fused.rmsnorm_rope(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim), self.q_norm.weight,
+                                   cos, sin, self.q_norm.eps).transpose(1, 2)
+            k = fused.rmsnorm_rope(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim), self.k_norm.weight,
+                                   cos, sin, self.k_norm.eps).transpose(1, 2)
+        else:
+            q = self.q_norm(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim))
+            k = self.k_norm(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim))
+            q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hq, S, D]
+            k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
         v = v.transpose(1, 2)
 
         if paged_ctx is not None:   # CUDA kernel path, identical contract to GemmaAttention
@@ -192,14 +201,22 @@ class Qwen3SparseMoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, H = x.shape
         flat = x.reshape(-1, H)
-        weights, experts = route(self.gate(flat), self.top_k, self.norm_topk_prob)
+        logits = self.gate(flat)
+        on = flat.is_cuda and fused._on(flat)
+        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob) if on
+                            else route(logits, self.top_k, self.norm_topk_prob))
         E = self.experts.num_experts
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
-        gate, up = self.experts.gate_up(flat[tok], offs).chunk(2, dim=-1)
-        y = self.experts.down(F.silu(gate) * up, offs)
+        h = self.experts.gate_up(flat[tok], offs)
+        if on:
+            act = fused.silu_mul(h)
+        else:
+            gate, up = h.chunk(2, dim=-1)
+            act = F.silu(gate) * up
+        y = self.experts.down(act, offs)
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
 
@@ -218,6 +235,9 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(self, h, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         a, kv_new = self.self_attn(self.input_layernorm(h), cos, sin, past_kv=past_kv,
                                    attn_mask=attn_mask, paged_ctx=paged_ctx, kv_layer_idx=kv_layer_idx)
+        if h.is_cuda and fused._on(h):          # residual add + post-attention norm in one launch
+            h, n = fused.add_rmsnorm(h, a, self.post_attention_layernorm.weight, self.post_attention_layernorm.eps)
+            return h + self.mlp(n), kv_new
         h = h + a
         return h + self.mlp(self.post_attention_layernorm(h)), kv_new
 
