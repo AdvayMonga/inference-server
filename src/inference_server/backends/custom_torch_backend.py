@@ -297,12 +297,15 @@ class CustomTorchBackend(InferenceBackend):
         if os.environ.get("CUSTOM_BACKEND_BLOCKS"):
             n_blocks = int(os.environ["CUSTOM_BACKEND_BLOCKS"])
         elif self.device.type == "cuda":
-            # From what the weights left free: a fixed 512 blocks held ~8k tokens of Qwen3-30B-A3B's
-            # KV on a 141 GB H200. The rest of the free memory is for activations and CUDA graphs.
+            # From what the weights leave free after the largest prefill wave the scheduler admits (its peak is
+            # measured, not guessed: a fixed 512 blocks held ~8k tokens, and 90% of the raw free memory OOMed
+            # on long prompts). The remaining share is for CUDA graphs and smaller transients.
+            peak = self._prefill_peak_bytes(settings.max_prefill_tokens or self.max_positions or 4096)
             free, _ = torch.cuda.mem_get_info(self.device)
-            n_blocks = blocks_for_budget(self.model, int(free * settings.kv_cache_memory_fraction), bsz)
-            logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free)", n_blocks, bsz,
-                        100 * settings.kv_cache_memory_fraction, free / 2**30)
+            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz)
+            logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free minus a %.1f GiB prefill peak "
+                        "at %d tokens)", n_blocks, bsz, 100 * settings.kv_cache_memory_fraction, free / 2**30,
+                        peak / 2**30, settings.max_prefill_tokens)
         else:
             n_blocks = 512
         sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
@@ -525,6 +528,21 @@ class CustomTorchBackend(InferenceBackend):
         if not cache.any_evicted:   # only cache prefixes that fit fully in the window
             self.prefix_cache.store(token_ids, cache.block_tables)
         return cache, first_token, cache.seq_len
+
+    @torch.no_grad()
+    def _prefill_peak_bytes(self, tokens: int) -> int:
+        """Peak memory above the weights of one prefill of `tokens` tokens, run through the plain (unpaged) forward
+        with the logits of the last position only: what the KV pools must leave room for."""
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        base = torch.cuda.memory_allocated(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        ids = torch.zeros(1, tokens, dtype=torch.long, device=self.device)
+        self.model(ids, logits_index=torch.tensor([tokens - 1], device=self.device))
+        torch.cuda.synchronize(self.device)
+        peak = torch.cuda.max_memory_allocated(self.device) - base
+        torch.cuda.empty_cache()
+        return peak
 
     @torch.no_grad()
     def prefill_batch(self, prompts, session_ids=None):
