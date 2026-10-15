@@ -252,6 +252,96 @@ def decode_splits(n_seqs: int, n_qheads: int) -> int:
     return min(_MAX_SPLITS, 1 << (s - 1).bit_length())      # round up to a power of two
 
 
+@triton.jit
+def _gqa_decode_splitk_kernel(
+    Q, Kp, Vp, BT, SL, PM, PL, PA,
+    sq_n, sq_h,
+    sk_b, sk_h, sk_s,
+    pm_n, pm_h,
+    pa_n, pa_h, pa_s,
+    bt_n,
+    scale, window,
+    GROUP: tl.constexpr, G_PAD: tl.constexpr, BLOCK_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr, D: tl.constexpr, SPLITS: tl.constexpr,
+):
+    # One program per (seq, kv_head, split): all GROUP query heads share each K/V load.
+    seq = tl.program_id(0)
+    kvh = tl.program_id(1)
+    sp = tl.program_id(2)
+
+    g = tl.arange(0, G_PAD)
+    gm = g < GROUP
+    heads = kvh * GROUP + g
+    d = tl.arange(0, D)
+    n = tl.arange(0, BLOCK_N)
+
+    L = tl.load(SL + seq)
+    lo = L - window
+    kstart = (tl.maximum(lo, 0) // BLOCK_SIZE) * BLOCK_SIZE
+    n_tiles = (L - kstart + BLOCK_N - 1) // BLOCK_N
+    per = (n_tiles + SPLITS - 1) // SPLITS
+    t0 = sp * per
+    t1 = tl.minimum(t0 + per, n_tiles)
+
+    q = tl.load(Q + seq * sq_n + heads[:, None] * sq_h + d[None, :],
+                mask=gm[:, None], other=0.0).to(Kp.dtype.element_ty)   # [G_PAD, D]
+
+    m_i = tl.zeros([G_PAD], dtype=tl.float32) - 1e30
+    l_i = tl.zeros([G_PAD], dtype=tl.float32)
+    acc = tl.zeros([G_PAD, D], dtype=tl.float32)
+
+    for t in range(t0, t1):
+        offs = kstart + t * BLOCK_N + n
+        valid = (offs < L) & (offs >= lo)
+        blk = tl.load(BT + seq * bt_n + offs // BLOCK_SIZE, mask=valid, other=0)
+        base = blk * sk_b + kvh * sk_h + (offs % BLOCK_SIZE) * sk_s
+        k = tl.load(Kp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0)
+        s = tl.dot(q, tl.trans(k)) * scale                          # [G_PAD, BLOCK_N]
+        s = tl.where(valid[None, :], s, -float("inf"))
+        m_new = tl.maximum(m_i, tl.max(s, axis=1))
+        alpha = tl.exp(m_i - m_new)
+        p = tl.exp(s - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        v = tl.load(Vp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0)
+        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+        m_i = m_new
+
+    tl.store(PM + seq * pm_n + heads * pm_h + sp, m_i, mask=gm)
+    tl.store(PL + seq * pm_n + heads * pm_h + sp, l_i, mask=gm)
+    tl.store(PA + seq * pa_n + heads[:, None] * pa_h + sp * pa_s + d[None, :], acc,
+             mask=gm[:, None])
+
+
+@triton.jit
+def _splitk_combine_vec_kernel(
+    PM, PL, PA, Out,
+    pm_n, pm_h,
+    pa_n, pa_h, pa_s,
+    so_n, so_h,
+    D: tl.constexpr, SPLITS: tl.constexpr,
+):
+    seq = tl.program_id(0)
+    qh = tl.program_id(1)
+    d = tl.arange(0, D)
+    sp = tl.arange(0, SPLITS)
+    ms = tl.load(PM + seq * pm_n + qh * pm_h + sp)
+    ls = tl.load(PL + seq * pm_n + qh * pm_h + sp)
+    mmax = tl.max(ms, axis=0)
+    w = tl.exp(ms - mmax)
+    l_tot = tl.sum(ls * w, axis=0)
+    a = tl.load(PA + seq * pa_n + qh * pa_h + sp[:, None] * pa_s + d[None, :])
+    acc = tl.sum(a * w[:, None], axis=0)
+    out = acc / l_tot
+    tl.store(Out + seq * so_n + qh * so_h + d, out.to(Out.dtype.element_ty))
+
+
+def _gqa_splits(n_seqs: int, n_kv: int) -> int:
+    base = max(1, n_seqs * n_kv)
+    s = (256 + base - 1) // base
+    s = 1 << (s - 1).bit_length()
+    return max(2, min(16, s))
+
+
 def paged_decode_attention(
     q: torch.Tensor,          # [N, Hq, D] — one decode token per sequence
     k_pool: torch.Tensor,     # [num_blocks, num_kv_heads, block_size, D]
@@ -264,9 +354,44 @@ def paged_decode_attention(
     """Decode attention reading K/V via block tables. Returns [N, Hq, D] (q's dtype)."""
     N, Hq, D = q.shape
     num_kv_heads = k_pool.shape[1]
-    out = torch.empty(N, Hq, D, dtype=torch.float32, device=q.device)
     q = q.contiguous()
+    group = Hq // num_kv_heads
+    bs = k_pool.shape[2]
 
+    # GQA-packed split-K: one program per (sequence, KV head, split) serves all GROUP query heads from each K/V load.
+    # Found by the layer-1 loop (BlameGraph kernels/evolve, 2026-10-14) and validated for head dim <= 128 only; wider
+    # heads (Gemma 4) keep the tuned launch table below.
+    if (D & (D - 1)) == 0 and 16 <= D <= 128 and (bs & (bs - 1)) == 0 and k_pool.dtype in (
+            torch.float16, torch.bfloat16):
+        g_pad = max(16, 1 << (group - 1).bit_length())
+        block_n = 64 if D <= 128 else (32 if D <= 256 else 16)
+        block_n = max(block_n, bs) if bs <= 64 else block_n
+        splits = _gqa_splits(N, num_kv_heads)
+        pm = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
+        pl = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
+        pa = torch.empty(N, Hq, splits, D, dtype=torch.float32, device=q.device)
+        _gqa_decode_splitk_kernel[(N, num_kv_heads, splits)](
+            q, k_pool, v_pool, block_tables, seq_lens, pm, pl, pa,
+            q.stride(0), q.stride(1),
+            k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
+            pm.stride(0), pm.stride(1),
+            pa.stride(0), pa.stride(1), pa.stride(2),
+            block_tables.stride(0),
+            scale, window,
+            GROUP=group, G_PAD=g_pad, BLOCK_SIZE=bs, BLOCK_N=block_n, D=D, SPLITS=splits,
+            num_warps=4,
+        )
+        out = torch.empty(N, Hq, D, dtype=q.dtype, device=q.device)
+        _splitk_combine_vec_kernel[(N, Hq)](
+            pm, pl, pa, out,
+            pm.stride(0), pm.stride(1),
+            pa.stride(0), pa.stride(1), pa.stride(2),
+            out.stride(0), out.stride(1),
+            D=D, SPLITS=splits, num_warps=4,
+        )
+        return out
+
+    out = torch.empty(N, Hq, D, dtype=torch.float32, device=q.device)
     cfg = launch_table.lookup("paged_decode", N, D, k_pool.shape[2])
     splits = cfg["splits"] if cfg else decode_splits(N, Hq)
     kw = launch_table.compile_kwargs(cfg)
