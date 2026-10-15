@@ -110,14 +110,63 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     return weights.to(router_logits.dtype), experts
 
 
+FP8 = torch.float8_e4m3fn
+FP8_MAX = 448.0
+
+
+def quantize_rowwise(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric fp8 e4m3 along the last dim: (q, scale), scale fp32 of shape x.shape[:-1], so x ~ q * scale[..., None]."""
+    amax = x.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1e-12)
+    scale = amax / FP8_MAX
+    return (x.float() / scale).clamp(-FP8_MAX, FP8_MAX).to(FP8), scale.squeeze(-1)
+
+
+def _fake_quantize(x: torch.Tensor) -> torch.Tensor:
+    q, s = quantize_rowwise(x)
+    return (q.to(torch.float32) * s[..., None]).to(x.dtype)
+
+
 class Qwen3Experts(nn.Module):
-    """All experts' SwiGLU weights as 3D tensors (HF's layout): gate_up [E, 2I, H], down [E, H, I]."""
+    """All experts' SwiGLU weights as 3D tensors (HF's layout): gate_up [E, 2I, H], down [E, H, I]. `quantize_fp8`
+    swaps them for fp8 e4m3 with one fp32 scale per expert and output channel; activations are then quantized per
+    token on the fly and the GEMMs run in fp8 (half the weight bytes per decode step, the MoE's limit)."""
 
     def __init__(self, num_experts: int, hidden_size: int, moe_intermediate: int,
                  dtype: torch.dtype = torch.bfloat16):
         super().__init__()
+        self.num_experts = num_experts
+        self.fp8 = False
         self.gate_up_proj = nn.Parameter(torch.empty(num_experts, 2 * moe_intermediate, hidden_size, dtype=dtype))
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, moe_intermediate, dtype=dtype))
+
+    @torch.no_grad()
+    def quantize_fp8(self) -> None:
+        """Weights to fp8 (per output channel), the bf16 copies freed. Purely mathematical: no data touches it."""
+        for name in ("gate_up_proj", "down_proj"):
+            w = self._parameters.pop(name).data
+            q, s = quantize_rowwise(w)
+            del w
+            self.register_buffer(f"{name}_fp8", q)
+            self.register_buffer(f"{name}_scale", s.contiguous())
+        self.fp8 = True
+
+    def gate_up(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+        return self._mm(a, "gate_up_proj", offs)
+
+    def down(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+        return self._mm(a, "down_proj", offs)
+
+    def _mm(self, a: torch.Tensor, name: str, offs: torch.Tensor) -> torch.Tensor:
+        """Grouped GEMM of the expert-sorted rows `a` against weight stack `name`, groups ending at `offs`."""
+        if not self.fp8:
+            return torch._grouped_mm(a, getattr(self, name).transpose(-2, -1), offs=offs)
+        w, s = getattr(self, f"{name}_fp8"), getattr(self, f"{name}_scale")
+        if a.is_cuda:
+            a8, sa = quantize_rowwise(a)
+            return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
+        # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
+        deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
+        return torch._grouped_mm(_fake_quantize(a), deq.transpose(-2, -1), offs=offs)
 
 
 class Qwen3SparseMoE(nn.Module):
@@ -135,14 +184,13 @@ class Qwen3SparseMoE(nn.Module):
         B, S, H = x.shape
         flat = x.reshape(-1, H)
         weights, experts = route(self.gate(flat), self.top_k, self.norm_topk_prob)
-        E = self.experts.gate_up_proj.shape[0]
+        E = self.experts.num_experts
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
-        gate, up = torch._grouped_mm(flat[tok], self.experts.gate_up_proj.transpose(-2, -1),
-                                     offs=offs).chunk(2, dim=-1)
-        y = torch._grouped_mm(F.silu(gate) * up, self.experts.down_proj.transpose(-2, -1), offs=offs)
+        gate, up = self.experts.gate_up(flat[tok], offs).chunk(2, dim=-1)
+        y = self.experts.down(F.silu(gate) * up, offs)
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
 

@@ -269,10 +269,18 @@ class CustomTorchBackend(InferenceBackend):
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
         # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
-        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8"
-        if quant and moe:
+        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
+        if quant == "fp8" and moe and self.device.type == "cuda":
+            # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
+            for layer in self.model.model.layers:
+                layer.mlp.experts.quantize_fp8()
+            torch.cuda.empty_cache()
+            logger.info("MoE experts quantized to fp8 e4m3 (per output channel; activations per token)")
+        elif quant == "fp8":
+            logger.warning("CUSTOM_BACKEND_QUANT=fp8 needs qwen3_moe on CUDA; ignoring")
+        elif quant == "int8" and moe:
             logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
-        elif quant:
+        elif quant == "int8":
             from inference_server.models.quant import quantize_model_int8
             # On CUDA, route layers through the shared compiled GEMV so Inductor fuses the dequant
             # (keeps weight int8 in HBM — the bandwidth win); composes with the decode CUDA graph.
