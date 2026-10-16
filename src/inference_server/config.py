@@ -49,6 +49,8 @@ class Settings:
     # Batched prefill: the most (right-padded) tokens one wave may carry, rows x the longest prompt. Bounds the
     # activation peak, which the KV pools are sized around (a wave of long prompts OOMed with no cap). 0 = none.
     max_prefill_tokens: int = 32768
+    # Decode step n launched with step n-1's tokens still on the device; n-1's tokens processed while n runs.
+    async_decode: bool = False
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
@@ -129,6 +131,7 @@ def load_settings() -> Settings:
         max_prefill_tokens=int(os.environ.get("MAX_PREFILL_TOKENS", Settings.max_prefill_tokens)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
         max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
+        async_decode=os.environ.get("ASYNC_DECODE", str(Settings.async_decode)).lower() in ("1", "true"),
         prefix_cache_impl=os.environ.get("PREFIX_CACHE_IMPL", Settings.prefix_cache_impl),
         prefix_cache_max_entries=int(os.environ.get(
             "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),
