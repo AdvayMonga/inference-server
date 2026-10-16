@@ -85,6 +85,7 @@ class _ActiveRow:
     request: ScheduledRequest
     current_token: int       # token to feed next forward pass
     real_kv_len: int         # actual KV cache length for this row
+    fresh: bool = True       # current_token not yet appended/streamed/checked for EOS by _evict_finished
 
 
 @dataclass
@@ -148,6 +149,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
+                 async_decode: bool = False,
                  telemetry: RowStore | None = None,
                  timeline: Timeline | None = None):
         self.backend = backend
@@ -185,6 +187,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # has already waited this long has blown any SLO it had; fail it fast and free the slot.
         # 0 disables the deadline.
         self.max_queue_wait_s = max_queue_wait_s
+        # Async decode: step n is launched with step n-1's tokens still on the device, and n-1's tokens are read
+        # back and processed (streamed, EOS, evictions) while n runs. The host lags the GPU by one step; a row that
+        # finished at n-1 has decoded one token too many at n, which is dropped.
+        self.async_decode = async_decode
+        self._pending: tuple | None = None       # (tokens on device, rows at launch, host copy, event)
         self.policy: SchedulingPolicy = policy if policy is not None else FCFSPolicy()
         self._pending_lock = threading.Lock()
         self._pending_cv = threading.Condition(self._pending_lock)
@@ -339,6 +346,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "total_preempted": self._total_preempted,
             "total_expired": self._total_expired,
             "max_queue_wait_s": self.max_queue_wait_s,
+            "async_decode": self.async_decode,
             "total_iteration_errors": self._total_iteration_errors,
             "telemetry": (self._telemetry.stats() if self._telemetry is not None
                           else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
@@ -377,6 +385,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._advance_prefill_chunk(device)
                     with self._timeline.phase("evict"):
                         self._evict_finished()
+                    if not self._active:
+                        self._pending = None            # every row of the last step has gone
                     if self._active:
                         self._active_samples += 1
                         self._active_sum += len(self._active)
@@ -384,7 +394,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._active_high_water = len(self._active)
                         try:
                             with self._timeline.phase("decode", batch=len(self._active)):
-                                self._decode_step(device)
+                                if self.async_decode:
+                                    self._decode_step_async(device)
+                                else:
+                                    self._decode_step(device)
                         except Exception as e:
                             # Under genuine KV pressure the NEWEST request should pay, not the
                             # whole batch. Preempt one row (freeing its blocks) and let the next
@@ -433,6 +446,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if row.request.cancelled:
                 to_evict.append((i, "cancelled"))
                 continue
+            if not row.fresh:                 # async decode: this row's latest token is still on the device
+                continue
+            row.fresh = False
 
             if self.backend.is_eos(tok):
                 to_evict.append((i, "ok"))
@@ -832,12 +848,68 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row, tok in zip(self._active, next_tokens.tolist()):
             row.current_token = tok
             row.real_kv_len += 1
+            row.fresh = True
             req = row.request
             # Two int adds and a compare: the decode-time width every row here just shared.
             req.decode_width_sum += batch_size
             req.decode_width_steps += 1
             if batch_size > req.decode_width_max:
                 req.decode_width_max = batch_size
+            self.policy.on_tokens_processed(req, 1)
+
+    def _decode_step_async(self, device: str) -> None:
+        """Launch this step, then process the previous one. Inputs: continuing rows take their latest token from the
+        previous step's output on the device (no host round trip); rows that joined since take their first token
+        from the host. Positions come from the backend's state."""
+        batch = list(self._active)
+        n = len(batch)
+        if self._pending is not None:
+            out_prev, snap_prev = self._pending[0], self._pending[1]
+            where = {id(r): i for i, r in enumerate(snap_prev)}
+            current = torch.empty(n, dtype=torch.long, device=out_prev.device)
+            dst = [i for i, r in enumerate(batch) if id(r) in where]
+            if dst:
+                src = torch.tensor([where[id(batch[i])] for i in dst], device=out_prev.device)
+                current[torch.tensor(dst, device=out_prev.device)] = out_prev[src]
+            new = [i for i, r in enumerate(batch) if id(r) not in where]
+            if new:
+                current[torch.tensor(new, device=out_prev.device)] = torch.tensor(
+                    [batch[i].current_token for i in new], dtype=torch.long, device=out_prev.device)
+        else:
+            current = torch.tensor([r.current_token for r in batch], dtype=torch.long, device=device)
+        next_tokens, self._batched_kv = self.backend.decode_step_batched(
+            current.unsqueeze(1), self._batched_kv, self._attention_mask, None,
+            sampling_per_row=[r.request.sampling for r in batch])
+        if next_tokens.is_cuda:
+            host = torch.empty(n, dtype=next_tokens.dtype, pin_memory=True)
+            host.copy_(next_tokens, non_blocking=True)
+            event = torch.cuda.Event()
+            event.record()
+        else:
+            host, event = next_tokens.clone(), None
+        if self._pending is not None:
+            self._finish_pending()                 # the previous step's tokens, while this step runs
+        self._pending = (next_tokens, batch, host, event)
+
+    def _finish_pending(self) -> None:
+        """Read the previous step's tokens and hand them to the rows that still exist (`_evict_finished` streams
+        them and evicts the finished ones next iteration, before the following launch)."""
+        _, snap, host, event = self._pending
+        if event is not None:
+            event.synchronize()
+        alive = {id(r) for r in self._active}
+        width = len(snap)
+        for row, tok in zip(snap, host.tolist()):
+            if id(row) not in alive:
+                continue                           # finished or cancelled since: its extra token is dropped
+            row.current_token = tok
+            row.real_kv_len += 1
+            row.fresh = True
+            req = row.request
+            req.decode_width_sum += width
+            req.decode_width_steps += 1
+            if width > req.decode_width_max:
+                req.decode_width_max = width
             self.policy.on_tokens_processed(req, 1)
 
     # --- Cross-thread helpers ---

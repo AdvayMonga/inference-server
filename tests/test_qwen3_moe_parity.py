@@ -219,6 +219,22 @@ async def test_mixed_prefill_matches_hf_greedy(backend, hf):
     assert sched.stats()["prefill_chunks_processed"] >= 3
 
 
+async def test_async_decode_matches_hf_greedy(backend, hf):
+    """Step n fed from step n-1's output tensor, tokens processed a step late: still HF's greedy tokens."""
+    from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8, async_decode=True)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=list(p), max_tokens=8, session_id=f"a{i}",
+                                 future=loop.create_future()) for i, p in enumerate(PROMPTS)]
+        outs = await asyncio.gather(*(sched.submit(r) for r in reqs))
+    finally:
+        await sched.stop()
+    assert outs == [_hf_greedy(hf, p, 8) for p in PROMPTS]
+
+
 async def test_unfittable_request_rejected_at_once_and_does_not_block_the_queue(backend):
     """64 blocks of 2 = 128 tokens per pool: 9 + 200 can never fit, so it fails at submit."""
     import time
