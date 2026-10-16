@@ -10,6 +10,7 @@ lm_head, no softcap. Module names mirror HF's state_dict keys so loading is one 
 
 from __future__ import annotations
 
+import functools
 import os
 
 import torch
@@ -130,6 +131,11 @@ class Qwen3Attention(nn.Module):
         return out, (k, v)   # only the new K/V; the model owns the cache
 
 
+@functools.lru_cache(maxsize=None)
+def _experts_arange(num_experts: int, device: torch.device) -> torch.Tensor:
+    return torch.arange(num_experts, device=device)
+
+
 def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     """Softmax over experts in fp32 → top-k → optional renormalise. Returns (weights, expert ids)."""
     probs = F.softmax(router_logits, dim=-1, dtype=torch.float)
@@ -226,7 +232,7 @@ class Qwen3SparseMoE(nn.Module):
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
-        offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
+        offs = torch.searchsorted(sorted_e, _experts_arange(E, x.device), right=True).to(torch.int32)
         M = tok.numel()
         if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
             # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).
