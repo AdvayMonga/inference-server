@@ -270,6 +270,9 @@ class CustomTorchBackend(InferenceBackend):
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
         # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
+        if moe and os.environ.get("CUSTOM_BACKEND_FUSE_QKV", "1") == "1":
+            for layer in self.model.model.layers:
+                layer.self_attn.fuse_qkv()
         quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
         if quant == "fp8" and moe and self.device.type == "cuda":
             # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
@@ -791,11 +794,14 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
+        # One stacked table for every live layer; the per-layer views feed the kernels. Replay then refreshes
+        # all layers in a handful of launches instead of a fill + copy per layer (96 at 48 layers).
+        live = [L for L, pool in enumerate(self.pools) if pool is not None]
+        scratch_col = torch.tensor([self._scratch[L] for L in live], dtype=torch.long, device=dev)[:, None, None]
+        g_bt_all = scratch_col.expand(len(live), bucket, cols).clone()
         g_bt = [None] * len(self.pools)
-        for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            g_bt[L] = torch.full((bucket, cols), self._scratch[L], dtype=torch.long, device=dev)
+        for i, L in enumerate(live):
+            g_bt[L] = g_bt_all[i]
         ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
@@ -816,8 +822,8 @@ class CustomTorchBackend(InferenceBackend):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):   # private pool per bucket — see docstring
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
-            self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos,
-                                    "seqlens": g_seqlens, "bt": g_bt, "out": out}
+            self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos, "seqlens": g_seqlens,
+                                    "bt": g_bt, "bt_all": g_bt_all, "live": live, "scratch_col": scratch_col, "out": out}
             print(f"[graphs]   bucket {bucket} captured in {time.perf_counter() - t_b:.1f}s",
                   flush=True)
         except Exception:
@@ -885,12 +891,14 @@ class CustomTorchBackend(InferenceBackend):
         g["pos"][:n].copy_(position_ids)
         g["seqlens"][:n].copy_(state.seq_lens)
         g["seqlens"][n:] = 1
-        for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            g["bt"][L].fill_(self._scratch[L])           # reset dummies + stale columns to scratch
-            bt = state.block_tables[L]
-            g["bt"][L][:n, :bt.shape[1]].copy_(bt.clamp_min(0))
+        tables = [state.block_tables[L] for L in g["live"]]
+        g["bt_all"].copy_(g["scratch_col"].expand_as(g["bt_all"]))   # reset dummies + stale columns to scratch
+        if all(t.shape == tables[0].shape for t in tables):
+            stacked = torch.stack(tables)                             # [layers, n, cols]: one copy for every layer
+            g["bt_all"][:, :n, :stacked.shape[2]].copy_(stacked.clamp_min(0))
+        else:
+            for i, bt in enumerate(tables):
+                g["bt_all"][i, :n, :bt.shape[1]].copy_(bt.clamp_min(0))
         g["graph"].replay()
         return g["out"][:n]
 
