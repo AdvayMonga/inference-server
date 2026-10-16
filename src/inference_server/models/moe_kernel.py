@@ -27,7 +27,7 @@ def _arange(n: int, device: torch.device, scale: int = 1) -> torch.Tensor:
 def _moe_gemm_kernel(A, TOK, W, C, SORTED, EXPERT_IDS, M, N, K,
                      stride_am, stride_wn, stride_wk, stride_cm,
                      E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                     ROWS_FROM_TOKENS: tl.constexpr):
+                     ROWS_FROM_TOKENS: tl.constexpr, EVEN_K: tl.constexpr, EVEN_N: tl.constexpr):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     e = tl.load(EXPERT_IDS + pid_m)
@@ -47,9 +47,16 @@ def _moe_gemm_kernel(A, TOK, W, C, SORTED, EXPERT_IDS, M, N, K,
     w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + offs_k[None, :] * stride_wk
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k0 in range(0, K, BLOCK_K):
-        k_ok = (k0 + offs_k) < K
-        a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
-        w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
+        if EVEN_K:
+            a = tl.load(a_ptrs, mask=valid[:, None], other=0.0)
+            if EVEN_N:
+                w = tl.load(w_ptrs, eviction_policy="evict_first")
+            else:
+                w = tl.load(w_ptrs, mask=n_ok[:, None], other=0.0, eviction_policy="evict_first")
+        else:
+            k_ok = (k0 + offs_k) < K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0, eviction_policy="evict_first")
         acc += tl.dot(a, tl.trans(w))
         a_ptrs += BLOCK_K
         w_ptrs += BLOCK_K * stride_wk
@@ -88,10 +95,12 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     `w` [E, N, K] bf16 contiguous."""
     E, N, K = w.shape
     C = torch.empty(M, N, dtype=a.dtype, device=a.device)
-    BLOCK_N, BLOCK_K = 128, 64
+    BLOCK_N, BLOCK_K = 64, 128
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
     _moe_gemm_kernel[grid](a, tok if tok is not None else a, w, C, sorted_ids, expert_ids, M, N, K,
                            a.stride(0), w.stride(1), w.stride(2), C.stride(0),
                            E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                           ROWS_FROM_TOKENS=tok is not None, num_warps=4, num_stages=3)
+                           ROWS_FROM_TOKENS=tok is not None,
+                           EVEN_K=(K % BLOCK_K == 0), EVEN_N=(N % BLOCK_N == 0),
+                           num_warps=4, num_stages=4)
     return C
