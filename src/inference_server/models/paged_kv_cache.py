@@ -635,6 +635,11 @@ class BatchedDecodeState:
         self._live = [L for L, p in enumerate(pools) if p is not None]
         self._li = {L: i for i, L in enumerate(self._live)}
         self.bt: torch.Tensor | None = None
+        # Host mirrors of what join, leave and allocation need, so none of them waits on the GPU (an async decode
+        # step overlaps host work with the running forward; a .item() here would serialize them again).
+        self._host_len: list[int] = []                   # per row: logical length (pre-step)
+        self._host_alloc: list[int] = []                 # per row: logical blocks allocated
+        self._host_blocks: list[list[list[int]]] = []    # per row, per live layer: block ids
         # Sliding layers all share one window + seq_lens, so they evict in lockstep → one
         # shared evicted-count tensor [R] (not per-layer), enabling a sync-free fast path.
         self._sliding = [L for L, p in enumerate(pools) if p is not None and p.window is not None]
@@ -667,6 +672,9 @@ class BatchedDecodeState:
         tables = [pkv.block_tables[L] for L in self._live]
         n0 = max((len(t) for t in tables), default=0)
         self.n_alloc = torch.cat([self.n_alloc, torch.tensor([n0], device=self.device)])
+        self._host_len.append(pkv.seq_len)
+        self._host_alloc.append(n0)
+        self._host_blocks.append([list(t) for t in tables])
         cols = max(n0, self.bt.shape[2] if self.bt is not None else 0)
         row = torch.tensor([t + [0] * (cols - len(t)) for t in tables], dtype=torch.long, device=self.device)
         if self.bt is None:
@@ -680,12 +688,13 @@ class BatchedDecodeState:
         """Free row `idx`'s blocks and drop it from the batch."""
         keep = [i for i in range(self.n_rows) if i != idx]
         keep_t = torch.tensor(keep, dtype=torch.long, device=self.device)
-        n_alloc_idx = int(self.n_alloc[idx].item())
-        blocks = self.bt[:, idx, :n_alloc_idx].tolist()                  # one D2H for every layer's blocks
+        blocks = self._host_blocks.pop(idx)                             # host mirror: no D2H
+        self._host_len.pop(idx)
+        self._host_alloc.pop(idx)
         for i, L in enumerate(self._live):
             pool = self.pools[L]
             for bid in blocks[i]:
-                if bid >= 0:  # -1 = already-evicted (freed); padding never reaches here (< n_alloc)
+                if bid >= 0:  # -1 = evicted (freed by advance); the mirror holds -1 there too
                     pool.release(bid)
         self.bt = self.bt[:, keep_t] if keep else None
         self.seq_lens = self.seq_lens[keep_t]
@@ -696,14 +705,19 @@ class BatchedDecodeState:
         """Alloc a block for every boundary-crossing row in every layer (once per step)."""
         if self.n_rows == 0:
             return
-        lb = self.seq_lens // self.bs                  # logical block of the new token, per row
-        crossing = (lb >= self.n_alloc).nonzero().flatten().tolist()
+        bs = self.bs                                   # from the host mirrors: no sync before the step
+        crossing = [r for r in range(self.n_rows) if self._host_len[r] // bs >= self._host_alloc[r]]
         if not crossing:
             return
-        lbs = lb[crossing].tolist()
+        lbs = [self._host_len[r] // bs for r in crossing]
         self.bt = self._grow_cols(self.bt, max(lbs) + 1)
-        new = torch.tensor([[self.pools[L].alloc() for _ in crossing] for L in self._live],
-                           dtype=torch.long, device=self.device)                  # [layers, crossing]
+        ids = [[self.pools[L].alloc() for _ in crossing] for L in self._live]
+        for i, _L in enumerate(self._live):
+            for j, r in enumerate(crossing):
+                self._host_blocks[r][i].append(ids[i][j])
+        for r in crossing:
+            self._host_alloc[r] += 1
+        new = torch.tensor(ids, dtype=torch.long, device=self.device)                  # [layers, crossing]
         rows_t = torch.tensor(crossing, dtype=torch.long, device=self.device)
         lbs_t = torch.tensor(lbs, dtype=torch.long, device=self.device)
         self.bt[:, rows_t, lbs_t] = new
@@ -731,6 +745,8 @@ class BatchedDecodeState:
         one `.any()` to check if any row crossed the window; the per-row Python (with its
         GPU→CPU `.item()` syncs) runs only when a block is actually evicted (~1 per 16 steps)."""
         self.seq_lens = self.seq_lens + 1
+        for r in range(len(self._host_len)):
+            self._host_len[r] += 1
         if self._window is None or self.n_rows == 0:
             return
         keep_from = ((self.seq_lens - self._window).clamp_min(0)) // self.bs   # [R], same for all sliding layers
@@ -740,10 +756,11 @@ class BatchedDecodeState:
         for r in need.nonzero().flatten().tolist():
             for i in range(int(self.evicted[r].item()), int(keep_from[r].item())):
                 for L in self._sliding:
-                    bid = int(self.block_tables[L][r, i].item())
+                    bid = self._host_blocks[r][self._li[L]][i]
                     if bid >= 0:
                         self.pools[L].release(bid)
                         self.block_tables[L][r, i] = -1
+                        self._host_blocks[r][self._li[L]][i] = -1
             self.evicted[r] = keep_from[r]
 
 

@@ -741,6 +741,8 @@ class CustomTorchBackend(InferenceBackend):
         if self.device.type == "cuda":
             state = batched_kv
             n = state.n_rows
+            if position_ids is None:                   # the state knows every row's position; no host round trip
+                position_ids = state.seq_lens.unsqueeze(1)
             state.prepare_step()  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
@@ -758,6 +760,8 @@ class CustomTorchBackend(InferenceBackend):
             n = len(rows)
             ctx = BatchedPagedKVCache(rows)
             seq_lens = [r.seq_len for r in rows]
+            if position_ids is None:                   # each row's own position, not the batch's longest
+                position_ids = torch.tensor([[L] for L in seq_lens], dtype=torch.long, device=self.device)
             lmax = max(seq_lens)
             mask = torch.zeros(n, 1, 1, lmax + 1, dtype=torch.bool, device=self.device)
             for i, L in enumerate(seq_lens):
