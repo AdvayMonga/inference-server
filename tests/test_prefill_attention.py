@@ -47,10 +47,11 @@ def _wave(rows):
 @pytest.mark.parametrize("rows", [[(0, 300)], [(40, 7)], [(160, 500)], [(33, 1)],
                                   [(0, 300), (0, 120), (0, 7)],                       # a cache-miss wave
                                   [(48, 200), (0, 333), (17, 1), (160, 64)]])          # mixed prefixes, ragged
-@pytest.mark.parametrize("batched_max", [10 ** 9, 0])                           # the wave path, then per row
-def test_sdpa_prefill_matches_the_paged_kernel(rows, batched_max, monkeypatch):
+@pytest.mark.parametrize("batched_max,group_max", [(10 ** 9, 10 ** 9), (0, 10 ** 9), (10 ** 9, 600)])  # wave, per row, grouped
+def test_sdpa_prefill_matches_the_paged_kernel(rows, batched_max, group_max, monkeypatch):
     from inference_server.models import prefill_attention
     monkeypatch.setattr(prefill_attention, "BATCHED_MAX_TOKENS", batched_max)
+    monkeypatch.setattr(prefill_attention, "GROUP_MAX_TOKENS", group_max)
     monkeypatch.setattr(prefill_attention, "PER_ROW_MAX_ROWS", 10 ** 9)
     q, k, v, ctx, ref = _wave(rows)
     got = prefill_attention.sdpa_prefill(q, k, v, ctx, 0, D ** -0.5)
