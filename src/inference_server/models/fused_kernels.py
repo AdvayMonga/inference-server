@@ -91,7 +91,8 @@ def _topk_softmax_kernel(X, Wt, Ids, stride_x, E: tl.constexpr, BLOCK_E: tl.cons
     scale = 1.0 / total if RENORM else 1.0
     for j in tl.static_range(K):
         v = tl.max(p, axis=0)
-        idx = tl.min(tl.where(p == v, cols, BLOCK_E), axis=0)
+        # A NaN row (a graph's dummy rows can carry them) matches nothing: clamp so the id stays a real expert.
+        idx = tl.minimum(tl.min(tl.where(p == v, cols, BLOCK_E), axis=0), E - 1)
         tl.store(Wt + row * K + j, v * scale)
         tl.store(Ids + row * K + j, idx.to(tl.int64))
         p = tl.where(cols == idx, -1.0, p)

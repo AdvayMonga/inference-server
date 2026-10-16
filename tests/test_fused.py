@@ -51,3 +51,11 @@ def test_silu_mul_and_topk_softmax():
         assert ids.dtype == torch.int64 and ids.shape == (37, 8)
         assert torch.equal(ids.sort(dim=-1).values, rids.sort(dim=-1).values)
         torch.testing.assert_close(w.sort(dim=-1).values, rw.sort(dim=-1).values, atol=2e-3, rtol=2e-2)
+
+
+def test_topk_softmax_keeps_ids_in_range_on_nan_rows():
+    from inference_server.models import fused
+    logits = torch.randn(4, 128, dtype=torch.bfloat16, device="cuda")
+    logits[1] = float("nan")
+    w, ids = fused.topk_softmax(logits, 8, True)
+    assert ids.min() >= 0 and ids.max() < 128

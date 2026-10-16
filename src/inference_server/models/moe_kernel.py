@@ -52,6 +52,7 @@ def align(sorted_experts: torch.Tensor, num_experts: int, block_m: int) -> tuple
     """Pad each expert's run of sorted pairs to a multiple of `block_m`: (sorted pair ids with `M` as padding, the
     expert of each row block, `num_experts` for blocks past the end). Device-side only, static shapes for graphs."""
     M = sorted_experts.numel()
+    sorted_experts = sorted_experts.clamp_(0, num_experts - 1)      # never index past the last expert
     dev = sorted_experts.device
     ar = torch.arange(num_experts, device=dev)
     ends = torch.searchsorted(sorted_experts, ar, right=True)
