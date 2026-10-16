@@ -20,6 +20,7 @@ Storage layout per pool: `[num_blocks, num_kv_heads, block_size, head_dim]`
 
 from __future__ import annotations
 
+import heapq
 from collections import OrderedDict
 
 import torch
@@ -275,6 +276,11 @@ class RadixPrefixCache:
         self.max_entries = max_entries      # kept for API parity; not a binding cap here
         self._nodes = 0
         self._clock = 0
+        # Leaves by last use, as a lazy min-heap: an entry is stale once its node gained a child, left the trie or was
+        # used again, and is skipped when popped. Evicting the LRU leaf is then O(log n), not a walk of the whole trie
+        # once per block (which made long-context prefill quadratic under memory pressure).
+        self._leaves: list[tuple[int, int, _RadixNode]] = []
+        self._seq = 0
         self.hits = 0
         self.lookups = 0
         self.evictions = 0
@@ -291,23 +297,42 @@ class RadixPrefixCache:
     def _capacity(self) -> int:
         return self.max_blocks
 
-    def _evict_lru_leaf(self) -> int:
-        """Drop the least recently used LEAF (an interior node is still someone's path)."""
-        best, stack = None, [self.root]
+    def _push_leaf(self, node: "_RadixNode") -> None:
+        if node is not self.root and not node.children:
+            self._seq += 1
+            heapq.heappush(self._leaves, (node.last_used, self._seq, node))
+            if len(self._leaves) > 4 * self._nodes + 64:          # bound the stale entries: rebuild from the trie
+                self._rebuild_leaves()
+
+    def _rebuild_leaves(self) -> None:
+        leaves, stack = [], [self.root]
         while stack:
             n = stack.pop()
             if n is not self.root and not n.children:
-                if best is None or n.last_used < best.last_used:
-                    best = n
+                self._seq += 1
+                leaves.append((n.last_used, self._seq, n))
             stack.extend(n.children.values())
+        heapq.heapify(leaves)
+        self._leaves = leaves
+
+    def _evict_lru_leaf(self) -> int:
+        """Drop the least recently used LEAF (an interior node is still someone's path)."""
+        best = None
+        while self._leaves:
+            used, _, n = heapq.heappop(self._leaves)
+            if n.parent is not None and not n.children and n.last_used == used:
+                best = n
+                break
         if best is None:
             return 0
         freed = 0
         for layer_idx, bid in best.blocks.items():
             if self.pools[layer_idx].release(bid):
                 freed += 1
-        best.parent.children.pop(best.chunk, None)
+        parent = best.parent
+        parent.children.pop(best.chunk, None)
         best.parent = None
+        self._push_leaf(parent)                  # its last child gone, the parent is now a leaf
         self._nodes -= 1
         self.evictions += 1
         return freed
@@ -325,6 +350,7 @@ class RadixPrefixCache:
                 break
             node = child
             node.last_used = self._tick()
+            self._push_leaf(node)
             for layer_idx, bid in node.blocks.items():
                 per_layer[layer_idx].append(bid)
             matched += bs
@@ -373,6 +399,7 @@ class RadixPrefixCache:
                 self._nodes += 1
             node = child
             node.last_used = self._tick()
+            self._push_leaf(node)
 
     def reclaim(self, min_blocks: int = 1) -> int:
         freed = 0
