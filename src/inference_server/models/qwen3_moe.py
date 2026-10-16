@@ -10,6 +10,7 @@ lm_head, no softcap. Module names mirror HF's state_dict keys so loading is one 
 
 from __future__ import annotations
 
+import functools
 import os
 
 import torch
@@ -59,17 +60,31 @@ class Qwen3Attention(nn.Module):
         self.q_norm = Qwen3RMSNorm(head_dim, eps=eps, dtype=dtype)
         self.k_norm = Qwen3RMSNorm(head_dim, eps=eps, dtype=dtype)
 
+    @torch.no_grad()
+    def fuse_qkv(self) -> None:
+        """One GEMM for q, k and v (their weights concatenated): three launches per layer become one."""
+        w = torch.cat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight], dim=0)
+        del self.q_proj, self.k_proj, self.v_proj
+        self.register_buffer("qkv_weight", w.contiguous())
+
+    def _qkv(self, x):
+        qd, kd = self.num_q_heads * self.head_dim, self.num_kv_heads * self.head_dim
+        if hasattr(self, "qkv_weight"):
+            return F.linear(x, self.qkv_weight).split([qd, kd, kd], dim=-1)
+        return self.q_proj(x), self.k_proj(x), self.v_proj(x)
+
     def forward(self, x, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         B, S, _ = x.shape
-        v = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
+        q, k, v = self._qkv(x)
+        v = v.view(B, S, self.num_kv_heads, self.head_dim)
         if x.is_cuda and fused._on(x):          # head norm + rotary in one launch each
-            q = fused.rmsnorm_rope(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim), self.q_norm.weight,
+            q = fused.rmsnorm_rope(q.view(B, S, self.num_q_heads, self.head_dim), self.q_norm.weight,
                                    cos, sin, self.q_norm.eps).transpose(1, 2)
-            k = fused.rmsnorm_rope(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim), self.k_norm.weight,
+            k = fused.rmsnorm_rope(k.view(B, S, self.num_kv_heads, self.head_dim), self.k_norm.weight,
                                    cos, sin, self.k_norm.eps).transpose(1, 2)
         else:
-            q = self.q_norm(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim))
-            k = self.k_norm(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim))
+            q = self.q_norm(q.view(B, S, self.num_q_heads, self.head_dim))
+            k = self.k_norm(k.view(B, S, self.num_kv_heads, self.head_dim))
             q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hq, S, D]
             k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
         v = v.transpose(1, 2)
@@ -114,6 +129,11 @@ class Qwen3Attention(nn.Module):
             attn = F.scaled_dot_product_attention(q, k_exp, v_exp, is_causal=S_q == S_k, scale=self.scale)
         out = self.o_proj(attn.transpose(1, 2).reshape(B, S, -1))
         return out, (k, v)   # only the new K/V; the model owns the cache
+
+
+@functools.lru_cache(maxsize=None)
+def _experts_arange(num_experts: int, device: torch.device) -> torch.Tensor:
+    return torch.arange(num_experts, device=device)
 
 
 def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
@@ -212,7 +232,7 @@ class Qwen3SparseMoE(nn.Module):
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
-        offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
+        offs = torch.searchsorted(sorted_e, _experts_arange(E, x.device), right=True).to(torch.int32)
         M = tok.numel()
         if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
             # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).

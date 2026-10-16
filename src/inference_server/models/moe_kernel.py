@@ -9,9 +9,18 @@ fp8 weights and large M keep the CUTLASS path."""
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
+
+
+@functools.lru_cache(maxsize=None)
+def _arange(n: int, device: torch.device, scale: int = 1) -> torch.Tensor:
+    """A constant index vector, built once per (n, device): these were ~6 launches per layer per step."""
+    ar = torch.arange(n, device=device)
+    return ar * scale if scale != 1 else ar
 
 
 @triton.jit
@@ -54,7 +63,7 @@ def align(sorted_experts: torch.Tensor, num_experts: int, block_m: int) -> tuple
     M = sorted_experts.numel()
     sorted_experts = sorted_experts.clamp_(0, num_experts - 1)      # never index past the last expert
     dev = sorted_experts.device
-    ar = torch.arange(num_experts, device=dev)
+    ar = _arange(num_experts, dev)
     ends = torch.searchsorted(sorted_experts, ar, right=True)
     starts = torch.searchsorted(sorted_experts, ar, right=False)
     counts = ends - starts
@@ -62,11 +71,11 @@ def align(sorted_experts: torch.Tensor, num_experts: int, block_m: int) -> tuple
     pstart = torch.cumsum(padded, 0) - padded                   # padded start of each expert
     max_pad = M + num_experts * (block_m - 1)
     sorted_ids = torch.full((max_pad,), M, dtype=torch.int32, device=dev)
-    i = torch.arange(M, device=dev)
+    i = _arange(M, dev)
     dest = pstart[sorted_experts] + (i - starts[sorted_experts])
     sorted_ids[dest] = i.to(torch.int32)
     n_blocks = max_pad // block_m
-    block_starts = torch.arange(n_blocks, device=dev) * block_m
+    block_starts = _arange(n_blocks, dev, block_m)
     total = pstart[-1] + padded[-1] if num_experts else 0
     expert_ids = torch.searchsorted(pstart, block_starts, right=True) - 1
     expert_ids = torch.where(block_starts < total, expert_ids, torch.full_like(expert_ids, num_experts))
