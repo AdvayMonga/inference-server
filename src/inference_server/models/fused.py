@@ -1,0 +1,85 @@
+"""Fused Triton kernels for the Qwen3-MoE layer on CUDA (bf16 activations).
+
+A decode step launched ~4,500 kernels across 48 layers (RMSNorm as 8 ops, RoPE as ~6, SiLU*up as 3, routing as
+~6, ...), and at 1-3 us each those tiny launches, not the GEMMs, set the ~20 ms step. Each function here is one
+launch with fp32 arithmetic inside and one bf16 rounding at the end; the torch code it replaces stays as the
+CPU path and the reference the tests compare against. Off with CUSTOM_BACKEND_FUSED=0."""
+
+from __future__ import annotations
+
+import os
+
+import importlib.util
+
+import torch
+
+ENABLED = os.environ.get("CUSTOM_BACKEND_FUSED", "1") == "1" and importlib.util.find_spec("triton") is not None
+
+
+class _Lazy:
+    """The kernels module, imported on first use."""
+    def __getattr__(self, name):
+        from inference_server.models import fused_kernels
+        return getattr(fused_kernels, name)
+
+
+K = _Lazy()
+
+
+def _on(*ts: torch.Tensor) -> bool:
+    return ENABLED and all(t.is_cuda and t.dtype == torch.bfloat16 for t in ts)
+
+
+def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    D = x.shape[-1]
+    x2 = x.reshape(-1, D)
+    if not x2.is_contiguous():
+        x2 = x2.contiguous()
+    y = torch.empty_like(x2)
+    K._rmsnorm_kernel[(x2.shape[0],)](x2, weight, y, x2.stride(0), y.stride(0), eps, D=D,
+                                     BLOCK=K.triton.next_power_of_2(D))
+    return y.view(x.shape)
+
+
+def add_rmsnorm(h: torch.Tensor, a: torch.Tensor, weight: torch.Tensor, eps: float) -> tuple[torch.Tensor, torch.Tensor]:
+    """(h + a, rmsnorm(h + a)), both bf16, one launch."""
+    D = h.shape[-1]
+    h2, a2 = h.reshape(-1, D).contiguous(), a.reshape(-1, D).contiguous()
+    ho, y = torch.empty_like(h2), torch.empty_like(h2)
+    K._add_rmsnorm_kernel[(h2.shape[0],)](h2, a2, weight, ho, y, h2.stride(0), eps, D=D, BLOCK=K.triton.next_power_of_2(D))
+    return ho.view(h.shape), y.view(h.shape)
+
+
+def rmsnorm_rope(x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float) -> torch.Tensor:
+    """x [B, S, H, D] -> head-wise RMSNorm then rotary (cos/sin [B, S, D], HF layout: halves repeat)."""
+    B, S, H, D = x.shape
+    x = x.contiguous()
+    y = torch.empty_like(x)
+    cos2, sin2 = cos.reshape(B * S, -1), sin.reshape(B * S, -1)
+    if not cos2.is_contiguous():
+        cos2, sin2 = cos2.contiguous(), sin2.contiguous()
+    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(0) // S if S else D * H, D, cos2.stride(0), eps,
+                                        H=H, D=D, HALF=D // 2)
+    return y
+
+
+def silu_mul(x: torch.Tensor) -> torch.Tensor:
+    """x [M, 2I] -> silu(x[:, :I]) * x[:, I:]."""
+    M, two_i = x.shape
+    I = two_i // 2
+    x = x.contiguous()
+    y = torch.empty(M, I, dtype=x.dtype, device=x.device)
+    BLOCK = 1024
+    K._silu_mul_kernel[(M, K.triton.cdiv(I, BLOCK))](x, y, x.stride(0), y.stride(0), I=I, BLOCK=BLOCK)
+    return y
+
+
+def topk_softmax(logits: torch.Tensor, k: int, renorm: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """Like models.qwen3_moe.route: (weights in logits' dtype, expert ids int64), both [M, k]."""
+    M, E = logits.shape
+    logits = logits.contiguous()
+    w = torch.empty(M, k, dtype=torch.float32, device=logits.device)
+    ids = torch.empty(M, k, dtype=torch.int64, device=logits.device)
+    K._topk_softmax_kernel[(M,)](logits, w, ids, logits.stride(0), E=E, BLOCK_E=K.triton.next_power_of_2(E), K=k,
+                               RENORM=renorm)
+    return w.to(logits.dtype), ids

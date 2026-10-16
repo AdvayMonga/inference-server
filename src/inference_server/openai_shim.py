@@ -9,6 +9,7 @@ DECISIONS [2026-05-18]."""
 import asyncio
 import itertools
 import json
+import logging
 import time
 from collections.abc import AsyncGenerator
 
@@ -18,6 +19,8 @@ from pydantic import BaseModel
 
 from inference_server.sampling import SamplingParams
 from inference_server.scheduler import QueueFullError, RequestTooLargeError, ScheduledRequest
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 _ids = itertools.count(1)  # request-id / session-id counter (no RNG needed)
@@ -107,34 +110,62 @@ def _chunk(cid: str, created: int, model: str, text: str, finish: str | None) ->
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def _stream(req: ScheduledRequest, tokenizer, cid: str, created: int, model: str,
-                  prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
+async def _first_token(req: ScheduledRequest) -> int | None:
+    """Wait for the first token before any byte of the response goes out, so a request that fails
+    before it (expired in the queue, shed, preempted) is still an HTTP status rather than a 200
+    whose stream is cut off. None: it ended without generating anything."""
+    try:
+        tok = await req.token_queue.get()
+    except asyncio.CancelledError:
+        req.cancelled = True
+        raise
+    if tok is None:
+        await req.future           # raises the request's failure, whatever order its signals came in
+    return tok
+
+
+async def _tokens(req: ScheduledRequest, first: int | None):
+    """Every generated token id, from `first`. Ends normally on completion; on a failure after the
+    first token it ends too, leaving `req.future` holding the error."""
+    tok = first
+    while tok is not None:
+        yield tok
+        tok = await req.token_queue.get()
+
+
+def _failed_midway(req: ScheduledRequest, n: int) -> bool:
+    """A failure after tokens were sent: the stream must end without a finish reason or [DONE],
+    so the client sees it cut short instead of a complete answer."""
+    exc = req.future.exception() if req.future.done() else None
+    if exc is not None:
+        logger.warning("request %s failed after %d tokens: %s", req.trace_id, n, exc)
+    return exc is not None
+
+
+async def _stream(req: ScheduledRequest, first: int | None, tokenizer, cid: str, created: int,
+                  model: str, prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
     """Stream one OpenAI chunk per generated token, then finish_reason + usage + [DONE]."""
     n = 0
     ended = False
     try:
-        while True:
-            tok_id = await req.token_queue.get()
-            if tok_id is None:
-                ended = True
-                break
+        async for tok_id in _tokens(req, first):
             text = tokenizer.decode_token(tok_id)
             n += 1
             if text:
                 yield _chunk(cid, created, model, text, None)
-        if req.future.done() and req.future.exception():
-            raise req.future.exception()  # type: ignore[misc]
+        ended = True
     finally:
         req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
-        finish = "length" if n >= max_tokens else "stop"
-        yield _chunk(cid, created, model, "", finish)
-        usage_payload = {
-            "id": cid, "object": "text_completion", "created": created, "model": model,
-            "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
-                                     "total_tokens": prompt_tokens + n},
-        }
-        yield f"data: {json.dumps(usage_payload)}\n\n"
-        yield "data: [DONE]\n\n"
+    if _failed_midway(req, n):
+        return
+    yield _chunk(cid, created, model, "", "length" if n >= max_tokens else "stop")
+    usage_payload = {
+        "id": cid, "object": "text_completion", "created": created, "model": model,
+        "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
+                                 "total_tokens": prompt_tokens + n},
+    }
+    yield f"data: {json.dumps(usage_payload)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 async def _score(request: Request, body: CompletionRequest, token_ids: list[int], loop) -> dict:
@@ -204,8 +235,13 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         except RequestTooLargeError as e:
             raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        try:
+            first = await _first_token(req)
+        except QueueFullError as e:
+            raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
-            _stream(req, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
+            _stream(req, first, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 
@@ -243,34 +279,31 @@ def _chat_chunk(cid: str, created: int, model: str, delta: dict, finish: str | N
     return f"data: {json.dumps(payload)}\n\n"
 
 
-async def _chat_stream(req: ScheduledRequest, tokenizer, cid: str, created: int, model: str,
-                       prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
+async def _chat_stream(req: ScheduledRequest, first: int | None, tokenizer, cid: str, created: int,
+                       model: str, prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
     """Role delta first (clients key off it), then one content delta per token, then usage."""
     n = 0
     ended = False
     try:
         yield _chat_chunk(cid, created, model, {"role": "assistant", "content": ""}, None)
-        while True:
-            tok_id = await req.token_queue.get()
-            if tok_id is None:
-                ended = True
-                break
+        async for tok_id in _tokens(req, first):
             text = tokenizer.decode_token(tok_id)
             n += 1
             if text:
                 yield _chat_chunk(cid, created, model, {"content": text}, None)
-        if req.future.done() and req.future.exception():
-            raise req.future.exception()  # type: ignore[misc]
+        ended = True
     finally:
         req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
-        yield _chat_chunk(cid, created, model, {}, "length" if n >= max_tokens else "stop")
-        usage_payload = {
-            "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
-            "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
-                                     "total_tokens": prompt_tokens + n},
-        }
-        yield f"data: {json.dumps(usage_payload)}\n\n"
-        yield "data: [DONE]\n\n"
+    if _failed_midway(req, n):
+        return
+    yield _chat_chunk(cid, created, model, {}, "length" if n >= max_tokens else "stop")
+    usage_payload = {
+        "id": cid, "object": "chat.completion.chunk", "created": created, "model": model,
+        "choices": [], "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": n,
+                                 "total_tokens": prompt_tokens + n},
+    }
+    yield f"data: {json.dumps(usage_payload)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 @router.post("/v1/chat/completions")
@@ -313,8 +346,13 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         except RequestTooLargeError as e:
             raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        try:
+            first = await _first_token(req)
+        except QueueFullError as e:
+            raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
-            _chat_stream(req, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
+            _chat_stream(req, first, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 

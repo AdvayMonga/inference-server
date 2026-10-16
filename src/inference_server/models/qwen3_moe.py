@@ -10,10 +10,13 @@ lm_head, no softcap. Module names mirror HF's state_dict keys so loading is one 
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from inference_server.models import fused
 from inference_server.models.gemma4 import GemmaRotaryEmbedding, _skip_param_init, apply_rotary
 
 
@@ -29,6 +32,8 @@ class Qwen3RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=dtype))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if x.is_cuda and fused._on(x):
+            return fused.rmsnorm(x, self.weight, self.eps)
         x32 = x.float()
         x32 = x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + self.eps)
         return self.weight * x32.to(x.dtype)
@@ -56,24 +61,34 @@ class Qwen3Attention(nn.Module):
 
     def forward(self, x, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         B, S, _ = x.shape
-        q = self.q_norm(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim))
-        k = self.k_norm(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim))
         v = self.v_proj(x).view(B, S, self.num_kv_heads, self.head_dim)
-        q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hq, S, D]
-        k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
+        if x.is_cuda and fused._on(x):          # head norm + rotary in one launch each
+            q = fused.rmsnorm_rope(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim), self.q_norm.weight,
+                                   cos, sin, self.q_norm.eps).transpose(1, 2)
+            k = fused.rmsnorm_rope(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim), self.k_norm.weight,
+                                   cos, sin, self.k_norm.eps).transpose(1, 2)
+        else:
+            q = self.q_norm(self.q_proj(x).view(B, S, self.num_q_heads, self.head_dim))
+            k = self.k_norm(self.k_proj(x).view(B, S, self.num_kv_heads, self.head_dim))
+            q = apply_rotary(q, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hq, S, D]
+            k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
         v = v.transpose(1, 2)
 
         if paged_ctx is not None:   # CUDA kernel path, identical contract to GemmaAttention
             from inference_server.models.paged_attention_kernel import (
                 paged_decode_attention, paged_prefill_attention,
             )
+            from inference_server.models.prefill_attention import sdpa_prefill
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
-                bt = paged_ctx.block_table_tensor(kv_layer_idx)
-                out = paged_prefill_attention(q.transpose(1, 2), pool.k, pool.v, bt,
-                                              paged_ctx.prefix_lens, paged_ctx.suffix_lens,
-                                              scale=self.scale)
+                if PREFILL_ATTN == "sdpa" and hasattr(paged_ctx, "caches"):   # eager prefill; the graph ctx has no caches
+                    out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
+                else:
+                    bt = paged_ctx.block_table_tensor(kv_layer_idx)
+                    out = paged_prefill_attention(q.transpose(1, 2), pool.k, pool.v, bt,
+                                                  paged_ctx.prefix_lens, paged_ctx.suffix_lens,
+                                                  scale=self.scale)
             else:
                 bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
                 out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=self.scale)
@@ -110,14 +125,69 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     return weights.to(router_logits.dtype), experts
 
 
+# Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
+PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
+
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+
+FP8 = torch.float8_e4m3fn
+FP8_MAX = 448.0
+
+
+def quantize_rowwise(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric fp8 e4m3 along the last dim: (q, scale), scale fp32 of shape x.shape[:-1], so x ~ q * scale[..., None]."""
+    amax = x.detach().abs().amax(dim=-1, keepdim=True).float().clamp_min(1e-12)
+    scale = amax / FP8_MAX
+    return (x.float() / scale).clamp(-FP8_MAX, FP8_MAX).to(FP8), scale.squeeze(-1)
+
+
+def _fake_quantize(x: torch.Tensor) -> torch.Tensor:
+    q, s = quantize_rowwise(x)
+    return (q.to(torch.float32) * s[..., None]).to(x.dtype)
+
+
 class Qwen3Experts(nn.Module):
-    """All experts' SwiGLU weights as 3D tensors (HF's layout): gate_up [E, 2I, H], down [E, H, I]."""
+    """All experts' SwiGLU weights as 3D tensors (HF's layout): gate_up [E, 2I, H], down [E, H, I]. `quantize_fp8`
+    swaps them for fp8 e4m3 with one fp32 scale per expert and output channel; activations are then quantized per
+    token on the fly and the GEMMs run in fp8 (half the weight bytes per decode step, the MoE's limit)."""
 
     def __init__(self, num_experts: int, hidden_size: int, moe_intermediate: int,
                  dtype: torch.dtype = torch.bfloat16):
         super().__init__()
+        self.num_experts = num_experts
+        self.fp8 = False
         self.gate_up_proj = nn.Parameter(torch.empty(num_experts, 2 * moe_intermediate, hidden_size, dtype=dtype))
         self.down_proj = nn.Parameter(torch.empty(num_experts, hidden_size, moe_intermediate, dtype=dtype))
+
+    @torch.no_grad()
+    def quantize_fp8(self) -> None:
+        """Weights to fp8 (per output channel), the bf16 copies freed. Purely mathematical: no data touches it."""
+        for name in ("gate_up_proj", "down_proj"):
+            w = self._parameters.pop(name).data
+            q, s = quantize_rowwise(w)
+            del w
+            self.register_buffer(f"{name}_fp8", q)
+            self.register_buffer(f"{name}_scale", s.contiguous())
+        self.fp8 = True
+
+    def gate_up(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+        return self._mm(a, "gate_up_proj", offs)
+
+    def down(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
+        return self._mm(a, "down_proj", offs)
+
+    def _mm(self, a: torch.Tensor, name: str, offs: torch.Tensor) -> torch.Tensor:
+        """Grouped GEMM of the expert-sorted rows `a` against weight stack `name`, groups ending at `offs`."""
+        if not self.fp8:
+            return torch._grouped_mm(a, getattr(self, name).transpose(-2, -1), offs=offs)
+        w, s = getattr(self, f"{name}_fp8"), getattr(self, f"{name}_scale")
+        if a.is_cuda:
+            a8, sa = quantize_rowwise(a)
+            return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
+        # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
+        deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
+        return torch._grouped_mm(_fake_quantize(a), deq.transpose(-2, -1), offs=offs)
 
 
 class Qwen3SparseMoE(nn.Module):
@@ -134,15 +204,31 @@ class Qwen3SparseMoE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, S, H = x.shape
         flat = x.reshape(-1, H)
-        weights, experts = route(self.gate(flat), self.top_k, self.norm_topk_prob)
-        E = self.experts.gate_up_proj.shape[0]
+        logits = self.gate(flat)
+        on = flat.is_cuda and fused._on(flat)
+        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob) if on
+                            else route(logits, self.top_k, self.norm_topk_prob))
+        E = self.experts.num_experts
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, torch.arange(E, device=x.device), right=True).to(torch.int32)
-        gate, up = torch._grouped_mm(flat[tok], self.experts.gate_up_proj.transpose(-2, -1),
-                                     offs=offs).chunk(2, dim=-1)
-        y = torch._grouped_mm(F.silu(gate) * up, self.experts.down_proj.transpose(-2, -1), offs=offs)
+        M = tok.numel()
+        if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
+            # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).
+            from inference_server.models import moe_kernel
+            sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
+            h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
+            act = fused.silu_mul(h)
+            y = moe_kernel.moe_gemm(act, None, self.experts.down_proj, sorted_ids, expert_ids, M)
+        else:
+            h = self.experts.gate_up(flat[tok], offs)
+            if on:
+                act = fused.silu_mul(h)
+            else:
+                gate, up = h.chunk(2, dim=-1)
+                act = F.silu(gate) * up
+            y = self.experts.down(act, offs)
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
 
@@ -161,6 +247,9 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(self, h, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         a, kv_new = self.self_attn(self.input_layernorm(h), cos, sin, past_kv=past_kv,
                                    attn_mask=attn_mask, paged_ctx=paged_ctx, kv_layer_idx=kv_layer_idx)
+        if h.is_cuda and fused._on(h):          # residual add + post-attention norm in one launch
+            h, n = fused.add_rmsnorm(h, a, self.post_attention_layernorm.weight, self.post_attention_layernorm.eps)
+            return h + self.mlp(n), kv_new
         h = h + a
         return h + self.mlp(self.post_attention_layernorm(h)), kv_new
 

@@ -155,6 +155,7 @@ class _PrefillCtx:
         self.caches = caches                       # list[PagedKVCache], one per row
         self.pools = pools
         self._suffix = suffix_lens                 # python list of per-row real suffix lengths
+        self._prefix = list(prefix_lens)           # and cached prefix lengths (prefill_attention.sdpa_prefill)
         self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
         self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
         self.device = device
@@ -269,10 +270,18 @@ class CustomTorchBackend(InferenceBackend):
 
         # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
         # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
-        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower() == "int8"
-        if quant and moe:
+        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
+        if quant == "fp8" and moe and self.device.type == "cuda":
+            # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
+            for layer in self.model.model.layers:
+                layer.mlp.experts.quantize_fp8()
+            torch.cuda.empty_cache()
+            logger.info("MoE experts quantized to fp8 e4m3 (per output channel; activations per token)")
+        elif quant == "fp8":
+            logger.warning("CUSTOM_BACKEND_QUANT=fp8 needs qwen3_moe on CUDA; ignoring")
+        elif quant == "int8" and moe:
             logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
-        elif quant:
+        elif quant == "int8":
             from inference_server.models.quant import quantize_model_int8
             # On CUDA, route layers through the shared compiled GEMV so Inductor fuses the dequant
             # (keeps weight int8 in HBM — the bandwidth win); composes with the decode CUDA graph.
@@ -283,15 +292,29 @@ class CustomTorchBackend(InferenceBackend):
 
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
-        n_blocks = int(os.environ.get("CUSTOM_BACKEND_BLOCKS", "512"))
-        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
+        from inference_server.config import settings
+        from inference_server.models.paged_kv_cache import blocks_for_budget
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
+        if os.environ.get("CUSTOM_BACKEND_BLOCKS"):
+            n_blocks = int(os.environ["CUSTOM_BACKEND_BLOCKS"])
+        elif self.device.type == "cuda":
+            # From what the weights leave free after the largest prefill wave the scheduler admits (its peak is
+            # measured, not guessed: a fixed 512 blocks held ~8k tokens, and 90% of the raw free memory OOMed
+            # on long prompts). The remaining share is for CUDA graphs and smaller transients.
+            peak = self._prefill_peak_bytes(settings.max_prefill_tokens or self.max_positions or 4096)
+            free, _ = torch.cuda.mem_get_info(self.device)
+            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz)
+            logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free minus a %.1f GiB prefill peak "
+                        "at %d tokens)", n_blocks, bsz, 100 * settings.kv_cache_memory_fraction, free / 2**30,
+                        peak / 2**30, settings.max_prefill_tokens)
+        else:
+            n_blocks = 512
+        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
         self.pools = make_pools_for_gemma(
             self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
-        from inference_server.config import settings
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
         cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
         self.prefix_cache = cache_cls(
@@ -506,6 +529,21 @@ class CustomTorchBackend(InferenceBackend):
         if not cache.any_evicted:   # only cache prefixes that fit fully in the window
             self.prefix_cache.store(token_ids, cache.block_tables)
         return cache, first_token, cache.seq_len
+
+    @torch.no_grad()
+    def _prefill_peak_bytes(self, tokens: int) -> int:
+        """Peak memory above the weights of one prefill of `tokens` tokens, run through the plain (unpaged) forward
+        with the logits of the last position only: what the KV pools must leave room for."""
+        torch.cuda.synchronize(self.device)
+        torch.cuda.empty_cache()
+        base = torch.cuda.memory_allocated(self.device)
+        torch.cuda.reset_peak_memory_stats(self.device)
+        ids = torch.zeros(1, tokens, dtype=torch.long, device=self.device)
+        self.model(ids, logits_index=torch.tensor([tokens - 1], device=self.device))
+        torch.cuda.synchronize(self.device)
+        peak = torch.cuda.max_memory_allocated(self.device) - base
+        torch.cuda.empty_cache()
+        return peak
 
     @torch.no_grad()
     def prefill_batch(self, prompts, session_ids=None):

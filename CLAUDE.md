@@ -45,6 +45,20 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
+- Serving on the H200 (measured 2026-10-15, Verda, bf16, short tier): single_stream TPOT p99 15.6 ms (was 21),
+  saturated 0.37 req/s (was 0.097), long_prompt 2.66 req/s (was invalid); vLLM 4.1 ms / 5.8 / 68. The decode step
+  is launch-bound: ~4,500 kernels per step before `models/fused.py` (RMSNorm, add+RMSNorm, RMSNorm+RoPE, SiLU*up,
+  routing; `CUSTOM_BACKEND_FUSED=0` disables), ~2,300 after; batch-1 step 24 → 13.3 ms. Prefill attention goes
+  through torch SDPA (`models/prefill_attention.py`): the Triton paged prefill kernel ran at ~5 TFLOP/s against
+  SDPA's ~600 (`CUSTOM_BACKEND_PREFILL_ATTN=triton` keeps it). KV pools take `KV_CACHE_MEMORY_FRACTION` (0.9)
+  of the memory free after a measured prefill of `MAX_PREFILL_TOKENS` (32768) tokens, which also caps a batched
+  prefill wave (rows x longest prompt); 90% of raw free memory OOMed on long prompts. `MAX_BATCH_SIZE` 128,
+  scheduling `fair`. Streaming: a request shed before its first token is a 429, after it the stream ends short.
+  Off by default, measured: `CUSTOM_BACKEND_QUANT=fp8` experts (correct, no gain while launch-bound, frees 26 GB);
+  `CUSTOM_BACKEND_MOE_KERNEL_ROWS` > 0 (Triton grouped GEMM, `models/moe_kernel.py`: exact in eager mode, a
+  device-side assert inside the decode CUDA graph under load; the CUTLASS grouped GEMM it replaces is 3.5 ms of
+  the 13 ms step). Correctness gate on this state: inconclusive at concurrency 32 (12/1,585 unanswered as 429s,
+  ratio 0.9951 on the rest); re-run at 16. Tag `loop-baseline` = the engine before all of this.
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in

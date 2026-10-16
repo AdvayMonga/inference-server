@@ -354,8 +354,7 @@ async def test_a_dropped_stream_cancels_its_request():
         loop = asyncio.get_running_loop()
         req = ScheduledRequest(token_ids=[1], max_tokens=5, session_id="s", future=loop.create_future(),
                                token_queue=asyncio.Queue())
-        req.token_queue.put_nowait(ord("a"))
-        task = asyncio.ensure_future(_drain(gen(req, FakeTokenizer(), "id", 0, "m", 1, 5)))
+        task = asyncio.ensure_future(_drain(gen(req, ord("a"), FakeTokenizer(), "id", 0, "m", 1, 5)))
         await asyncio.sleep(0.05)               # one token streamed, now waiting for the next
         task.cancel()
         try:
@@ -366,11 +365,44 @@ async def test_a_dropped_stream_cancels_its_request():
 
     done = ScheduledRequest(token_ids=[1], max_tokens=5, session_id="s",
                             future=asyncio.get_running_loop().create_future(), token_queue=asyncio.Queue())
-    done.token_queue.put_nowait(None)
-    await _drain(_stream(done, FakeTokenizer(), "id", 0, "m", 1, 5))
+    await _drain(_stream(done, None, FakeTokenizer(), "id", 0, "m", 1, 5))
     assert not done.cancelled                   # a stream that ended normally is not a cancel
 
 
 async def _drain(agen):
     async for _ in agen:
         pass
+
+
+class ExpiringScheduler(FakeScheduler):
+    """Accepts the request, then sheds it before any token, as the admission deadline does."""
+    def enqueue(self, req):
+        loop = asyncio.get_event_loop()
+        loop.call_soon(req.token_queue.put_nowait, None)            # the scheduler's order: end, then error
+        loop.call_soon(req.future.set_exception, QueueFullError("queued 31.0s, over the 30s admission deadline"))
+
+
+def test_a_request_shed_before_its_first_token_is_429_even_when_streaming():
+    """Never a 200 whose stream is cut off: the client must see an explicit rejection."""
+    client = TestClient(_app(ExpiringScheduler()))
+    for path, body in (("/v1/completions", {"prompt": "hello", "max_tokens": 5, "stream": True}),
+                       ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hi"}],
+                                                 "max_tokens": 5, "stream": True})):
+        r = client.post(path, json=body)
+        assert r.status_code == 429 and "admission deadline" in r.text, (path, r.status_code, r.text)
+
+
+async def test_a_failure_after_tokens_ends_the_stream_without_a_finish_or_done():
+    """Tokens already sent: the stream stops short, so the client sees it truncated, not complete."""
+    from inference_server.openai_shim import _chat_stream, _stream
+    from inference_server.scheduler import QueueFullError, ScheduledRequest
+    for gen in (_stream, _chat_stream):
+        loop = asyncio.get_running_loop()
+        req = ScheduledRequest(token_ids=[1], max_tokens=5, session_id="s", future=loop.create_future(),
+                               token_queue=asyncio.Queue())
+        req.token_queue.put_nowait(ord("b"))
+        req.token_queue.put_nowait(None)
+        req.future.set_exception(QueueFullError("preempted under KV pressure after 2 tokens"))
+        out = [c async for c in gen(req, ord("a"), FakeTokenizer(), "id", 0, "m", 1, 5)]
+        assert out and "[DONE]" not in "".join(out) and '"finish_reason": "stop"' not in "".join(out)
+        assert not req.cancelled

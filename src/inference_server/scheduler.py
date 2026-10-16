@@ -143,6 +143,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  policy: SchedulingPolicy | None = None,
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
+                 max_prefill_tokens: int = 0,
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
@@ -155,6 +156,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self.max_active_kv_tokens = max_active_kv_tokens if max_active_kv_tokens > 0 else 2**31
         # Tokens fed per prefill chunk (chunked mode only).
         self.prefill_chunk_size = prefill_chunk_size
+        # Batched mode: a wave is right-padded to its longest prompt, so it costs rows x longest tokens of
+        # activations; cap that (0 = no cap). One prompt always goes, however long.
+        self.max_prefill_tokens = max_prefill_tokens if max_prefill_tokens > 0 else 2**31
         # Default mode from chunk_size (back-compat: chunk_size>0 → chunked), explicit override wins.
         self.prefill_mode = prefill_mode or ("chunked" if prefill_chunk_size > 0 else "monolithic")
         if self.prefill_mode not in self.PREFILL_MODES:
@@ -323,6 +327,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "active_kv_budget": self.max_active_kv_tokens,
             "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
+            "max_prefill_tokens": self.max_prefill_tokens,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             "wave_sizes": dict(sorted(self._wave_sizes.items())),
             "total_preempted": self._total_preempted,
@@ -512,6 +517,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     window = self.policy.peek_window(free * self.wave_window_mult)
                 plan = plan_wave(window, free)
         self._shed_expired()
+        longest = 0                                 # the wave's longest prompt so far (batched mode)
         while len(self._active) + len(self._prefilling) + len(to_admit) < self.max_batch_size:
             with self._pending_cv:
                 # HOL-wait: peek, KV-fit check, then consume only if it fits.
@@ -534,6 +540,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     continue
 
                 reservation = len(peeked.token_ids) + peeked.max_tokens
+
+                # Prefill-wave gate (batched mode): the padded wave must fit the activation budget.
+                if to_admit and (len(to_admit) + 1) * max(longest, len(peeked.token_ids)) > self.max_prefill_tokens:
+                    self._timeline.event("admit_blocked", reason="prefill_tokens", trace_id=peeked.trace_id,
+                                         wave=len(to_admit), longest=max(longest, len(peeked.token_ids)))
+                    break
 
                 # Active-KV gate: protects against decode-time OOM.
                 if reservation > self.max_active_kv_tokens:
@@ -589,6 +601,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                  reservation=reservation, queue_wait_s=req.admit_ts - req.enqueue_ts)
             if self.prefill_mode == "batched":
                 to_admit.append(req)  # defer the forward; one prefill_batch after the loop
+                longest = max(longest, len(req.token_ids))
                 continue
             try:
                 if self.prefill_mode == "chunked":
