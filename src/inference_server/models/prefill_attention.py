@@ -27,9 +27,12 @@ def wave_mask(prefix: torch.Tensor, suffix: torch.Tensor, p_max: int, s_max: int
     return torch.cat([pre, suf], dim=2)[:, None]
 
 
-# Waves with more padded tokens than this take the per-row path: the masked SDPA (memory-efficient backend, K/V
-# heads expanded) loses to flash on a few long rows, while on many short rows the per-row Python loop loses more.
+# Waves of at most this many rows AND more padded tokens than BATCHED_MAX_TOKENS take the per-row path: the masked
+# SDPA loses to flash on a few long rows, while on many rows the per-row Python loop loses far more (a 51-row mixed
+# prefill step with long prefixes took 3.3 s per row-loop against ~0.1 s of kernels).
+PER_ROW_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_PER_ROW_MAX_ROWS", "4"))
 BATCHED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_BATCHED_TOKENS", "8192"))
+_GQA_MASKED = [False]                             # set once a masked SDPA with enable_gqa raised on this build
 
 
 def _gather_prefix(pool, ids: torch.Tensor, length: int, Hkv: int, D: int):
@@ -73,7 +76,7 @@ def sdpa_prefill(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, ctx, layer_i
     if p_max == 0 and all(n == S for n in ctx._suffix):          # a cache-miss wave of equal lengths: plain causal
         o = F.scaled_dot_product_attention(q, k, v, is_causal=S > 1, scale=scale, enable_gqa=True)
         return o.transpose(1, 2)
-    if B == 1 or B * (p_max + S) > BATCHED_MAX_TOKENS:
+    if B == 1 or (B <= PER_ROW_MAX_ROWS and B * (p_max + S) > BATCHED_MAX_TOKENS):
         return _per_row(q, k, v, ctx, layer_idx, scale)
     pool = ctx.pools[layer_idx]
     bs = pool.k.shape[2]
@@ -84,8 +87,14 @@ def sdpa_prefill(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, ctx, layer_i
         vp = pool.v[bt].permute(0, 2, 1, 3, 4).reshape(B, Hkv, nb * bs, D)[:, :, :p_max]
         k, v = torch.cat([kp, k], dim=2), torch.cat([vp, v], dim=2)
     mask = wave_mask(ctx.prefix_lens.long(), ctx.suffix_lens.long(), p_max, S)
-    rep = Hq // Hkv
-    if rep > 1:                                   # the masked backends do not all take enable_gqa: expand K/V heads
+    if Hq != Hkv and not _GQA_MASKED[0]:         # expanding K/V 8x costs memory and time; try the native GQA first
+        try:
+            o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale, enable_gqa=True)
+            return o.transpose(1, 2)
+        except RuntimeError:
+            _GQA_MASKED[0] = True                 # this torch/backend will not: expand from now on
+    if Hq != Hkv:
+        rep = Hq // Hkv
         k, v = k.repeat_interleave(rep, dim=1), v.repeat_interleave(rep, dim=1)
     o = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scale)
     return o.transpose(1, 2)
