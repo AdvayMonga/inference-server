@@ -51,6 +51,7 @@ def _wave(rows):
 def test_sdpa_prefill_matches_the_paged_kernel(rows, batched_max, monkeypatch):
     from inference_server.models import prefill_attention
     monkeypatch.setattr(prefill_attention, "BATCHED_MAX_TOKENS", batched_max)
+    monkeypatch.setattr(prefill_attention, "PER_ROW_MAX_ROWS", 10 ** 9)
     q, k, v, ctx, ref = _wave(rows)
     got = prefill_attention.sdpa_prefill(q, k, v, ctx, 0, D ** -0.5)
     for r, (_, s) in enumerate(rows):                                            # padding rows are unspecified
