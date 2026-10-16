@@ -162,6 +162,10 @@ class _PrefillCtx:
         self._scratch = scratch                    # per-pool padding block (padding writes land here)
         self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
         self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
+        # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
+        # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
+        padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
+        self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
         self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
 
     def _ensure_blocks(self, layer_idx):

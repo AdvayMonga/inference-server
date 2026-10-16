@@ -76,6 +76,19 @@ def test_moe_block_matches_hf(hf, ours):
         torch.testing.assert_close(ours.model.layers[0].mlp(x), ref, atol=1e-2 * ref.abs().max().item(), rtol=1.6e-2)
 
 
+def test_moe_block_on_real_tokens_only_matches_dense(ours):
+    """A right-padded wave with `tokens` = its real positions: those rows equal the dense result, padding is zero."""
+    mlp = ours.model.layers[0].mlp
+    x = torch.randn(3, 5, 64, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(1))
+    lens = [5, 2, 3]
+    valid = torch.arange(5)[None, :] < torch.tensor(lens)[:, None]
+    tokens = valid.reshape(-1).nonzero().squeeze(1)
+    with torch.no_grad():
+        dense, sparse = mlp(x), mlp(x, tokens)
+    torch.testing.assert_close(sparse[valid], dense[valid])
+    assert sparse[~valid].abs().sum() == 0
+
+
 def test_from_safetensors_matches_from_hf(tiny_dir, ours):
     fast = Qwen3MoeForCausalLM.from_safetensors(str(tiny_dir)).state_dict()
     ref = ours.state_dict()
