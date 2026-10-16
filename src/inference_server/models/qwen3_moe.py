@@ -221,9 +221,16 @@ class Qwen3SparseMoE(nn.Module):
         self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=dtype)
         self.experts = Qwen3Experts(num_experts, hidden_size, moe_intermediate, dtype=dtype)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, tokens: torch.Tensor | None = None) -> torch.Tensor:
+        """`tokens`: flat indices of the real tokens of a right-padded wave; only those are routed and run, the
+        padding positions come back as zeros (their outputs are never read)."""
         B, S, H = x.shape
         flat = x.reshape(-1, H)
+        if tokens is None:
+            return self._run(flat).view(B, S, H)
+        return torch.zeros_like(flat).index_copy_(0, tokens, self._run(flat[tokens])).view(B, S, H)
+
+    def _run(self, flat: torch.Tensor) -> torch.Tensor:
         logits = self.gate(flat)
         on = flat.is_cuda and fused._on(flat)
         weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob) if on
@@ -232,7 +239,7 @@ class Qwen3SparseMoE(nn.Module):
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
-        offs = torch.searchsorted(sorted_e, _experts_arange(E, x.device), right=True).to(torch.int32)
+        offs = torch.searchsorted(sorted_e, _experts_arange(E, flat.device), right=True).to(torch.int32)
         M = tok.numel()
         if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
             # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).
@@ -250,7 +257,7 @@ class Qwen3SparseMoE(nn.Module):
                 act = F.silu(gate) * up
             y = self.experts.down(act, offs)
         y = y * weights.view(-1)[order, None]
-        return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype)).view(B, S, H)
+        return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype))
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -267,11 +274,12 @@ class Qwen3DecoderLayer(nn.Module):
     def forward(self, h, cos, sin, past_kv=None, attn_mask=None, paged_ctx=None, kv_layer_idx=None):
         a, kv_new = self.self_attn(self.input_layernorm(h), cos, sin, past_kv=past_kv,
                                    attn_mask=attn_mask, paged_ctx=paged_ctx, kv_layer_idx=kv_layer_idx)
+        tokens = getattr(paged_ctx, "tokens", None)      # a padded prefill wave: the experts see real tokens only
         if h.is_cuda and fused._on(h):          # residual add + post-attention norm in one launch
             h, n = fused.add_rmsnorm(h, a, self.post_attention_layernorm.weight, self.post_attention_layernorm.eps)
-            return h + self.mlp(n), kv_new
+            return h + self.mlp(n, tokens), kv_new
         h = h + a
-        return h + self.mlp(self.post_attention_layernorm(h)), kv_new
+        return h + self.mlp(self.post_attention_layernorm(h), tokens), kv_new
 
 
 class Qwen3MoeModel(nn.Module):

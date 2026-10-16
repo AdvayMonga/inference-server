@@ -42,10 +42,14 @@ class Settings:
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
     # 0 = derive from max_batch_size * context_window (effectively unbounded).
     max_active_kv_tokens: int = 0
-    # Prefill strategy: "monolithic" (one forward on admit) or "chunked" (V-A: interleave one
-    # prefill chunk + one decode step per iter, kills HOL blocking) or "batched". "" = derive:
-    # chunk_size>0 → chunked, else batched on custom-* backends, else monolithic.
+    # Prefill strategy: "monolithic" (one forward on admit), "chunked" (V-A: one request's chunk + one decode
+    # step per iter), "batched" (a wave of whole prompts, then decode) or "mixed" (every waiting prefill advances
+    # by up to prefill_step_tokens in ONE forward per iter, then a decode step: prefill never stalls decode for
+    # more than one bounded chunk, and is not one request at a time). "" = derive: chunk_size>0 → chunked, else
+    # batched on custom-* backends, else monolithic.
     prefill_mode: str = ""
+    # Mixed mode: the most prefill tokens fed between two decode steps (all rows together).
+    prefill_step_tokens: int = 2048
     # Batched prefill: the most (right-padded) tokens one wave may carry, rows x the longest prompt. Bounds the
     # activation peak, which the KV pools are sized around (a wave of long prompts OOMed with no cap). 0 = none.
     max_prefill_tokens: int = 32768
@@ -127,6 +131,7 @@ def load_settings() -> Settings:
         max_queue_size=int(os.environ.get("MAX_QUEUE_SIZE", Settings.max_queue_size)),
         max_active_kv_tokens=int(os.environ.get("MAX_ACTIVE_KV_TOKENS", Settings.max_active_kv_tokens)),
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
+        prefill_step_tokens=int(os.environ.get("PREFILL_STEP_TOKENS", Settings.prefill_step_tokens)),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         max_prefill_tokens=int(os.environ.get("MAX_PREFILL_TOKENS", Settings.max_prefill_tokens)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),

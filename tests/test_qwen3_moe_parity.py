@@ -76,6 +76,19 @@ def test_moe_block_matches_hf(hf, ours):
         torch.testing.assert_close(ours.model.layers[0].mlp(x), ref, atol=1e-2 * ref.abs().max().item(), rtol=1.6e-2)
 
 
+def test_moe_block_on_real_tokens_only_matches_dense(ours):
+    """A right-padded wave with `tokens` = its real positions: those rows equal the dense result, padding is zero."""
+    mlp = ours.model.layers[0].mlp
+    x = torch.randn(3, 5, 64, dtype=torch.bfloat16, generator=torch.Generator().manual_seed(1))
+    lens = [5, 2, 3]
+    valid = torch.arange(5)[None, :] < torch.tensor(lens)[:, None]
+    tokens = valid.reshape(-1).nonzero().squeeze(1)
+    with torch.no_grad():
+        dense, sparse = mlp(x), mlp(x, tokens)
+    torch.testing.assert_close(sparse[valid], dense[valid])
+    assert sparse[~valid].abs().sum() == 0
+
+
 def test_from_safetensors_matches_from_hf(tiny_dir, ours):
     fast = Qwen3MoeForCausalLM.from_safetensors(str(tiny_dir)).state_dict()
     ref = ours.state_dict()
@@ -182,6 +195,28 @@ async def test_scheduler_greedy_matches_hf(backend, hf):
     assert backend.prefix_cache.hits > 0
     held = backend.prefix_cache.stats()["blocks_held"]
     assert [free_before[i] - p.free_count for i, p in enumerate(backend.pools)] == [held] * 2
+
+
+async def test_mixed_prefill_matches_hf_greedy(backend, hf):
+    """Mixed mode on the CPU backend (one prefill_chunk per row behind prefill_chunk_batch): a prompt longer than
+    the step budget is fed over several steps and still decodes like HF; a second pass hits the prefix cache."""
+    from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8, prefill_mode="mixed", prefill_step_tokens=4)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=list(p), max_tokens=8, session_id=f"m{i}",
+                                 future=loop.create_future()) for i, p in enumerate(PROMPTS)]
+        outs = await asyncio.gather(*(sched.submit(r) for r in reqs))
+        reqs = [ScheduledRequest(token_ids=list(p), max_tokens=8, session_id=f"n{i}",
+                                 future=loop.create_future()) for i, p in enumerate(PROMPTS)]
+        again = await asyncio.gather(*(sched.submit(r) for r in reqs))
+    finally:
+        await sched.stop()
+    expected = [_hf_greedy(hf, p, 8) for p in PROMPTS]
+    assert outs == expected and again == expected
+    assert sched.stats()["prefill_chunks_processed"] >= 3
 
 
 async def test_async_decode_matches_hf_greedy(backend, hf):
