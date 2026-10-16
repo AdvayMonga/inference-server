@@ -47,9 +47,11 @@ def _wave(rows):
 @pytest.mark.parametrize("rows", [[(0, 300)], [(40, 7)], [(160, 500)], [(33, 1)],
                                   [(0, 300), (0, 120), (0, 7)],                       # a cache-miss wave
                                   [(48, 200), (0, 333), (17, 1), (160, 64)]])          # mixed prefixes, ragged
-def test_sdpa_prefill_matches_the_paged_kernel(rows):
-    from inference_server.models.prefill_attention import sdpa_prefill
+@pytest.mark.parametrize("batched_max", [10 ** 9, 0])                           # the wave path, then per row
+def test_sdpa_prefill_matches_the_paged_kernel(rows, batched_max, monkeypatch):
+    from inference_server.models import prefill_attention
+    monkeypatch.setattr(prefill_attention, "BATCHED_MAX_TOKENS", batched_max)
     q, k, v, ctx, ref = _wave(rows)
-    got = sdpa_prefill(q, k, v, ctx, 0, D ** -0.5)
+    got = prefill_attention.sdpa_prefill(q, k, v, ctx, 0, D ** -0.5)
     for r, (_, s) in enumerate(rows):                                            # padding rows are unspecified
         torch.testing.assert_close(got[r, :s].float(), ref[r, :s].float(), atol=2e-2, rtol=2e-2)
