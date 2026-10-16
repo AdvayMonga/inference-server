@@ -136,7 +136,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     # chunk + one decode step per iter, kills HOL blocking). The enum is the forward-compat
     # extension point: `mixed_batch` (V-B) and `disaggregated` (P/D) are future strategies that
     # reuse the same `_prefilling` phase + `prefill_chunk` primitive + `_promote_to_decode` seam.
-    PREFILL_MODES = ("monolithic", "chunked", "batched")
+    PREFILL_MODES = ("monolithic", "chunked", "batched", "mixed")
 
     def __init__(self, backend: InferenceBackend, max_batch_size: int = 16,
                  max_queue_size: int = 1000,
@@ -144,6 +144,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
                  max_prefill_tokens: int = 0,
+                 prefill_step_tokens: int = 2048,
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
@@ -167,6 +168,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
             raise ValueError("prefill_mode='chunked' requires prefill_chunk_size > 0")
         if self.prefill_mode == "batched" and not hasattr(backend, "prefill_batch"):
             raise ValueError("prefill_mode='batched' requires a backend with prefill_batch (custom-*)")
+        if self.prefill_mode == "mixed" and not hasattr(backend, "prefill_chunk_batch"):
+            raise ValueError("prefill_mode='mixed' requires a backend with prefill_chunk_batch (custom-*)")
+        # Mixed mode: prefill tokens fed between two decode steps, over every waiting row together.
+        self.prefill_step_tokens = max(1, prefill_step_tokens)
         # Window (as a multiple of free slots) that batched-mode wave planning may reorder
         # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
         # current workload: at rates 1-6 the queue never backs up, so 83-91% of prefill waves
@@ -328,6 +333,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
             "max_prefill_tokens": self.max_prefill_tokens,
+            "prefill_step_tokens": self.prefill_step_tokens,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             "wave_sizes": dict(sorted(self._wave_sizes.items())),
             "total_preempted": self._total_preempted,
@@ -365,7 +371,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     with self._timeline.phase("admit"):
                         self._admit_pending(device)
                     with self._timeline.phase("prefill_chunk"):
-                        self._advance_prefill_chunk(device)
+                        if self.prefill_mode == "mixed":
+                            self._advance_prefill_mixed(device)
+                        else:
+                            self._advance_prefill_chunk(device)
                     with self._timeline.phase("evict"):
                         self._evict_finished()
                     if self._active:
@@ -604,8 +613,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 longest = max(longest, len(req.token_ids))
                 continue
             try:
-                if self.prefill_mode == "chunked":
-                    # Chunked-prefill mode: lookup only, defer forward pass to _advance_prefill_chunk
+                if self.prefill_mode in ("chunked", "mixed"):
+                    # Lookup only; the forward happens in _advance_prefill_chunk / _advance_prefill_mixed
                     partial_kv, matched = self.backend.prefill_lookup(req.token_ids, req.session_id)
                     req.cache_hit_tokens = self.backend.last_cache_hit_tokens
                     self._prefilling.append(_PrefillingRow(
@@ -720,6 +729,53 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 logger.exception("prefill_store failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
             self._promote_to_decode(prow.request, kv, kv_len, last_token, device)
+
+    def _advance_prefill_mixed(self, device: str) -> None:
+        """Advance every waiting prefill, oldest first, by up to `prefill_step_tokens` tokens in total in ONE forward;
+        rows fed their last chunk join decode. Between two decode steps there is at most this much prefill work, so
+        a wave of prompts cannot stall TPOT (batched mode), and prompts do not wait for one another (chunked mode).
+        A full cache hit re-feeds its last token, as the chunked path does."""
+        if not self._prefilling:
+            return
+        budget, picked = self.prefill_step_tokens, []          # [(row, chunk, is_final)]
+        for prow in self._prefilling:
+            if budget <= 0:
+                break
+            ids = prow.request.token_ids
+            if prow.matched == len(ids) and prow.tokens_fed == prow.matched:
+                chunk, final = [ids[-1]], True
+            else:
+                end = min(prow.tokens_fed + budget, len(ids))
+                chunk, final = ids[prow.tokens_fed:end], end == len(ids)
+            budget -= len(chunk)
+            picked.append((prow, chunk, final))
+        try:
+            with self._timeline.phase("prefill_mixed", rows=len(picked), tokens=sum(len(c) for _, c, _ in picked)):
+                results = self.backend.prefill_chunk_batch(
+                    [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked])
+        except Exception as e:
+            e = _as_backpressure(e)
+            logger.warning("mixed prefill rejected (%d rows): %s", len(picked), e)
+            for prow, _, _ in picked:
+                self._prefilling.remove(prow)
+                self._active_kv_reserved -= len(prow.request.token_ids) + prow.request.max_tokens
+                self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
+                self.policy.on_request_finished(prow.request)
+                self._reject(prow.request, e)
+            return
+        for (prow, chunk, final), (kv, last_token, kv_len) in zip(picked, results):
+            prow.partial_kv = kv
+            prow.tokens_fed += len(chunk)
+            self._prefill_chunks_processed += 1
+            self._metrics.record_chunk()
+            if final:
+                try:
+                    self.backend.prefill_store(prow.request.token_ids, kv, prow.matched, prow.request.session_id)
+                except Exception:
+                    logger.exception("prefill_store failed for session %s", prow.request.session_id)
+                self._prefilling.remove(prow)
+                self._promote_to_decode(prow.request, kv, kv_len, last_token, device)
+                self._total_admitted += 1
 
     def _splice_in(self, new_kv: object, new_kv_len: int, device: str) -> None:
         """Add a new row's KV to the batched cache; backend handles cache surgery."""

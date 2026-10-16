@@ -184,6 +184,28 @@ async def test_scheduler_greedy_matches_hf(backend, hf):
     assert [free_before[i] - p.free_count for i, p in enumerate(backend.pools)] == [held] * 2
 
 
+async def test_mixed_prefill_matches_hf_greedy(backend, hf):
+    """Mixed mode on the CPU backend (one prefill_chunk per row behind prefill_chunk_batch): a prompt longer than
+    the step budget is fed over several steps and still decodes like HF; a second pass hits the prefix cache."""
+    from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+
+    sched = ContinuousBatchScheduler(backend, max_batch_size=8, prefill_mode="mixed", prefill_step_tokens=4)
+    sched.start()
+    try:
+        loop = asyncio.get_running_loop()
+        reqs = [ScheduledRequest(token_ids=list(p), max_tokens=8, session_id=f"m{i}",
+                                 future=loop.create_future()) for i, p in enumerate(PROMPTS)]
+        outs = await asyncio.gather(*(sched.submit(r) for r in reqs))
+        reqs = [ScheduledRequest(token_ids=list(p), max_tokens=8, session_id=f"n{i}",
+                                 future=loop.create_future()) for i, p in enumerate(PROMPTS)]
+        again = await asyncio.gather(*(sched.submit(r) for r in reqs))
+    finally:
+        await sched.stop()
+    expected = [_hf_greedy(hf, p, 8) for p in PROMPTS]
+    assert outs == expected and again == expected
+    assert sched.stats()["prefill_chunks_processed"] >= 3
+
+
 async def test_unfittable_request_rejected_at_once_and_does_not_block_the_queue(backend):
     """64 blocks of 2 = 128 tokens per pool: 9 + 200 can never fit, so it fails at submit."""
     import time

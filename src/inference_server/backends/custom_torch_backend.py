@@ -724,6 +724,44 @@ class CustomTorchBackend(InferenceBackend):
         last_token = int(sample(logits[:, -1, :], sampling).item())
         return partial_kv, last_token, partial_kv.seq_len
 
+    @torch.no_grad()
+    def prefill_chunk_batch(self, items):
+        """`items`: [(partial_kv | None, chunk_ids, is_final, sampling)] -> [(kv, last_token | None, kv_len)]. CUDA:
+        one forward over every chunk, right-padded, each row attending to its own blocks so far plus the chunk
+        (the batched-prefill context, with a row's fed tokens as its prefix); else one prefill_chunk per row. On a
+        failure every row's blocks are freed: the scheduler rejects them all."""
+        from inference_server.models.paged_kv_cache import PagedKVCache
+        if self.device.type != "cuda":
+            out = []
+            for kv, chunk, final, sampling in items:
+                kv, tok, n = self.prefill_chunk(chunk, kv, sampling=sampling)
+                out.append((kv, tok if final else None, n))
+            return out
+        dev = self.device
+        caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
+        prefix = [c.seq_len for c in caches]
+        chunks = [chunk for _, chunk, _, _ in items]
+        S = max(len(c) for c in chunks)
+        input_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
+        position_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
+        for k, chunk in enumerate(chunks):
+            input_ids[k, :len(chunk)] = torch.tensor(chunk, device=dev)
+            position_ids[k, :len(chunk)] = torch.arange(prefix[k], prefix[k] + len(chunk), device=dev)
+        self._ensure_scratch()
+        try:
+            ctx = _PrefillCtx(caches, self.pools, prefix, [len(c) for c in chunks], dev, scratch=self._scratch)
+            last_idx = torch.tensor([len(c) - 1 for c in chunks], device=dev)
+            logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
+        except BaseException:
+            for c in caches:
+                c.free_all()
+            raise
+        out = []
+        for k, (_, chunk, final, sampling) in enumerate(items):
+            tok = int(sample(logits[k:k + 1, 0, :], sampling).item()) if final else None
+            out.append((caches[k], tok, caches[k].seq_len))
+        return out
+
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
         if not full_kv.any_evicted:   # only cache prefixes that fit fully in the window
