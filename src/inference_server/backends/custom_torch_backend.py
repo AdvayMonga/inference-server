@@ -745,7 +745,7 @@ class CustomTorchBackend(InferenceBackend):
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
-            fits = next(t for t in state.block_tables if t is not None).shape[1] <= self._graph_max_cols
+            fits = state.bt.shape[2] <= self._graph_max_cols
             if self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
@@ -891,14 +891,8 @@ class CustomTorchBackend(InferenceBackend):
         g["pos"][:n].copy_(position_ids)
         g["seqlens"][:n].copy_(state.seq_lens)
         g["seqlens"][n:] = 1
-        tables = [state.block_tables[L] for L in g["live"]]
         g["bt_all"].copy_(g["scratch_col"].expand_as(g["bt_all"]))   # reset dummies + stale columns to scratch
-        if all(t.shape == tables[0].shape for t in tables):
-            stacked = torch.stack(tables)                             # [layers, n, cols]: one copy for every layer
-            g["bt_all"][:, :n, :stacked.shape[2]].copy_(stacked.clamp_min(0))
-        else:
-            for i, bt in enumerate(tables):
-                g["bt_all"][i, :n, :bt.shape[1]].copy_(bt.clamp_min(0))
+        g["bt_all"][:, :n, :state.bt.shape[2]].copy_(state.bt.clamp_min(0))   # every layer in one copy
         g["graph"].replay()
         return g["out"][:n]
 
