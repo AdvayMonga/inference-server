@@ -97,7 +97,11 @@ class Qwen3Attention(nn.Module):
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
-                if PREFILL_ATTN == "sdpa" and hasattr(paged_ctx, "caches"):   # eager prefill; the graph ctx has no caches
+                eager = hasattr(paged_ctx, "caches")                           # the graph ctx has no caches
+                if eager and PREFILL_ATTN == "flashinfer":
+                    from inference_server.models.prefill_flashinfer import flashinfer_prefill
+                    out = flashinfer_prefill(q, paged_ctx, kv_layer_idx, self.scale)
+                elif eager and PREFILL_ATTN == "sdpa":
                     out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
                 else:
                     bt = paged_ctx.block_table_tensor(kv_layer_idx)
@@ -145,8 +149,13 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     return weights.to(router_logits.dtype), experts
 
 
-# Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
+# Prefill attention on CUDA: torch SDPA (flash) by default; "flashinfer" is FlashInfer's paged batch prefill
+# (prefill_flashinfer.py, sdpa when the package is missing); "triton" is the paged kernel (~100x slower at 4k+).
 PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
+if PREFILL_ATTN == "flashinfer":
+    from inference_server.models import prefill_flashinfer as _fi
+    if not _fi.available():
+        PREFILL_ATTN = "sdpa"
 
 # Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
 MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
@@ -228,34 +237,38 @@ class Qwen3SparseMoE(nn.Module):
         flat = x.reshape(-1, H)
         if tokens is None:
             return self._run(flat).view(B, S, H)
-        return torch.zeros_like(flat).index_copy_(0, tokens, self._run(flat[tokens])).view(B, S, H)
+        y = self._run(flat[tokens])
+        return torch.zeros(flat.shape, dtype=y.dtype, device=y.device).index_copy_(0, tokens, y).view(B, S, H)
 
     def _run(self, flat: torch.Tensor) -> torch.Tensor:
+        """The experts' output per row: bf16, or fp32 from the Triton path (its caller adds it to the residual)."""
         logits = self.gate(flat)
         on = flat.is_cuda and fused._on(flat)
-        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob) if on
+        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
                             else route(logits, self.top_k, self.norm_topk_prob))
         E = self.experts.num_experts
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
+        M = sorted_e.numel()
+        if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
+            # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py); the
+            # routing bookkeeping is one launch and the down GEMM scatters weighted rows into an fp32 output.
+            from inference_server.models import moe_kernel
+            sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E, self.top_k, 16)
+            h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
+            act = fused.silu_mul(h)
+            out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
+            moe_kernel.moe_gemm_scatter(act, self.experts.down_proj, sorted_ids, expert_ids, M, tok, pair_w, out)
+            return out
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, _experts_arange(E, flat.device), right=True).to(torch.int32)
-        M = tok.numel()
-        if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
-            # Decode-sized M: the Triton grouped GEMM reads only the active experts' weights (moe_kernel.py).
-            from inference_server.models import moe_kernel
-            sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
-            h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
+        h = self.experts.gate_up(flat[tok], offs)
+        if on:
             act = fused.silu_mul(h)
-            y = moe_kernel.moe_gemm(act, None, self.experts.down_proj, sorted_ids, expert_ids, M)
         else:
-            h = self.experts.gate_up(flat[tok], offs)
-            if on:
-                act = fused.silu_mul(h)
-            else:
-                gate, up = h.chunk(2, dim=-1)
-                act = F.silu(gate) * up
-            y = self.experts.down(act, offs)
+            gate, up = h.chunk(2, dim=-1)
+            act = F.silu(gate) * up
+        y = self.experts.down(act, offs)
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype))
 
@@ -277,7 +290,8 @@ class Qwen3DecoderLayer(nn.Module):
         tokens = getattr(paged_ctx, "tokens", None)      # a padded prefill wave: the experts see real tokens only
         if h.is_cuda and fused._on(h):          # residual add + post-attention norm in one launch
             h, n = fused.add_rmsnorm(h, a, self.post_attention_layernorm.weight, self.post_attention_layernorm.eps)
-            return h + self.mlp(n, tokens), kv_new
+            y = self.mlp(n, tokens)
+            return (fused.add_cast(h, y) if y.dtype == torch.float32 else h + y), kv_new
         h = h + a
         return h + self.mlp(self.post_attention_layernorm(h), tokens), kv_new
 

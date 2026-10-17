@@ -26,6 +26,17 @@ from collections import OrderedDict
 import torch
 import torch.nn.functional as F
 
+from inference_server.models import fused
+
+
+def write_token(pool, bid: torch.Tensor, slot: torch.Tensor, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
+    """One decode token per row into the pool: pool.k[bid[r], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
+    if fused._on(k_new, v_new, pool.k):
+        fused.kv_store(pool.k, pool.v, bid, slot, k_new, v_new)
+        return
+    pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
+    pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+
 
 class KVCacheExhausted(RuntimeError):
     """No KV block available even after reclaiming the prefix cache.
@@ -726,19 +737,24 @@ class BatchedDecodeState:
     def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
         """Scatter the new token (k_new,v_new [R,H,1,D]) into each row's block. Pure GPU —
         block id + slot computed from seq_lens (prepare_step already alloc'd any new block)."""
-        pool = self.pools[layer_idx]
-        rows = torch.arange(self.n_rows, device=self.device)
-        lb = self.seq_lens // self.bs
-        slot = self.seq_lens % self.bs
-        bid = self.bt[self._li[layer_idx]][rows, lb]   # [R]
-        pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
-        pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+        if layer_idx == self._live[0]:
+            self._begin_step()
+        bid = self.bt[self._li[layer_idx]][self._rows, self._lb]   # [R]
+        write_token(self.pools[layer_idx], bid, self._slot, k_new, v_new)
+
+    def _begin_step(self) -> None:
+        """What every layer's append and block_table_tensor share, built once at the first layer of a step (as
+        per-layer ops they were ~10 launches a layer, ~480 a step)."""
+        self._rows = torch.arange(self.n_rows, device=self.device)
+        self._lb = self.seq_lens // self.bs
+        self._slot = self.seq_lens % self.bs
+        self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
+        self._sl32 = (self.seq_lens + 1).to(torch.int32)
 
     def block_table_tensor(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Kernel inputs: persistent block table (int32, -1→0) + effective seq_lens (incl. the
-        new token just written). No rebuild — just dtype/sign cleanup + the +1."""
-        bt = self.bt[self._li[layer_idx]].to(torch.int32).clamp_min(0)
-        return bt, (self.seq_lens + 1).to(torch.int32)
+        new token just written), both from this step's cache."""
+        return self._bt32[self._li[layer_idx]], self._sl32
 
     def advance(self) -> None:
         """Bump seq_lens by the new token, then evict out-of-window blocks. Sync-free fast path:

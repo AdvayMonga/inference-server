@@ -61,6 +61,14 @@ async def test_a_prompt_longer_than_the_budget_takes_several_steps():
 
 
 @pytest.mark.asyncio
+async def test_a_row_cap_splits_a_burst_over_steps():
+    b = FakeMixedBackend()
+    outs, sched = await _run(b, [10, 10, 10, 10, 10], step_tokens=1000, prefill_step_rows=2)
+    assert outs == [[200, 201, 202]] * 5
+    assert b.calls[:3] == [[10, 10], [10, 10], [10]] and sched.stats()["prefill_step_rows"] == 2
+
+
+@pytest.mark.asyncio
 async def test_a_failed_mixed_forward_rejects_its_rows_and_frees_the_slots():
     b = FakeMixedBackend(fail=True)
     outs, sched = await _run(b, [100, 100], step_tokens=1000)

@@ -26,6 +26,8 @@ dev = [
     "ruff>=0.16.10",
     "matplotlib>=3.8",
 ]
+# Paged batch prefill attention (CUSTOM_BACKEND_PREFILL_ATTN=flashinfer); JIT-compiles against the local CUDA toolkit.
+flashinfer = ["flashinfer-python>=0.2"]
 
 [project.urls]
 Repository = "https://github.com/AdvayMonga/inference-server"

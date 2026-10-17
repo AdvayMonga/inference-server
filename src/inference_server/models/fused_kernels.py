@@ -97,3 +97,30 @@ def _topk_softmax_kernel(X, Wt, Ids, stride_x, E: tl.constexpr, BLOCK_E: tl.cons
         tl.store(Ids + row * K + j, idx.to(tl.int64))
         p = tl.where(cols == idx, -1.0, p)
 
+
+@triton.jit
+def _add_cast_kernel(H, Y, OUT, stride, D: tl.constexpr, BLOCK: tl.constexpr):
+    """out = bf16(h + y) for a bf16 residual and an fp32 row."""
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    m = cols < D
+    h = tl.load(H + row * stride + cols, mask=m, other=0.0).to(tl.float32)
+    y = tl.load(Y + row * stride + cols, mask=m, other=0.0)
+    tl.store(OUT + row * stride + cols, (h + y).to(tl.bfloat16), mask=m)
+
+
+@triton.jit
+def _kv_store_kernel(KN, VN, PK, PV, BID, SLOT, stride_kr, stride_kh, stride_vr, stride_vh,
+                     stride_pb, stride_ph, stride_ps, H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Row r's new K and V ([H, D] each, their own strides: V is a slice of the fused q/k/v GEMM) into
+    pool[bid[r], :, slot[r], :], both pools in one launch."""
+    r = tl.program_id(0)
+    b = tl.load(BID + r).to(tl.int64)
+    s = tl.load(SLOT + r).to(tl.int64)
+    offs = tl.arange(0, BLOCK)
+    m = offs < H * D
+    h, d = offs // D, offs % D
+    dst = b * stride_pb + h * stride_ph + s * stride_ps + d
+    tl.store(PK + dst, tl.load(KN + r * stride_kr + h * stride_kh + d, mask=m, other=0.0), mask=m)
+    tl.store(PV + dst, tl.load(VN + r * stride_vr + h * stride_vh + d, mask=m, other=0.0), mask=m)
+

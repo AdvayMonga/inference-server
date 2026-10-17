@@ -82,8 +82,11 @@ def build_scheduler(backend: InferenceBackend, settings: Settings, *,
     if timeline is None and settings.timeline_dir:
         timeline = Timeline(settings.timeline_dir)
     mode = settings.prefill_mode
-    if not mode and settings.prefill_chunk_size <= 0 and hasattr(backend, "prefill_batch"):
-        mode = "batched"   # unset: batched where the backend has it (Qwen3-MoE on H200: TTFT p50 121 → 80 ms)
+    if not mode and settings.prefill_chunk_size <= 0:
+        if hasattr(backend, "prefill_chunk_batch"):
+            mode = "mixed"      # unset: mixed where the backend has it (H200 2026-10-16: saturated 1.11 → 1.87 req/s)
+        elif hasattr(backend, "prefill_batch"):
+            mode = "batched"
     return ContinuousBatchScheduler(
         backend,
         max_batch_size=settings.max_batch_size,
@@ -92,6 +95,7 @@ def build_scheduler(backend: InferenceBackend, settings: Settings, *,
         prefill_chunk_size=settings.prefill_chunk_size,
         max_prefill_tokens=settings.max_prefill_tokens,
         prefill_step_tokens=settings.prefill_step_tokens,
+        prefill_step_rows=settings.prefill_step_rows,
         prefill_mode=mode or None,
         wave_window_mult=settings.wave_window_mult,
         max_queue_wait_s=settings.max_queue_wait_s,
