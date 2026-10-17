@@ -149,9 +149,11 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     return weights.to(router_logits.dtype), experts
 
 
-# Prefill attention on CUDA: torch SDPA (flash) by default; "flashinfer" is FlashInfer's paged batch prefill
-# (prefill_flashinfer.py, sdpa when the package is missing); "triton" is the paged kernel (~100x slower at 4k+).
-PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
+# Prefill attention on CUDA: "flashinfer" (default) is FlashInfer's paged batch prefill (prefill_flashinfer.py;
+# H200 2026-10-17: long_prompt 1.77 -> 8.43 req/s and saturated TTFT p99 at 128 clients 1.3 -> 0.67 s against
+# sdpa under the mixed scheduler), falling back to "sdpa" (torch SDPA over gathered prefixes) when the package is
+# missing; "triton" is the paged kernel (~100x slower at 4k+).
+PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "flashinfer")
 if PREFILL_ATTN == "flashinfer":
     from inference_server.models import prefill_flashinfer as _fi
     if not _fi.available():
