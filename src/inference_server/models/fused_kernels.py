@@ -40,14 +40,16 @@ def _add_rmsnorm_kernel(H, A, W, HO, Y, stride, eps, D: tl.constexpr, BLOCK: tl.
 @triton.jit
 def _rmsnorm_rope_kernel(X, W, COS, SIN, Y, stride_row, stride_head, stride_cs, eps,
                          H: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr):
-    """Per (token, head): RMSNorm over D, then rotary with HF's rotate_half layout. cos/sin per token, first HALF."""
+    """Per (token, head): RMSNorm over D, then rotary with HF's rotate_half layout. cos/sin per token, first HALF.
+    X is read with its own strides (a slice of the fused q/k/v GEMM output), Y is written contiguous [rows, H, D]."""
     pid = tl.program_id(0)
     row = pid // H
     head = pid % H
-    base = row * stride_row + head * stride_head
+    xbase = row * stride_row + head * stride_head
+    base = pid * D
     i = tl.arange(0, HALF)
-    x1 = tl.load(X + base + i).to(tl.float32)
-    x2 = tl.load(X + base + HALF + i).to(tl.float32)
+    x1 = tl.load(X + xbase + i).to(tl.float32)
+    x2 = tl.load(X + xbase + HALF + i).to(tl.float32)
     w1 = tl.load(W + i).to(tl.float32)
     w2 = tl.load(W + HALF + i).to(tl.float32)
     var = (tl.sum(x1 * x1, axis=0) + tl.sum(x2 * x2, axis=0)) / D

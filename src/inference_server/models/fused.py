@@ -53,12 +53,13 @@ def add_rmsnorm(h: torch.Tensor, a: torch.Tensor, weight: torch.Tensor, eps: flo
 def rmsnorm_rope(x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float) -> torch.Tensor:
     """x [B, S, H, D] -> head-wise RMSNorm then rotary (cos/sin [B, S, D], HF layout: halves repeat)."""
     B, S, H, D = x.shape
-    x = x.contiguous()
-    y = torch.empty_like(x)
+    if x.stride(3) != 1 or x.stride(2) != D or (B > 1 and x.stride(0) != S * x.stride(1)):
+        x = x.contiguous()                      # any layout but "rows of H*D-contiguous heads" (never the qkv slice)
+    y = torch.empty(B, S, H, D, dtype=x.dtype, device=x.device)
     cos2, sin2 = cos.reshape(B * S, -1), sin.reshape(B * S, -1)
     if not cos2.is_contiguous():
         cos2, sin2 = cos2.contiguous(), sin2.contiguous()
-    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(0) // S if S else D * H, D, cos2.stride(0), eps,
+    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(1), x.stride(2), cos2.stride(0), eps,
                                         H=H, D=D, HALF=D // 2)
     return y
 
@@ -68,7 +69,7 @@ def silu_mul(x: torch.Tensor) -> torch.Tensor:
     M, two_i = x.shape
     I = two_i // 2
     x = x.contiguous()
-    y = torch.empty(M, I, dtype=x.dtype, device=x.device)
+    y = torch.empty(M, I, dtype=torch.bfloat16, device=x.device)      # x may be the fp32 split-K accumulator
     BLOCK = 1024
     K._silu_mul_kernel[(M, K.triton.cdiv(I, BLOCK))](x, y, x.stride(0), y.stride(0), I=I, BLOCK=BLOCK)
     return y

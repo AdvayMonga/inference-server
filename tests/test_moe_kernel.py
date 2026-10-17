@@ -21,10 +21,14 @@ def test_moe_gemm_matches_grouped_mm(T, top_k, E):
     ref = torch._grouped_mm(flat[tok], w.transpose(-2, -1), offs=offs)
     sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
     assert sorted_ids.numel() == M + E * 15 and (sorted_ids < M).sum() == M
-    got = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M)
+    got = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M)                     # auto split-K (fp32 when split)
     torch.testing.assert_close(got.float(), ref.float(), atol=3e-2, rtol=2e-2)
-    got2 = moe_kernel.moe_gemm(flat[tok].contiguous(), None, w, sorted_ids, expert_ids, M)   # rows given directly
+    got2 = moe_kernel.moe_gemm(flat[tok].contiguous(), None, w, sorted_ids, expert_ids, M, split_k=1)   # rows direct, bf16
+    assert got2.dtype == torch.bfloat16
     torch.testing.assert_close(got2.float(), ref.float(), atol=3e-2, rtol=2e-2)
+    got4 = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M, split_k=4)
+    assert got4.dtype == torch.float32
+    torch.testing.assert_close(got4, ref.float(), atol=3e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("T,top_k,E", [(1, 8, 128), (7, 8, 128), (64, 8, 128), (256, 8, 128), (5, 2, 8), (3, 1, 4)])
