@@ -74,8 +74,8 @@ def test_kv_store_matches_the_index_put_scatter():
     rk, rv = pk.clone(), pv.clone()
     bid = torch.tensor([3, 17, 0, 63, 17], device="cuda")
     slot = torch.tensor([0, 15, 7, 1, 2], device="cuda")
-    k = torch.randn(R, H, 1, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2).transpose(1, 2)
-    v = torch.randn(R, H, 1, D, dtype=torch.bfloat16, device="cuda")
+    k = torch.randn(R, 1, H, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2)        # rope's layout
+    v = torch.randn(R, 1, 3 * H * D, dtype=torch.bfloat16, device="cuda")[..., 2 * H * D:].view(R, 1, H, D).transpose(1, 2)
     fused.kv_store(pk, pv, bid, slot, k, v)
     rk[bid, :, slot, :] = k[:, :, 0, :]
     rv[bid, :, slot, :] = v[:, :, 0, :]
