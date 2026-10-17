@@ -48,9 +48,10 @@ class Settings:
     # more than one bounded chunk, and is not one request at a time). "" = derive: chunk_size>0 → chunked, else
     # mixed on custom-* backends (H200, 2026-10-16: saturated 1.11 → 1.87 req/s with async decode), else monolithic.
     prefill_mode: str = ""
-    # Mixed mode: the most prefill tokens fed between two decode steps (all rows together), and the most rows one
-    # step may carry (0 = no cap; a 116-row step of ~17 tokens each took 3.1 s on the H200 at concurrency 128).
-    prefill_step_tokens: int = 2048
+    # Mixed mode: the most prefill tokens fed between two decode steps (all rows together; H200 2026-10-17 with
+    # FlashInfer: 8192 gives long_prompt 9.0 vs 8.4 req/s at 2048, saturated unchanged), and the most rows one step
+    # may carry (0 = no cap; a cap of 32 lost saturated 3.58 -> 2.35 req/s, TPOT p99 over the limit at 128 clients).
+    prefill_step_tokens: int = 8192
     prefill_step_rows: int = 0
     # Batched prefill: the most (right-padded) tokens one wave may carry, rows x the longest prompt. Bounds the
     # activation peak, which the KV pools are sized around (a wave of long prompts OOMed with no cap). 0 = none.
