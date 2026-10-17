@@ -66,16 +66,21 @@ def test_route_fused_matches_the_four_launch_routing(T, top_k, E, renorm):
     assert sorted_ids.numel() == expert_ids.numel() * 16 and (sorted_ids < M).sum() == M
     real = sorted_ids[sorted_ids < M]
     assert torch.equal(real.sort().values, torch.arange(M, device="cuda", dtype=torch.int32))   # every pair once
-    pair_e = rids.view(-1).to(torch.int32)                       # the reference expert of pair t * K + slot
-    assert torch.equal(tok.long(), torch.arange(M, device="cuda") // top_k)
-    torch.testing.assert_close(pair_w, rw.view(-1).float(), atol=2e-3, rtol=2e-2)
+    # bf16 logits tie often, and the kernel breaks ties by lowest index while torch.topk's order is unspecified: compare
+    # each token's expert SET and each (token, expert) weight, and the scattered output (order-free).
+    pair_e = torch.full((M,), -1, dtype=torch.int32, device="cuda")
     for b in range(expert_ids.numel()):
         ids = sorted_ids[b * 16:(b + 1) * 16]
-        ids = ids[ids < M]
+        ids = ids[ids < M].long()
         if ids.numel():
-            assert (pair_e[ids.long()] == expert_ids[b]).all()
-        else:
-            assert expert_ids[b] == E or True                   # an empty block may close an expert's padding
+            assert expert_ids[b] < E
+            pair_e[ids] = expert_ids[b]
+    assert (pair_e >= 0).all()
+    assert torch.equal(tok.long(), torch.arange(M, device="cuda") // top_k)
+    ref_w = torch.zeros(T, E, device="cuda").scatter_(1, rids, rw.float())          # weight per (token, expert)
+    for t in range(T):
+        assert set(pair_e[t * top_k:(t + 1) * top_k].tolist()) == set(rids[t].tolist())
+    torch.testing.assert_close(pair_w, ref_w[tok.long(), pair_e.long()], atol=2e-3, rtol=2e-2)
     K_, N = 256, 384
     act = torch.randn(M, K_, dtype=torch.bfloat16, device="cuda")
     w = torch.randn(E, N, K_, dtype=torch.bfloat16, device="cuda") * 0.05
@@ -83,5 +88,5 @@ def test_route_fused_matches_the_four_launch_routing(T, top_k, E, renorm):
     moe_kernel.moe_gemm_scatter(act, w, sorted_ids, expert_ids, M, tok, pair_w, out)
     ref = torch.zeros(T, N, device="cuda")
     for i in range(M):
-        ref[i // top_k] += (act[i].float() @ w[pair_e[i]].float().T) * rw.view(-1)[i].float()
+        ref[i // top_k] += (act[i].float() @ w[pair_e[i]].float().T) * ref_w[i // top_k, pair_e[i]]
     torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)
