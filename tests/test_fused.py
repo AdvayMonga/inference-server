@@ -53,6 +53,23 @@ def test_silu_mul_and_topk_softmax():
         torch.testing.assert_close(w.sort(dim=-1).values, rw.sort(dim=-1).values, atol=2e-3, rtol=2e-2)
 
 
+def test_kv_store_matches_the_index_put_scatter():
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    R, H, bs, D = 5, 4, 16, 128
+    pk = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda")
+    pv = torch.randn_like(pk)
+    rk, rv = pk.clone(), pv.clone()
+    bid = torch.tensor([3, 17, 0, 63, 17], device="cuda")
+    slot = torch.tensor([0, 15, 7, 1, 2], device="cuda")
+    k = torch.randn(R, H, 1, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2).transpose(1, 2)
+    v = torch.randn(R, H, 1, D, dtype=torch.bfloat16, device="cuda")
+    fused.kv_store(pk, pv, bid, slot, k, v)
+    rk[bid, :, slot, :] = k[:, :, 0, :]
+    rv[bid, :, slot, :] = v[:, :, 0, :]
+    assert torch.equal(pk, rk) and torch.equal(pv, rv)
+
+
 def test_topk_softmax_keeps_ids_in_range_on_nan_rows():
     from inference_server.models import fused
     logits = torch.randn(4, 128, dtype=torch.bfloat16, device="cuda")

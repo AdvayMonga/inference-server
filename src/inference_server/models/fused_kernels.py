@@ -97,3 +97,19 @@ def _topk_softmax_kernel(X, Wt, Ids, stride_x, E: tl.constexpr, BLOCK_E: tl.cons
         tl.store(Ids + row * K + j, idx.to(tl.int64))
         p = tl.where(cols == idx, -1.0, p)
 
+
+@triton.jit
+def _kv_store_kernel(KN, VN, PK, PV, BID, SLOT, stride_nr, stride_nh, stride_pb, stride_ph, stride_ps,
+                     H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Row r's new K and V ([H, D] each) into pool[bid[r], :, slot[r], :], both pools in one launch."""
+    r = tl.program_id(0)
+    b = tl.load(BID + r).to(tl.int64)
+    s = tl.load(SLOT + r).to(tl.int64)
+    offs = tl.arange(0, BLOCK)
+    m = offs < H * D
+    h, d = offs // D, offs % D
+    src = r * stride_nr + h * stride_nh + d
+    dst = b * stride_pb + h * stride_ph + s * stride_ps + d
+    tl.store(PK + dst, tl.load(KN + src, mask=m, other=0.0), mask=m)
+    tl.store(PV + dst, tl.load(VN + src, mask=m, other=0.0), mask=m)
+

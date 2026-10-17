@@ -74,6 +74,17 @@ def silu_mul(x: torch.Tensor) -> torch.Tensor:
     return y
 
 
+def kv_store(pool_k: torch.Tensor, pool_v: torch.Tensor, bid: torch.Tensor, slot: torch.Tensor,
+             k_new: torch.Tensor, v_new: torch.Tensor) -> None:
+    """pool[bid[r], :, slot[r], :] = new[r, :, 0, :] for K and V in one launch (k/v_new [R, H, 1, D], the pools
+    [blocks, H, bs, D]; the two index_put scatters it replaces were ~8 launches per layer)."""
+    R, H, _, D = k_new.shape
+    assert k_new.stride(3) == 1 and v_new.stride(3) == 1 and k_new.stride() == v_new.stride()
+    K._kv_store_kernel[(R,)](k_new, v_new, pool_k, pool_v, bid, slot, k_new.stride(0), k_new.stride(1),
+                             pool_k.stride(0), pool_k.stride(1), pool_k.stride(2),
+                             H=H, D=D, BLOCK=K.triton.next_power_of_2(H * D))
+
+
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """Like models.qwen3_moe.route: (weights in logits' dtype, expert ids int64), both [M, k]."""
     M, E = logits.shape
