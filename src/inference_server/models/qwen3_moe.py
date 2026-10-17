@@ -161,6 +161,9 @@ if PREFILL_ATTN == "flashinfer":
 
 # Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
 MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+# Up to this many tokens the whole router (softmax, top-k, grouping, padding) is one launch (moe_kernel.route_fused);
+# above it, topk_softmax + sort + align_fused. 0 = never.
+ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "32"))
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -246,21 +249,30 @@ class Qwen3SparseMoE(nn.Module):
         """The experts' output per row: bf16, or fp32 from the Triton path (its caller adds it to the residual)."""
         logits = self.gate(flat)
         on = flat.is_cuda and fused._on(flat)
-        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
-                            else route(logits, self.top_k, self.norm_topk_prob))
         E = self.experts.num_experts
-        sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
-        M = sorted_e.numel()
+        T = flat.shape[0]
+        M = T * self.top_k
         if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
             # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py); the
-            # routing bookkeeping is one launch and the down GEMM scatters weighted rows into an fp32 output.
+            # routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the down GEMM scatters weighted rows
+            # into an fp32 output.
             from inference_server.models import moe_kernel
-            sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E, self.top_k, 16)
+            if T <= ROUTE_FUSED_MAX_TOKENS:
+                sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, self.top_k,
+                                                                             self.norm_topk_prob, 16)
+            else:
+                weights, experts = fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True)
+                sorted_e, order = torch.sort(experts.view(-1), stable=True)
+                sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E,
+                                                                             self.top_k, 16)
             h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
             act = fused.silu_mul(h)
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
             moe_kernel.moe_gemm_scatter(act, self.experts.down_proj, sorted_ids, expert_ids, M, tok, pair_w, out)
             return out
+        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
+                            else route(logits, self.top_k, self.norm_topk_prob))
+        sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, _experts_arange(E, flat.device), right=True).to(torch.int32)

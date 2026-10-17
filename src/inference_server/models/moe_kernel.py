@@ -189,3 +189,83 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
                            E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
                            ROWS_FROM_TOKENS=tok is not None, num_warps=4, num_stages=3)
     return C
+
+
+@triton.jit
+def _route_kernel(LOGITS, SORTED_IDS, EXPERT_IDS, TOK, PAIR_W, SCRATCH, stride_l, T, n_blocks, max_blocks,
+                  E: tl.constexpr, E_PAD: tl.constexpr, K: tl.constexpr, RENORM: tl.constexpr,
+                  BLOCK_T: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
+    """The whole router for a decode-sized batch in one program: softmax and top-K per token, then the (token, slot)
+    pairs grouped by expert with a counting sort (each pair's rank among its expert's pairs) and padded per expert to
+    BLOCK_M rows: the same outputs as topk_softmax + sort + align_fused (four launches).
+    SCRATCH int32/fp32 views: [BLOCK] pair experts, [BLOCK] pair weights, [BLOCK_T] per-token weight sums,
+    [E_PAD] padded starts."""
+    t = tl.arange(0, BLOCK_T)
+    cols = tl.arange(0, E_PAD)
+    tm = t < T
+    m2 = tm[:, None] & (cols < E)[None, :]
+    x = tl.load(LOGITS + t[:, None] * stride_l + cols[None, :], mask=m2, other=float("-inf")).to(tl.float32)
+    p = tl.exp(x - tl.max(x, axis=1)[:, None])
+    p = p / tl.sum(p, axis=1)[:, None]
+    p = tl.where(m2, p, -1.0)
+    total = tl.zeros((BLOCK_T,), tl.float32)
+    for j in tl.static_range(K):
+        v = tl.max(p, axis=1)
+        # A NaN row (a graph's dummy rows) matches nothing: clamp so the id stays a real expert.
+        idx = tl.minimum(tl.min(tl.where(p == v[:, None], cols[None, :], E_PAD), axis=1), E - 1)
+        total += v
+        tl.store(SCRATCH + t * K + j, idx.to(tl.int32), mask=tm)
+        tl.store(SCRATCH.to(tl.pointer_type(tl.float32)) + BLOCK + t * K + j, v, mask=tm)
+        p = tl.where(cols[None, :] == idx[:, None], -1.0, p)
+    tl.store(SCRATCH.to(tl.pointer_type(tl.float32)) + 2 * BLOCK + t, total, mask=tm)
+    tl.debug_barrier()
+    offs = tl.arange(0, BLOCK)                                  # pair i = token * K + slot
+    M = T * K
+    pm = offs < M
+    e = tl.load(SCRATCH + offs, mask=pm, other=E)
+    tok = offs // K
+    w = tl.load(SCRATCH.to(tl.pointer_type(tl.float32)) + BLOCK + offs, mask=pm, other=0.0)
+    if RENORM:
+        w = w / tl.load(SCRATCH.to(tl.pointer_type(tl.float32)) + 2 * BLOCK + tok, mask=pm, other=1.0)
+    bins = tl.arange(0, E_PAD)
+    counts = tl.where(bins < E, tl.histogram(e, E_PAD), 0)
+    padded = (counts + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    pstart = tl.cumsum(padded, 0) - padded
+    tl.store(SCRATCH + 3 * BLOCK + bins, pstart)
+    for s in range(0, n_blocks * BLOCK_M, BLOCK):              # padding rows read M, blocks past the end E
+        tl.store(SORTED_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + M, mask=(s + offs) < n_blocks * BLOCK_M)
+    for s in range(0, n_blocks, BLOCK):
+        tl.store(EXPERT_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + E, mask=(s + offs) < n_blocks)
+    tl.debug_barrier()
+    same = (e[:, None] == e[None, :]) & (offs[None, :] < offs[:, None]) & pm[None, :]
+    rank = tl.sum(same.to(tl.int32), axis=1)                   # pairs of the same expert before this one
+    dest = tl.load(SCRATCH + 3 * BLOCK + e, mask=pm, other=0) + rank
+    tl.store(SORTED_IDS + dest, offs.to(tl.int32), mask=pm)
+    tl.store(TOK + offs, tok.to(tl.int32), mask=pm)
+    tl.store(PAIR_W + offs, w, mask=pm)
+    nb = padded // BLOCK_M
+    first = pstart // BLOCK_M
+    for j in range(0, max_blocks):                              # each expert's row blocks carry its id
+        tl.store(EXPERT_IDS + first + j, bins, mask=(j < nb) & (bins < E))
+
+
+def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool,
+                block_m: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """topk_softmax + sort + align_fused in one launch for T tokens (decode-sized: the rank step compares every pair
+    with every other): (sorted_ids, expert_ids, tok, pair_w), pairs numbered token * top_k + slot."""
+    T, E = logits.shape
+    M = T * top_k
+    dev = logits.device
+    n_blocks = (M + E * (block_m - 1)) // block_m
+    sorted_ids = torch.empty(n_blocks * block_m, dtype=torch.int32, device=dev)
+    expert_ids = torch.empty(n_blocks, dtype=torch.int32, device=dev)
+    tok = torch.empty(M, dtype=torch.int32, device=dev)
+    pair_w = torch.empty(M, dtype=torch.float32, device=dev)
+    e_pad = triton.next_power_of_2(E + 1)
+    block = max(triton.next_power_of_2(M), e_pad)
+    block_t = max(triton.next_power_of_2(T), 1)
+    scratch = torch.empty(3 * block + e_pad, dtype=torch.int32, device=dev)
+    _route_kernel[(1,)](logits, sorted_ids, expert_ids, tok, pair_w, scratch, logits.stride(0), T, n_blocks,
+                        triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=block_t,
+                        BLOCK_M=block_m, BLOCK=block, num_warps=min(16, max(4, block // 64)))
+    return sorted_ids, expert_ids, tok, pair_w
