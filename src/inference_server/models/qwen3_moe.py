@@ -97,7 +97,11 @@ class Qwen3Attention(nn.Module):
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
-                if PREFILL_ATTN == "sdpa" and hasattr(paged_ctx, "caches"):   # eager prefill; the graph ctx has no caches
+                eager = hasattr(paged_ctx, "caches")                           # the graph ctx has no caches
+                if eager and PREFILL_ATTN == "flashinfer":
+                    from inference_server.models.prefill_flashinfer import flashinfer_prefill
+                    out = flashinfer_prefill(q, paged_ctx, kv_layer_idx, self.scale)
+                elif eager and PREFILL_ATTN == "sdpa":
                     out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
                 else:
                     bt = paged_ctx.block_table_tensor(kv_layer_idx)
@@ -145,8 +149,13 @@ def route(router_logits: torch.Tensor, top_k: int, norm_topk_prob: bool):
     return weights.to(router_logits.dtype), experts
 
 
-# Prefill attention on CUDA: torch SDPA (flash) by default; "triton" is the paged kernel (~100x slower at 4k+).
+# Prefill attention on CUDA: torch SDPA (flash) by default; "flashinfer" is FlashInfer's paged batch prefill
+# (prefill_flashinfer.py, sdpa when the package is missing); "triton" is the paged kernel (~100x slower at 4k+).
 PREFILL_ATTN = os.environ.get("CUSTOM_BACKEND_PREFILL_ATTN", "sdpa")
+if PREFILL_ATTN == "flashinfer":
+    from inference_server.models import prefill_flashinfer as _fi
+    if not _fi.available():
+        PREFILL_ATTN = "sdpa"
 
 # Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
 MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))

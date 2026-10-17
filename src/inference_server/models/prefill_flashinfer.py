@@ -1,0 +1,80 @@
+"""Prefill attention over the paged K/V with FlashInfer: ragged queries, paged keys, one call per layer for the whole
+wave, no padding and no K/V gather.
+
+The SDPA paths (prefill_attention.py) gather every row's cached prefix out of the blocks and run a masked attention
+over the right-padded wave, or one flash call per row: the 2026-10-16 session found each in turn as the step that
+capped TTFT at concurrency 128 (a 116-row step of ~17 tokens each took 3.1 s). FlashInfer's batch prefill reads the
+pool directly ("HND" layout = our [blocks, Hkv, block_size, D]); `causal=True` with a query shorter than its keys
+aligns the query to the end, which is exactly "prefix keys, then the causal suffix". Each layer has its own block
+ids, so the wrapper is planned per layer (host work, ~0.1-0.3 ms); the row structure is built once per wave.
+Opt-in with CUSTOM_BACKEND_PREFILL_ATTN=flashinfer; falls back to sdpa when flashinfer is not importable."""
+
+from __future__ import annotations
+
+import functools
+import logging
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+WORKSPACE_BYTES = 128 * 1024 * 1024
+
+
+def available() -> bool:
+    try:
+        import flashinfer  # noqa: F401
+    except Exception as e:  # noqa: BLE001  (an import error of any kind means the sdpa path)
+        logger.warning("flashinfer not usable (%s): prefill attention stays on sdpa", e)
+        return False
+    return True
+
+
+@functools.lru_cache(maxsize=None)
+def _wrapper(device: torch.device):
+    import flashinfer
+    workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
+    return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND")
+
+
+def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):
+    """The wave's row structure for FlashInfer, on the host (plan reads indptrs there, so no device sync):
+    (qo_indptr, kv_indptr, kv_last_page_len) int32, and each row's block count."""
+    lens = [p + s for p, s in zip(prefix, suffix)]
+    nb = [(n + block_size - 1) // block_size for n in lens]
+    qo, kv = [0], [0]
+    for s, n in zip(suffix, nb):
+        qo.append(qo[-1] + s)
+        kv.append(kv[-1] + n)
+    last = [(n - 1) % block_size + 1 for n in lens]
+    i32 = torch.int32
+    return torch.tensor(qo, dtype=i32), torch.tensor(kv, dtype=i32), torch.tensor(last, dtype=i32), nb
+
+
+def kv_indices(block_table: torch.Tensor, nb: list[int]) -> torch.Tensor:
+    """Each row's first nb[r] block ids of a [rows, max_blocks] table, concatenated (int32, on the table's device)."""
+    cols = torch.arange(block_table.shape[1], device=block_table.device)
+    keep = cols[None, :] < torch.tensor(nb, device=block_table.device)[:, None]
+    return block_table[keep].to(torch.int32)
+
+
+def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> torch.Tensor:
+    """q [B, Hq, S, D] right-padded; the suffix K/V already appended to the pool. Returns [B, S, Hq, D] in q's dtype,
+    padding rows zero. `ctx` is the backend's prefill context (`_prefix`/`_suffix`, `tokens`, `block_table_tensor`)."""
+    B, Hq, S, D = q.shape
+    pool = ctx.pools[layer_idx]
+    Hkv, bs = pool.k.shape[1], pool.k.shape[2]
+    st = getattr(ctx, "_fi", None)
+    if st is None:                                   # once per wave; the block ids differ per layer, the rows do not
+        st = ctx._fi = plan_inputs(ctx._prefix, ctx._suffix, bs)
+    qo_indptr, kv_indptr, last, nb = st
+    indices = kv_indices(ctx.block_table_tensor(layer_idx), nb)
+    w = _wrapper(q.device)
+    w.plan(qo_indptr, kv_indptr, indices, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
+           q_data_type=q.dtype, kv_data_type=pool.k.dtype)
+    tokens = getattr(ctx, "tokens", None)
+    qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
+    o = w.run(qp[tokens] if tokens is not None else qp, (pool.k, pool.v))           # [total real tokens, Hq, D]
+    if tokens is None:
+        return o.view(B, S, Hq, D)
+    return torch.zeros(B * S, Hq, D, dtype=o.dtype, device=o.device).index_copy_(0, tokens, o).view(B, S, Hq, D)
