@@ -38,7 +38,9 @@ def test_align_fused_matches_align_and_the_scatter_gemm_matches_index_add(T, top
     M = sorted_e.numel()
     ref_ids, ref_experts = moe_kernel.align(sorted_e.clone(), E, 16)
     sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E, top_k, 16)
-    assert torch.equal(sorted_ids, ref_ids) and torch.equal(expert_ids, ref_experts)
+    # align sizes its ids M + E * 15 (not always a multiple of 16); the fused one stops at the last whole block.
+    assert sorted_ids.numel() == expert_ids.numel() * 16 and sorted_ids.numel() <= ref_ids.numel()
+    assert torch.equal(sorted_ids, ref_ids[:sorted_ids.numel()]) and torch.equal(expert_ids, ref_experts)
     assert torch.equal(tok.long(), order // top_k) and torch.equal(pair_w, weights.view(-1)[order])
     act = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
     w = torch.randn(E, N, K, dtype=torch.bfloat16, device="cuda") * 0.05

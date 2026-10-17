@@ -126,7 +126,7 @@ def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torc
     pair_w = torch.empty(M, dtype=torch.float32, device=dev)
     e_pad = triton.next_power_of_2(E + 1)
     scratch = torch.empty(2 * e_pad, dtype=torch.int32, device=dev)
-    block = max(triton.next_power_of_2(M), 16)
+    block = max(triton.next_power_of_2(M), e_pad)
     _align_kernel[(1,)](sorted_experts, order, weights.reshape(-1), sorted_ids, expert_ids, tok, pair_w, scratch,
                         M, n_blocks, triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, BLOCK_M=block_m,
                         BLOCK=block, num_warps=min(16, max(1, block // 128)))
