@@ -66,13 +66,16 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     Hkv, bs = pool.k.shape[1], pool.k.shape[2]
     st = getattr(ctx, "_fi", None)
     if st is None:                                   # once per wave; the block ids differ per layer, the rows do not
-        st = ctx._fi = plan_inputs(ctx._prefix, ctx._suffix, bs)
-    qo_indptr, kv_indptr, last, nb = st
+        tokens = getattr(ctx, "tokens", None)        # the real positions of a ragged wave (None when none is padded)
+        if tokens is None and sum(ctx._suffix) != B * S:
+            valid = torch.arange(S, device=q.device)[None, :] < torch.tensor(ctx._suffix, device=q.device)[:, None]
+            tokens = valid.reshape(-1).nonzero().squeeze(1)
+        st = ctx._fi = (*plan_inputs(ctx._prefix, ctx._suffix, bs), tokens)
+    qo_indptr, kv_indptr, last, nb, tokens = st
     indices = kv_indices(ctx.block_table_tensor(layer_idx), nb)
     w = _wrapper(q.device)
     w.plan(qo_indptr, kv_indptr, indices, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
            q_data_type=q.dtype, kv_data_type=pool.k.dtype)
-    tokens = getattr(ctx, "tokens", None)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
     o = w.run(qp[tokens] if tokens is not None else qp, (pool.k, pool.v))           # [total real tokens, Hq, D]
     if tokens is None:
