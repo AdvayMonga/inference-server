@@ -53,6 +53,18 @@ def test_silu_mul_and_topk_softmax():
         torch.testing.assert_close(w.sort(dim=-1).values, rw.sort(dim=-1).values, atol=2e-3, rtol=2e-2)
 
 
+def test_add_cast_and_fp32_topk_weights():
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    h = torch.randn(3, 5, 2048, dtype=torch.bfloat16, device="cuda")
+    y = torch.randn(3, 5, 2048, device="cuda")
+    torch.testing.assert_close(fused.add_cast(h, y), (h.float() + y).to(torch.bfloat16))
+    logits = torch.randn(9, 128, dtype=torch.bfloat16, device="cuda")
+    w32, ids32 = fused.topk_softmax(logits, 8, True, fp32=True)
+    w16, ids16 = fused.topk_softmax(logits, 8, True)
+    assert w32.dtype == torch.float32 and torch.equal(ids32, ids16) and torch.equal(w32.to(w16.dtype), w16)
+
+
 def test_kv_store_matches_the_index_put_scatter():
     from inference_server.models import fused
     torch.manual_seed(0)

@@ -85,12 +85,21 @@ def kv_store(pool_k: torch.Tensor, pool_v: torch.Tensor, bid: torch.Tensor, slot
                              H=H, D=D, BLOCK=K.triton.next_power_of_2(H * D))
 
 
-def topk_softmax(logits: torch.Tensor, k: int, renorm: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    """Like models.qwen3_moe.route: (weights in logits' dtype, expert ids int64), both [M, k]."""
+def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+    """Like models.qwen3_moe.route: (weights in logits' dtype, or fp32 as computed, expert ids int64), both [M, k]."""
     M, E = logits.shape
     logits = logits.contiguous()
     w = torch.empty(M, k, dtype=torch.float32, device=logits.device)
     ids = torch.empty(M, k, dtype=torch.int64, device=logits.device)
     K._topk_softmax_kernel[(M,)](logits, w, ids, logits.stride(0), E=E, BLOCK_E=K.triton.next_power_of_2(E), K=k,
                                RENORM=renorm)
-    return w.to(logits.dtype), ids
+    return (w if fp32 else w.to(logits.dtype)), ids
+
+
+def add_cast(h: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """bf16(h + y) for a bf16 residual `h` and an fp32 `y` of the same shape, one launch."""
+    D = h.shape[-1]
+    h2, y2 = h.reshape(-1, D).contiguous(), y.reshape(-1, D).contiguous()
+    out = torch.empty_like(h2)
+    K._add_cast_kernel[(h2.shape[0],)](h2, y2, out, D, D=D, BLOCK=K.triton.next_power_of_2(D))
+    return out.view(h.shape)

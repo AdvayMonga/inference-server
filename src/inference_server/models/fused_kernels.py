@@ -99,6 +99,17 @@ def _topk_softmax_kernel(X, Wt, Ids, stride_x, E: tl.constexpr, BLOCK_E: tl.cons
 
 
 @triton.jit
+def _add_cast_kernel(H, Y, OUT, stride, D: tl.constexpr, BLOCK: tl.constexpr):
+    """out = bf16(h + y) for a bf16 residual and an fp32 row."""
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    m = cols < D
+    h = tl.load(H + row * stride + cols, mask=m, other=0.0).to(tl.float32)
+    y = tl.load(Y + row * stride + cols, mask=m, other=0.0)
+    tl.store(OUT + row * stride + cols, (h + y).to(tl.bfloat16), mask=m)
+
+
+@triton.jit
 def _kv_store_kernel(KN, VN, PK, PV, BID, SLOT, stride_nr, stride_nh, stride_pb, stride_ph, stride_ps,
                      H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
     """Row r's new K and V ([H, D] each) into pool[bid[r], :, slot[r], :], both pools in one launch."""
