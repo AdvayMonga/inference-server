@@ -29,11 +29,13 @@ import torch.nn.functional as F
 from inference_server.models import fused
 
 
-def write_token(pool, bid: torch.Tensor, slot: torch.Tensor, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
-    """One decode token per row into the pool: pool.k[bid[r], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
+def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
+                k_new: torch.Tensor, v_new: torch.Tensor) -> None:
+    """One decode token per row into the pool: pool.k[bt[r, lb[r]], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
     if fused._on(k_new, v_new, pool.k):
-        fused.kv_store(pool.k, pool.v, bid, slot, k_new, v_new)
+        fused.kv_store(pool.k, pool.v, bt, lb, slot, k_new, v_new)
         return
+    bid = bt[rows, lb]
     pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
     pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
 
@@ -739,8 +741,7 @@ class BatchedDecodeState:
         block id + slot computed from seq_lens (prepare_step already alloc'd any new block)."""
         if layer_idx == self._live[0]:
             self._begin_step()
-        bid = self.bt[self._li[layer_idx]][self._rows, self._lb]   # [R]
-        write_token(self.pools[layer_idx], bid, self._slot, k_new, v_new)
+        write_token(self.pools[layer_idx], self.bt[self._li[layer_idx]], self._rows, self._lb, self._slot, k_new, v_new)
 
     def _begin_step(self) -> None:
         """What every layer's append and block_table_tensor share, built once at the first layer of a step (as

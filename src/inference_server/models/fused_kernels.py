@@ -110,12 +110,12 @@ def _add_cast_kernel(H, Y, OUT, stride, D: tl.constexpr, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _kv_store_kernel(KN, VN, PK, PV, BID, SLOT, stride_kr, stride_kh, stride_vr, stride_vh,
+def _kv_store_kernel(KN, VN, PK, PV, BT, LB, SLOT, stride_kr, stride_kh, stride_vr, stride_vh, stride_bt,
                      stride_pb, stride_ph, stride_ps, H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
     """Row r's new K and V ([H, D] each, their own strides: V is a slice of the fused q/k/v GEMM) into
-    pool[bid[r], :, slot[r], :], both pools in one launch."""
+    pool[bt[r, lb[r]], :, slot[r], :], both pools in one launch."""
     r = tl.program_id(0)
-    b = tl.load(BID + r).to(tl.int64)
+    b = tl.load(BT + r * stride_bt + tl.load(LB + r)).to(tl.int64)
     s = tl.load(SLOT + r).to(tl.int64)
     offs = tl.arange(0, BLOCK)
     m = offs < H * D
