@@ -146,6 +146,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  prefill_chunk_size: int = 0,
                  max_prefill_tokens: int = 0,
                  prefill_step_tokens: int = 2048,
+                 prefill_step_rows: int = 0,
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
@@ -172,8 +173,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
             raise ValueError("prefill_mode='batched' requires a backend with prefill_batch (custom-*)")
         if self.prefill_mode == "mixed" and not hasattr(backend, "prefill_chunk_batch"):
             raise ValueError("prefill_mode='mixed' requires a backend with prefill_chunk_batch (custom-*)")
-        # Mixed mode: prefill tokens fed between two decode steps, over every waiting row together.
+        # Mixed mode: prefill tokens fed between two decode steps, over every waiting row together, and the most
+        # rows one step carries (0 = no cap).
         self.prefill_step_tokens = max(1, prefill_step_tokens)
+        self.prefill_step_rows = prefill_step_rows if prefill_step_rows > 0 else 2**31
         # Window (as a multiple of free slots) that batched-mode wave planning may reorder
         # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
         # current workload: at rates 1-6 the queue never backs up, so 83-91% of prefill waves
@@ -341,6 +344,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "prefill_chunk_size": self.prefill_chunk_size,
             "max_prefill_tokens": self.max_prefill_tokens,
             "prefill_step_tokens": self.prefill_step_tokens,
+            "prefill_step_rows": self.prefill_step_rows,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             "wave_sizes": dict(sorted(self._wave_sizes.items())),
             "total_preempted": self._total_preempted,
@@ -755,7 +759,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             return
         budget, picked = self.prefill_step_tokens, []          # [(row, chunk, is_final)]
         for prow in self._prefilling:
-            if budget <= 0:
+            if budget <= 0 or len(picked) >= self.prefill_step_rows:
                 break
             ids = prow.request.token_ids
             if prow.matched == len(ids) and prow.tokens_fed == prow.matched:
