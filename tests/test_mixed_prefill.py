@@ -69,6 +69,14 @@ async def test_a_row_cap_splits_a_burst_over_steps():
 
 
 @pytest.mark.asyncio
+async def test_the_padded_size_of_a_step_is_capped_like_a_batched_wave():
+    b = FakeMixedBackend()
+    outs, _ = await _run(b, [1000, 5, 5, 5], step_tokens=4000, max_prefill_tokens=2000)
+    assert outs == [[200, 201, 202]] * 4
+    assert b.calls[:2] == [[1000, 5], [5, 5]]       # 3 x 1000 padded would exceed the cap; the short rows wait a step
+
+
+@pytest.mark.asyncio
 async def test_a_failed_mixed_forward_rejects_its_rows_and_frees_the_slots():
     b = FakeMixedBackend(fail=True)
     outs, sched = await _run(b, [100, 100], step_tokens=1000)
