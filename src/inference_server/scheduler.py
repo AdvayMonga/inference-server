@@ -782,6 +782,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         decode, batch = None, None
         if (self._active and self.async_decode and self._batched_kv is not None
                 and getattr(self.backend, "packed_prefill", False)):
+            # The launch comes before this iteration's evict here, so consume the previous step's tokens first: the
+            # launch's _finish_pending overwrites current_token, and a token still marked fresh would never be streamed
+            # (the joint path once dropped one token at every pure-decode -> joint transition: "merged [intervals").
+            self._evict_finished()
             batch = list(self._active)
             decode = (self._batched_kv, self._current_tokens(batch, device), [r.request.sampling for r in batch])
         try:
