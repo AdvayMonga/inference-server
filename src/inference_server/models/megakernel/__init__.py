@@ -1,7 +1,9 @@
 """The decode-layer megakernel (decode_layer.cu): one persistent CUDA kernel per decoder layer for batch <= 16,
 JIT-built with torch's cpp_extension on first use (nvcc, sm_90a). `available()` is False without CUDA or nvcc.
-MEGAKERNEL=1 makes the model's decoder layers use it on the decode path; the Triton/torch path stays for prefill,
-wide batches and everything else."""
+MEGAKERNEL=1 makes the backend use it for decode steps of up to MEGAKERNEL_MAX_ROWS rows (default 2: measured on
+the H200, 68 us a layer at batch 1 against 122 for the torch path, 4.39 ms single-stream TPOT p99 against 5.87;
+from batch 4 on both paths stream ~30 distinct experts' weights and the CUDA graphs win); the Triton/torch path
+stays for prefill, wider batches and everything else."""
 
 from __future__ import annotations
 

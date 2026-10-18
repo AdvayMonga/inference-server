@@ -399,6 +399,9 @@ class CustomTorchBackend(InferenceBackend):
         # The decode-layer megakernel (models/megakernel): one cooperative kernel per layer for batch <= 16.
         from inference_server.models import megakernel as _mk
         self._mega_on = self.device.type == "cuda" and _mk.ENABLED and _mk.available()
+        # Measured 2026-10-18 (H200): the kernel's step beats the graphs at batch 1 (4.1 vs 5.6 ms) and 2 (5.4 vs
+        # 5.7); from 4 on both are bound by streaming ~30 distinct experts' weights and the graphs are faster.
+        self._mega_max_rows = int(os.environ.get("MEGAKERNEL_MAX_ROWS", "2"))
         self._mega = None
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
@@ -888,7 +891,7 @@ class CustomTorchBackend(InferenceBackend):
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[2] <= self._graph_max_cols
-            if self._mega_on and n <= 16:
+            if self._mega_on and n <= self._mega_max_rows:
                 logits = self._decode_megakernel(current_tokens, state)
             elif self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
