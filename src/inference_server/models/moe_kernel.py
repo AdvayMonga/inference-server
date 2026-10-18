@@ -178,7 +178,7 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
     E, N, K = w.shape
     BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
-    split_k = split_k_for(grid[0] * grid[1], K, BLOCK_K)
+    split_k = split_k_for(min(M, E) * grid[1], K, BLOCK_K)
     _moe_gemm_scatter_kernel[(*grid, split_k)](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
                                                a.stride(0), w.stride(1), w.stride(2), out.stride(0),
                                                E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
@@ -188,14 +188,16 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
 SMS = None
 
 
-def split_k_for(programs: int, K: int, block_k: int) -> int:
-    """How many K slices to run so the grid fills the GPU: at batch 1 the gate_up GEMM was 192 programs on 132 SMs
-    (31 us against a ~10 us weight-read floor: the second wave left half the SMs idle). 1 when the grid is wide."""
+def split_k_for(active_programs: int, K: int, block_k: int) -> int:
+    """How many K slices to run so the programs that have work fill the GPU. At batch 1 the grid is 120 row blocks
+    x 12 tiles, but only 8 row blocks hold a pair (the rest exit at once): ncu saw 11% achieved occupancy and 38% of
+    DRAM bandwidth (29 us against a ~10 us weight-read floor), while batch 8 reached 77%. `active_programs` is the
+    bound min(M, E) x tiles, not the grid. 1 when that is already wide."""
     global SMS
     if SMS is None:
         SMS = torch.cuda.get_device_properties(0).multi_processor_count if torch.cuda.is_available() else 1
     for s in (4, 2):
-        if programs < 2 * SMS and K % (s * block_k) == 0 and programs * s <= 8 * SMS:
+        if active_programs < 2 * SMS and K % (s * block_k) == 0:
             return s
     return 1
 
@@ -208,7 +210,7 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
     if split_k is None:
-        split_k = split_k_for(grid[0] * grid[1], K, BLOCK_K)
+        split_k = split_k_for(min(M, E) * grid[1], K, BLOCK_K)
     if split_k > 1:
         C = torch.zeros(M, N, dtype=torch.float32, device=a.device)
     else:
@@ -298,3 +300,26 @@ def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool
                         triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=block_t,
                         BLOCK_M=block_m, BLOCK=block, num_warps=min(16, max(4, block // 64)))
     return sorted_ids, expert_ids, tok, pair_w
+
+
+@triton.jit
+def _scatter_add_weighted_kernel(Y, TOK, PAIR_W, OUT, M, N, stride_y, stride_o,
+                                 BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """out[tok[i]] += pair_w[i] * y[i] for a tile of rows: the MoE epilogue of the CUTLASS path in one pass."""
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm, cm = rows < M, cols < N
+    y = tl.load(Y + rows[:, None] * stride_y + cols[None, :], mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+    w = tl.load(PAIR_W + rows, mask=rm, other=0.0)
+    t = tl.load(TOK + rows, mask=rm, other=0).to(tl.int64)
+    tl.atomic_add(OUT + t[:, None] * stride_o + cols[None, :], y * w[:, None], mask=rm[:, None] & cm[None, :])
+
+
+def scatter_add_weighted(y: torch.Tensor, tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor) -> None:
+    """out [T, N] fp32 += each row of y [M, N] (bf16) times its routing weight, at its token. At 8k tokens the torch
+    version (multiply into fp32, cast, zero-fill, index_add) was ~0.9 ms a layer for ~0.3 GB of traffic."""
+    M, N = y.shape
+    BLOCK_M, BLOCK_N = 32, 256
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    _scatter_add_weighted_kernel[grid](y, tok, pair_w, out, M, N, y.stride(0), out.stride(0),
+                                       BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, num_warps=4)

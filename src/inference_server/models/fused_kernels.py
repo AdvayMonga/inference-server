@@ -39,27 +39,29 @@ def _add_rmsnorm_kernel(H, A, W, HO, Y, stride, eps, D: tl.constexpr, BLOCK: tl.
 
 @triton.jit
 def _rmsnorm_rope_kernel(X, W, COS, SIN, Y, stride_row, stride_head, stride_cs, eps,
-                         H: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr):
-    """Per (token, head): RMSNorm over D, then rotary with HF's rotate_half layout. cos/sin per token, first HALF.
-    X is read with its own strides (a slice of the fused q/k/v GEMM output), Y is written contiguous [rows, H, D]."""
-    pid = tl.program_id(0)
-    row = pid // H
-    head = pid % H
-    xbase = row * stride_row + head * stride_head
-    base = pid * D
+                         H: tl.constexpr, HB: tl.constexpr, D: tl.constexpr, HALF: tl.constexpr):
+    """Per (token, block of HB heads): RMSNorm over D per head, then rotary with HF's rotate_half layout. cos/sin per
+    token, first HALF. X is read with its own strides (a slice of the fused q/k/v GEMM output), Y is written
+    contiguous [rows, H, D]."""
+    row = tl.program_id(0)
+    heads = tl.program_id(1) * HB + tl.arange(0, HB)
+    hm = heads < H
     i = tl.arange(0, HALF)
-    x1 = tl.load(X + xbase + i).to(tl.float32)
-    x2 = tl.load(X + xbase + HALF + i).to(tl.float32)
-    w1 = tl.load(W + i).to(tl.float32)
-    w2 = tl.load(W + HALF + i).to(tl.float32)
-    var = (tl.sum(x1 * x1, axis=0) + tl.sum(x2 * x2, axis=0)) / D
-    r = 1.0 / tl.sqrt(var + eps)
+    xbase = row * stride_row + heads[:, None] * stride_head + i[None, :]
+    m = hm[:, None] & (i < HALF)[None, :]
+    x1 = tl.load(X + xbase, mask=m, other=0.0).to(tl.float32)
+    x2 = tl.load(X + xbase + HALF, mask=m, other=0.0).to(tl.float32)
+    w1 = tl.load(W + i).to(tl.float32)[None, :]
+    w2 = tl.load(W + HALF + i).to(tl.float32)[None, :]
+    var = (tl.sum(x1 * x1, axis=1) + tl.sum(x2 * x2, axis=1)) / D
+    r = (1.0 / tl.sqrt(var + eps))[:, None]
     n1 = w1 * (x1 * r).to(tl.bfloat16).to(tl.float32)
     n2 = w2 * (x2 * r).to(tl.bfloat16).to(tl.float32)
-    c = tl.load(COS + row * stride_cs + i).to(tl.float32)
-    s = tl.load(SIN + row * stride_cs + i).to(tl.float32)
-    tl.store(Y + base + i, (n1 * c - n2 * s).to(tl.bfloat16))
-    tl.store(Y + base + HALF + i, (n2 * c + n1 * s).to(tl.bfloat16))
+    c = tl.load(COS + row * stride_cs + i).to(tl.float32)[None, :]
+    s = tl.load(SIN + row * stride_cs + i).to(tl.float32)[None, :]
+    ybase = (row * H + heads[:, None]) * D + i[None, :]
+    tl.store(Y + ybase, (n1 * c - n2 * s).to(tl.bfloat16), mask=m)
+    tl.store(Y + ybase + HALF, (n2 * c + n1 * s).to(tl.bfloat16), mask=m)
 
 
 @triton.jit

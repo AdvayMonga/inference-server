@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 
 import torch
 
@@ -35,7 +36,8 @@ def available() -> bool:
 def _wrapper(device: torch.device):
     import flashinfer
     workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
-    return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND")
+    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")      # auto | fa2 | fa3 | cutlass | trtllm-gen
+    return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
 
 
 def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):
