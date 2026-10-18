@@ -363,7 +363,7 @@ async def test_packed_joint_steps_match_hf_greedy_with_staggered_arrivals(backen
     backend.packed_prefill = True
     try:
         sched = ContinuousBatchScheduler(backend, max_batch_size=8, prefill_mode="mixed", prefill_step_tokens=3,
-                                         async_decode=True)
+                                         async_decode=True, prefill_joint=True)
         sched.start()
         try:
             loop = asyncio.get_running_loop()

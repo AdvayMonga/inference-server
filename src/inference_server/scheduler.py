@@ -147,6 +147,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  max_prefill_tokens: int = 0,
                  prefill_step_tokens: int = 2048,
                  prefill_step_rows: int = 0,
+                 prefill_joint: bool = False,
                  prefill_mode: str | None = None,
                  wave_window_mult: int = 0,
                  max_queue_wait_s: float = 30.0,
@@ -177,6 +178,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # rows one step carries (0 = no cap).
         self.prefill_step_tokens = max(1, prefill_step_tokens)
         self.prefill_step_rows = prefill_step_rows if prefill_step_rows > 0 else 2**31
+        self.prefill_joint = prefill_joint                # decode rows ride in the packed prefill forward
         self._decoded_this_iter = False            # the decode rows advanced inside this iteration's packed prefill
         # Window (as a multiple of free slots) that batched-mode wave planning may reorder
         # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
@@ -346,6 +348,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "max_prefill_tokens": self.max_prefill_tokens,
             "prefill_step_tokens": self.prefill_step_tokens,
             "prefill_step_rows": self.prefill_step_rows,
+            "prefill_joint": self.prefill_joint,
             "prefill_chunks_processed": self._prefill_chunks_processed,
             "wave_sizes": dict(sorted(self._wave_sizes.items())),
             "total_preempted": self._total_preempted,
@@ -780,7 +783,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # Decode rows join the packed forward: one step for the chunks and their tokens (the weights are streamed once
         # for both), instead of a prefill forward followed by a decode step they wait through.
         decode, batch = None, None
-        if (self._active and self.async_decode and self._batched_kv is not None
+        if (self.prefill_joint and self._active and self.async_decode and self._batched_kv is not None
                 and getattr(self.backend, "packed_prefill", False)):
             # The launch comes before this iteration's evict here, so consume the previous step's tokens first: the
             # launch's _finish_pending overwrites current_token, and a token still marked fresh would never be streamed
