@@ -283,11 +283,10 @@ class Qwen3SparseMoE(nn.Module):
             gate, up = h.chunk(2, dim=-1)
             act = F.silu(gate) * up
         y = self.experts.down(act, offs)
-        if on:                                      # one pass: weight, scatter-add into fp32 (the caller adds + casts)
+        if on:                                      # one pass per token: its K rows gathered, weighted, summed (bf16)
             from inference_server.models import moe_kernel
-            out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
-            moe_kernel.scatter_add_weighted(y, tok, weights.view(-1)[order].contiguous(), out)
-            return out
+            pos = torch.empty_like(order).scatter_(0, order, _experts_arange(order.numel(), flat.device))
+            return moe_kernel.gather_weighted(y, pos.view(T, self.top_k), weights.contiguous())
         y = y * weights.view(-1)[order, None]
         return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype))
 

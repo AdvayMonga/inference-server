@@ -323,3 +323,30 @@ def scatter_add_weighted(y: torch.Tensor, tok: torch.Tensor, pair_w: torch.Tenso
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _scatter_add_weighted_kernel[grid](y, tok, pair_w, out, M, N, y.stride(0), out.stride(0),
                                        BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, num_warps=4)
+
+
+@triton.jit
+def _gather_weighted_kernel(Y, POS, W, OUT, N, stride_y, stride_o, K: tl.constexpr, BLOCK_N: tl.constexpr):
+    """out[t] = sum_j w[t, j] * y[pos[t, j]]: one token's K expert rows gathered and summed, no atomics, bf16 out."""
+    t = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    cm = cols < N
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for j in tl.static_range(K):
+        pos = tl.load(POS + t * K + j).to(tl.int64)
+        w = tl.load(W + t * K + j)
+        acc += w * tl.load(Y + pos * stride_y + cols, mask=cm, other=0.0).to(tl.float32)
+    tl.store(OUT + t * stride_o + cols, acc.to(tl.bfloat16), mask=cm)
+
+
+def gather_weighted(y: torch.Tensor, pos: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """[T, N] bf16: each token's routed rows of y [M, N] (at sorted positions pos [T, K]) times its weights [T, K],
+    summed. The MoE epilogue of the CUTLASS path as one read of y and one write of the output: the atomic
+    scatter-add version ran at 456 us a layer for 8k tokens (8 fp32 atomics per output element)."""
+    T, K = pos.shape
+    N = y.shape[1]
+    out = torch.empty(T, N, dtype=torch.bfloat16, device=y.device)
+    BLOCK_N = 256
+    _gather_weighted_kernel[(T, triton.cdiv(N, BLOCK_N))](y, pos, weights, out, N, y.stride(0), out.stride(0),
+                                                           K=K, BLOCK_N=BLOCK_N, num_warps=4)
+    return out

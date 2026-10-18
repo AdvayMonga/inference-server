@@ -97,6 +97,21 @@ def test_route_fused_matches_the_four_launch_routing(T, top_k, E, renorm):
 
 
 @pytest.mark.parametrize("T,top_k,N", [(1, 8, 2048), (300, 8, 2048), (1000, 8, 384)])
+def test_gather_weighted_matches_index_add(T, top_k, N):
+    from inference_server.models import moe_kernel
+    torch.manual_seed(T + 1)
+    M = T * top_k
+    y = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+    order = torch.randperm(M, device="cuda")                       # sorted position -> pair (token * K + slot)
+    weights = torch.rand(T, top_k, device="cuda")
+    pos = torch.empty_like(order).scatter_(0, order, torch.arange(M, device="cuda"))   # pair -> sorted position
+    ref = torch.zeros(T, N, device="cuda").index_add_(0, order // top_k, y.float() * weights.view(-1)[order, None])
+    got = moe_kernel.gather_weighted(y, pos.view(T, top_k), weights)
+    assert got.dtype == torch.bfloat16
+    torch.testing.assert_close(got.float(), ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("T,top_k,N", [(1, 8, 2048), (300, 8, 2048), (1000, 8, 384)])
 def test_scatter_add_weighted_matches_index_add(T, top_k, N):
     from inference_server.models import moe_kernel
     torch.manual_seed(T)
