@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from typing import Generator
 
 import torch
@@ -174,9 +175,12 @@ class _PrefillCtx:
         self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
         self._wave_table, self._wave_layer = None, -1   # the table shared by every layer with the same block ids
         self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens
+        self.alloc_s = 0.0                         # host seconds in block allocation over the wave
 
     def _ensure_blocks(self, layer_idx):
-        """Reserve every row's blocks for this layer up front (Python only, no GPU work)."""
+        """Reserve every row's blocks for this layer up front (Python only, no GPU work; `alloc_s` totals it, the
+        prefix cache's reclaim included)."""
+        t0 = time.perf_counter()
         pool = self.pools[layer_idx]
         bs = pool.block_size
         for b, cache in enumerate(self.caches):
@@ -184,6 +188,7 @@ class _PrefillCtx:
             need = (cache.seq_lens[layer_idx] + self._suffix[b] + bs - 1) // bs
             while len(bt) < need:
                 bt.append(pool.alloc())
+        self.alloc_s += time.perf_counter() - t0
 
     def _table(self, layer_idx):
         """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
@@ -738,18 +743,33 @@ class CustomTorchBackend(InferenceBackend):
             input_ids[k, :len(chunk)] = torch.tensor(chunk, device=dev)
             position_ids[k, :len(chunk)] = torch.arange(prefix[k], prefix[k] + len(chunk), device=dev)
         self._ensure_scratch()
+        t0 = time.perf_counter()
+        cuda = dev.type == "cuda"
+        ev0 = ev1 = None
         try:
             ctx = _PrefillCtx(caches, self.pools, prefix, [len(c) for c in chunks], dev, scratch=self._scratch)
             last_idx = torch.tensor([len(c) - 1 for c in chunks], device=dev)
+            if cuda:
+                ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                ev0.record()
             logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
+            if cuda:
+                ev1.record()
         except BaseException:
             for c in caches:
                 c.free_all()
             raise
+        t1 = time.perf_counter()
         out = []
         for k, (_, chunk, final, sampling) in enumerate(items):
             tok = int(sample(logits[k:k + 1, 0, :], sampling).item()) if final else None
             out.append((caches[k], tok, caches[k].seq_len))
+        t2 = time.perf_counter()
+        # Where a step's time went, for the timeline (`prefill_detail`): host work enqueueing the forward (incl. the
+        # block allocations inside it), the forward's own device time, and the wait at the first sync.
+        self.last_prefill_timing = {"host_enqueue_s": round(t1 - t0, 4), "alloc_s": round(ctx.alloc_s, 4),
+                                    "sync_wait_s": round(t2 - t1, 4),
+                                    "gpu_forward_s": round(ev0.elapsed_time(ev1) / 1e3, 4) if cuda else None}
         return out
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):

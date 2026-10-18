@@ -778,6 +778,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             with self._timeline.phase("prefill_mixed", rows=len(picked), tokens=sum(len(c) for _, c, _ in picked)):
                 results = self.backend.prefill_chunk_batch(
                     [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked])
+            detail = getattr(self.backend, "last_prefill_timing", None)
+            if detail:
+                self._timeline.event("prefill_detail", rows=len(picked), **detail)
         except Exception as e:
             e = _as_backpressure(e)
             logger.warning("mixed prefill rejected (%d rows): %s", len(picked), e)
