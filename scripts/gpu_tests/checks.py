@@ -14,9 +14,8 @@ from typing import Callable
 TOL = 5e-2
 
 
-def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale, window=1 << 30):
-    """Pure-torch paged attention: gather each seq's real K/V, softmax over the last
-    `window` keys (window >= L → full attention)."""
+def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale):
+    """Pure-torch paged attention: gather each seq's real K/V, softmax over all its keys."""
     import torch
 
     N, Hq, D = q.shape
@@ -26,33 +25,32 @@ def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale, window=1 << 30)
     out = torch.empty(N, Hq, D, dtype=torch.float32, device=q.device)
     for i in range(N):
         L = int(seq_lens[i].item())
-        lo = max(0, L - window)                      # window lower bound (key pos >= lo)
         nb = (L + bs - 1) // bs
         ks, vs = [], []
         for b in range(nb):
             blk = int(block_tables[i, b].item())
             ks.append(k_pool[blk])  # [num_kv_heads, bs, D]
             vs.append(v_pool[blk])
-        K = torch.cat(ks, dim=1)[:, lo:L, :].float()  # [num_kv_heads, win, D]
-        V = torch.cat(vs, dim=1)[:, lo:L, :].float()
-        K = K.repeat_interleave(group, dim=0)        # [Hq, win, D]
+        K = torch.cat(ks, dim=1)[:, :L, :].float()  # [num_kv_heads, L, D]
+        V = torch.cat(vs, dim=1)[:, :L, :].float()
+        K = K.repeat_interleave(group, dim=0)        # [Hq, L, D]
         V = V.repeat_interleave(group, dim=0)
         qi = q[i].float()                            # [Hq, D]
-        scores = (qi[:, None, :] * K).sum(-1) * scale  # [Hq, win]
+        scores = (qi[:, None, :] * K).sum(-1) * scale  # [Hq, L]
         attn = torch.softmax(scores, dim=-1)
         out[i] = (attn[:, :, None] * V).sum(dim=1)   # [Hq, D]
     return out
 
 
 def paged_decode_parity() -> tuple[bool, str]:
-    """Decode kernel vs the torch reference: Gemma 256/512 and Qwen3-MoE 128 head_dim, GQA 8:1."""
+    """Decode kernel vs the torch reference: Qwen3-MoE's head_dim 128 at its GQA 8:1 and at one KV head."""
     import torch
 
     from inference_server.models.paged_attention_kernel import paged_decode_attention
 
     torch.manual_seed(0)
     results = []
-    for D, num_kv_heads, Hq in [(256, 1, 8), (512, 1, 8), (256, 2, 8), (128, 4, 32)]:
+    for D, num_kv_heads, Hq in [(128, 4, 32), (128, 1, 8)]:
         N, num_blocks, bs = 5, 64, 16
         max_blocks = 8
         seq_lens = torch.tensor([1, 16, 17, 40, 100][:N], dtype=torch.int32, device="cuda")
@@ -71,30 +69,6 @@ def paged_decode_parity() -> tuple[bool, str]:
     return ok, " ".join(f"D={D} kvh={kvh} Hq={Hq} max|diff|={d:.2e}" for D, kvh, Hq, d in results)
 
 
-def paged_decode_window() -> tuple[bool, str]:
-    """Sliding-window probe: window < seq_len must match a windowed reference (last W keys)."""
-    import torch
-
-    from inference_server.models.paged_attention_kernel import paged_decode_attention
-
-    torch.manual_seed(0)
-    results = []
-    for D in [256, 512]:
-        N, num_blocks, bs, W = 4, 256, 16, 50
-        seq_lens = torch.tensor([10, 50, 80, 200], dtype=torch.int32, device="cuda")  # mix < and > W
-        max_blocks = (int(seq_lens.max()) + bs - 1) // bs
-        k_pool = torch.randn(num_blocks, 1, bs, D, dtype=torch.bfloat16, device="cuda")
-        v_pool = torch.randn_like(k_pool)
-        bt = torch.arange(N * max_blocks, dtype=torch.int32, device="cuda").reshape(N, max_blocks) % num_blocks
-        q = torch.randn(N, 8, D, dtype=torch.bfloat16, device="cuda")
-        got = paged_decode_attention(q, k_pool, v_pool, bt, seq_lens, scale=1.0, window=W)
-        ref = _reference(q, k_pool, v_pool, bt, seq_lens, scale=1.0, window=W).to(got.dtype)
-        diff = (got.float() - ref.float()).abs().max().item()
-        results.append((D, W, diff))
-    ok = all(diff < TOL for *_, diff in results)
-    return ok, " ".join(f"D={D} W={W} max|diff|={d:.2e}" for D, W, d in results)
-
-
 def paged_decode_no_recompile() -> tuple[bool, str]:
     """Vary block-count widely: with the runtime loop bound only the first call per head_dim
     compiles. A constexpr bound would recompile per distinct count → ~1s spikes → the
@@ -104,7 +78,7 @@ def paged_decode_no_recompile() -> tuple[bool, str]:
     from inference_server.models.paged_attention_kernel import paged_decode_attention
 
     torch.manual_seed(0)
-    D, num_kv_heads, Hq, bs = 256, 1, 8, 16
+    D, num_kv_heads, Hq, bs = 128, 4, 32, 16
     num_blocks = 4096
     k_pool = torch.randn(num_blocks, num_kv_heads, bs, D, dtype=torch.bfloat16, device="cuda")
     v_pool = torch.randn_like(k_pool)
@@ -187,7 +161,6 @@ def _prefill_parity_at(D: int) -> tuple[bool, str]:
 # Name → check. The gate runs all of them; each modal script runs its own subset.
 CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_parity": paged_decode_parity,
-    "paged_decode_window": paged_decode_window,
     "paged_decode_no_recompile": paged_decode_no_recompile,
     "paged_prefill_parity": paged_prefill_parity,
 }

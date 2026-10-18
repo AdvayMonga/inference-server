@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / "scripts" / "bench"))
 sys.path.insert(0, str(REPO / "scripts" / "tools"))
 import tune_triton_launch as tune  # noqa: E402
 
-GPU, MODEL = "NVIDIA A100 80GB PCIe", "google/gemma-4-E4B-it"
+GPU, MODEL = "NVIDIA A100 80GB PCIe", "Qwen/Qwen3-30B-A3B"
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,7 @@ def test_another_models_table_loads_nothing_and_clears_the_old_one(tmp_path):
     p = tmp_path / "t.json"
     p.write_text(json.dumps(_doc([_entry()])))
     launch_table.load(p, GPU, MODEL)
-    p.write_text(json.dumps(_doc([_entry()], model="google/gemma-4-E2B-it")))
+    p.write_text(json.dumps(_doc([_entry()], model="Qwen/Qwen3-235B-A22B")))
     assert launch_table.load(p, GPU, MODEL) == 0
     assert launch_table.lookup("paged_decode", 8, 256, 16) is None
 
@@ -203,23 +203,23 @@ def test_config_space_is_the_full_cross_product():
     assert {c["block_m"] for c in tune.tiled_space()} == {16, 32, 64}
 
 
-def test_attention_shapes_from_a_gemma_config():
-    cfg = SimpleNamespace(layer_types=["sliding_attention"] * 4 + ["full_attention"],
-                          head_dim=256, global_head_dim=512, num_attention_heads=8,
-                          num_key_value_heads=2, sliding_window=512)
-    assert tune.attention_shapes(cfg) == [tune.Shape(256, 8, 2, 512),
-                                          tune.Shape(512, 8, 2, tune.FULL)]
+def test_attention_shapes_from_a_qwen3_moe_config():
+    cfg = SimpleNamespace(head_dim=128, num_attention_heads=32, num_key_value_heads=4)
+    assert tune.attention_shapes(cfg) == [tune.Shape(128, 32, 4)]
 
 
 def test_plan_sweeps_every_bucket_and_tiles_only_where_the_engine_could():
-    shapes = [tune.Shape(256, 8, 2, 512), tune.Shape(512, 8, 2, tune.FULL)]
+    shapes = [tune.Shape(128, 32, 4)]
     cases = tune.plan(shapes, (2, 4, 8), (64, 512, 1024), 16, 512, {256})
     by = {}
     for c in cases:
         by.setdefault(c.kernel, []).append((c.shape, c.attn.head_dim))
-    assert sorted(by["paged_decode"]) == [(n, d) for n in (2, 4, 8) for d in (256, 512)]
-    assert sorted(by["paged_prefill"]) == [(s, d) for s in (64, 512, 1024) for d in (256, 512)]
-    assert sorted(by["paged_prefill_tiled"]) == [(512, 256), (1024, 256)]
+    assert sorted(by["paged_decode"]) == [(n, 128) for n in (2, 4, 8)]
+    assert sorted(by["paged_prefill"]) == [(s, 128) for s in (64, 512, 1024)]
+    assert "paged_prefill_tiled" not in by            # the engine never tiles at head_dim 128
+    tiled = [c for c in tune.plan(shapes, (2,), (64, 512, 1024), 16, 512, {128})
+             if c.kernel == "paged_prefill_tiled"]
+    assert sorted(c.shape for c in tiled) == [512, 1024]
 
 
 def _row(cfg, ms, diff=0.0, error=None):
@@ -227,7 +227,7 @@ def _row(cfg, ms, diff=0.0, error=None):
 
 
 def test_pick_takes_the_fastest_valid_config_and_only_past_the_gain_bar():
-    case = tune.Case("paged_decode", 8, tune.Shape(256, 8, 2, 512), 16, [])
+    case = tune.Case("paged_decode", 8, tune.Shape(128, 32, 4), 16, [])
     rows = [_row({"splits": 8}, 0.5, error="OutOfResources"),
             _row({"splits": 4}, 0.6, diff=1.0),                    # fast but wrong
             _row({"splits": 2}, 0.8, diff=1e-3),
@@ -240,17 +240,17 @@ def test_pick_takes_the_fastest_valid_config_and_only_past_the_gain_bar():
 
 
 def test_prefill_uses_the_tighter_parity_tolerance():
-    case = tune.Case("paged_prefill", 64, tune.Shape(256, 8, 2, 512), 16, [])
+    case = tune.Case("paged_prefill", 64, tune.Shape(128, 32, 4), 16, [])
     assert tune.pick(case, 1.0, [_row({"num_warps": 8}, 0.5, diff=2e-2)]) is None
     assert tune.Case("paged_decode", 8, case.attn, 16, []).tol == 5e-2
 
 
 def test_a_written_table_is_what_the_engine_loads(tmp_path):
-    case = tune.Case("paged_decode", 8, tune.Shape(256, 8, 2, 512), 16, [])
+    case = tune.Case("paged_decode", 8, tune.Shape(128, 32, 4), 16, [])
     e = tune.pick(case, 1.0, [_row({"splits": 4, "num_warps": 2, "num_stages": 3}, 0.5)])
     doc = tune.build_table([e], model=MODEL, gpu=GPU, sha="abc1234", run_group="grp-x")
     path = tune.write_table(doc, tmp_path / tune.table_filename(GPU, "abc1234"))
     assert path.name == "triton-launch-nvidia-a100-80gb-pcie-abc1234.json"
     assert launch_table.load(path, GPU, MODEL) == 1
-    assert launch_table.lookup("paged_decode", 8, 256, 16) == {"splits": 4, "num_warps": 2,
+    assert launch_table.lookup("paged_decode", 8, 128, 16) == {"splits": 4, "num_warps": 2,
                                                                "num_stages": 3}

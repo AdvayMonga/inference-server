@@ -5,7 +5,7 @@ The engine reads the table at model load via CUSTOM_BACKEND_LAUNCH_TABLE (models
 — never at first call, so tuning adds nothing to cold start. A key with no entry launches
 exactly as before. Why a sweep at all: BlameGraph knowledge/kb-20260905-a474d802.json.
 
-    python -m lab.vm run -- env MODEL_NAME=google/gemma-4-E4B-it MAX_BATCH_SIZE=256 \\
+    python -m lab.vm run -- env MODEL_NAME=Qwen/Qwen3-30B-A3B MAX_BATCH_SIZE=256 \\
         python scripts/bench/tune_triton_launch.py      # from BlameGraph: the environment's GPU VM
     PYTHONPATH=src python scripts/bench/tune_triton_launch.py          # directly, on a CUDA box
 
@@ -35,7 +35,6 @@ sys.path.insert(0, str(REPO / "scripts" / "gpu_tests"))
 
 import checks  # noqa: E402
 from inference_server.models import launch_table  # noqa: E402
-from inference_server.models.gemma4 import head_dims  # noqa: E402
 
 WARPS = (1, 2, 4, 8)
 STAGES = (1, 2, 3, 4)
@@ -44,9 +43,8 @@ BLOCK_MS = (16, 32, 64)
 DECODE_TOL = checks.TOL          # paged_decode_parity's bound
 PREFILL_TOL = 1e-2               # paged_prefill_parity's bound
 MIN_GAIN = 1.05                  # a config must beat the default launch by 5% to earn an entry
-FULL = 1 << 30                   # the kernels' "no window" sentinel
 TIMING_DIR = REPO / "runs" / "timing"      # evidence; file it in BlameGraph knowledge/ if it holds
-DEFAULT_MODEL = "google/gemma-4-E4B-it"
+DEFAULT_MODEL = "Qwen/Qwen3-30B-A3B"
 
 
 @dataclass(frozen=True)
@@ -55,7 +53,6 @@ class Shape:
     head_dim: int
     q_heads: int
     kv_heads: int
-    window: int
 
 
 @dataclass
@@ -74,18 +71,9 @@ class Case:
 
 # ------------------------------------------------------------------ pure (CPU-testable)
 
-def attention_shapes(text_cfg: Any) -> list[Shape]:
-    """Distinct (head_dim, heads, window) the model's layers launch with."""
-    out: list[Shape] = []
-    sliding_dim, full_dim = head_dims(text_cfg)
-    for t in dict.fromkeys(text_cfg.layer_types):
-        sliding = t == "sliding_attention"
-        s = Shape(sliding_dim if sliding else full_dim,
-                  text_cfg.num_attention_heads, text_cfg.num_key_value_heads,
-                  text_cfg.sliding_window if sliding else FULL)
-        if s not in out:
-            out.append(s)
-    return out
+def attention_shapes(cfg: Any) -> list[Shape]:
+    """The one (head_dim, q heads, kv heads) every Qwen3-MoE layer launches with."""
+    return [Shape(cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads)]
 
 
 def decode_space() -> list[dict[str, int]]:
@@ -179,7 +167,7 @@ def _inputs(case: Case, kv_len: int) -> Callable[[], Any]:
         bt = torch.arange(n * nb, device=dev, dtype=torch.int32).reshape(n, nb)
         sl = torch.full((n,), kv_len, device=dev, dtype=torch.int32)
         q = torch.randn(n, a.q_heads, a.head_dim, device=dev, dtype=torch.bfloat16)
-        return lambda: K.paged_decode_attention(q, kp, vp, bt, sl, 1.0, a.window)
+        return lambda: K.paged_decode_attention(q, kp, vp, bt, sl, 1.0)
     s = case.shape
     nb = (s + bs - 1) // bs
     kp = torch.randn(nb, a.kv_heads, bs, a.head_dim, device=dev, dtype=torch.bfloat16)
@@ -188,7 +176,7 @@ def _inputs(case: Case, kv_len: int) -> Callable[[], Any]:
     pl = torch.zeros(1, device=dev, dtype=torch.int32)
     sl = torch.full((1,), s, device=dev, dtype=torch.int32)
     q = torch.randn(1, s, a.q_heads, a.head_dim, device=dev, dtype=torch.bfloat16)
-    return lambda: K.paged_prefill_attention(q, kp, vp, bt, pl, sl, 1.0, a.window)
+    return lambda: K.paged_prefill_attention(q, kp, vp, bt, pl, sl, 1.0)
 
 
 def _time(case: Case, fn: Callable[[], Any]) -> float:
@@ -265,7 +253,7 @@ def main() -> int:
     compile_on = os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
     decode_buckets = _decode_buckets(settings.max_batch_size, coarse=compile_on)
     kv_lens = env_ints("TUNE_DECODE_KV_LENS", "256,2048")
-    shapes = attention_shapes(AutoConfig.from_pretrained(model).text_config)
+    shapes = attention_shapes(AutoConfig.from_pretrained(model))
     cases = plan(shapes, decode_buckets, _PREFILL_BUCKETS, block_size,
                  K.TILED_MIN_TOKENS, set(K.LAUNCH_BY_HEAD_DIM))
     print(f"[tune] {model} on {gpu}: {len(cases)} keys, "

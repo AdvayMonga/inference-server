@@ -96,11 +96,8 @@ class Tokenizer:
 
     @staticmethod
     def strip_thinking(text: str) -> str:
-        """Remove thinking blocks from model output (supports multiple formats)."""
-        # Gemma 4 format: <|channel>thought\n...<channel|>
-        stripped = re.sub(r"<\|channel>thought.*?<channel\|>", "", text, flags=re.DOTALL)
-        # Also handle <think>...</think> format
-        stripped = re.sub(r"<think>.*?</think>", "", stripped, flags=re.DOTALL)
+        """Remove <think>...</think> blocks from model output."""
+        stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         return stripped.strip()
 
     @property

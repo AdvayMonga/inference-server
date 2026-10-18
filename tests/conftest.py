@@ -1,26 +1,18 @@
 """Shared test config — and the guard rails that keep the suite from eating the machine.
 
-The full suite loads a 9.6 GB model repeatedly: test_gemma4_parity does 5 separate from_hf()
-calls, test_sliding_window 2 more, and test_custom_backend_scheduler / test_prefill_batch each
-hold their own module-scoped backend. On a 24 GB laptop that only survives because CPython frees
-each one before the next allocates — there is no headroom, and two suite runs at once will take
-the machine down.
-
-So: model-heavy tests are marked `heavy` and DESELECTED by default. Run them deliberately:
+Tests that load a real model (GBs of RAM, a GPU for Qwen3-30B-A3B) are marked `heavy` and
+DESELECTED by default; the default suite runs on the tiny Qwen3-MoE checkpoint below. Run the
+heavy ones deliberately:
 
     pytest                  # fast tests only, safe, seconds
     pytest -m heavy         # the model-loading ones, one process at a time
-    pytest -m ''            # everything (what used to be the default)
+    pytest -m ''            # everything
 """
 
 import pytest
 
-# Any test module that constructs a real Gemma model or backend.
+# Test modules marked heavy as a whole.
 _HEAVY_MODULES = {
-    "test_gemma4_parity",
-    "test_sliding_window",
-    "test_custom_backend_scheduler",
-    "test_prefill_batch",
     "test_chunked_prefill",
     "test_scheduler_splice",
 }

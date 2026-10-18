@@ -1,1 +1,1 @@
-"""Custom model forward passes — Gemma 4 (M1) and future architectures."""
+"""Custom model forward passes — Qwen3-MoE."""

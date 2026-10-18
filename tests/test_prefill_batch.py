@@ -3,7 +3,7 @@
 K=1 is the strong check: same [1,L] forward, no padding → byte-identical first token AND identical
 decode from the distributed paged cache (proves the per-row KV slice/append is correct). K>1 checks
 the padded batching produces the same first tokens (allowing rare near-tie flips from batch
-reduction-order noise — same caveat as the Triton kernel).
+reduction-order noise — same caveat as the Triton kernel). Tiny Qwen3-MoE checkpoint, CPU, bf16.
 """
 
 import pytest
@@ -12,23 +12,22 @@ import torch
 from inference_server.backends.custom_torch_backend import CustomTorchBackend
 from inference_server.models.paged_kv_cache import PrefixCache
 
-MODEL = "google/gemma-4-E2B-it"
-PROMPTS_TEXT = [
-    "The capital of France is",
-    "Water boils at a temperature of",
-    "The opposite of hot is",
+# Odd lengths: a repeat is a partial prefix hit, never a full one (see test_qwen3_moe_parity).
+PROMPTS = [
+    [5, 17, 300, 42, 8, 99, 123, 7, 55],
+    [12, 900, 31, 64, 2, 77, 410],
+    [3, 3, 150, 151, 152, 9, 10, 11, 12, 13, 14],
 ]
 
 
 @pytest.fixture(scope="module")
-def backend():
-    b = CustomTorchBackend(device="cpu")
-    b.load_model(MODEL)
+def backend(tiny_qwen3_moe_dir):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("CUSTOM_BACKEND_BLOCKS", "64")
+        mp.setenv("CUSTOM_BACKEND_BLOCK_SIZE", "2")   # short prompts still fill blocks → prefix sharing
+        b = CustomTorchBackend(device="cpu", model_name=tiny_qwen3_moe_dir)
+        b.load_model(tiny_qwen3_moe_dir)
     return b
-
-
-def _toks(backend, text):
-    return backend.tokenizer(text, return_tensors="pt").input_ids[0].tolist()
 
 
 def _decode(backend, cache, first, n=5):
@@ -42,7 +41,7 @@ def _decode(backend, cache, first, n=5):
 
 
 def test_prefill_batch_k1_identical_to_single(backend):
-    p = _toks(backend, PROMPTS_TEXT[0])
+    p = PROMPTS[0]
 
     backend.prefix_cache = PrefixCache(pools=backend.pools)  # fresh → full prefill both ways
     (cache_b, first_b, kvlen_b), = backend.prefill_batch([p])
@@ -60,7 +59,7 @@ def test_prefill_batch_k1_identical_to_single(backend):
 def test_prefill_batch_cache_hit_suffix_only_matches_full(backend):
     """With a warm prefix cache, prefill_batch forwards only the 1-token suffix against the seeded
     prefix — must still equal a cold full single prefill (first token + decode)."""
-    p = _toks(backend, PROMPTS_TEXT[1])
+    p = PROMPTS[1]
 
     backend.prefix_cache = PrefixCache(pools=backend.pools)          # cold reference
     cache_s, first_s, _ = backend.prefill(p)
@@ -77,19 +76,17 @@ def test_prefill_batch_cache_hit_suffix_only_matches_full(backend):
 
 
 def test_prefill_batch_k3_first_tokens_match(backend):
-    prompts = [_toks(backend, t) for t in PROMPTS_TEXT]
-
     backend.prefix_cache = PrefixCache(pools=backend.pools)
-    singles = [backend.prefill(p) for p in prompts]
+    singles = [backend.prefill(p) for p in PROMPTS]
     first_single = [s[1] for s in singles]
     kvlen_single = [s[2] for s in singles]
 
     backend.prefix_cache = PrefixCache(pools=backend.pools)
-    batched = backend.prefill_batch(prompts)
+    batched = backend.prefill_batch(PROMPTS)
     first_batch = [b[1] for b in batched]
     kvlen_batch = [b[2] for b in batched]
 
-    assert kvlen_batch == kvlen_single == [len(p) for p in prompts]
+    assert kvlen_batch == kvlen_single == [len(p) for p in PROMPTS]
     # padded batch reorders reductions → allow rare near-tie flips, but the clear majority must match
     matches = sum(a == b for a, b in zip(first_batch, first_single))
     assert matches >= 2

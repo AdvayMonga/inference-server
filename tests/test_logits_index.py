@@ -1,7 +1,7 @@
 """lm_head position slicing: `logits_index` must equal slicing the full logits afterwards.
 
 Prefill needs one logit row per sequence, but running lm_head over every position is the
-largest FLOP-and-bytes item in a prefill wave (a K x Smax x 262144 projection to read K rows).
+largest FLOP-and-bytes item in a prefill wave (a K x Smax x vocab projection to read K rows).
 Slicing the hidden states first must not change the answer.
 
 NOT bit-exact, and that is expected: lm_head over [B, 1, H] is a different GEMM shape than
@@ -14,21 +14,18 @@ from __future__ import annotations
 
 import torch
 
-from inference_server.models.gemma4 import GemmaForCausalLM, GemmaModel
-
-VOCAB = 64
+from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM
+from tests.conftest import TINY_VOCAB as VOCAB, tiny_qwen3_moe_cfg
 
 
 def _tiny_model():
-    torch.manual_seed(0)
-    model = GemmaModel(
-        vocab_size=VOCAB, hidden_size=32, num_layers=2, intermediate_size=64,
-        num_q_heads=4, num_kv_heads=1, head_dim=8, global_head_dim=8,
-        hidden_per_layer=8, layer_types=["sliding_attention", "full_attention"],
-        sliding_window=16, num_kv_shared_layers=0, use_double_wide_mlp=False,
-        eps=1e-6, dtype=torch.float32,
-    )
-    return GemmaForCausalLM(model, final_logit_softcapping=30.0).eval()
+    """fp32 tiny Qwen3-MoE with deterministic random weights (from_config allocates uninitialised)."""
+    model = Qwen3MoeForCausalLM.from_config(tiny_qwen3_moe_cfg(), dtype=torch.float32)
+    g = torch.Generator().manual_seed(0)
+    with torch.no_grad():
+        for p in model.parameters():
+            p.copy_(torch.randn(p.shape, generator=g) * 0.1)
+    return model.eval()
 
 
 def test_logits_index_matches_full_then_slice():
