@@ -43,6 +43,7 @@ def test_layer_matches_torch_and_writes_the_kv(backend, L, lens):
     h = torch.randn(B, 2048, dtype=torch.bfloat16, device="cuda")
     layer = model.layers[L]
     sa = _state(backend, prompts)
+    sa._begin_step()                      # append does this at the first live layer; a deep layer is called directly
     pos = sa.seq_lens.clone()
     cos, sin = (t.to(h.dtype) for t in model.rope(pos.unsqueeze(1)))
     ref, _ = layer(h.unsqueeze(1), cos, sin, paged_ctx=sa, kv_layer_idx=L)
