@@ -28,10 +28,9 @@ from inference_server.sampling import GREEDY, SamplingParams, sample, sample_bat
 
 logger = logging.getLogger(__name__)
 
-# Suffix-length buckets for K=1 CUDA-graph prefill. Past 512 a sliding layer WILL evict during
-# the prompt; that is handled after the replay (see _replay_prefill) rather than avoided, because
-# the p95 prompt on our workload is ~830 tokens and those were the requests still stuck on the
-# ~100ms eager path — i.e. exactly the ones setting TTFT p95.
+# Suffix-length buckets for K=1 CUDA-graph prefill. The ladder reaches past 512 because the p95
+# prompt on our workload is ~830 tokens and those were the requests still stuck on the ~100ms
+# eager path — i.e. exactly the ones setting TTFT p95.
 #
 # The ladder is finer than powers of two because a graph processes its WHOLE bucket: a 600-token
 # suffix in a 1024 bucket wastes 40% of the forward, and prefill is now the entire TTFT tail
@@ -189,7 +188,7 @@ class _PrefillCtx:
         rows = [c.block_tables[layer_idx] for c in self.caches]
         maxb = max((len(r) for r in rows), default=1)
         pad = self._scratch[layer_idx] if self._scratch is not None else 0
-        flat = [[(x if x >= 0 else 0) for x in r] + [pad] * (maxb - len(r)) for r in rows]
+        flat = [r + [pad] * (maxb - len(r)) for r in rows]
         return torch.tensor(flat, dtype=torch.int32, device=self.device)
 
     def append(self, layer_idx, k_new, v_new):
@@ -219,10 +218,9 @@ class _PrefillCtx:
 
         for b, cache in enumerate(self.caches):   # bookkeeping only — no GPU work
             cache.seq_lens[layer_idx] += self._suffix[b]
-            cache._evict(layer_idx)
 
     def block_table_tensor(self, layer_idx):
-        # append() already built it for this layer; rebuild only if eviction changed the table.
+        # append() already built it for this layer; rebuilt only when asked for again.
         bt = self._bt_cache.pop(layer_idx, None)
         if bt is None:
             return self._table(layer_idx)
@@ -235,8 +233,8 @@ class CustomTorchBackend(InferenceBackend):
     THINK_START = 100   # replaced at load by the tokenizer's <think> / </think> ids
     THINK_END = 101
 
-    # Each row's paged cache holds only its real tokens and the model derives causality +
-    # sliding window from per-row seq_lens, so the scheduler's [B, S] mask is never read.
+    # Each row's paged cache holds only its real tokens and the model derives causality
+    # from per-row seq_lens, so the scheduler's [B, S] mask is never read.
     needs_attention_mask = False
 
     def __init__(self, device: str = "cuda", model_name: str = "Qwen/Qwen3-30B-A3B"):
@@ -285,8 +283,7 @@ class CustomTorchBackend(InferenceBackend):
         elif quant == "int8":
             logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
 
-        # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
-        # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
+        # Pre-allocate paged block pools shared across sessions — see kv_reserve.
         from inference_server.config import settings
         from inference_server.models.paged_kv_cache import blocks_for_budget
         bsz = int(os.environ.get("CUSTOM_BACKEND_BLOCK_SIZE", "16"))
@@ -304,10 +301,7 @@ class CustomTorchBackend(InferenceBackend):
                         peak / 2**30, settings.max_prefill_tokens)
         else:
             n_blocks = 512
-        sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
-        self.pools = make_pools(
-            self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
-        )
+        self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
 
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
@@ -424,10 +418,7 @@ class CustomTorchBackend(InferenceBackend):
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
                 # Store the prompt's full blocks for future sharing (before releasing our refs).
-                # Skip if a sliding layer evicted (prompt > window) — we only cache prefixes
-                # that fit fully in the window (no partial/offset blocks to share).
-                if not cache.any_evicted:
-                    self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.block_tables)
                 return visible
             finally:
                 cache.free_all()
@@ -472,8 +463,7 @@ class CustomTorchBackend(InferenceBackend):
                     step = torch.tensor([[tok]], device=self.device)
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
-                if not cache.any_evicted:   # only cache prefixes that fit fully in the window
-                    self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.block_tables)
             finally:
                 cache.free_all()
 
@@ -521,8 +511,7 @@ class CustomTorchBackend(InferenceBackend):
             cache.free_all()            # do not abandon partially allocated blocks
             raise
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
-        if not cache.any_evicted:   # only cache prefixes that fit fully in the window
-            self.prefix_cache.store(token_ids, cache.block_tables)
+        self.prefix_cache.store(token_ids, cache.block_tables)
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
@@ -548,8 +537,8 @@ class CustomTorchBackend(InferenceBackend):
         (dispatch-bound) instead of re-prefilling the full prompt. No cache hit → suffix = full prompt
         (the v1 behaviour). Returns per-row (PagedKVCache, first_token, kv_len). Device-agnostic
         (gather + masked SDPA). Left-pad the prefix, right-pad the suffix, so each row's prefix+suffix
-        keys are contiguous (the sliding window is per query by column); a per-row mask keeps rows
-        independent (suffix query attends to its real prefix keys + causal suffix keys).
+        keys are contiguous; a per-row mask keeps rows independent (suffix query attends to its real
+        prefix keys + causal suffix keys).
 
         CUDA uses the gather-free paged prefill kernel instead (`_prefill_batch_kernel`)."""
         if self.device.type == "cuda":
@@ -623,8 +612,7 @@ class CustomTorchBackend(InferenceBackend):
                     continue
                 ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = columns Pmax..Pmax+L
                 cache.append(i, ki_t[k:k + 1, :, Pmax:Pmax + L, :], vi_t[k:k + 1, :, Pmax:Pmax + L, :])
-            if not cache.any_evicted:
-                self.prefix_cache.store(prompts[k], cache.block_tables)
+            self.prefix_cache.store(prompts[k], cache.block_tables)
             results.append((cache, first, len(prompts[k])))
         return results
 
@@ -692,8 +680,7 @@ class CustomTorchBackend(InferenceBackend):
         results = []
         for k in range(len(prompts)):
             first = int(sample(logits[k:k + 1, 0, :], GREEDY).item())
-            if not caches[k].any_evicted:
-                self.prefix_cache.store(prompts[k], caches[k].block_tables)
+            self.prefix_cache.store(prompts[k], caches[k].block_tables)
             results.append((caches[k], first, len(prompts[k])))
         return results
 
@@ -756,14 +743,13 @@ class CustomTorchBackend(InferenceBackend):
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
-        if not full_kv.any_evicted:   # only cache prefixes that fit fully in the window
-            self.prefix_cache.store(token_ids, full_kv.block_tables)
+        self.prefix_cache.store(token_ids, full_kv.block_tables)
 
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
                             position_ids, sampling_per_row=None):
         """One batched forward over all rows. `attention_mask` (scheduler-built) is ignored;
-        the window/causality come from per-row seq_lens inside the model.
+        causality comes from per-row seq_lens inside the model.
 
         CUDA: `batched_kv` is a persistent `BatchedDecodeState` — block tables live as GPU
         tensors, so the per-step hot path is pure GPU (no Python rebuild). CPU/MPS: a
@@ -783,7 +769,7 @@ class CustomTorchBackend(InferenceBackend):
                                              self._decode_bucket(n))
             else:
                 logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
-            state.advance()       # bump seq_lens + evict out-of-window blocks
+            state.advance()       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
             rows = batched_kv
@@ -1038,22 +1024,14 @@ class CustomTorchBackend(InferenceBackend):
             if pool is None:
                 continue
             bt = cache.block_tables[L]                    # already holds the shared prefix blocks
-            # A sliding layer keeps only the last `window` tokens. The graph writes every
-            # position, but positions that are ALREADY outside the window when this prefill
-            # ends never need a real block — point them at scratch instead of allocating.
-            # Without this a long prompt transiently holds prompt-many blocks in a sliding pool,
-            # overshooting the window-capped footprint admission reserved, and exhausting it.
-            keep_from = max(0, total - pool.window) // bs if pool.window is not None else 0
             while len(bt) < need:
-                bt.append(-1 if len(bt) < keep_from else pool.alloc())
+                bt.append(pool.alloc())
             cache.seq_lens[L] = total
             # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
             # positions, so the entries past this prompt's real blocks must point somewhere
             # harmless — otherwise padding K/V lands in whichever request used this buffer last.
             g["bts"][L][0].fill_(self._scratch[L])
-            # -1 = already evicted. Map it to the scratch block, NOT block 0, which is a real
-            # block another request may own; the graph writes every position it is given.
-            row = torch.tensor([x if x >= 0 else self._scratch[L] for x in bt], device=dev)
+            row = torch.tensor(bt, device=dev)
             g["bts"][L][0, :row.shape[0]].copy_(row)
         g["ids"].zero_()
         g["ids"][0, :S].copy_(torch.tensor(prompt_ids[matched:], device=dev))
@@ -1062,15 +1040,8 @@ class CustomTorchBackend(InferenceBackend):
         g["suffix_lens"].fill_(S)                                               # padding queries skipped
         g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
-        # Free blocks that fell out of a sliding window during this prompt. Deferring eviction
-        # until after the forward is safe: the kernel already masks keys below its window bound,
-        # so extra live blocks are simply never read.
-        for L, pool in enumerate(self.pools):
-            if pool is not None and pool.window is not None:
-                cache._evict(L)
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
-        if not cache.any_evicted:
-            self.prefix_cache.store(prompt_ids, cache.block_tables)
+        self.prefix_cache.store(prompt_ids, cache.block_tables)
         return cache, first, matched + S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
@@ -1100,23 +1071,13 @@ class CustomTorchBackend(InferenceBackend):
             return int(kv.seq_lens.max().item()) if kv.n_rows else 0
         return max((c.seq_len for c in kv), default=0)
 
-    # --- Window-aware per-pool KV admission ---
+    # --- Per-pool KV admission ---
 
     def _kv_footprints(self, prompt_len: int, max_tokens: int) -> list[int]:
-        """Worst-case blocks this request occupies in each pool. Sliding pools are capped at
-        the window (they evict out-of-window blocks); full pools grow with the sequence."""
+        """Worst-case blocks this request occupies in each pool (prompt + max_tokens, rounded up)."""
         tokens = prompt_len + max_tokens
-        fps = []
-        for pool in self.pools:
-            if pool is None:
-                fps.append(0)
-                continue
-            blocks = (tokens + pool.block_size - 1) // pool.block_size
-            if pool.window is not None:
-                window_blocks = pool.window // pool.block_size + 1  # +1 for window/block straddle
-                blocks = min(blocks, window_blocks)
-            fps.append(blocks)
-        return fps
+        return [0 if pool is None else (tokens + pool.block_size - 1) // pool.block_size
+                for pool in self.pools]
 
     def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
         """Admit only if this request's per-pool footprint fits in EVERY pool's free blocks.

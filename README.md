@@ -10,7 +10,7 @@ referee, GPU VMs) lives in [BlameGraph](https://github.com/AdvayMonga/BlameGraph
 
 - Continuous batching, iteration-level: freed slots refill immediately (`ContinuousBatchScheduler`)
 - Prefill in three modes: monolithic, chunked (no head-of-line stall), batched (one forward)
-- Block-paged KV cache with refcounted blocks, window-aware sliding layers
+- Block-paged KV cache with refcounted blocks
 - Radix-tree `PrefixCache`: cross-session prefix sharing, so a shared system prompt is prefilled once
 - Triton paged decode and prefill kernels reading K/V through block tables; split-K decode variant
 - Bucketed CUDA-graph decode, `torch.compile`, fp8 MoE experts (`CUSTOM_BACKEND_QUANT=fp8`)

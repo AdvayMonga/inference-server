@@ -166,7 +166,7 @@ def backend(tiny_dir):
 
 def test_backend_builds_full_attention_pools(backend):
     assert len(backend.pools) == 2
-    assert all(p.window is None and p.num_kv_heads == 2 and p.head_dim == 16 for p in backend.pools)
+    assert all(p.num_kv_heads == 2 and p.head_dim == 16 for p in backend.pools)
     assert backend._eos_ids == {EOS}
     assert (backend.THINK_START, backend.THINK_END) == (VOCAB - 2, VOCAB - 1)
     assert not (backend._graph_on or backend._compile_on or backend._prefill_graph_on)

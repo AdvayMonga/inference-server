@@ -43,7 +43,6 @@ BLOCK_MS = (16, 32, 64)
 DECODE_TOL = checks.TOL          # paged_decode_parity's bound
 PREFILL_TOL = 1e-2               # paged_prefill_parity's bound
 MIN_GAIN = 1.05                  # a config must beat the default launch by 5% to earn an entry
-FULL = 1 << 30                   # the kernels' "no window" sentinel
 TIMING_DIR = REPO / "runs" / "timing"      # evidence; file it in BlameGraph knowledge/ if it holds
 DEFAULT_MODEL = "Qwen/Qwen3-30B-A3B"
 
@@ -54,7 +53,6 @@ class Shape:
     head_dim: int
     q_heads: int
     kv_heads: int
-    window: int
 
 
 @dataclass
@@ -74,8 +72,8 @@ class Case:
 # ------------------------------------------------------------------ pure (CPU-testable)
 
 def attention_shapes(cfg: Any) -> list[Shape]:
-    """The one (head_dim, heads, window) every Qwen3-MoE layer launches with."""
-    return [Shape(cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads, FULL)]
+    """The one (head_dim, q heads, kv heads) every Qwen3-MoE layer launches with."""
+    return [Shape(cfg.head_dim, cfg.num_attention_heads, cfg.num_key_value_heads)]
 
 
 def decode_space() -> list[dict[str, int]]:
@@ -169,7 +167,7 @@ def _inputs(case: Case, kv_len: int) -> Callable[[], Any]:
         bt = torch.arange(n * nb, device=dev, dtype=torch.int32).reshape(n, nb)
         sl = torch.full((n,), kv_len, device=dev, dtype=torch.int32)
         q = torch.randn(n, a.q_heads, a.head_dim, device=dev, dtype=torch.bfloat16)
-        return lambda: K.paged_decode_attention(q, kp, vp, bt, sl, 1.0, a.window)
+        return lambda: K.paged_decode_attention(q, kp, vp, bt, sl, 1.0)
     s = case.shape
     nb = (s + bs - 1) // bs
     kp = torch.randn(nb, a.kv_heads, bs, a.head_dim, device=dev, dtype=torch.bfloat16)
@@ -178,7 +176,7 @@ def _inputs(case: Case, kv_len: int) -> Callable[[], Any]:
     pl = torch.zeros(1, device=dev, dtype=torch.int32)
     sl = torch.full((1,), s, device=dev, dtype=torch.int32)
     q = torch.randn(1, s, a.q_heads, a.head_dim, device=dev, dtype=torch.bfloat16)
-    return lambda: K.paged_prefill_attention(q, kp, vp, bt, pl, sl, 1.0, a.window)
+    return lambda: K.paged_prefill_attention(q, kp, vp, bt, pl, sl, 1.0)
 
 
 def _time(case: Case, fn: Callable[[], Any]) -> float:

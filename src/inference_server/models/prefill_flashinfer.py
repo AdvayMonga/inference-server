@@ -82,7 +82,7 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
         st = ctx._fi = (*plan_inputs(ctx._prefix, ctx._suffix, bs), tokens, layer_idx)
     qo_indptr, kv_indptr, last, nb, tokens, planned = st
     if layer_idx != planned and not _same_blocks(ctx, layer_idx, planned):
-        planned = layer_idx                          # a layer with its own block ids (sliding layers): its own plan
+        planned = layer_idx                          # a layer with its own block ids: its own plan
     if planned == layer_idx:
         w.plan(qo_indptr, kv_indptr, kv_indices(ctx.block_table_tensor(layer_idx), nb), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)

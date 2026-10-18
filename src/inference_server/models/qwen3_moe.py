@@ -44,7 +44,6 @@ class Qwen3Attention(nn.Module):
     """GQA attention, full causal every layer. Exposes the attrs make_pools reads."""
 
     is_kv_shared = False
-    sliding_window = None
 
     def __init__(self, hidden_size: int, num_q_heads: int, num_kv_heads: int, head_dim: int,
                  eps: float = 1e-6, dtype: torch.dtype = torch.bfloat16):

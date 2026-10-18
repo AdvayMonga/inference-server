@@ -5,9 +5,8 @@ scattered physical blocks via its block table, in-kernel, with no dense [N,H,Lma
 materialization and no padding. One query token per sequence (decode), FlashAttention-style
 online softmax over the sequence's blocks.
 
-Handles Gemma 4 specifics: GQA (Hq query heads share num_kv_heads KV heads), scale=1.0
-(magnitudes absorbed by the QK/V norms), and head_dim 256 (sliding) / 512 (full) via a
-`D` constexpr — sidestepping the 256 ceiling that ruled out FlashAttention-2.
+GQA (Hq query heads share num_kv_heads KV heads), the caller's softmax scale, and any power-of-two
+head_dim via a `D` constexpr (Qwen3-MoE: 128, GQA 8:1).
 
 CUDA-only (Triton). Import lazily on the GPU path; do not import on CPU/MPS.
 """
@@ -91,7 +90,7 @@ def _paged_decode_kernel(
     sk_b, sk_h, sk_s,      # pool strides: [num_blocks, num_kv_heads, block_size, D]
     so_n, so_h,            # Out strides
     bt_n,                  # block_tables row stride: [N, max_blocks]
-    scale, window,         # sliding window (W most-recent keys); huge sentinel = full attention
+    scale,
     GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr,
 ):
     seq = tl.program_id(0)
@@ -104,8 +103,6 @@ def _paged_decode_kernel(
     q = tl.load(Q + seq * sq_n + qh * sq_h + d).to(tl.float32)  # [D]
     L = tl.load(SL + seq)
     n_blocks = (L + BLOCK_SIZE - 1) // BLOCK_SIZE
-    lo = L - window                                             # keys at pos < lo are outside the window
-    start_b = tl.maximum(lo, 0) // BLOCK_SIZE                   # skip fully-out blocks (perf)
 
     m = -float("inf")
     l = 0.0
@@ -113,10 +110,10 @@ def _paged_decode_kernel(
 
     # Runtime (per-sequence) loop bounds — NOT constexpr. A constexpr here would recompile
     # the kernel for every distinct block-count, thrashing under varied/growing seq lengths.
-    for b in range(start_b, n_blocks):
+    for b in range(0, n_blocks):
         blk = tl.load(BT + seq * bt_n + b)
         offs = b * BLOCK_SIZE + slots
-        valid = (offs < L) & (offs >= lo)                       # causal upper + window lower
+        valid = offs < L                                        # causal upper bound
 
         kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
         k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)  # [BLOCK_SIZE, D]
@@ -158,7 +155,7 @@ def _paged_decode_splitk_kernel(
     pm_n, pm_h,            # partial m/l strides: [N, Hq, SPLITS]
     pa_n, pa_h, pa_s,      # partial acc strides: [N, Hq, SPLITS, D]
     bt_n,
-    scale, window,
+    scale,
     GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr, SPLITS: tl.constexpr,
 ):
     seq = tl.program_id(0)
@@ -171,13 +168,10 @@ def _paged_decode_splitk_kernel(
 
     L = tl.load(SL + seq)
     n_blocks = (L + BLOCK_SIZE - 1) // BLOCK_SIZE
-    lo = L - window
-    start_b = tl.maximum(lo, 0) // BLOCK_SIZE
 
-    # Even split of this row's live block range across SPLITS programs (runtime bounds).
-    live = n_blocks - start_b
-    per = (live + SPLITS - 1) // SPLITS
-    b0 = start_b + sp * per
+    # Even split of this row's blocks across SPLITS programs (runtime bounds).
+    per = (n_blocks + SPLITS - 1) // SPLITS
+    b0 = sp * per
     b1 = tl.minimum(b0 + per, n_blocks)
 
     m = -float("inf")
@@ -189,7 +183,7 @@ def _paged_decode_splitk_kernel(
         for b in range(b0, b1):
             blk = tl.load(BT + seq * bt_n + b)
             offs = b * BLOCK_SIZE + slots
-            valid = (offs < L) & (offs >= lo)
+            valid = offs < L
             kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
             k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)
             sc = tl.sum(q[None, :] * k, axis=1) * scale
@@ -260,7 +254,7 @@ def _gqa_decode_splitk_kernel(
     pm_n, pm_h,
     pa_n, pa_h, pa_s,
     bt_n,
-    scale, window,
+    scale,
     GROUP: tl.constexpr, G_PAD: tl.constexpr, BLOCK_SIZE: tl.constexpr,
     BLOCK_N: tl.constexpr, D: tl.constexpr, SPLITS: tl.constexpr,
 ):
@@ -276,9 +270,7 @@ def _gqa_decode_splitk_kernel(
     n = tl.arange(0, BLOCK_N)
 
     L = tl.load(SL + seq)
-    lo = L - window
-    kstart = (tl.maximum(lo, 0) // BLOCK_SIZE) * BLOCK_SIZE
-    n_tiles = (L - kstart + BLOCK_N - 1) // BLOCK_N
+    n_tiles = (L + BLOCK_N - 1) // BLOCK_N
     per = (n_tiles + SPLITS - 1) // SPLITS
     t0 = sp * per
     t1 = tl.minimum(t0 + per, n_tiles)
@@ -291,8 +283,8 @@ def _gqa_decode_splitk_kernel(
     acc = tl.zeros([G_PAD, D], dtype=tl.float32)
 
     for t in range(t0, t1):
-        offs = kstart + t * BLOCK_N + n
-        valid = (offs < L) & (offs >= lo)
+        offs = t * BLOCK_N + n
+        valid = offs < L
         blk = tl.load(BT + seq * bt_n + offs // BLOCK_SIZE, mask=valid, other=0)
         base = blk * sk_b + kvh * sk_h + (offs % BLOCK_SIZE) * sk_s
         k = tl.load(Kp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0)
@@ -349,7 +341,6 @@ def paged_decode_attention(
     block_tables: torch.Tensor,  # [N, MAX_BLOCKS] int32 — physical block id per logical block
     seq_lens: torch.Tensor,      # [N] int32 — real KV length per sequence
     scale: float = 1.0,
-    window: int = 1 << 30,       # sliding window (W most-recent keys); default = full attention
 ) -> torch.Tensor:
     """Decode attention reading K/V via block tables. Returns [N, Hq, D] (q's dtype)."""
     N, Hq, D = q.shape
@@ -360,7 +351,7 @@ def paged_decode_attention(
 
     # GQA-packed split-K: one program per (sequence, KV head, split) serves all GROUP query heads from each K/V load.
     # Found by the layer-1 loop (BlameGraph kernels/evolve, 2026-10-14) and validated for head dim <= 128 only; wider
-    # heads (Gemma 4) keep the tuned launch table below.
+    # heads keep the tuned launch table below.
     if (D & (D - 1)) == 0 and 16 <= D <= 128 and (bs & (bs - 1)) == 0 and k_pool.dtype in (
             torch.float16, torch.bfloat16):
         g_pad = max(16, 1 << (group - 1).bit_length())
@@ -377,7 +368,7 @@ def paged_decode_attention(
             pm.stride(0), pm.stride(1),
             pa.stride(0), pa.stride(1), pa.stride(2),
             block_tables.stride(0),
-            scale, window,
+            scale,
             GROUP=group, G_PAD=g_pad, BLOCK_SIZE=bs, BLOCK_N=block_n, D=D, SPLITS=splits,
             num_warps=4,
         )
@@ -406,7 +397,7 @@ def paged_decode_attention(
             pm.stride(0), pm.stride(1),
             pa.stride(0), pa.stride(1), pa.stride(2),
             block_tables.stride(0),
-            scale, window,
+            scale,
             GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, SPLITS=splits, **kw,
         )
         _splitk_combine_kernel[(N, Hq)](
@@ -424,7 +415,7 @@ def paged_decode_attention(
         k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
         out.stride(0), out.stride(1),
         block_tables.stride(0),
-        scale, window,
+        scale,
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
@@ -440,7 +431,7 @@ def _paged_prefill_kernel(
     sk_b, sk_h, sk_s,      # pool strides
     so_n, so_s, so_h,      # Out strides: [N, S_q, Hq, D]
     bt_n,
-    scale, window,
+    scale,
     GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr,
 ):
     # One program per (sequence, query-head, suffix-query-token). Each query attends, causally, to
@@ -462,17 +453,15 @@ def _paged_prefill_kernel(
     slots = tl.arange(0, BLOCK_SIZE)
     q = tl.load(Q + seq * sq_n + qj * sq_s + qh * sq_h + d).to(tl.float32)
 
-    lo = q_pos + 1 - window                        # window lower bound (keys at pos < lo excluded)
     n_blocks = (q_pos + 1 + BLOCK_SIZE - 1) // BLOCK_SIZE
-    start_b = tl.maximum(lo, 0) // BLOCK_SIZE
 
     m = -float("inf")
     l = 0.0
     acc = tl.zeros([D], dtype=tl.float32)
-    for b in range(start_b, n_blocks):
+    for b in range(0, n_blocks):
         blk = tl.load(BT + seq * bt_n + b)
         offs = b * BLOCK_SIZE + slots
-        valid = (offs <= q_pos) & (offs >= lo)     # causal (≤ q_pos) + window
+        valid = offs <= q_pos                      # causal (≤ q_pos)
         kptr = Kp + blk * sk_b + kvh * sk_h + slots[:, None] * sk_s + d[None, :]
         k = tl.load(kptr, mask=valid[:, None], other=0.0).to(tl.float32)
         s = tl.sum(q[None, :] * k, axis=1) * scale
@@ -497,7 +486,7 @@ def _paged_prefill_tiled_kernel(
     sk_b, sk_h, sk_s,
     so_n, so_s, so_h,
     bt_n,
-    scale, window,
+    scale,
     GROUP: tl.constexpr, BLOCK_SIZE: tl.constexpr, D: tl.constexpr, BLOCK_M: tl.constexpr,
 ):
     """FlashAttention-style tiled paged prefill: one program per BLOCK_M query tokens.
@@ -538,19 +527,17 @@ def _paged_prefill_tiled_kernel(
     last_in_tile = tl.minimum(tile_start + BLOCK_M - 1, suffix_len - 1)
     last_pos = prefix_len + last_in_tile
     n_blocks = (last_pos + 1 + BLOCK_SIZE - 1) // BLOCK_SIZE
-    lo = prefix_len + tile_start + 1 - window                 # window bound at the tile's first query
-    start_b = tl.maximum(lo, 0) // BLOCK_SIZE
 
-    # Finite sentinel, not -inf. Tiling shares one start block across BLOCK_M queries, so a row
-    # whose window begins later WILL see a fully-masked block; with -inf that gives
-    # exp(-inf - -inf) = NaN and poisons the whole tile. The untiled kernel never hits this
-    # because it computes the start block per query.
+    # Finite sentinel, not -inf. Tiling shares one block range across BLOCK_M queries, so an
+    # earlier query in the tile WILL see a fully-masked (entirely future) block; with -inf that
+    # gives exp(-inf - -inf) = NaN and poisons the whole tile. The untiled kernel never hits this
+    # because it computes the block range per query.
     NEG: tl.constexpr = -1e30
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) + NEG
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, D], dtype=tl.float32)
 
-    for b in range(start_b, n_blocks):
+    for b in range(0, n_blocks):
         blk = tl.load(BT + seq * bt_n + b)
         offs_n = b * BLOCK_SIZE + slots                       # absolute key positions
 
@@ -558,8 +545,8 @@ def _paged_prefill_tiled_kernel(
         k = tl.load(kptr).to(tl.float32)                      # [BLOCK_SIZE, D] — loaded ONCE
         s = tl.dot(q, tl.trans(k)) * scale                    # [BLOCK_M, BLOCK_SIZE]
 
-        # causal (key <= query) and sliding window (key > query - window), per (query, key)
-        valid = (offs_n[None, :] <= q_pos[:, None]) &                 (offs_n[None, :] > q_pos[:, None] - window) & real[:, None]
+        # causal (key <= query), per (query, key)
+        valid = (offs_n[None, :] <= q_pos[:, None]) & real[:, None]
         s = tl.where(valid, s, -float("inf"))
 
         m_new = tl.maximum(m_i, tl.max(s, axis=1))
@@ -586,7 +573,6 @@ def paged_prefill_attention(
     prefix_lens: torch.Tensor,   # [N] int32 — cached prefix length per sequence
     suffix_lens: torch.Tensor,   # [N] int32 — real suffix length per sequence
     scale: float = 1.0,
-    window: int = 1 << 30,
 ) -> torch.Tensor:
     """Multi-query paged prefill attention (no gather). Suffix K/V must already be in the blocks.
     Returns [N, S_q, Hq, D] (q's dtype); padding query rows are left undefined (caller slices)."""
@@ -609,7 +595,7 @@ def paged_prefill_attention(
             k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
             out.stride(0), out.stride(1), out.stride(2),
             block_tables.stride(0),
-            scale, window,
+            scale,
             GROUP=Hq // num_kv_heads, BLOCK_SIZE=k_pool.shape[2], D=D, BLOCK_M=block_m, **kw,
         )
         return out.to(q.dtype)
@@ -621,7 +607,7 @@ def paged_prefill_attention(
         k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
         out.stride(0), out.stride(1), out.stride(2),
         block_tables.stride(0),
-        scale, window,
+        scale,
         GROUP=Hq // num_kv_heads,
         BLOCK_SIZE=k_pool.shape[2],
         D=D,
