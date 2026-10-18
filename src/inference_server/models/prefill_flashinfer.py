@@ -36,8 +36,14 @@ def available() -> bool:
 def _wrapper(device: torch.device):
     import flashinfer
     workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
-    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")      # auto | fa2 | fa3 | cutlass | trtllm-gen
-    return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
+    # fa3 on Hopper (H200 2026-10-18: long_prompt 12.0 -> 14.2 req/s against auto, saturated unchanged); anything
+    # else falls back to FlashInfer's choice. auto | fa2 | fa3 | cutlass | trtllm-gen.
+    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "fa3")
+    try:
+        return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("flashinfer backend %r unavailable (%s): using auto", backend, e)
+        return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend="auto")
 
 
 def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):

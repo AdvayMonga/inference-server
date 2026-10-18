@@ -176,30 +176,17 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
                      tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor, block_m: int = 16) -> None:
     """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) over the sorted pairs; `out` [T, N] fp32, zeroed."""
     E, N, K = w.shape
-    BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
-    split_k = split_k_for(min(M, E) * grid[1], K, BLOCK_K)
-    _moe_gemm_scatter_kernel[(*grid, split_k)](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
-                                               a.stride(0), w.stride(1), w.stride(2), out.stride(0),
-                                               E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                               SPLIT_K=split_k, num_warps=4, num_stages=3)
+    _moe_gemm_scatter_kernel[(*grid, 1)](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
+                                         a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+                                         E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+                                         SPLIT_K=1, num_warps=4, num_stages=NUM_STAGES)
 
 
-SMS = None
-
-
-def split_k_for(active_programs: int, K: int, block_k: int) -> int:
-    """How many K slices to run so the programs that have work fill the GPU. At batch 1 the grid is 120 row blocks
-    x 12 tiles, but only 8 row blocks hold a pair (the rest exit at once): ncu saw 11% achieved occupancy and 38% of
-    DRAM bandwidth (29 us against a ~10 us weight-read floor), while batch 8 reached 77%. `active_programs` is the
-    bound min(M, E) x tiles, not the grid. 1 when that is already wide."""
-    global SMS
-    if SMS is None:
-        SMS = torch.cuda.get_device_properties(0).multi_processor_count if torch.cuda.is_available() else 1
-    for s in (4, 2):
-        if active_programs < 2 * SMS and K % (s * block_k) == 0:
-            return s
-    return 1
+# Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
+# took gate_up 29 -> 18 us and down 29 -> 17 us at batch 1 (the ncu diagnosis had been occupancy: splitting K bought
+# nothing at any tile; stages and the tile shape did). The same config won at M = 64 (85 -> 76, 50 -> 44 us).
+BLOCK_N, BLOCK_K, NUM_STAGES = 64, 128, 4
 
 
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
@@ -207,10 +194,9 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     """C [M, N] = per pair i: a[tok[i]] @ w[expert(i)].T, pairs in sorted order. `a` [T, K] (or [M, K] with tok None),
     `w` [E, N, K] bf16 contiguous. bf16, or fp32 when the GEMM is split over K (small grids; `split_k` None = auto)."""
     E, N, K = w.shape
-    BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
     if split_k is None:
-        split_k = split_k_for(min(M, E) * grid[1], K, BLOCK_K)
+        split_k = 1
     if split_k > 1:
         C = torch.zeros(M, N, dtype=torch.float32, device=a.device)
     else:
@@ -218,7 +204,8 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, C, sorted_ids, expert_ids, M, N, K,
                                        a.stride(0), w.stride(1), w.stride(2), C.stride(0),
                                        E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, num_warps=4, num_stages=3)
+                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, num_warps=4,
+                                       num_stages=NUM_STAGES)
     return C
 
 
