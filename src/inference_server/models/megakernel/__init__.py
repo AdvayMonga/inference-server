@@ -23,7 +23,9 @@ def _ext():
     from torch.utils.cpp_extension import load
     src = Path(__file__).with_name("decode_layer.cu")
     return load(name="qwen3_decode_layer", sources=[str(src)],
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-lineinfo"],
+                # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
+                # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"],
                 verbose=False)
 
 
