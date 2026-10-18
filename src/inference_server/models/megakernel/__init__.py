@@ -1,0 +1,76 @@
+"""The decode-layer megakernel (decode_layer.cu): one persistent CUDA kernel per decoder layer for batch <= 16,
+JIT-built with torch's cpp_extension on first use (nvcc, sm_90a). `available()` is False without CUDA or nvcc.
+MEGAKERNEL=1 makes the model's decoder layers use it on the decode path; the Triton/torch path stays for prefill,
+wide batches and everything else."""
+
+from __future__ import annotations
+
+import functools
+import logging
+import os
+from pathlib import Path
+
+import torch
+
+logger = logging.getLogger(__name__)
+
+ENABLED = os.environ.get("MEGAKERNEL", "0") == "1"
+BMAX = 16
+
+
+@functools.lru_cache(maxsize=None)
+def _ext():
+    from torch.utils.cpp_extension import load
+    src = Path(__file__).with_name("decode_layer.cu")
+    return load(name="qwen3_decode_layer", sources=[str(src)],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math", "-lineinfo"],
+                verbose=False)
+
+
+def available() -> bool:
+    if not torch.cuda.is_available():
+        return False
+    try:
+        _ext()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("megakernel not built (%s)", str(e)[:300])
+        return False
+    return True
+
+
+class LayerWeights:
+    """The layer's tensors the kernel reads, checked once: contiguous bf16, the fused q/k/v weight, bf16 experts."""
+
+    def __init__(self, layer, rope_inv_freq: torch.Tensor):
+        attn, mlp = layer.self_attn, layer.mlp
+        assert hasattr(attn, "qkv_weight"), "fuse_qkv() first"
+        assert not mlp.experts.fp8, "bf16 experts (fp8 experts: a later stage)"
+        ts = dict(in_norm=layer.input_layernorm.weight, wqkv=attn.qkv_weight, q_norm=attn.q_norm.weight,
+                  k_norm=attn.k_norm.weight, wo=attn.o_proj.weight, post_norm=layer.post_attention_layernorm.weight,
+                  wr=mlp.gate.weight, gate_up=mlp.experts.gate_up_proj, down=mlp.experts.down_proj)
+        for name, t in ts.items():
+            assert t.is_cuda and t.dtype == torch.bfloat16 and t.is_contiguous(), name
+        self.t = ts
+        self.inv_freq = rope_inv_freq.to(torch.float32).contiguous()
+        self.scale = attn.scale
+
+
+class Scratch:
+    """Device scratch for one step (sized for BMAX rows), shared by every layer."""
+
+    def __init__(self, device):
+        e = _ext()
+        self.f32 = torch.empty(e.scratch_f32_elems(), dtype=torch.float32, device=device)
+        self.bf16 = torch.empty(e.scratch_bf16_elems(), dtype=torch.bfloat16, device=device)
+        self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=device)
+
+
+def decode_layer(h: torch.Tensor, pos: torch.Tensor, block_table: torch.Tensor, pool_k: torch.Tensor,
+                 pool_v: torch.Tensor, w: LayerWeights, scratch: Scratch) -> torch.Tensor:
+    """h [B, 2048] bf16 (the residual stream), pos [B] int32 (each row's length so far = the new token's position),
+    block_table [B, cols] int32 for this layer's pool. Writes the new token's K/V into the pool and returns the
+    layer's output [B, 2048] bf16."""
+    t = w.t
+    return _ext().decode_layer(h.contiguous(), pos, block_table.contiguous(), pool_k, pool_v, t["in_norm"], t["wqkv"],
+                               t["q_norm"], t["k_norm"], t["wo"], t["post_norm"], t["wr"], t["gate_up"], t["down"],
+                               w.inv_freq, scratch.f32, scratch.bf16, scratch.i32, float(w.scale))
