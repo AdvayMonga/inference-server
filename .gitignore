@@ -37,17 +37,5 @@ Thumbs.db
 
 notes/
 
-# Claude Code: local settings stay out, shared agent definitions come in
-.claude/*
-!.claude/agents/
-HANDOFF.md
-PLAN.md
-
-notes/
-
-# Claude Code: local settings stay out, shared agent definitions come in
-.claude/*
-!.claude/agents/
-# Research loop: raw run panels (regenerable, large)
-runs/
-
+# Claude Code: local settings stay out (no shared agent definitions since 2026-10-18)
+.claude/
