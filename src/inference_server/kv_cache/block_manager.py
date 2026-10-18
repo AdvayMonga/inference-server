@@ -16,7 +16,7 @@ class BlockManager:
     Each layer gets its own (num_blocks, n_kv_heads, block_size, head_dim) tensor.
     Per-layer pools (rather than one stacked tensor) let us support hybrid
     architectures where different layers have different KV shapes
-    (e.g. Gemma 4: most layers head_dim=256, every 5th layer head_dim=512).
+    (different head dims or KV head counts per layer).
     """
 
     def __init__(

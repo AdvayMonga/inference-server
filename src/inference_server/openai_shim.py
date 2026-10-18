@@ -317,9 +317,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
     messages = [m.model_dump() for m in body.messages]
     try:
         # thinking=False, chosen rather than inherited. A compatibility shim must not switch the
-        # model into a mode no caller asked for: encode_messages defaults to True, which renders
-        # a <|think|> system turn ahead of the user turn and made gemma-4-E2B-it open every
-        # answer with a preamble and run every corpus request to max_tokens (kb-20260919-9ea56f98).
+        # model into a mode no caller asked for: encode_messages defaults to True, which once made
+        # every answer open with a thinking preamble and run every corpus request to max_tokens
+        # (kb-20260919-9ea56f98); for Qwen3 it renders the empty <think> block instead.
         token_ids = await loop.run_in_executor(
             None, lambda: tokenizer.encode_messages(messages, thinking=False))
     except ValueError as e:

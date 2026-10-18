@@ -57,7 +57,7 @@ class FakeScheduler:
 
 
 class TemplatingTokenizer(FakeTokenizer):
-    """Renders gemma-4's shape, so a test can read the prompt the model would actually see."""
+    """Renders a chat template with a thinking system turn, so a test can read the prompt the model would see."""
     def encode_messages(self, messages, thinking=True):
         if not messages:
             raise ValueError("No messages provided")

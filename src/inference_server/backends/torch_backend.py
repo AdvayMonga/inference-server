@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 class TorchBackend(InferenceBackend):
     """HuggingFace + PyTorch backend. Works on cuda, mps, or cpu."""
 
-    # Thinking channel token IDs (Gemma 4)
-    THINK_START = 100  # <|channel>
-    THINK_END = 101    # <channel|>
+    # Thinking-marker token ids filtered out of the visible output.
+    THINK_START = 100
+    THINK_END = 101
 
     def __init__(self, device: str = "cuda"):
         self.model = None

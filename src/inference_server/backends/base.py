@@ -91,7 +91,7 @@ class InferenceBackend(ABC):
         ...
 
     # --- Continuous-batching primitives (used by ContinuousBatchScheduler) ---
-    # Backends that cannot expose these (e.g. MLX via mlx_lm) raise NotImplementedError.
+    # Backends that cannot expose these raise NotImplementedError.
 
     def prefill(
         self, token_ids: list[int], session_id: str = "default"

@@ -18,9 +18,9 @@
 - Derive what the project is from the code, git log, and recent memory — not from assumptions.
 
 ## Models
-- Hand-written forwards: `models/gemma4.py` (Gemma 4) and `models/qwen3_moe.py` (Qwen3-MoE);
-  `CustomTorchBackend` picks one by the HF `model_type`. Qwen3-30B-A3B is the benchmark model
-  (owner's Phase 0 decision, 2026-10-01); its path runs decode CUDA graphs (2026-10-04) but not torch.compile or int8 yet.
+- Hand-written forward: `models/qwen3_moe.py` (Qwen3-MoE only; the Gemma 4 forward it was first
+  written for was removed 2026-10-17). Qwen3-30B-A3B is the benchmark model (owner's Phase 0
+  decision, 2026-10-01).
 - Direction (2026-10-04): one engine that adapts to load across every corpus class; cold start is
   one class among them, no longer the headline. The headline metric is not decided yet.
 

@@ -26,13 +26,13 @@ def test_rmsnorm_and_add_rmsnorm():
 
 def test_rmsnorm_rope_matches_norm_then_rotary():
     from inference_server.models import fused
-    from inference_server.models.gemma4 import GemmaRotaryEmbedding, apply_rotary
+    from inference_server.models.common import RotaryEmbedding, apply_rotary
     torch.manual_seed(0)
     B, S, H, D = 2, 7, 4, 128
     x = torch.randn(B, S, H, D, dtype=torch.bfloat16, device="cuda")
     w = (torch.rand(D, device="cuda") + 0.5).to(torch.bfloat16)
     pos = torch.arange(S, device="cuda")[None].repeat(B, 1) + torch.tensor([[0], [1000]], device="cuda")
-    cos, sin = (t.to(torch.bfloat16) for t in GemmaRotaryEmbedding(D, 1e6).cuda()(pos))
+    cos, sin = (t.to(torch.bfloat16) for t in RotaryEmbedding(D, 1e6).cuda()(pos))
     ref = apply_rotary(_norm(x, w, 1e-6), cos, sin, unsqueeze_dim=2)
     torch.testing.assert_close(fused.rmsnorm_rope(x, w, cos, sin, 1e-6), ref, atol=3e-2, rtol=3e-2)
 
