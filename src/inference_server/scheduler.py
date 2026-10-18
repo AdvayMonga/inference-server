@@ -377,46 +377,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     if self._pending_count == 0:
                         continue   # idle tick: nothing to admit, nothing to step
 
-            self._timeline.begin_step()
-            step_t0 = time.perf_counter()
             try:
-                with self.backend._lock:  # serialize against legacy generate/stream
-                    # Order matters: admit (lookup-only when chunked) → advance one prefill
-                    # chunk (may promote a row to _active with a fresh first_token) → evict
-                    # processes those first_tokens this same iter → decode advances active.
-                    with self._timeline.phase("admit"):
-                        self._admit_pending(device)
-                    self._decoded_this_iter = False
-                    with self._timeline.phase("prefill_chunk"):
-                        if self.prefill_mode == "mixed":
-                            self._advance_prefill_mixed(device)
-                        else:
-                            self._advance_prefill_chunk(device)
-                    with self._timeline.phase("evict"):
-                        self._evict_finished()
-                    if not self._active:
-                        self._pending = None            # every row of the last step has gone
-                    if self._active and not self._decoded_this_iter:
-                        self._active_samples += 1
-                        self._active_sum += len(self._active)
-                        if len(self._active) > self._active_high_water:
-                            self._active_high_water = len(self._active)
-                        try:
-                            with self._timeline.phase("decode", batch=len(self._active)):
-                                if self.async_decode:
-                                    self._decode_step_async(device)
-                                else:
-                                    self._decode_step(device)
-                        except Exception as e:
-                            # Under genuine KV pressure the NEWEST request should pay, not the
-                            # whole batch. Preempt one row (freeing its blocks) and let the next
-                            # iteration retry; only escalate if we are down to a single row.
-                            if len(self._active) > 1:
-                                self._preempt_newest(e)
-                            else:
-                                raise
+                self.step(device)
                 errors_in_a_row = 0
-                self._step_event(step_t0)
             except Exception as e:
                 # A failed iteration must NOT end the worker. It used to: any exception escaped
                 # to _fail_all and the thread exited, after which the server accepted requests
@@ -431,6 +394,49 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                  errors_in_a_row)
                     self._fail_all(e)
                     break
+
+    def step(self, device: str | None = None) -> None:
+        """One scheduler iteration: admit → one prefill chunk → evict → decode, under the backend's lock. The loop
+        calls it; a simulator calls it directly, on its own clock, with its own backend."""
+        device = device or self.backend.device_str
+        self._timeline.begin_step()
+        step_t0 = time.perf_counter()
+        with self.backend._lock:  # serialize against legacy generate/stream
+            # Order matters: admit (lookup-only when chunked) → advance one prefill
+            # chunk (may promote a row to _active with a fresh first_token) → evict
+            # processes those first_tokens this same iter → decode advances active.
+            with self._timeline.phase("admit"):
+                self._admit_pending(device)
+            self._decoded_this_iter = False
+            with self._timeline.phase("prefill_chunk"):
+                if self.prefill_mode == "mixed":
+                    self._advance_prefill_mixed(device)
+                else:
+                    self._advance_prefill_chunk(device)
+            with self._timeline.phase("evict"):
+                self._evict_finished()
+            if not self._active:
+                self._pending = None            # every row of the last step has gone
+            if self._active and not self._decoded_this_iter:
+                self._active_samples += 1
+                self._active_sum += len(self._active)
+                if len(self._active) > self._active_high_water:
+                    self._active_high_water = len(self._active)
+                try:
+                    with self._timeline.phase("decode", batch=len(self._active)):
+                        if self.async_decode:
+                            self._decode_step_async(device)
+                        else:
+                            self._decode_step(device)
+                except Exception as e:
+                    # Under genuine KV pressure the NEWEST request should pay, not the
+                    # whole batch. Preempt one row (freeing its blocks) and let the next
+                    # iteration retry; only escalate if we are down to a single row.
+                    if len(self._active) > 1:
+                        self._preempt_newest(e)
+                    else:
+                        raise
+        self._step_event(step_t0)
 
     def _step_event(self, t0: float) -> None:
         if not self._timeline.enabled:
