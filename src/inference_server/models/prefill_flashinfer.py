@@ -36,9 +36,9 @@ def available() -> bool:
 def _wrapper(device: torch.device):
     import flashinfer
     workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
-    # fa3 on Hopper (H200 2026-10-18: long_prompt 12.0 -> 14.2 req/s against auto, saturated unchanged); anything
-    # else falls back to FlashInfer's choice. auto | fa2 | fa3 | cutlass | trtllm-gen.
-    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "fa3")
+    # auto | fa2 | fa3 | cutlass | trtllm-gen. fa3 measured long_prompt 14.2 req/s once and 6.25 once against auto's
+    # 12.0-12.5 (H200 2026-10-18; one-off ~2 s stalls on tiny steps in both fa3 runs, unexplained), so it stays opt-in.
+    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")
     try:
         return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
     except Exception as e:  # noqa: BLE001
