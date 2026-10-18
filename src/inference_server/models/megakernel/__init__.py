@@ -16,7 +16,7 @@ import torch
 
 logger = logging.getLogger(__name__)
 
-ENABLED = os.environ.get("MEGAKERNEL", "0") == "1"
+ENABLED = os.environ.get("MEGAKERNEL", "1") == "1"      # on where it builds (CUDA + nvcc); MEGAKERNEL=0 for the graphs
 BMAX = 16
 
 
