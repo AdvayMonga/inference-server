@@ -146,7 +146,6 @@ __global__ void __launch_bounds__(THREADS, 1) decode_layer_kernel(Args a) {
     cg::grid_group grid = cg::this_grid();
     const int B = a.B, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int gwarp = blockIdx.x * WARPS + warp, nwarps = gridDim.x * WARPS;
-    __shared__ int ne_shared;                                        // experts with pairs (P6/P7)
     float* red = reinterpret_cast<float*>(smem_raw);                  // [WARPS] reduction scratch
     unsigned char* smem = smem_raw + 64;
 
@@ -426,100 +425,69 @@ __global__ void __launch_bounds__(THREADS, 1) decode_layer_kernel(Args a) {
     STAMP(7);
     grid.sync();
 
-    // ---- P6: experts gate_up, grouped by expert: a weight row is read once for every pair that routed to it
-    //          (every block builds the grouping from ids: pairs sorted by expert, the experts with work).
+    // ---- P6: gate_up GEMV per (pair, n): act[pair][n] = bf16(silu(bf16(gate)) * bf16(up))
     {
         bf16* xs = reinterpret_cast<bf16*>(smem);                      // n2 rows [B][H]
-        int* cnt = reinterpret_cast<int*>(smem + (size_t)BT * H * 2);  // [E] pairs per expert
-        int* start = cnt + E;                                          // [E] first slot of the expert's pairs
-        int* fill = start + E;                                         // [E] placement cursor
-        int* elist = fill + E;                                         // [E] experts with pairs, in index order
-        int* gpairs = elist + E;                                       // [B*K] pair ids grouped by expert
-        const int pairs = B * K;
         for (int i = tid; i < B * H / 8; i += THREADS)
             reinterpret_cast<uint4*>(xs)[i] = reinterpret_cast<const uint4*>(a.sc.n2)[i];
-        for (int e = tid; e < E; e += THREADS) { cnt[e] = 0; fill[e] = 0; }
         __syncthreads();
-        for (int p = tid; p < pairs; p += THREADS) atomicAdd(&cnt[a.sc.ids[p]], 1);
-        __syncthreads();
-        if (tid == 0) {
-            int acc = 0, k = 0;
-            for (int e = 0; e < E; ++e) { start[e] = acc; acc += cnt[e]; if (cnt[e]) elist[k++] = e; }
-            ne_shared = k;
-        }
-        __syncthreads();
-        for (int p = tid; p < pairs; p += THREADS) { const int e = a.sc.ids[p]; gpairs[start[e] + atomicAdd(&fill[e], 1)] = p; }
-        __syncthreads();
-        const int ne_ = ne_shared;
-        for (int w = gwarp; w < ne_ * I; w += nwarps) {
-            const int e = elist[w / I], n = w % I, c = cnt[e], s0 = start[e];
+        const int pairs = B * K;
+        for (int w = gwarp; w < pairs * I; w += nwarps) {
+            const int p = w / I, n = w % I, b = p / K, e = a.sc.ids[p];
             const bf16* wg = a.wt.gate_up + ((size_t)e * (2 * I) + n) * H;
             const bf16* wu = a.wt.gate_up + ((size_t)e * (2 * I) + I + n) * H;
-            uint4 gv[H / 256], uv[H / 256];
+            // one row's dot: lanes split k
+            float g = 0.f, u = 0.f;
+            const bf16* x = xs + b * H;
+            for (int k = lane * 8; k < H; k += 256) {
+                const uint4 xv = *reinterpret_cast<const uint4*>(x + k);
+                const uint4 gv = *reinterpret_cast<const uint4*>(wg + k);
+                const uint4 uv = *reinterpret_cast<const uint4*>(wu + k);
+                const bf16* xp = reinterpret_cast<const bf16*>(&xv);
+                const bf16* gp = reinterpret_cast<const bf16*>(&gv);
+                const bf16* up = reinterpret_cast<const bf16*>(&uv);
 #pragma unroll
-            for (int i = 0; i < H / 256; ++i) { gv[i] = *reinterpret_cast<const uint4*>(wg + i * 256 + lane * 8); uv[i] = *reinterpret_cast<const uint4*>(wu + i * 256 + lane * 8); }
-#pragma unroll
-            for (int q = 0; q < BT; ++q) {
-                if (q < c) {
-                    const int p = gpairs[s0 + q];
-                    const bf16* x = xs + (p / K) * H;
-                    float g = 0.f, u = 0.f;
-#pragma unroll
-                    for (int i = 0; i < H / 256; ++i) {
-                        const uint4 xv = *reinterpret_cast<const uint4*>(x + i * 256 + lane * 8);
-                        const bf16* xp = reinterpret_cast<const bf16*>(&xv);
-                        const bf16* gp = reinterpret_cast<const bf16*>(&gv[i]);
-                        const bf16* up = reinterpret_cast<const bf16*>(&uv[i]);
-#pragma unroll
-                        for (int j = 0; j < 8; ++j) { const float xf = bf2f(xp[j]); g += xf * bf2f(gp[j]); u += xf * bf2f(up[j]); }
-                    }
-                    g = warp_sum(g); u = warp_sum(u);
-                    if (lane == 0) { const float gb = rbf(g), ub = rbf(u); a.sc.act[(size_t)p * I + n] = f2bf(gb / (1.f + __expf(-gb)) * ub); }
-                }
+                for (int j = 0; j < 8; ++j) { const float xf = bf2f(xp[j]); g += xf * bf2f(gp[j]); u += xf * bf2f(up[j]); }
+            }
+            g = warp_sum(g); u = warp_sum(u);
+            if (lane == 0) {
+                const float gb = rbf(g), ub = rbf(u);
+                a.sc.act[(size_t)p * I + n] = f2bf(gb / (1.f + __expf(-gb)) * ub);
             }
         }
     }
     STAMP(8);
     grid.sync();
 
-    // ---- P7: experts down, grouped by expert (the grouping arrays survive in shared memory): out2[b][n] +=
-    //          w[pair] * dot(act[pair], down[e][n]); RD rows in flight per warp.
+    // ---- P7: down GEMV per (pair, n): out2[b][n] += w[pair] * dot(act[pair], down[e][n])
     {
-        int* cnt = reinterpret_cast<int*>(smem + (size_t)BT * H * 2);
-        int* start = cnt + E; int* elist = start + 2 * E; int* gpairs = elist + E;
-        const int ne_ = ne_shared;
-        constexpr int RD = 4;
-        for (int w0 = gwarp * RD; w0 < ne_ * H; w0 += nwarps * RD) {
+        const int pairs = B * K;
+        constexpr int RD = 4;                                          // rows in flight per warp (1.5 KB each)
+        for (int w0 = gwarp * RD; w0 < pairs * H; w0 += nwarps * RD) {
             uint4 wv[RD][I / 256];
-            int ee[RD], nn[RD];
+            int pp[RD], nn[RD];
 #pragma unroll
             for (int r = 0; r < RD; ++r) {
-                const int w = min(w0 + r, ne_ * H - 1);
-                ee[r] = elist[w / H]; nn[r] = w % H;
-                const bf16* wd = a.wt.down + ((size_t)ee[r] * H + nn[r]) * I;
+                const int w = min(w0 + r, pairs * H - 1);
+                pp[r] = w / H; nn[r] = w % H;
+                const bf16* wd = a.wt.down + ((size_t)a.sc.ids[pp[r]] * H + nn[r]) * I;
 #pragma unroll
                 for (int i = 0; i < I / 256; ++i) wv[r][i] = *reinterpret_cast<const uint4*>(wd + i * 256 + lane * 8);
             }
 #pragma unroll
             for (int r = 0; r < RD; ++r) {
-                if (w0 + r < ne_ * H) {
-                    const int c = cnt[ee[r]], s0 = start[ee[r]];
-                    for (int q = 0; q < c; ++q) {
-                        const int p = gpairs[s0 + q];
-                        const bf16* x = a.sc.act + (size_t)p * I;
-                        float acc = 0.f;
+                const bf16* x = a.sc.act + (size_t)pp[r] * I;
+                float acc = 0.f;
 #pragma unroll
-                        for (int i = 0; i < I / 256; ++i) {
-                            const uint4 xv = *reinterpret_cast<const uint4*>(x + i * 256 + lane * 8);
-                            const bf16* xp = reinterpret_cast<const bf16*>(&xv);
-                            const bf16* wp = reinterpret_cast<const bf16*>(&wv[r][i]);
+                for (int i = 0; i < I / 256; ++i) {
+                    const uint4 xv = *reinterpret_cast<const uint4*>(x + i * 256 + lane * 8);
+                    const bf16* xp = reinterpret_cast<const bf16*>(&xv);
+                    const bf16* wp = reinterpret_cast<const bf16*>(&wv[r][i]);
 #pragma unroll
-                            for (int j = 0; j < 8; ++j) acc += bf2f(xp[j]) * bf2f(wp[j]);
-                        }
-                        acc = warp_sum(acc);
-                        if (lane == 0) atomicAdd(a.sc.out2 + (p / K) * H + nn[r], acc * a.sc.w[p]);
-                    }
+                    for (int j = 0; j < 8; ++j) acc += bf2f(xp[j]) * bf2f(wp[j]);
                 }
+                acc = warp_sum(acc);
+                if (lane == 0 && w0 + r < pairs * H) atomicAdd(a.sc.out2 + (pp[r] / K) * H + nn[r], acc * a.sc.w[pp[r]]);
             }
         }
     }
