@@ -53,12 +53,13 @@ def add_rmsnorm(h: torch.Tensor, a: torch.Tensor, weight: torch.Tensor, eps: flo
 def rmsnorm_rope(x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float) -> torch.Tensor:
     """x [B, S, H, D] -> head-wise RMSNorm then rotary (cos/sin [B, S, D], HF layout: halves repeat)."""
     B, S, H, D = x.shape
-    x = x.contiguous()
-    y = torch.empty_like(x)
+    if x.stride(3) != 1 or x.stride(2) != D or (B > 1 and x.stride(0) != S * x.stride(1)):
+        x = x.contiguous()                      # any layout but "rows of H*D-contiguous heads" (never the qkv slice)
+    y = torch.empty(B, S, H, D, dtype=x.dtype, device=x.device)
     cos2, sin2 = cos.reshape(B * S, -1), sin.reshape(B * S, -1)
     if not cos2.is_contiguous():
         cos2, sin2 = cos2.contiguous(), sin2.contiguous()
-    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(0) // S if S else D * H, D, cos2.stride(0), eps,
+    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(1), x.stride(2), cos2.stride(0), eps,
                                         H=H, D=D, HALF=D // 2)
     return y
 
@@ -68,21 +69,22 @@ def silu_mul(x: torch.Tensor) -> torch.Tensor:
     M, two_i = x.shape
     I = two_i // 2
     x = x.contiguous()
-    y = torch.empty(M, I, dtype=x.dtype, device=x.device)
+    y = torch.empty(M, I, dtype=torch.bfloat16, device=x.device)      # x may be the fp32 split-K accumulator
     BLOCK = 1024
     K._silu_mul_kernel[(M, K.triton.cdiv(I, BLOCK))](x, y, x.stride(0), y.stride(0), I=I, BLOCK=BLOCK)
     return y
 
 
-def kv_store(pool_k: torch.Tensor, pool_v: torch.Tensor, bid: torch.Tensor, slot: torch.Tensor,
+def kv_store(pool_k: torch.Tensor, pool_v: torch.Tensor, bt: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
              k_new: torch.Tensor, v_new: torch.Tensor) -> None:
-    """pool[bid[r], :, slot[r], :] = new[r, :, 0, :] for K and V in one launch (k/v_new [R, H, 1, D], the pools
-    [blocks, H, bs, D]; the two index_put scatters it replaces were ~8 launches per layer)."""
+    """pool[bt[r, lb[r]], :, slot[r], :] = new[r, :, 0, :] for K and V in one launch (k/v_new [R, H, 1, D], `bt`
+    the layer's [R, cols] block table, the pools [blocks, H, bs, D]; the gather and two index_put scatters it
+    replaces were ~9 launches per layer)."""
     R, H, _, D = k_new.shape
-    assert k_new.stride(3) == 1 and v_new.stride(3) == 1
-    K._kv_store_kernel[(R,)](k_new, v_new, pool_k, pool_v, bid, slot, k_new.stride(0), k_new.stride(1),
-                             v_new.stride(0), v_new.stride(1), pool_k.stride(0), pool_k.stride(1), pool_k.stride(2),
-                             H=H, D=D, BLOCK=K.triton.next_power_of_2(H * D))
+    assert k_new.stride(3) == 1 and v_new.stride(3) == 1 and bt.stride(1) == 1
+    K._kv_store_kernel[(R,)](k_new, v_new, pool_k, pool_v, bt, lb, slot, k_new.stride(0), k_new.stride(1),
+                             v_new.stride(0), v_new.stride(1), bt.stride(0), pool_k.stride(0), pool_k.stride(1),
+                             pool_k.stride(2), H=H, D=D, BLOCK=K.triton.next_power_of_2(H * D))
 
 
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:

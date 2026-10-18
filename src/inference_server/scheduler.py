@@ -757,7 +757,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         A full cache hit re-feeds its last token, as the chunked path does."""
         if not self._prefilling:
             return
-        budget, picked = self.prefill_step_tokens, []          # [(row, chunk, is_final)]
+        budget, picked, longest = self.prefill_step_tokens, [], 0          # [(row, chunk, is_final)]
         for prow in self._prefilling:
             if budget <= 0 or len(picked) >= self.prefill_step_rows:
                 break
@@ -767,6 +767,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
             else:
                 end = min(prow.tokens_fed + budget, len(ids))
                 chunk, final = ids[prow.tokens_fed:end], end == len(ids)
+            # The forward is right-padded to the longest chunk, so a step costs rows x longest in activations: the
+            # same cap as a batched wave (a 62-row step padded to 8192 asked 3.9 GiB for q alone and OOMed).
+            if picked and (len(picked) + 1) * max(longest, len(chunk)) > self.max_prefill_tokens:
+                break
+            longest = max(longest, len(chunk))
             budget -= len(chunk)
             picked.append((prow, chunk, final))
         try:

@@ -6,7 +6,8 @@ over the right-padded wave, or one flash call per row: the 2026-10-16 session fo
 capped TTFT at concurrency 128 (a 116-row step of ~17 tokens each took 3.1 s). FlashInfer's batch prefill reads the
 pool directly ("HND" layout = our [blocks, Hkv, block_size, D]); `causal=True` with a query shorter than its keys
 aligns the query to the end, which is exactly "prefix keys, then the causal suffix". Each layer has its own block
-ids, so the wrapper is planned per layer (host work, ~0.1-0.3 ms); the row structure is built once per wave.
+ids in principle, but every layer allocates and releases in the same order, so the wrapper is planned once per
+wave (host work, ~0.1-0.3 ms per plan) and re-planned only for a layer whose block ids differ.
 Opt-in with CUSTOM_BACKEND_PREFILL_ATTN=flashinfer; falls back to sdpa when flashinfer is not importable."""
 
 from __future__ import annotations
@@ -58,6 +59,13 @@ def kv_indices(block_table: torch.Tensor, nb: list[int]) -> torch.Tensor:
     return block_table[keep].to(torch.int32)
 
 
+def _same_blocks(ctx, layer_idx: int, other: int) -> bool:
+    """Whether every row holds the same block ids in `layer_idx` as in `other` (host lists, no device work). Every
+    layer allocates and releases in the same order, so this holds for all of Qwen3's layers; one plan serves them."""
+    caches = getattr(ctx, "caches", None)
+    return caches is not None and all(c.block_tables[layer_idx] == c.block_tables[other] for c in caches)
+
+
 def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> torch.Tensor:
     """q [B, Hq, S, D] right-padded; the suffix K/V already appended to the pool. Returns [B, S, Hq, D] in q's dtype,
     padding rows zero. `ctx` is the backend's prefill context (`_prefix`/`_suffix`, `tokens`, `block_table_tensor`)."""
@@ -65,17 +73,19 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     pool = ctx.pools[layer_idx]
     Hkv, bs = pool.k.shape[1], pool.k.shape[2]
     st = getattr(ctx, "_fi", None)
-    if st is None:                                   # once per wave; the block ids differ per layer, the rows do not
+    w = _wrapper(q.device)
+    if st is None:                                   # once per wave: the row structure, and the plan for this layer
         tokens = getattr(ctx, "tokens", None)        # the real positions of a ragged wave (None when none is padded)
         if tokens is None and sum(ctx._suffix) != B * S:
             valid = torch.arange(S, device=q.device)[None, :] < torch.tensor(ctx._suffix, device=q.device)[:, None]
             tokens = valid.reshape(-1).nonzero().squeeze(1)
-        st = ctx._fi = (*plan_inputs(ctx._prefix, ctx._suffix, bs), tokens)
-    qo_indptr, kv_indptr, last, nb, tokens = st
-    indices = kv_indices(ctx.block_table_tensor(layer_idx), nb)
-    w = _wrapper(q.device)
-    w.plan(qo_indptr, kv_indptr, indices, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
-           q_data_type=q.dtype, kv_data_type=pool.k.dtype)
+        st = ctx._fi = (*plan_inputs(ctx._prefix, ctx._suffix, bs), tokens, layer_idx)
+    qo_indptr, kv_indptr, last, nb, tokens, planned = st
+    if layer_idx != planned and not _same_blocks(ctx, layer_idx, planned):
+        planned = layer_idx                          # a layer with its own block ids (sliding layers): its own plan
+    if planned == layer_idx:
+        w.plan(qo_indptr, kv_indptr, kv_indices(ctx.block_table_tensor(layer_idx), nb), last, Hq, Hkv, D, bs,
+               causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
     o = w.run(qp[tokens] if tokens is not None else qp, (pool.k, pool.v))           # [total real tokens, Hq, D]
     if tokens is None:

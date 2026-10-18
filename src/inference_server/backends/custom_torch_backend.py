@@ -141,8 +141,7 @@ class _GraphCtx:
             self._slot = self.seq_lens % self.bs
             self._sl32 = (self.seq_lens + 1).to(torch.int32)
             self._bt32 = self.bt_all.to(torch.int32).clamp_min_(0) if self.bt_all is not None else None
-        bid = self.block_tables[layer_idx][self._rows, self._lb]
-        write_token(self.pools[layer_idx], bid, self._slot, k_new, v_new)
+        write_token(self.pools[layer_idx], self.block_tables[layer_idx], self._rows, self._lb, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
         if self._bt32 is not None:
@@ -355,8 +354,8 @@ class CustomTorchBackend(InferenceBackend):
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
-        self._compile_on = self.device.type == "cuda" and not moe and \
-            os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"
+        self._compile_on = self.device.type == "cuda" and \
+            os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"      # MoE included since 2026-10-17 (an A/B)
         self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
         self._scratch = None                 # one padding block per pool, shared by every bucket

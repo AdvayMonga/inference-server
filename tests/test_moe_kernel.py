@@ -21,10 +21,14 @@ def test_moe_gemm_matches_grouped_mm(T, top_k, E):
     ref = torch._grouped_mm(flat[tok], w.transpose(-2, -1), offs=offs)
     sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
     assert sorted_ids.numel() == M + E * 15 and (sorted_ids < M).sum() == M
-    got = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M)
+    got = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M)                     # auto split-K (fp32 when split)
     torch.testing.assert_close(got.float(), ref.float(), atol=3e-2, rtol=2e-2)
-    got2 = moe_kernel.moe_gemm(flat[tok].contiguous(), None, w, sorted_ids, expert_ids, M)   # rows given directly
+    got2 = moe_kernel.moe_gemm(flat[tok].contiguous(), None, w, sorted_ids, expert_ids, M, split_k=1)   # rows direct, bf16
+    assert got2.dtype == torch.bfloat16
     torch.testing.assert_close(got2.float(), ref.float(), atol=3e-2, rtol=2e-2)
+    got4 = moe_kernel.moe_gemm(flat, tok, w, sorted_ids, expert_ids, M, split_k=4)
+    assert got4.dtype == torch.float32
+    torch.testing.assert_close(got4, ref.float(), atol=3e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize("T,top_k,E", [(1, 8, 128), (7, 8, 128), (64, 8, 128), (256, 8, 128), (5, 2, 8), (3, 1, 4)])
@@ -50,3 +54,43 @@ def test_align_fused_matches_align_and_the_scatter_gemm_matches_index_add(T, top
     out = torch.zeros(T, N, device="cuda")
     moe_kernel.moe_gemm_scatter(act, w, sorted_ids, expert_ids, M, tok, pair_w, out)
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("T,top_k,E,renorm", [(1, 8, 128, True), (7, 8, 128, True), (32, 8, 128, False), (5, 2, 8, True),
+                                               (3, 1, 4, True)])
+def test_route_fused_matches_the_four_launch_routing(T, top_k, E, renorm):
+    """Same grouping (every pair once, each block one expert), same weights, same scattered output."""
+    from inference_server.models import moe_kernel
+    from inference_server.models.qwen3_moe import route
+    torch.manual_seed(T + 7)
+    logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
+    rw, rids = route(logits, top_k, renorm)
+    sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, top_k, renorm, 16)
+    M = T * top_k
+    assert sorted_ids.numel() == expert_ids.numel() * 16 and (sorted_ids < M).sum() == M
+    real = sorted_ids[sorted_ids < M]
+    assert torch.equal(real.sort().values, torch.arange(M, device="cuda", dtype=torch.int32))   # every pair once
+    # bf16 logits tie often, and the kernel breaks ties by lowest index while torch.topk's order is unspecified: compare
+    # each token's expert SET and each (token, expert) weight, and the scattered output (order-free).
+    pair_e = torch.full((M,), -1, dtype=torch.int32, device="cuda")
+    for b in range(expert_ids.numel()):
+        ids = sorted_ids[b * 16:(b + 1) * 16]
+        ids = ids[ids < M].long()
+        if ids.numel():
+            assert expert_ids[b] < E
+            pair_e[ids] = expert_ids[b]
+    assert (pair_e >= 0).all()
+    assert torch.equal(tok.long(), torch.arange(M, device="cuda") // top_k)
+    ref_w = torch.zeros(T, E, device="cuda").scatter_(1, rids, rw.float())          # weight per (token, expert)
+    for t in range(T):
+        assert set(pair_e[t * top_k:(t + 1) * top_k].tolist()) == set(rids[t].tolist())
+    torch.testing.assert_close(pair_w, ref_w[tok.long(), pair_e.long()], atol=2e-3, rtol=2e-2)
+    K_, N = 256, 384
+    act = torch.randn(M, K_, dtype=torch.bfloat16, device="cuda")
+    w = torch.randn(E, N, K_, dtype=torch.bfloat16, device="cuda") * 0.05
+    out = torch.zeros(T, N, device="cuda")
+    moe_kernel.moe_gemm_scatter(act, w, sorted_ids, expert_ids, M, tok, pair_w, out)
+    ref = torch.zeros(T, N, device="cuda")
+    for i in range(M):
+        ref[i // top_k] += (act[i].float() @ w[pair_e[i]].float().T) * ref_w[i // top_k, pair_e[i]]
+    torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)
