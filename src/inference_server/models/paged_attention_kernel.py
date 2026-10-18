@@ -35,7 +35,7 @@ from inference_server.models import launch_table
 _TILED_PREFILL = os.environ.get("CUSTOM_BACKEND_TILED_PREFILL", "0") == "1"
 
 
-# Where tiling actually wins, measured on A100 (test_tiled_prefill_modal.py):
+# Where tiling actually wins, measured on A100 (Gemma head dims; the Modal scripts are gone):
 #
 #   tokens   D    untiled    tiled   speedup
 #      240  256    0.392     0.470     0.83x
@@ -56,7 +56,7 @@ TILED_MAX_HEAD_DIM = 256
 # (BLOCK_M, num_warps) per head_dim. The accumulator is [BLOCK_M, D] fp32 spread across the
 # block's threads, so warps and tile size trade off against the register file together — leaving
 # num_warps to Triton's default heuristic is what made D=512 spill.
-# Swept on A100 (sweep_tiled_launch_modal.py), untiled = 1.0x:
+# Swept on A100 (Modal sweep, script gone), untiled = 1.0x:
 #
 #   D=256 S=824   BLOCK_M=16 w=4  10.84x  | BLOCK_M=32 w=4  1.81x  | BLOCK_M=64 w=8  0.83x
 #   D=256 S=512   BLOCK_M=16 w=4   8.10x  | BLOCK_M=32 w=4  1.01x

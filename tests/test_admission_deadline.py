@@ -165,6 +165,6 @@ def test_the_deadline_default_is_150x_the_ttft_budget():
     a small multiple of the latency budget, not two orders of magnitude above it."""
     from inference_server.config import Settings
 
-    slo_ttft_ms = 200.0                       # bench_serving_modal.SLO_TTFT_MS
+    slo_ttft_ms = 200.0                       # the serving SLO of the Modal-era benchmark
     assert Settings.max_queue_wait_s == 30.0
     assert Settings.max_queue_wait_s * 1000 / slo_ttft_ms == 150.0
