@@ -173,6 +173,7 @@ class _PrefillCtx:
         padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
         self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
         self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
+        self._wave_table, self._wave_layer = None, -1   # the table shared by every layer with the same block ids
 
     def _ensure_blocks(self, layer_idx):
         """Reserve every row's blocks for this layer up front (Python only, no GPU work)."""
@@ -200,7 +201,11 @@ class _PrefillCtx:
         pool = self.pools[layer_idx]
         bs = pool.block_size
         self._ensure_blocks(layer_idx)
-        bt = self._table(layer_idx).long()                              # [K, maxb]
+        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
+                                                    for c in self.caches)
+        if not same:                                       # every layer allocates in the same order: built once a wave
+            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx   # [K, maxb]
+        bt = self._wave_table
         self._bt_cache[layer_idx] = bt
 
         S = k_new.shape[2]
