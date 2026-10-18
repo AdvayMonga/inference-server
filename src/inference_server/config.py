@@ -46,15 +46,19 @@ class Settings:
     # step per iter), "batched" (a wave of whole prompts, then decode) or "mixed" (every waiting prefill advances
     # by up to prefill_step_tokens in ONE forward per iter, then a decode step: prefill never stalls decode for
     # more than one bounded chunk, and is not one request at a time). "" = derive: chunk_size>0 → chunked, else
-    # batched on custom-* backends, else monolithic.
+    # mixed on custom-* backends (H200, 2026-10-16: saturated 1.11 → 1.87 req/s with async decode), else monolithic.
     prefill_mode: str = ""
-    # Mixed mode: the most prefill tokens fed between two decode steps (all rows together).
-    prefill_step_tokens: int = 2048
+    # Mixed mode: the most prefill tokens fed between two decode steps (all rows together; H200 2026-10-17 with
+    # FlashInfer: 8192 gives long_prompt 9.0 vs 8.4 req/s at 2048, saturated unchanged), and the most rows one step
+    # may carry (0 = no cap; a cap of 32 lost saturated 3.58 -> 2.35 req/s, TPOT p99 over the limit at 128 clients).
+    prefill_step_tokens: int = 8192
+    prefill_step_rows: int = 0
     # Batched prefill: the most (right-padded) tokens one wave may carry, rows x the longest prompt. Bounds the
     # activation peak, which the KV pools are sized around (a wave of long prompts OOMed with no cap). 0 = none.
     max_prefill_tokens: int = 32768
-    # Decode step n launched with step n-1's tokens still on the device; n-1's tokens processed while n runs.
-    async_decode: bool = False
+    # Decode step n launched with step n-1's tokens still on the device; n-1's tokens processed while n runs
+    # (H200, 2026-10-16: single_stream TPOT p99 9.5 → 9.24 ms, decode step at batch 128 33.9 → 27.8 ms).
+    async_decode: bool = True
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
@@ -132,6 +136,7 @@ def load_settings() -> Settings:
         max_active_kv_tokens=int(os.environ.get("MAX_ACTIVE_KV_TOKENS", Settings.max_active_kv_tokens)),
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_step_tokens=int(os.environ.get("PREFILL_STEP_TOKENS", Settings.prefill_step_tokens)),
+        prefill_step_rows=int(os.environ.get("PREFILL_STEP_ROWS", Settings.prefill_step_rows)),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         max_prefill_tokens=int(os.environ.get("MAX_PREFILL_TOKENS", Settings.max_prefill_tokens)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),

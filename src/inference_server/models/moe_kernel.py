@@ -82,6 +82,100 @@ def align(sorted_experts: torch.Tensor, num_experts: int, block_m: int) -> tuple
     return sorted_ids, expert_ids.to(torch.int32)
 
 
+@triton.jit
+def _align_kernel(SORTED_E, ORDER, W, SORTED_IDS, EXPERT_IDS, TOK, PAIR_W, SCRATCH, M, n_blocks, max_blocks,
+                  E: tl.constexpr, E_PAD: tl.constexpr, K: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
+    """One program: from the expert-sorted pairs, everything the grouped GEMMs need (`align` did it in ~15 launches,
+    plus the token map and the per-pair routing weight that cost two more)."""
+    offs = tl.arange(0, BLOCK)
+    m = offs < M
+    e = tl.load(SORTED_E + offs, mask=m, other=E).to(tl.int32)
+    bins = tl.arange(0, E_PAD)
+    counts = tl.where(bins < E, tl.histogram(e, E_PAD), 0)          # pairs per expert (bin E holds the padding)
+    padded = (counts + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    pstart = tl.cumsum(padded, 0) - padded                          # each expert's first padded row
+    ustart = tl.cumsum(counts, 0) - counts                          # and its first sorted pair
+    tl.store(SCRATCH + bins, pstart)
+    tl.store(SCRATCH + E_PAD + bins, ustart)
+    for s in range(0, n_blocks * BLOCK_M, BLOCK):                   # padding rows read M, blocks past the end E
+        tl.store(SORTED_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + M, mask=(s + offs) < n_blocks * BLOCK_M)
+    for s in range(0, n_blocks, BLOCK):
+        tl.store(EXPERT_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + E, mask=(s + offs) < n_blocks)
+    tl.debug_barrier()
+    dest = tl.load(SCRATCH + e, mask=m, other=0) + offs - tl.load(SCRATCH + E_PAD + e, mask=m, other=0)
+    tl.store(SORTED_IDS + dest, offs.to(tl.int32), mask=m)
+    order = tl.load(ORDER + offs, mask=m, other=0)
+    tl.store(TOK + offs, (order // K).to(tl.int32), mask=m)
+    tl.store(PAIR_W + offs, tl.load(W + order, mask=m, other=0.0), mask=m)
+    nb = padded // BLOCK_M
+    first = pstart // BLOCK_M
+    for j in range(0, max_blocks):                                  # each expert's row blocks carry its id
+        tl.store(EXPERT_IDS + first + j, bins, mask=(j < nb) & (bins < E))
+
+
+def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torch.Tensor, num_experts: int,
+                top_k: int, block_m: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """`align` plus the token of each sorted pair and its routing weight (fp32), in one launch: (sorted_ids,
+    expert_ids, tok, pair_w). `weights` is [T, top_k] fp32 as the router produced it."""
+    M, E = sorted_experts.numel(), num_experts
+    dev = sorted_experts.device
+    n_blocks = (M + E * (block_m - 1)) // block_m
+    sorted_ids = torch.empty(n_blocks * block_m, dtype=torch.int32, device=dev)
+    expert_ids = torch.empty(n_blocks, dtype=torch.int32, device=dev)
+    tok = torch.empty(M, dtype=torch.int32, device=dev)
+    pair_w = torch.empty(M, dtype=torch.float32, device=dev)
+    e_pad = triton.next_power_of_2(E + 1)
+    scratch = torch.empty(2 * e_pad, dtype=torch.int32, device=dev)
+    block = max(triton.next_power_of_2(M), e_pad)
+    _align_kernel[(1,)](sorted_experts, order, weights.reshape(-1), sorted_ids, expert_ids, tok, pair_w, scratch,
+                        M, n_blocks, triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, BLOCK_M=block_m,
+                        BLOCK=block, num_warps=min(16, max(1, block // 128)))
+    return sorted_ids, expert_ids, tok, pair_w
+
+
+@triton.jit
+def _moe_gemm_scatter_kernel(A, W, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
+                             stride_am, stride_wn, stride_wk, stride_om,
+                             E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr):
+    """The down projection with its epilogue: each pair's row, times its routing weight, added into its token's
+    fp32 output row (the multiply, the zero-fill-and-index_add and the cast were four launches)."""
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    e = tl.load(EXPERT_IDS + pid_m)
+    if e >= E:
+        return
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = tl.load(SORTED + offs_m)
+    valid = rows < M
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_ok = offs_n < N
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = A + rows[:, None] * stride_am + offs_k[None, :]
+    w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + offs_k[None, :] * stride_wk
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        k_ok = (k0 + offs_k) < K
+        a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+        w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
+        acc += tl.dot(a, tl.trans(w))
+        a_ptrs += BLOCK_K
+        w_ptrs += BLOCK_K * stride_wk
+    acc = acc * tl.load(PAIR_W + rows, mask=valid, other=0.0)[:, None]
+    t = tl.load(TOK + rows, mask=valid, other=0).to(tl.int64)
+    tl.atomic_add(OUT + t[:, None] * stride_om + offs_n[None, :], acc, mask=valid[:, None] & n_ok[None, :])
+
+
+def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor, expert_ids: torch.Tensor, M: int,
+                     tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor, block_m: int = 16) -> None:
+    """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) over the sorted pairs; `out` [T, N] fp32, zeroed."""
+    E, N, K = w.shape
+    BLOCK_N, BLOCK_K = 128, 64
+    grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
+    _moe_gemm_scatter_kernel[grid](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
+                                   a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+                                   E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K, num_warps=4, num_stages=3)
+
+
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
              expert_ids: torch.Tensor, M: int, block_m: int = 16) -> torch.Tensor:
     """C [M, N] = per pair i: a[tok[i]] @ w[expert(i)].T, pairs in sorted order. `a` [T, K] (or [M, K] with tok None),

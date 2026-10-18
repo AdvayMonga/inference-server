@@ -23,6 +23,7 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import InferenceBackend, stop_token_ids
+from inference_server.models.paged_kv_cache import write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -124,23 +125,29 @@ class _GraphCtx:
     captured graph reads/writes fixed addresses and a replay just needs fresh values copied in.
     """
 
-    def __init__(self, pools, seq_lens, block_tables, bs):
+    def __init__(self, pools, seq_lens, block_tables, bs, bt_all=None):
         self.pools = pools
         self.seq_lens = seq_lens          # static [maxN] long
         self.block_tables = block_tables  # static per-layer [maxN, MAX_COLS] long
         self.bs = bs
+        self.bt_all = bt_all              # the same tables stacked [live layers, maxN, MAX_COLS], when given
+        self._live = [L for L, p in enumerate(pools) if p is not None]
+        self._li = {L: i for i, L in enumerate(self._live)}
 
     def append(self, layer_idx, k_new, v_new):
-        pool = self.pools[layer_idx]
-        rows = torch.arange(self.seq_lens.shape[0], device=self.seq_lens.device)
-        lb = self.seq_lens // self.bs
-        slot = self.seq_lens % self.bs
-        bid = self.block_tables[layer_idx][rows, lb]
-        pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
-        pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+        if layer_idx == self._live[0]:   # per-step values once per forward, not per layer (captured as such)
+            self._rows = torch.arange(self.seq_lens.shape[0], device=self.seq_lens.device)
+            self._lb = self.seq_lens // self.bs
+            self._slot = self.seq_lens % self.bs
+            self._sl32 = (self.seq_lens + 1).to(torch.int32)
+            self._bt32 = self.bt_all.to(torch.int32).clamp_min_(0) if self.bt_all is not None else None
+        bid = self.block_tables[layer_idx][self._rows, self._lb]
+        write_token(self.pools[layer_idx], bid, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
-        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), (self.seq_lens + 1).to(torch.int32)
+        if self._bt32 is not None:
+            return self._bt32[self._li[layer_idx]], self._sl32
+        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), self._sl32
 
 
 class _PrefillCtx:
@@ -848,7 +855,7 @@ class CustomTorchBackend(InferenceBackend):
         g_bt = [None] * len(self.pools)
         for i, L in enumerate(live):
             g_bt[L] = g_bt_all[i]
-        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
+        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size, bt_all=g_bt_all)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
         try:
