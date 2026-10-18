@@ -280,6 +280,18 @@ class _PackedCtx(_PrefillCtx):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
 
+class _StateRow:
+    """A decode row of a BatchedDecodeState seen as a prefill row: its block lists (host mirrors) and lengths, so the
+    packed context places its one token like any other row's chunk. Allocation happened in prepare_step."""
+
+    def __init__(self, state, r, n_layers):
+        self.block_tables = [None] * n_layers
+        for L, i in state._li.items():
+            self.block_tables[L] = state._host_blocks[r][i]
+        self.seq_lens = [state._host_len[r]] * n_layers
+        self.seq_len = state._host_len[r]
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom forward (Qwen3MoeForCausalLM)."""
 
@@ -381,8 +393,9 @@ class CustomTorchBackend(InferenceBackend):
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
-        # Mixed prefill as one packed forward (PREFILL_PACKED=0: the right-padded wave).
-        self.packed_prefill = self.device.type == "cuda" and os.environ.get("PREFILL_PACKED", "1") == "1"
+        # Mixed prefill as one packed forward, and decode rows join it (PREFILL_PACKED=0: the right-padded wave and a
+        # separate decode step; on CPU/MPS packed is opt-in, for the tests).
+        self.packed_prefill = os.environ.get("PREFILL_PACKED", "1" if self.device.type == "cuda" else "0") == "1"
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and \
@@ -759,13 +772,16 @@ class CustomTorchBackend(InferenceBackend):
         return partial_kv, last_token, partial_kv.seq_len
 
     @torch.no_grad()
-    def prefill_chunk_batch(self, items):
-        """`items`: [(partial_kv | None, chunk_ids, is_final, sampling)] -> [(kv, last_token | None, kv_len)]. CUDA:
-        one forward over every chunk, right-padded, each row attending to its own blocks so far plus the chunk
-        (the batched-prefill context, with a row's fed tokens as its prefix); else one prefill_chunk per row. On a
-        failure every row's blocks are freed: the scheduler rejects them all."""
-        from inference_server.models.paged_kv_cache import PagedKVCache
-        if self.device.type != "cuda":
+    def prefill_chunk_batch(self, items, decode=None):
+        """`items`: [(partial_kv | None, chunk_ids, is_final, sampling)] -> [(kv, last_token | None, kv_len)]. One
+        forward over every chunk: packed into one row (default), or right-padded (PREFILL_PACKED=0); each row attends
+        to its own blocks so far plus the chunk. With `decode` = (decode batch, current tokens [R], sampling per row)
+        the running decode rows join the packed forward with one token each and the result is (results, next tokens
+        [R]): one step for prefill chunks and decode tokens, the weights streamed once for both. On CPU/MPS without
+        the packed path, one prefill_chunk per row. On a failure every prefill row's blocks are freed: the scheduler
+        rejects them all."""
+        from inference_server.models.paged_kv_cache import BatchedDecodeState, PagedKVCache
+        if not self.packed_prefill and self.device.type != "cuda":
             out = []
             for kv, chunk, final, sampling in items:
                 kv, tok, n = self.prefill_chunk(chunk, kv, sampling=sampling)
@@ -776,6 +792,21 @@ class CustomTorchBackend(InferenceBackend):
         prefix = [c.seq_len for c in caches]
         chunks = [chunk for _, chunk, _, _ in items]
         lens = [len(c) for c in chunks]
+        K = len(items)
+        state = None
+        if decode is not None:
+            assert self.packed_prefill
+            batched, current, sampling_rows = decode
+            if isinstance(batched, BatchedDecodeState):
+                state = batched
+                state.prepare_step()                # any block a row crosses into, before its view is taken
+                rows = [_StateRow(state, r, len(self.pools)) for r in range(state.n_rows)]
+            else:
+                rows = list(batched)                # CPU/MPS: the decode rows are PagedKVCache objects
+            caches = caches + rows
+            prefix = prefix + [r.seq_len for r in rows]
+            chunks = chunks + [[int(t)] for t in current.tolist()]
+            lens = lens + [1] * len(rows)
         if self.packed_prefill:                     # one row of every chunk, no padding; logits at each row's last token
             input_ids = torch.tensor([t for c in chunks for t in c], dtype=torch.long, device=dev).unsqueeze(0)
             position_ids = torch.tensor([p + i for p, n in zip(prefix, lens) for i in range(n)],
@@ -807,7 +838,7 @@ class CustomTorchBackend(InferenceBackend):
             if cuda:
                 ev1.record()
         except BaseException:
-            for c in caches:
+            for c in caches[:K]:
                 c.free_all()
             raise
         t1 = time.perf_counter()
@@ -816,6 +847,11 @@ class CustomTorchBackend(InferenceBackend):
             row = logits[0, k:k + 1, :] if self.packed_prefill else logits[k:k + 1, 0, :]
             tok = int(sample(row, sampling).item()) if final else None
             out.append((caches[k], tok, caches[k].seq_len))
+        next_tokens = None
+        if decode is not None:
+            next_tokens = sample_batched(logits[0, K:, :], sampling_rows)
+            if state is not None:
+                state.advance()                     # the token is written; lengths move on
         t2 = time.perf_counter()
         # Where a step's time went, for the timeline (`prefill_detail`): host work enqueueing the forward (incl. the
         # block allocations inside it), the forward's own device time, and the wait at the first sync.
@@ -823,7 +859,7 @@ class CustomTorchBackend(InferenceBackend):
                                     "sync_wait_s": round(t2 - t1, 4),
                                     "gpu_forward_s": (round(ev0.elapsed_time(ev1) / 1e3, 4)
                                                       if cuda and ev1.query() else None)}   # a step with no final row has not synced
-        return out
+        return (out, next_tokens) if decode is not None else out
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""

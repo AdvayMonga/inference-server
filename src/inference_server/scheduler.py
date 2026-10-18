@@ -177,6 +177,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # rows one step carries (0 = no cap).
         self.prefill_step_tokens = max(1, prefill_step_tokens)
         self.prefill_step_rows = prefill_step_rows if prefill_step_rows > 0 else 2**31
+        self._decoded_this_iter = False            # the decode rows advanced inside this iteration's packed prefill
         # Window (as a multiple of free slots) that batched-mode wave planning may reorder
         # within, to group similar prompt lengths. DEFAULT 0 (off) — measured inert on our
         # current workload: at rates 1-6 the queue never backs up, so 83-91% of prefill waves
@@ -382,6 +383,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     # processes those first_tokens this same iter → decode advances active.
                     with self._timeline.phase("admit"):
                         self._admit_pending(device)
+                    self._decoded_this_iter = False
                     with self._timeline.phase("prefill_chunk"):
                         if self.prefill_mode == "mixed":
                             self._advance_prefill_mixed(device)
@@ -391,7 +393,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                         self._evict_finished()
                     if not self._active:
                         self._pending = None            # every row of the last step has gone
-                    if self._active:
+                    if self._active and not self._decoded_this_iter:
                         self._active_samples += 1
                         self._active_sum += len(self._active)
                         if len(self._active) > self._active_high_water:
@@ -775,10 +777,23 @@ class ContinuousBatchScheduler(SchedulerInterface):
             longest = max(longest, len(chunk))
             budget -= len(chunk)
             picked.append((prow, chunk, final))
+        # Decode rows join the packed forward: one step for the chunks and their tokens (the weights are streamed once
+        # for both), instead of a prefill forward followed by a decode step they wait through.
+        decode, batch = None, None
+        if (self._active and self.async_decode and self._batched_kv is not None
+                and getattr(self.backend, "packed_prefill", False)):
+            batch = list(self._active)
+            decode = (self._batched_kv, self._current_tokens(batch, device), [r.request.sampling for r in batch])
         try:
-            with self._timeline.phase("prefill_mixed", rows=len(picked), tokens=sum(len(c) for _, c, _ in picked)):
-                results = self.backend.prefill_chunk_batch(
-                    [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked])
+            with self._timeline.phase("prefill_mixed", rows=len(picked), tokens=sum(len(c) for _, c, _ in picked),
+                                      decode_rows=len(batch) if batch else 0):
+                items = [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked]
+                results = (self.backend.prefill_chunk_batch(items, decode=decode) if decode is not None
+                           else self.backend.prefill_chunk_batch(items))
+            if decode is not None:
+                results, next_tokens = results
+                self._launched(next_tokens, batch)
+                self._decoded_this_iter = True
             detail = getattr(self.backend, "last_prefill_timing", None)
             if detail:
                 self._timeline.event("prefill_detail", rows=len(picked), **detail)
@@ -875,26 +890,35 @@ class ContinuousBatchScheduler(SchedulerInterface):
         previous step's output on the device (no host round trip); rows that joined since take their first token
         from the host. Positions come from the backend's state."""
         batch = list(self._active)
-        n = len(batch)
-        if self._pending is not None:
-            out_prev, snap_prev = self._pending[0], self._pending[1]
-            where = {id(r): i for i, r in enumerate(snap_prev)}
-            current = torch.empty(n, dtype=torch.long, device=out_prev.device)
-            dst = [i for i, r in enumerate(batch) if id(r) in where]
-            if dst:
-                src = torch.tensor([where[id(batch[i])] for i in dst], device=out_prev.device)
-                current[torch.tensor(dst, device=out_prev.device)] = out_prev[src]
-            new = [i for i, r in enumerate(batch) if id(r) not in where]
-            if new:
-                current[torch.tensor(new, device=out_prev.device)] = torch.tensor(
-                    [batch[i].current_token for i in new], dtype=torch.long, device=out_prev.device)
-        else:
-            current = torch.tensor([r.current_token for r in batch], dtype=torch.long, device=device)
+        current = self._current_tokens(batch, device)
         next_tokens, self._batched_kv = self.backend.decode_step_batched(
             current.unsqueeze(1), self._batched_kv, self._attention_mask, None,
             sampling_per_row=[r.request.sampling for r in batch])
+        self._launched(next_tokens, batch)
+
+    def _current_tokens(self, batch: list, device: str) -> torch.Tensor:
+        """This step's input token per row: continuing rows from the previous step's device output, rows that joined
+        since from the host."""
+        n = len(batch)
+        if self._pending is None:
+            return torch.tensor([r.current_token for r in batch], dtype=torch.long, device=device)
+        out_prev, snap_prev = self._pending[0], self._pending[1]
+        where = {id(r): i for i, r in enumerate(snap_prev)}
+        current = torch.empty(n, dtype=torch.long, device=out_prev.device)
+        dst = [i for i, r in enumerate(batch) if id(r) in where]
+        if dst:
+            src = torch.tensor([where[id(batch[i])] for i in dst], device=out_prev.device)
+            current[torch.tensor(dst, device=out_prev.device)] = out_prev[src]
+        new = [i for i, r in enumerate(batch) if id(r) not in where]
+        if new:
+            current[torch.tensor(new, device=out_prev.device)] = torch.tensor(
+                [batch[i].current_token for i in new], dtype=torch.long, device=out_prev.device)
+        return current
+
+    def _launched(self, next_tokens: torch.Tensor, batch: list) -> None:
+        """A step is in flight: start its tokens' copy home, finish the previous step's, remember this one."""
         if next_tokens.is_cuda:
-            host = torch.empty(n, dtype=next_tokens.dtype, pin_memory=True)
+            host = torch.empty(len(batch), dtype=next_tokens.dtype, pin_memory=True)
             host.copy_(next_tokens, non_blocking=True)
             event = torch.cuda.Event()
             event.record()
