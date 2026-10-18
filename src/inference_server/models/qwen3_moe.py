@@ -88,16 +88,13 @@ class Qwen3Attention(nn.Module):
             k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
         v = v.transpose(1, 2)
 
-        if paged_ctx is not None:   # CUDA kernel path
-            from inference_server.models.paged_attention_kernel import (
-                paged_decode_attention, paged_prefill_attention,
-            )
+        if paged_ctx is not None:   # paged path (the Triton kernels are imported only where used: CPU runs it too)
             from inference_server.models.prefill_attention import sdpa_prefill, sdpa_prefill_packed
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
                 eager = hasattr(paged_ctx, "caches")                           # the graph ctx has no caches
-                if eager and PREFILL_ATTN == "flashinfer":                     # padded or packed alike
+                if eager and PREFILL_ATTN == "flashinfer" and q.is_cuda:       # padded or packed alike
                     from inference_server.models.prefill_flashinfer import flashinfer_prefill
                     out = flashinfer_prefill(q, paged_ctx, kv_layer_idx, self.scale)
                 elif eager and getattr(paged_ctx, "packed", False):
@@ -105,11 +102,13 @@ class Qwen3Attention(nn.Module):
                 elif eager and PREFILL_ATTN == "sdpa":
                     out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
                 else:
+                    from inference_server.models.paged_attention_kernel import paged_prefill_attention
                     bt = paged_ctx.block_table_tensor(kv_layer_idx)
                     out = paged_prefill_attention(q.transpose(1, 2), pool.k, pool.v, bt,
                                                   paged_ctx.prefix_lens, paged_ctx.suffix_lens,
                                                   scale=self.scale)
             else:
+                from inference_server.models.paged_attention_kernel import paged_decode_attention
                 bt, sl = paged_ctx.block_table_tensor(kv_layer_idx)
                 out = paged_decode_attention(q.squeeze(2), pool.k, pool.v, bt, sl, scale=self.scale)
             return self.o_proj(out.reshape(B, S, -1)), None
