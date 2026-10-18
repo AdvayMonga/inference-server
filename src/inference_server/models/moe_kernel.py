@@ -176,28 +176,17 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
                      tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor, block_m: int = 16) -> None:
     """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) over the sorted pairs; `out` [T, N] fp32, zeroed."""
     E, N, K = w.shape
-    BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
-    split_k = split_k_for(grid[0] * grid[1], K, BLOCK_K)
-    _moe_gemm_scatter_kernel[(*grid, split_k)](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
-                                               a.stride(0), w.stride(1), w.stride(2), out.stride(0),
-                                               E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                               SPLIT_K=split_k, num_warps=4, num_stages=3)
+    _moe_gemm_scatter_kernel[(*grid, 1)](a, w, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
+                                         a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+                                         E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+                                         SPLIT_K=1, num_warps=4, num_stages=NUM_STAGES)
 
 
-SMS = None
-
-
-def split_k_for(programs: int, K: int, block_k: int) -> int:
-    """How many K slices to run so the grid fills the GPU: at batch 1 the gate_up GEMM was 192 programs on 132 SMs
-    (31 us against a ~10 us weight-read floor: the second wave left half the SMs idle). 1 when the grid is wide."""
-    global SMS
-    if SMS is None:
-        SMS = torch.cuda.get_device_properties(0).multi_processor_count if torch.cuda.is_available() else 1
-    for s in (4, 2):
-        if programs < 2 * SMS and K % (s * block_k) == 0 and programs * s <= 8 * SMS:
-            return s
-    return 1
+# Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
+# took gate_up 29 -> 18 us and down 29 -> 17 us at batch 1 (the ncu diagnosis had been occupancy: splitting K bought
+# nothing at any tile; stages and the tile shape did). The same config won at M = 64 (85 -> 76, 50 -> 44 us).
+BLOCK_N, BLOCK_K, NUM_STAGES = 64, 128, 4
 
 
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
@@ -205,10 +194,9 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     """C [M, N] = per pair i: a[tok[i]] @ w[expert(i)].T, pairs in sorted order. `a` [T, K] (or [M, K] with tok None),
     `w` [E, N, K] bf16 contiguous. bf16, or fp32 when the GEMM is split over K (small grids; `split_k` None = auto)."""
     E, N, K = w.shape
-    BLOCK_N, BLOCK_K = 128, 64
     grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
     if split_k is None:
-        split_k = split_k_for(grid[0] * grid[1], K, BLOCK_K)
+        split_k = 1
     if split_k > 1:
         C = torch.zeros(M, N, dtype=torch.float32, device=a.device)
     else:
@@ -216,7 +204,8 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, C, sorted_ids, expert_ids, M, N, K,
                                        a.stride(0), w.stride(1), w.stride(2), C.stride(0),
                                        E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, num_warps=4, num_stages=3)
+                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, num_warps=4,
+                                       num_stages=NUM_STAGES)
     return C
 
 
@@ -298,3 +287,53 @@ def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool
                         triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=block_t,
                         BLOCK_M=block_m, BLOCK=block, num_warps=min(16, max(4, block // 64)))
     return sorted_ids, expert_ids, tok, pair_w
+
+
+@triton.jit
+def _scatter_add_weighted_kernel(Y, TOK, PAIR_W, OUT, M, N, stride_y, stride_o,
+                                 BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+    """out[tok[i]] += pair_w[i] * y[i] for a tile of rows: the MoE epilogue of the CUTLASS path in one pass."""
+    rows = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    rm, cm = rows < M, cols < N
+    y = tl.load(Y + rows[:, None] * stride_y + cols[None, :], mask=rm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+    w = tl.load(PAIR_W + rows, mask=rm, other=0.0)
+    t = tl.load(TOK + rows, mask=rm, other=0).to(tl.int64)
+    tl.atomic_add(OUT + t[:, None] * stride_o + cols[None, :], y * w[:, None], mask=rm[:, None] & cm[None, :])
+
+
+def scatter_add_weighted(y: torch.Tensor, tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor) -> None:
+    """out [T, N] fp32 += each row of y [M, N] (bf16) times its routing weight, at its token. At 8k tokens the torch
+    version (multiply into fp32, cast, zero-fill, index_add) was ~0.9 ms a layer for ~0.3 GB of traffic."""
+    M, N = y.shape
+    BLOCK_M, BLOCK_N = 32, 256
+    grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
+    _scatter_add_weighted_kernel[grid](y, tok, pair_w, out, M, N, y.stride(0), out.stride(0),
+                                       BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, num_warps=4)
+
+
+@triton.jit
+def _gather_weighted_kernel(Y, POS, W, OUT, N, stride_y, stride_o, K: tl.constexpr, BLOCK_N: tl.constexpr):
+    """out[t] = sum_j w[t, j] * y[pos[t, j]]: one token's K expert rows gathered and summed, no atomics, bf16 out."""
+    t = tl.program_id(0)
+    cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    cm = cols < N
+    acc = tl.zeros((BLOCK_N,), dtype=tl.float32)
+    for j in tl.static_range(K):
+        pos = tl.load(POS + t * K + j).to(tl.int64)
+        w = tl.load(W + t * K + j)
+        acc += w * tl.load(Y + pos * stride_y + cols, mask=cm, other=0.0).to(tl.float32)
+    tl.store(OUT + t * stride_o + cols, acc.to(tl.bfloat16), mask=cm)
+
+
+def gather_weighted(y: torch.Tensor, pos: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+    """[T, N] bf16: each token's routed rows of y [M, N] (at sorted positions pos [T, K]) times its weights [T, K],
+    summed. The MoE epilogue of the CUTLASS path as one read of y and one write of the output: the atomic
+    scatter-add version ran at 456 us a layer for 8k tokens (8 fp32 atomics per output element)."""
+    T, K = pos.shape
+    N = y.shape[1]
+    out = torch.empty(T, N, dtype=torch.bfloat16, device=y.device)
+    BLOCK_N = 256
+    _gather_weighted_kernel[(T, triton.cdiv(N, BLOCK_N))](y, pos, weights, out, N, y.stride(0), out.stride(0),
+                                                           K=K, BLOCK_N=BLOCK_N, num_warps=4)
+    return out

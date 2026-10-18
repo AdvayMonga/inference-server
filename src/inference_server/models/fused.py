@@ -59,8 +59,9 @@ def rmsnorm_rope(x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: 
     cos2, sin2 = cos.reshape(B * S, -1), sin.reshape(B * S, -1)
     if not cos2.is_contiguous():
         cos2, sin2 = cos2.contiguous(), sin2.contiguous()
-    K._rmsnorm_rope_kernel[(B * S * H,)](x, weight, cos2, sin2, y, x.stride(1), x.stride(2), cos2.stride(0), eps,
-                                        H=H, D=D, HALF=D // 2)
+    HB = min(8, K.triton.next_power_of_2(H))
+    K._rmsnorm_rope_kernel[(B * S, K.triton.cdiv(H, HB))](x, weight, cos2, sin2, y, x.stride(1), x.stride(2),
+                                                         cos2.stride(0), eps, H=H, HB=HB, D=D, HALF=D // 2)
     return y
 
 

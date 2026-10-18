@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 
 import torch
 
@@ -35,7 +36,14 @@ def available() -> bool:
 def _wrapper(device: torch.device):
     import flashinfer
     workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
-    return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND")
+    # auto | fa2 | fa3 | cutlass | trtllm-gen. fa3 measured long_prompt 14.2 req/s once and 6.25 once against auto's
+    # 12.0-12.5 (H200 2026-10-18; one-off ~2 s stalls on tiny steps in both fa3 runs, unexplained), so it stays opt-in.
+    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")
+    try:
+        return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("flashinfer backend %r unavailable (%s): using auto", backend, e)
+        return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend="auto")
 
 
 def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):

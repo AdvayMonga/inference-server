@@ -172,6 +172,8 @@ class _PrefillCtx:
         padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
         self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
         self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
+        self._wave_table, self._wave_layer = None, -1   # the table shared by every layer with the same block ids
+        self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens
 
     def _ensure_blocks(self, layer_idx):
         """Reserve every row's blocks for this layer up front (Python only, no GPU work)."""
@@ -199,19 +201,28 @@ class _PrefillCtx:
         pool = self.pools[layer_idx]
         bs = pool.block_size
         self._ensure_blocks(layer_idx)
-        bt = self._table(layer_idx).long()                              # [K, maxb]
+        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
+                                                    for c in self.caches)
+        if not same:                                       # every layer allocates in the same order: built once a wave
+            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx   # [K, maxb]
+        bt = self._wave_table
         self._bt_cache[layer_idx] = bt
 
         S = k_new.shape[2]
-        ar = self._ar[:S]
-        starts = torch.tensor([c.seq_lens[layer_idx] for c in self.caches],
-                              device=self.device).unsqueeze(1)          # [K, 1]
-        abs_pos = starts + ar                                            # [K, S]
-        valid = self._valid[:, :S]
-        bids = bt.gather(1, (abs_pos // bs).clamp_(max=bt.shape[1] - 1))
-        if self._scratch is not None:
-            bids = torch.where(valid, bids, bids.new_full((), self._scratch[layer_idx]))
-        slots = torch.where(valid, abs_pos % bs, torch.zeros_like(abs_pos))
+        scratch = self._scratch[layer_idx] if self._scratch is not None else None
+        if not same or self._wave_pos is None or self._wave_pos[0] != scratch:
+            # Where every row's suffix lands: the same for every layer (same prefix lengths, same block ids, scratch
+            # blocks allocated in lockstep), so built once a wave from device tensors. The per-layer
+            # torch.tensor(list) it replaces was a synchronous host->device copy: 41% of the scheduler thread's time
+            # under long prompts sat in it, and the host could never run ahead of the GPU by more than one layer.
+            abs_pos = self.prefix_lens.long().unsqueeze(1) + self._ar[:S]                     # [K, S]
+            valid = self._valid[:, :S]
+            bids = bt.gather(1, (abs_pos // bs).clamp_(max=bt.shape[1] - 1))
+            if scratch is not None:
+                bids = torch.where(valid, bids, bids.new_full((), scratch))
+            slots = torch.where(valid, abs_pos % bs, torch.zeros_like(abs_pos))
+            self._wave_pos = (scratch, bids, slots)
+        _, bids, slots = self._wave_pos
 
         pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3)            # [K, S, Hkv, D]
         pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3)
