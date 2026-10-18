@@ -66,6 +66,30 @@ def _per_row(q, k, v, ctx, layer_idx, scale):
     return out
 
 
+def sdpa_prefill_packed(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, ctx, layer_idx: int,
+                        scale: float) -> torch.Tensor:
+    """q/k/v [1, H, T, D] over a packed wave (rows of `ctx._suffix` tokens, each after `ctx._prefix` cached tokens):
+    one SDPA per row. The reference for the packed forward where FlashInfer is not used. Returns [1, T, Hq, D]."""
+    _, Hq, T, D = q.shape
+    Hkv = k.shape[1]
+    out = torch.empty(T, Hq, D, dtype=q.dtype, device=q.device)
+    pool = ctx.pools[layer_idx]
+    bt = ctx.block_table_tensor(layer_idx) if any(ctx._prefix) else None
+    s = 0
+    for n, (P, L) in enumerate(zip(ctx._prefix, ctx._suffix)):
+        qn, kn, vn = q[:, :, s:s + L], k[:, :, s:s + L], v[:, :, s:s + L]
+        if P > 0:
+            kp, vp = _gather_prefix(pool, bt[n], P, Hkv, D)
+            kn, vn = torch.cat([kp, kn], dim=2), torch.cat([vp, vn], dim=2)
+            mask = torch.ones(L, P + L, dtype=torch.bool, device=q.device).tril(diagonal=P)
+            o = F.scaled_dot_product_attention(qn, kn, vn, attn_mask=mask, scale=scale, enable_gqa=True)
+        else:
+            o = F.scaled_dot_product_attention(qn, kn, vn, is_causal=L > 1, scale=scale, enable_gqa=True)
+        out[s:s + L] = o[0].transpose(0, 1)
+        s += L
+    return out.unsqueeze(0)
+
+
 def sdpa_prefill(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, ctx, layer_idx: int,
                  scale: float) -> torch.Tensor:
     """q [B, Hq, S, D], k/v [B, Hkv, S, D]: this call's suffix per row, right-padded to S. `ctx` is the backend's

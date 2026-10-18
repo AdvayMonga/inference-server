@@ -92,14 +92,16 @@ class Qwen3Attention(nn.Module):
             from inference_server.models.paged_attention_kernel import (
                 paged_decode_attention, paged_prefill_attention,
             )
-            from inference_server.models.prefill_attention import sdpa_prefill
+            from inference_server.models.prefill_attention import sdpa_prefill, sdpa_prefill_packed
             paged_ctx.append(kv_layer_idx, k, v)
             pool = paged_ctx.pools[kv_layer_idx]
             if getattr(paged_ctx, "is_prefill", False):
                 eager = hasattr(paged_ctx, "caches")                           # the graph ctx has no caches
-                if eager and PREFILL_ATTN == "flashinfer":
+                if eager and PREFILL_ATTN == "flashinfer":                     # padded or packed alike
                     from inference_server.models.prefill_flashinfer import flashinfer_prefill
                     out = flashinfer_prefill(q, paged_ctx, kv_layer_idx, self.scale)
+                elif eager and getattr(paged_ctx, "packed", False):
+                    out = sdpa_prefill_packed(q, k, v, paged_ctx, kv_layer_idx, self.scale)
                 elif eager and PREFILL_ATTN == "sdpa":
                     out = sdpa_prefill(q, k, v, paged_ctx, kv_layer_idx, self.scale)
                 else:
@@ -362,7 +364,10 @@ class Qwen3MoeForCausalLM(nn.Module):
         """`logits_index` [B]: lm_head on that one position per row → [B, 1, V]."""
         h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
         if logits_index is not None:
-            h = h.gather(1, logits_index.view(-1, 1, 1).expand(-1, 1, h.shape[-1]))
+            if h.shape[0] == 1 and logits_index.numel() > 1:       # a packed wave: several rows' last tokens in one row
+                h = h[:, logits_index]
+            else:
+                h = h.gather(1, logits_index.view(-1, 1, 1).expand(-1, 1, h.shape[-1]))
         return self.lm_head(h)
 
     @classmethod

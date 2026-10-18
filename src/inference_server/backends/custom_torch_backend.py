@@ -190,6 +190,17 @@ class _PrefillCtx:
                 bt.append(pool.alloc())
         self.alloc_s += time.perf_counter() - t0
 
+    def _wave_bt(self, layer_idx):
+        """This layer's [K, maxb] block table (long) and whether it is the wave's shared one: every layer allocates
+        in the same order, so one table serves them all; a layer with different ids gets its own."""
+        self._ensure_blocks(layer_idx)
+        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
+                                                    for c in self.caches)
+        if not same:
+            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx
+        self._bt_cache[layer_idx] = self._wave_table
+        return self._wave_table, same
+
     def _table(self, layer_idx):
         """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
         rows = [c.block_tables[layer_idx] for c in self.caches]
@@ -205,13 +216,7 @@ class _PrefillCtx:
         pointed at the pool's scratch block so they cannot touch a real row's KV."""
         pool = self.pools[layer_idx]
         bs = pool.block_size
-        self._ensure_blocks(layer_idx)
-        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
-                                                    for c in self.caches)
-        if not same:                                       # every layer allocates in the same order: built once a wave
-            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx   # [K, maxb]
-        bt = self._wave_table
-        self._bt_cache[layer_idx] = bt
+        bt, same = self._wave_bt(layer_idx)
 
         S = k_new.shape[2]
         scratch = self._scratch[layer_idx] if self._scratch is not None else None
@@ -241,6 +246,38 @@ class _PrefillCtx:
         if bt is None:
             return self._table(layer_idx)
         return bt.to(torch.int32)
+
+
+class _PackedCtx(_PrefillCtx):
+    """The prefill context for one packed forward: every row's chunk concatenated into one row of `total` tokens,
+    nothing padded. Attention is per row through FlashInfer's ragged batch prefill (or sdpa_prefill_packed); the
+    K/V of token i land at its row's block for position prefix + offset. The padded wave cost rows x longest tokens of
+    activations (a 62-row step padded to 8192 OOMed) and capped how many rows a step could carry."""
+
+    packed = True
+
+    def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
+        super().__init__(caches, pools, prefix_lens, suffix_lens, device, scratch)
+        self.tokens = None                                  # nothing is padded: the MoE sees every token
+        lens = self.suffix_lens.long()
+        total = sum(suffix_lens)
+        rows = torch.repeat_interleave(torch.arange(len(suffix_lens), device=device), lens, output_size=total)
+        starts = torch.cumsum(lens, 0) - lens
+        self._rows = rows                                                                      # [T] row of token i
+        self._pos = self.prefix_lens.long()[rows] + torch.arange(total, device=device) - starts[rows]   # its position
+
+    def append(self, layer_idx, k_new, v_new):
+        """k/v_new [1, Hkv, T, D]: every token into its row's block, one scatter per pool."""
+        pool = self.pools[layer_idx]
+        bs = pool.block_size
+        bt, same = self._wave_bt(layer_idx)
+        if not same or self._wave_pos is None:
+            self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
+        _, bids, slots = self._wave_pos
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)                                  # [T, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+        for b, cache in enumerate(self.caches):
+            cache.seq_lens[layer_idx] += self._suffix[b]
 
 
 class CustomTorchBackend(InferenceBackend):
@@ -344,6 +381,8 @@ class CustomTorchBackend(InferenceBackend):
         self._block_size = bsz
         self._graph_max_rows = settings.max_batch_size
         self._graph_max_cols = (settings.context_window + bsz - 1) // bsz
+        # Mixed prefill as one packed forward (PREFILL_PACKED=0: the right-padded wave).
+        self.packed_prefill = self.device.type == "cuda" and os.environ.get("PREFILL_PACKED", "1") == "1"
         self._graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and \
@@ -736,19 +775,31 @@ class CustomTorchBackend(InferenceBackend):
         caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
         prefix = [c.seq_len for c in caches]
         chunks = [chunk for _, chunk, _, _ in items]
-        S = max(len(c) for c in chunks)
-        input_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
-        position_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
-        for k, chunk in enumerate(chunks):
-            input_ids[k, :len(chunk)] = torch.tensor(chunk, device=dev)
-            position_ids[k, :len(chunk)] = torch.arange(prefix[k], prefix[k] + len(chunk), device=dev)
+        lens = [len(c) for c in chunks]
+        if self.packed_prefill:                     # one row of every chunk, no padding; logits at each row's last token
+            input_ids = torch.tensor([t for c in chunks for t in c], dtype=torch.long, device=dev).unsqueeze(0)
+            position_ids = torch.tensor([p + i for p, n in zip(prefix, lens) for i in range(n)],
+                                        dtype=torch.long, device=dev).unsqueeze(0)
+            ends, acc = [], 0
+            for n in lens:
+                acc += n
+                ends.append(acc - 1)
+            last_idx = torch.tensor(ends, device=dev)
+        else:
+            S = max(lens)
+            input_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
+            position_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
+            for k, chunk in enumerate(chunks):
+                input_ids[k, :len(chunk)] = torch.tensor(chunk, device=dev)
+                position_ids[k, :len(chunk)] = torch.arange(prefix[k], prefix[k] + len(chunk), device=dev)
+            last_idx = torch.tensor([n - 1 for n in lens], device=dev)
         self._ensure_scratch()
         t0 = time.perf_counter()
         cuda = dev.type == "cuda"
         ev0 = ev1 = None
         try:
-            ctx = _PrefillCtx(caches, self.pools, prefix, [len(c) for c in chunks], dev, scratch=self._scratch)
-            last_idx = torch.tensor([len(c) - 1 for c in chunks], device=dev)
+            ctx_cls = _PackedCtx if self.packed_prefill else _PrefillCtx
+            ctx = ctx_cls(caches, self.pools, prefix, lens, dev, scratch=self._scratch)
             if cuda:
                 ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 ev0.record()
@@ -762,7 +813,8 @@ class CustomTorchBackend(InferenceBackend):
         t1 = time.perf_counter()
         out = []
         for k, (_, chunk, final, sampling) in enumerate(items):
-            tok = int(sample(logits[k:k + 1, 0, :], sampling).item()) if final else None
+            row = logits[0, k:k + 1, :] if self.packed_prefill else logits[k:k + 1, 0, :]
+            tok = int(sample(row, sampling).item()) if final else None
             out.append((caches[k], tok, caches[k].seq_len))
         t2 = time.perf_counter()
         # Where a step's time went, for the timeline (`prefill_detail`): host work enqueueing the forward (incl. the

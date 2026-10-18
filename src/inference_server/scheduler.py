@@ -769,7 +769,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 chunk, final = ids[prow.tokens_fed:end], end == len(ids)
             # The forward is right-padded to the longest chunk, so a step costs rows x longest in activations: the
             # same cap as a batched wave (a 62-row step padded to 8192 asked 3.9 GiB for q alone and OOMed).
-            if picked and (len(picked) + 1) * max(longest, len(chunk)) > self.max_prefill_tokens:
+            if (picked and not getattr(self.backend, "packed_prefill", False)
+                    and (len(picked) + 1) * max(longest, len(chunk)) > self.max_prefill_tokens):
                 break
             longest = max(longest, len(chunk))
             budget -= len(chunk)
