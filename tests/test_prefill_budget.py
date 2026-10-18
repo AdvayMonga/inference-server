@@ -44,3 +44,13 @@ def test_one_prompt_always_goes_and_no_cap_means_one_wave():
     s, b = _sched(0)
     s._admit_pending("cpu")
     assert b.waves == [[60, 60, 60, 20]]
+
+
+def test_step_is_one_iteration_of_the_loop():
+    """`step()` does what one `_run` iteration did: admit, prefill, evict, decode; the loop and a simulator share it."""
+    s, b = _sched(1000)
+    s.step()                                          # admits all four as one wave, decodes nothing yet
+    assert b.waves == [[60, 60, 60, 20]] and len(s._active) == 4 and s._pending_count == 0
+    s.step()                                          # a decode step: every row advanced one token
+    assert all(len(r.request.generated) >= 1 for r in s._active)
+    assert s.stats()["active_high_water"] == 4
