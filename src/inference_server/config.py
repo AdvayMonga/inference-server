@@ -53,6 +53,9 @@ class Settings:
     # may carry (0 = no cap; a cap of 32 lost saturated 3.58 -> 2.35 req/s, TPOT p99 over the limit at 128 clients).
     prefill_step_tokens: int = 8192
     prefill_step_rows: int = 0
+    # Decode rows join the packed prefill forward (one step for chunks and tokens). Gate PASS 2026-10-18; its
+    # throughput is not measured yet, so off until it is (PREFILL_JOINT=1).
+    prefill_joint: bool = False
     # Batched prefill: the most (right-padded) tokens one wave may carry, rows x the longest prompt. Bounds the
     # activation peak, which the KV pools are sized around (a wave of long prompts OOMed with no cap). 0 = none.
     max_prefill_tokens: int = 32768
@@ -137,6 +140,7 @@ def load_settings() -> Settings:
         prefill_mode=os.environ.get("PREFILL_MODE", Settings.prefill_mode),
         prefill_step_tokens=int(os.environ.get("PREFILL_STEP_TOKENS", Settings.prefill_step_tokens)),
         prefill_step_rows=int(os.environ.get("PREFILL_STEP_ROWS", Settings.prefill_step_rows)),
+        prefill_joint=os.environ.get("PREFILL_JOINT", str(Settings.prefill_joint)).lower() in ("1", "true"),
         prefill_chunk_size=int(os.environ.get("PREFILL_CHUNK_SIZE", Settings.prefill_chunk_size)),
         max_prefill_tokens=int(os.environ.get("MAX_PREFILL_TOKENS", Settings.max_prefill_tokens)),
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),

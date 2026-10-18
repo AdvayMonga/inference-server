@@ -353,3 +353,28 @@ def test_full_model_matches_hf():
     assert torch.equal(a.argmax(-1), b.argmax(-1))
     kl = torch.nn.functional.kl_div(a.log_softmax(-1), b.log_softmax(-1), log_target=True, reduction="none")
     assert kl.sum(-1).max() < 2e-2
+
+
+async def test_packed_joint_steps_match_hf_greedy_with_staggered_arrivals(backend, hf):
+    """Decode rows inside the packed prefill forward, with prompts arriving while others decode (pure-decode and joint
+    iterations alternate): every token of every row, like HF."""
+    from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
+
+    backend.packed_prefill = True
+    try:
+        sched = ContinuousBatchScheduler(backend, max_batch_size=8, prefill_mode="mixed", prefill_step_tokens=3,
+                                         async_decode=True, prefill_joint=True)
+        sched.start()
+        try:
+            loop = asyncio.get_running_loop()
+
+            async def one(i, p):
+                await asyncio.sleep(0.05 * i)
+                return await sched.submit(ScheduledRequest(token_ids=list(p), max_tokens=10, session_id=f"j{i}",
+                                                           future=loop.create_future()))
+            outs = await asyncio.gather(*(one(i, p) for i, p in enumerate(PROMPTS * 2)))
+        finally:
+            await sched.stop()
+    finally:
+        backend.packed_prefill = False
+    assert outs == [_hf_greedy(hf, p, 10) for p in PROMPTS * 2]
