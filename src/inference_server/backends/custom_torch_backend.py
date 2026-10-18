@@ -769,7 +769,8 @@ class CustomTorchBackend(InferenceBackend):
         # block allocations inside it), the forward's own device time, and the wait at the first sync.
         self.last_prefill_timing = {"host_enqueue_s": round(t1 - t0, 4), "alloc_s": round(ctx.alloc_s, 4),
                                     "sync_wait_s": round(t2 - t1, 4),
-                                    "gpu_forward_s": round(ev0.elapsed_time(ev1) / 1e3, 4) if cuda else None}
+                                    "gpu_forward_s": (round(ev0.elapsed_time(ev1) / 1e3, 4)
+                                                      if cuda and ev1.query() else None)}   # a step with no final row has not synced
         return out
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
