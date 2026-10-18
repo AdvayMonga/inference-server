@@ -20,7 +20,9 @@ BMAX = 16
 
 @functools.lru_cache(maxsize=None)
 def _ext():
+    import sys
     from torch.utils.cpp_extension import load
+    os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_layer.cu")
     return load(name="qwen3_decode_layer", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
