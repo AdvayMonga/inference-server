@@ -69,12 +69,20 @@ class Scratch:
         self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=device)
 
 
+_NO_TIMES = None
+
+
 def decode_layer(h: torch.Tensor, pos: torch.Tensor, block_table: torch.Tensor, pool_k: torch.Tensor,
-                 pool_v: torch.Tensor, w: LayerWeights, scratch: Scratch) -> torch.Tensor:
+                 pool_v: torch.Tensor, w: LayerWeights, scratch: Scratch, times: torch.Tensor | None = None) -> torch.Tensor:
     """h [B, 2048] bf16 (the residual stream), pos [B] int32 (each row's length so far = the new token's position),
     block_table [B, cols] int32 for this layer's pool. Writes the new token's K/V into the pool and returns the
     layer's output [B, 2048] bf16."""
     t = w.t
+    global _NO_TIMES
+    if times is None:
+        if _NO_TIMES is None:
+            _NO_TIMES = torch.empty(0, dtype=torch.int64, device=h.device)
+        times = _NO_TIMES
     return _ext().decode_layer(h.contiguous(), pos, block_table.contiguous(), pool_k, pool_v, t["in_norm"], t["wqkv"],
                                t["q_norm"], t["k_norm"], t["wo"], t["post_norm"], t["wr"], t["gate_up"], t["down"],
-                               w.inv_freq, scratch.f32, scratch.bf16, scratch.i32, float(w.scale))
+                               w.inv_freq, scratch.f32, scratch.bf16, scratch.i32, float(w.scale), times)
