@@ -79,7 +79,7 @@ class Settings:
     prefix_cache_block_fraction: float = 0.9   # cached blocks are reclaimed on demand (BlockPool.alloc)
 
     # Model
-    model_name: str = "google/gemma-4-E2B-it"
+    model_name: str = "Qwen/Qwen3-30B-A3B"
     device: str = "auto"  # "auto", "cuda", "mps", or "cpu"
     backend_name: str = ""  # explicit backend override (e.g. "custom-cuda"); empty = derive from device
     max_tokens: int = 512

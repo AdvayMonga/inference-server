@@ -1,4 +1,4 @@
-"""Block-paged KV cache for the custom Gemma 4 forward (M2.2).
+"""Block-paged KV cache for the custom Qwen3-MoE forward (M2.2).
 
 Drop-in replacement for `KVCache`: same `get(layer_idx)` / `append(layer_idx, k, v)`
 / `seq_len` interface. Difference: storage is per-layer block pools, each session
@@ -789,11 +789,11 @@ def blocks_for_budget(model, budget_bytes: int, block_size: int) -> int:
     return max(1, budget_bytes // per_block)
 
 
-def make_pools_for_gemma(
+def make_pools(
     model, num_blocks_per_pool: int = 1024, block_size: int = 16,
     sliding_blocks: int | None = None,
 ) -> list[BlockPool | None]:
-    """Build the BlockPool list matching a GemmaForCausalLM's (or Qwen3MoeForCausalLM's) layers.
+    """Build the BlockPool list matching a Qwen3MoeForCausalLM's layers.
 
     Shared layers get None (they don't own K/V). Full-attention pools are sized to
     `num_blocks_per_pool` (they grow with sequence length). Sliding pools are capped at the

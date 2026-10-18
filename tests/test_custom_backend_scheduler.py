@@ -2,12 +2,10 @@
 
 Verifies the scheduler-facing primitives (prefill / decode_step_batched / splice /
 remove / kv_length) produce correct tokens via paged KV, and that the eviction path
-frees blocks back to the pool (no leak across requests). CPU-only (bf16 parity).
+frees blocks back to the pool (no leak across requests). Tiny Qwen3-MoE checkpoint, CPU, bf16.
 """
 
 from __future__ import annotations
-
-import os
 
 import pytest
 import torch
@@ -15,17 +13,17 @@ import torch
 from inference_server.backends.custom_torch_backend import CustomTorchBackend
 from inference_server.scheduler import ContinuousBatchScheduler, ScheduledRequest
 
-MODEL_NAME = "google/gemma-4-E2B-it"
-PROMPT_IDS = [2, 651, 6037, 576, 6081, 603]  # arbitrary short token prompt
+PROMPT_IDS = [5, 17, 300, 42, 8, 99, 123]  # odd length: a repeat is a partial prefix hit
 MAX_TOKENS = 6
 
 
 @pytest.fixture(scope="module")
-def backend():
-    os.environ["CUSTOM_BACKEND_BLOCKS"] = "64"
-    os.environ["CUSTOM_BACKEND_BLOCK_SIZE"] = "2"  # 6-token prompt → 3 full blocks (sharing engages)
-    b = CustomTorchBackend(device="cpu", model_name=MODEL_NAME)
-    b.load_model(MODEL_NAME)
+def backend(tiny_qwen3_moe_dir):
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("CUSTOM_BACKEND_BLOCKS", "64")
+        mp.setenv("CUSTOM_BACKEND_BLOCK_SIZE", "2")  # 7-token prompt → 3 full blocks (sharing engages)
+        b = CustomTorchBackend(device="cpu", model_name=tiny_qwen3_moe_dir)
+        b.load_model(tiny_qwen3_moe_dir)
     return b
 
 
@@ -103,8 +101,8 @@ def test_batched_decode_matches_row_by_row(backend):
     next-tokens to decoding each row alone (the old row-by-row path)."""
     from inference_server.models.paged_kv_cache import PagedKVCache
 
-    p1 = [2, 651, 6037, 576, 6081, 603, 8]   # 7 tokens
-    p2 = [2, 1841, 603, 573]                  # 4 tokens — different length on purpose
+    p1 = [5, 17, 300, 42, 8, 99, 123]        # 7 tokens
+    p2 = [12, 900, 31, 64]                    # 4 tokens — different length on purpose
 
     def setup(prompt):
         c = PagedKVCache(pools=backend.pools)
@@ -149,13 +147,3 @@ async def test_concurrent_shared_prefix_hits_and_frees(backend):
     assert outs[0] == outs[1]  # identical prompts → identical greedy output
     assert backend.prefix_cache.hits > hits_before
     assert _free_counts(backend) == before, "blocks leaked after concurrent shared-prefix run"
-
-
-@pytest.mark.asyncio
-async def test_generation_stops_at_end_of_turn(backend):
-    """A chat answer ends on <turn|> (106); before the fix every request ran on to max_tokens."""
-    prompt = backend.tokenizer.apply_chat_template(
-        [{"role": "user", "content": "Say hello."}], add_generation_prompt=True,
-        enable_thinking=False, return_dict=True)["input_ids"]
-    (out,) = await _run_through_scheduler(backend, [prompt], 32)
-    assert 0 < len(out) < 32 and 106 not in out, out

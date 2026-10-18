@@ -1,4 +1,4 @@
-"""Custom-forward Torch backend — uses our hand-written Gemma 4 or Qwen3-MoE model.
+"""Custom-forward Torch backend — uses our hand-written Qwen3-MoE model.
 
 Drives the full stack: paged KV cache + cross-session prefix sharing under both the
 legacy direct `generate()` / `stream()` path and the `ContinuousBatchScheduler`.
@@ -230,16 +230,16 @@ class _PrefillCtx:
 
 
 class CustomTorchBackend(InferenceBackend):
-    """PyTorch backend driven by our custom forward (GemmaForCausalLM or Qwen3MoeForCausalLM)."""
+    """PyTorch backend driven by our custom forward (Qwen3MoeForCausalLM)."""
 
-    THINK_START = 100
+    THINK_START = 100   # replaced at load by the tokenizer's <think> / </think> ids
     THINK_END = 101
 
     # Each row's paged cache holds only its real tokens and the model derives causality +
     # sliding window from per-row seq_lens, so the scheduler's [B, S] mask is never read.
     needs_attention_mask = False
 
-    def __init__(self, device: str = "cuda", model_name: str = "google/gemma-4-E2B-it"):
+    def __init__(self, device: str = "cuda", model_name: str = "Qwen/Qwen3-30B-A3B"):
         self.device = torch.device(device)
         self.model_name = model_name
         self.model = None
@@ -252,56 +252,38 @@ class CustomTorchBackend(InferenceBackend):
     def load_model(self, model_name: str) -> None:
         import os
         from transformers import AutoConfig, AutoTokenizer
-        from inference_server.models.paged_kv_cache import make_pools_for_gemma
+        from inference_server.models.paged_kv_cache import make_pools
+        from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM
 
-        model_type = AutoConfig.from_pretrained(model_name).model_type
-        if model_type == "gemma4":
-            from inference_server.models.gemma4 import GemmaForCausalLM as model_cls
-        elif model_type == "qwen3_moe":
-            from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM as model_cls
-        else:
-            raise ValueError(f"CustomTorchBackend supports gemma4 and qwen3_moe, not {model_type!r}")
-        # compile / int8 stay Gemma-only until measured on qwen3_moe. Decode graphs are verified on it;
-        # the opt-in prefill graph is not output-checked there yet.
-        moe = model_type == "qwen3_moe"
+        cfg = AutoConfig.from_pretrained(model_name)
+        if cfg.model_type != "qwen3_moe":
+            raise ValueError(f"CustomTorchBackend supports qwen3_moe, not {cfg.model_type!r}")
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        if moe:   # Qwen's think markers; ids 100/101 are ordinary characters in its vocab
-            self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
+        # Qwen's think markers; ids 100/101 are ordinary characters in its vocab
+        self.THINK_START, self.THINK_END = self.tokenizer.convert_tokens_to_ids(["<think>", "</think>"])
 
-        if moe:   # shards stream straight onto the device; no HF model built in host memory first
-            self.model = model_cls.from_safetensors(model_name, device=self.device)
-        else:
-            self.model = model_cls.from_hf(model_name, dtype=torch.bfloat16).to(self.device).eval()
-        self.max_positions = int(getattr(AutoConfig.from_pretrained(model_name).get_text_config(), "max_position_embeddings", 0) or 0)   # Gemma 4 keeps it on the text config
+        # Shards stream straight onto the device; no HF model built in host memory first.
+        self.model = Qwen3MoeForCausalLM.from_safetensors(model_name, device=self.device)
+        self.max_positions = int(getattr(cfg.get_text_config(), "max_position_embeddings", 0) or 0)
         self._eos_ids = stop_token_ids(model_name, self.tokenizer)
 
-        # Weight-only int8: store Linear weights as int8 (per-channel), read 2× fewer bytes/step.
-        # The bandwidth lever for decode; dequant is fused into the GEMV (see models/quant.py).
-        if moe and os.environ.get("CUSTOM_BACKEND_FUSE_QKV", "1") == "1":
+        if os.environ.get("CUSTOM_BACKEND_FUSE_QKV", "1") == "1":
             for layer in self.model.model.layers:
                 layer.self_attn.fuse_qkv()
         quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
-        if quant == "fp8" and moe and self.device.type == "cuda":
+        if quant == "fp8" and self.device.type == "cuda":
             # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
             for layer in self.model.model.layers:
                 layer.mlp.experts.quantize_fp8()
             torch.cuda.empty_cache()
             logger.info("MoE experts quantized to fp8 e4m3 (per output channel; activations per token)")
         elif quant == "fp8":
-            logger.warning("CUSTOM_BACKEND_QUANT=fp8 needs qwen3_moe on CUDA; ignoring")
-        elif quant == "int8" and moe:
-            logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
+            logger.warning("CUSTOM_BACKEND_QUANT=fp8 needs CUDA; ignoring")
         elif quant == "int8":
-            from inference_server.models.quant import quantize_model_int8
-            # On CUDA, route layers through the shared compiled GEMV so Inductor fuses the dequant
-            # (keeps weight int8 in HBM — the bandwidth win); composes with the decode CUDA graph.
-            on_cuda = self.device.type == "cuda"
-            nq = quantize_model_int8(self.model, compiled=on_cuda)
-            logger.info("Quantized %d Linear layers to int8 weight-only%s", nq,
-                        " (+compiled)" if on_cuda else "")
+            logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
 
         # Pre-allocate paged block pools shared across sessions. Sliding pools can be sized
         # smaller (capped at the window) to free memory for the full pools — see kv_reserve.
@@ -323,7 +305,7 @@ class CustomTorchBackend(InferenceBackend):
         else:
             n_blocks = 512
         sliding_blocks = int(os.environ.get("CUSTOM_BACKEND_SLIDING_BLOCKS", str(n_blocks)))
-        self.pools = make_pools_for_gemma(
+        self.pools = make_pools(
             self.model, num_blocks_per_pool=n_blocks, block_size=bsz, sliding_blocks=sliding_blocks,
         )
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
@@ -501,7 +483,7 @@ class CustomTorchBackend(InferenceBackend):
         sampling: SamplingParams = GREEDY,
     ) -> tuple[int, object]:
         """One forward pass. Pass our KVCache to incremental-decode; pass None to do full prefill."""
-        from inference_server.models.gemma4 import KVCache
+        from inference_server.models.common import KVCache
         if kv_cache is None:
             kv_cache = KVCache(num_layers=self.model.model.num_layers)
         input_tensor = torch.tensor([token_ids], device=self.device)
@@ -530,7 +512,7 @@ class CustomTorchBackend(InferenceBackend):
         if matched >= len(token_ids):
             matched = len(token_ids) - 1  # leave ≥1 token so we get next-token logits
         suffix = token_ids[matched:]
-        # lm_head on the last suffix position only — see GemmaForCausalLM.forward(logits_index).
+        # lm_head on the last suffix position only — see Qwen3MoeForCausalLM.forward(logits_index).
         last = torch.tensor([len(suffix) - 1], device=self.device)
         try:
             logits = self.model(torch.tensor([suffix], device=self.device), kv_cache=cache,
@@ -572,7 +554,7 @@ class CustomTorchBackend(InferenceBackend):
         CUDA uses the gather-free paged prefill kernel instead (`_prefill_batch_kernel`)."""
         if self.device.type == "cuda":
             return self._prefill_batch_kernel(prompts)
-        from inference_server.models.gemma4 import KVCache
+        from inference_server.models.common import KVCache
         from inference_server.models.paged_kv_cache import PagedKVCache
         dev = self.device
         K = len(prompts)

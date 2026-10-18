@@ -45,14 +45,14 @@ def _reference(q, k_pool, v_pool, block_tables, seq_lens, scale, window=1 << 30)
 
 
 def paged_decode_parity() -> tuple[bool, str]:
-    """Decode kernel vs the torch reference: Gemma 256/512 and Qwen3-MoE 128 head_dim, GQA 8:1."""
+    """Decode kernel vs the torch reference: Qwen3-MoE's head_dim 128 at its GQA 8:1 and at one KV head."""
     import torch
 
     from inference_server.models.paged_attention_kernel import paged_decode_attention
 
     torch.manual_seed(0)
     results = []
-    for D, num_kv_heads, Hq in [(256, 1, 8), (512, 1, 8), (256, 2, 8), (128, 4, 32)]:
+    for D, num_kv_heads, Hq in [(128, 4, 32), (128, 1, 8)]:
         N, num_blocks, bs = 5, 64, 16
         max_blocks = 8
         seq_lens = torch.tensor([1, 16, 17, 40, 100][:N], dtype=torch.int32, device="cuda")
@@ -104,7 +104,7 @@ def paged_decode_no_recompile() -> tuple[bool, str]:
     from inference_server.models.paged_attention_kernel import paged_decode_attention
 
     torch.manual_seed(0)
-    D, num_kv_heads, Hq, bs = 256, 1, 8, 16
+    D, num_kv_heads, Hq, bs = 128, 4, 32, 16
     num_blocks = 4096
     k_pool = torch.randn(num_blocks, num_kv_heads, bs, D, dtype=torch.bfloat16, device="cuda")
     v_pool = torch.randn_like(k_pool)

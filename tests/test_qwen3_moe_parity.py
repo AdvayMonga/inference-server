@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from inference_server.models import qwen3_moe
-from inference_server.models.gemma4 import KVCache
+from inference_server.models.common import KVCache
 from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM, route
 
 REAL_DIR = Path(__file__).parent / "fixtures" / "qwen3-30b-a3b"   # config.json + generation_config.json
@@ -319,7 +319,7 @@ def test_unsupported_config_is_rejected(over):
 def test_backend_rejects_unknown_model_type(tmp_path):
     from inference_server.backends.custom_torch_backend import CustomTorchBackend
     (tmp_path / "config.json").write_text('{"model_type": "gpt2"}')
-    with pytest.raises(ValueError, match="gemma4 and qwen3_moe"):
+    with pytest.raises(ValueError, match="supports qwen3_moe"):
         CustomTorchBackend(device="cpu").load_model(str(tmp_path))
 
 

@@ -1,6 +1,6 @@
 # Inference Server
 
-A single-GPU LLM inference engine written from scratch in Python. Gemma 4 and Qwen3-MoE on PyTorch.
+A single-GPU LLM inference engine written from scratch in Python. Qwen3-MoE on PyTorch.
 The environment that measures and improves it (the agent lab, workloads, load regimes, correctness gate,
 referee, GPU VMs) lives in [BlameGraph](https://github.com/AdvayMonga/BlameGraph).
 
@@ -13,8 +13,8 @@ referee, GPU VMs) lives in [BlameGraph](https://github.com/AdvayMonga/BlameGraph
 - Block-paged KV cache with refcounted blocks, window-aware sliding layers
 - Radix-tree `PrefixCache`: cross-session prefix sharing, so a shared system prompt is prefilled once
 - Triton paged decode and prefill kernels reading K/V through block tables; split-K decode variant
-- Bucketed CUDA-graph decode, `torch.compile`, int8 weight-only quantization
-- Hand-written forwards: Gemma 4 (byte-identical to HF on the parity fixture) and Qwen3-MoE
+- Bucketed CUDA-graph decode, `torch.compile`, fp8 MoE experts (`CUSTOM_BACKEND_QUANT=fp8`)
+- Hand-written Qwen3-MoE forward (parity-tested against HF), fused Triton kernels, grouped MoE GEMM
 - FCFS and per-session fair share (virtual token counter) with priority hooks
 - Queue and KV backpressure (HTTP 429), admission deadline, preemption under KV pressure
 - HF Transformers baseline backend behind the same `InferenceBackend` interface, with LRU,

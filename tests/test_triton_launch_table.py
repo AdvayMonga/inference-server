@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / "scripts" / "bench"))
 sys.path.insert(0, str(REPO / "scripts" / "tools"))
 import tune_triton_launch as tune  # noqa: E402
 
-GPU, MODEL = "NVIDIA A100 80GB PCIe", "google/gemma-4-E4B-it"
+GPU, MODEL = "NVIDIA A100 80GB PCIe", "Qwen/Qwen3-30B-A3B"
 
 
 @pytest.fixture(autouse=True)
@@ -58,7 +58,7 @@ def test_another_models_table_loads_nothing_and_clears_the_old_one(tmp_path):
     p = tmp_path / "t.json"
     p.write_text(json.dumps(_doc([_entry()])))
     launch_table.load(p, GPU, MODEL)
-    p.write_text(json.dumps(_doc([_entry()], model="google/gemma-4-E2B-it")))
+    p.write_text(json.dumps(_doc([_entry()], model="Qwen/Qwen3-235B-A22B")))
     assert launch_table.load(p, GPU, MODEL) == 0
     assert launch_table.lookup("paged_decode", 8, 256, 16) is None
 
@@ -203,12 +203,9 @@ def test_config_space_is_the_full_cross_product():
     assert {c["block_m"] for c in tune.tiled_space()} == {16, 32, 64}
 
 
-def test_attention_shapes_from_a_gemma_config():
-    cfg = SimpleNamespace(layer_types=["sliding_attention"] * 4 + ["full_attention"],
-                          head_dim=256, global_head_dim=512, num_attention_heads=8,
-                          num_key_value_heads=2, sliding_window=512)
-    assert tune.attention_shapes(cfg) == [tune.Shape(256, 8, 2, 512),
-                                          tune.Shape(512, 8, 2, tune.FULL)]
+def test_attention_shapes_from_a_qwen3_moe_config():
+    cfg = SimpleNamespace(head_dim=128, num_attention_heads=32, num_key_value_heads=4)
+    assert tune.attention_shapes(cfg) == [tune.Shape(128, 32, 4, tune.FULL)]
 
 
 def test_plan_sweeps_every_bucket_and_tiles_only_where_the_engine_could():

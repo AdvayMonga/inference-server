@@ -1,7 +1,7 @@
 """Custom Qwen3-MoE forward (Qwen3-30B-A3B), parity-tested against HF Qwen3MoeForCausalLM.
 
-Same call surface as GemmaForCausalLM (kv_cache / attn_mask / paged_ctx / logits_index), so the
-backend, scheduler, prefix cache and paged-attention kernels drive it unchanged.
+Call surface: kv_cache / attn_mask / paged_ctx / logits_index; the backend, scheduler, prefix
+cache and paged-attention kernels drive it through these.
 
 Architecture: every layer is full attention (GQA, per-head QK RMSNorm, RoPE, scale 1/sqrt(d))
 followed by a sparse MoE block (softmax router → top-k → renormalise → SwiGLU experts). Untied
@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from inference_server.models import fused
-from inference_server.models.gemma4 import GemmaRotaryEmbedding, _skip_param_init, apply_rotary
+from inference_server.models.common import RotaryEmbedding, _skip_param_init, apply_rotary
 
 
 _ST_DTYPES = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32}
@@ -41,7 +41,7 @@ class Qwen3RMSNorm(nn.Module):
 
 
 class Qwen3Attention(nn.Module):
-    """GQA attention, full causal every layer. Exposes the attrs make_pools_for_gemma reads."""
+    """GQA attention, full causal every layer. Exposes the attrs make_pools reads."""
 
     is_kv_shared = False
     sliding_window = None
@@ -89,7 +89,7 @@ class Qwen3Attention(nn.Module):
             k = apply_rotary(k, cos, sin, unsqueeze_dim=2).transpose(1, 2)   # [B, Hkv, S, D]
         v = v.transpose(1, 2)
 
-        if paged_ctx is not None:   # CUDA kernel path, identical contract to GemmaAttention
+        if paged_ctx is not None:   # CUDA kernel path
             from inference_server.models.paged_attention_kernel import (
                 paged_decode_attention, paged_prefill_attention,
             )
@@ -320,7 +320,7 @@ class Qwen3MoeModel(nn.Module):
         self.num_layers = num_layers
         self.hidden_size = hidden_size
         self.embed_tokens = nn.Embedding(vocab_size, hidden_size, dtype=dtype)
-        self.rope = GemmaRotaryEmbedding(head_dim, rope_theta)
+        self.rope = RotaryEmbedding(head_dim, rope_theta)
         self.layers = nn.ModuleList(Qwen3DecoderLayer(
             hidden_size=hidden_size, num_q_heads=num_q_heads, num_kv_heads=num_kv_heads,
             head_dim=head_dim, moe_intermediate=moe_intermediate, num_experts=num_experts,
@@ -356,7 +356,7 @@ class Qwen3MoeForCausalLM(nn.Module):
 
     def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None,
                 paged_ctx=None, logits_index=None):
-        """`logits_index` [B]: lm_head on that one position per row → [B, 1, V] (see Gemma's)."""
+        """`logits_index` [B]: lm_head on that one position per row → [B, 1, V]."""
         h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
         if logits_index is not None:
             h = h.gather(1, logits_index.view(-1, 1, 1).expand(-1, 1, h.shape[-1]))
