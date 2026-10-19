@@ -15,7 +15,9 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get(
 @pytest.fixture(scope="module")
 def backend():
     os.environ["CUSTOM_BACKEND_CUDA_GRAPH"] = "0"
-    os.environ["MEGAKERNEL_FP8"] = "1"                 # the fp8 tables are built before the pools take the free memory
+    os.environ["CUSTOM_BACKEND_QUANT"] = "bf16"        # the torch reference forward runs bf16 experts
+    os.environ["MEGAKERNEL_FP8"] = "0"
+    os.environ["CUSTOM_BACKEND_BLOCKS"] = "8192"       # small pools: room for the fp8 copies built below
     from inference_server.backends.custom_torch_backend import CustomTorchBackend
     name = os.environ.get("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
     b = CustomTorchBackend("cuda", name)
@@ -24,9 +26,9 @@ def backend():
 
 
 @pytest.fixture(scope="module")
-def bf16_model(backend):
+def fp8_model(backend):
     from inference_server.models import megakernel as mk
-    m = mk.Model(backend.model, backend.device, fp8=False)               # points at the bf16 weights, no copy
+    m = mk.Model(backend.model, backend.device, fp8=True)                # fp8 copies of the experts
     m.bind_pools(backend.pools)
     return m
 
@@ -57,27 +59,34 @@ def _step(backend, mdl, prompts, seed):
 
 
 def _kv_match(backend, sb, sa, B):
+    """Layer 0's new K/V depend on the embedding alone (V exact, K to rounding); deeper layers carry every earlier
+    layer's rounding, so they are compared to bf16 tolerance."""
     for L in (0, 23, 47):
+        tol = 2e-2 if L == 0 else 6e-2
         for r in range(B):
             p = int(sa.seq_lens[r])
             ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
             pool = backend.pools[L]
-            torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=2e-2, rtol=2e-2)
-            assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
+            torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=tol, rtol=tol)
+            if L == 0:
+                assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
+            else:
+                torch.testing.assert_close(pool.v[bb, :, p % 16].float(), pool.v[ba, :, p % 16].float(), atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize("lens", [(37,), (37, 16, 300), (1000,)])
-def test_bf16_step_matches_torch(backend, bf16_model, lens):
+def test_bf16_step_matches_torch(backend, lens):
     prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
-    got, ref, sb, sa = _step(backend, bf16_model, prompts, seed=len(lens))
+    got, ref, sb, sa = _step(backend, backend._mega, prompts, seed=len(lens))
     assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
-    assert (got.float() - ref.float()).abs().mean() < 0.05, (got.float() - ref.float()).abs().max()
+    d, mag = (got.float() - ref.float()).abs(), ref.float().abs().mean()
+    assert d.mean() < 0.02 * mag, (d.mean(), d.max(), mag)        # ~1 bf16 step at |logit| ~10 is 0.06
     _kv_match(backend, sb, sa, len(lens))
 
 
 @pytest.mark.parametrize("lens", [(37,), (37, 16, 300)])
-def test_fp8_step_agrees_on_the_argmax(backend, lens):
+def test_fp8_step_agrees_on_the_argmax(backend, fp8_model, lens):
     prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
-    got, ref, sb, sa = _step(backend, backend._mega, prompts, seed=10 + len(lens))
+    got, ref, sb, sa = _step(backend, fp8_model, prompts, seed=10 + len(lens))
     assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
     _kv_match(backend, sb, sa, len(lens))

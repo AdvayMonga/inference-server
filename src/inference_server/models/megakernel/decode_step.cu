@@ -53,6 +53,7 @@ struct Args {
     const Layer* layers; int n_layers; const bf16* final_norm; const bf16* lm_head; int V; bf16* logits;
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
+    int stamp_layer;                                                                       // the layer `times` stamps
 };
 
 __device__ __forceinline__ float bf2f(bf16 x) { return __bfloat162float(x); }
@@ -206,7 +207,7 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 }
 
 __device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
-#define STAMP(i) do { if (a.times && L == 0 && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
+#define STAMP(i) do { if (a.times && L == a.stamp_layer && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
 #define STAMP_ALWAYS(i) do { if (a.times && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
 
 template <int BT, bool FP8>
@@ -692,7 +693,8 @@ template <bool FP8> static void* pick(int B) {
 
 std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch::Tensor pos, torch::Tensor bt, torch::Tensor layers, torch::Tensor embed,
                           torch::Tensor final_norm, torch::Tensor lm_head, torch::Tensor inv_freq, torch::Tensor scratch_f32,
-                          torch::Tensor scratch_bf16, torch::Tensor scratch_i32, double scale, bool fp8, torch::Tensor times) {
+                          torch::Tensor scratch_bf16, torch::Tensor scratch_i32, double scale, bool fp8, torch::Tensor times,
+                          int64_t stamp_layer) {
     TORCH_CHECK(tokens.is_cuda() && tokens.dtype() == torch::kInt64 && tokens.dim() == 1 && tokens.is_contiguous(), "tokens [B] int64");
     const int B = tokens.size(0);
     TORCH_CHECK(B >= 1 && B <= BMAX, "batch 1..16");
@@ -737,6 +739,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
         attr_set = true;
     }
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
+    a.stamp_layer = (int)stamp_layer;
     void* args[] = {&a};
     auto stream = at::cuda::getCurrentCUDAStream();
     cudaError_t err = cudaLaunchCooperativeKernel(fp8 ? pick<true>(B) : pick<false>(B), dim3(num_sms()), dim3(THREADS), args, SMEM_BYTES, stream);

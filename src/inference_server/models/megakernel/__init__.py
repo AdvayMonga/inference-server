@@ -118,11 +118,11 @@ _NO_TIMES = None
 
 
 def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.Tensor,
-                times: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+                times: torch.Tensor | None = None, stamp_layer: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
     """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [layers, B, cols]
     int64 block tables, as the batched state keeps them. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
-    `times` [16] int64: globaltimer stamps (layer 0's phases, after the layers, the end), debug."""
+    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug."""
     assert mdl.table is not None, "bind_pools() first"
     global _NO_TIMES
     if times is None:
@@ -130,4 +130,4 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
             _NO_TIMES = torch.empty(0, dtype=torch.int64, device=tokens.device)
         times = _NO_TIMES
     return _ext().decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
-                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times)
+                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer)
