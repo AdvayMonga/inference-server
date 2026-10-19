@@ -56,15 +56,17 @@ def test_short_prefill_as_decode_matches_the_packed_prefill():
     name = os.environ.get("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
     b = ctb.CustomTorchBackend("cuda", name)
     b.load_model(name)
-    torch.manual_seed(0)
-    prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in (300, 1000, 37)]
-    suffix = [12, 5, 20]
+    text = ("The history of the printing press begins in the fifteenth century, when movable metal type made books "
+            "cheap enough to spread literacy across Europe. ") * 40
+    ids = b.tokenizer.encode(text)
+    prompts = [ids[:300], ids[:1000], ids[:100]]                       # every prefix > 64 tokens: the packed path
+    suffixes = [ids[300:312], ids[1000:1005], ids[100:120]]          # 37 tokens in all: the decode-rows path
+    suffix = [len(x) for x in suffixes]
 
     def run(as_decode):
         ctb.PREFILL_AS_DECODE_TOKENS = 64 if as_decode else 0
         rows = [b.prefill_chunk_batch([(None, p, False, GREEDY)])[0][0] for p in prompts]       # the prefixes
-        items = [(kv, torch.randint(1000, 30000, (n,), generator=torch.Generator().manual_seed(n)).tolist(), True, GREEDY)
-                 for kv, n in zip(rows, suffix)]
+        items = [(kv, x, True, GREEDY) for kv, x in zip(rows, suffixes)]
         return b.prefill_chunk_batch(items), b.last_prefill_timing
 
     got, t_got = run(True)
