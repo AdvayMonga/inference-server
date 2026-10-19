@@ -296,8 +296,9 @@ class _StateRow:
 # per token, all of a request's rows sharing its block table, row i at position prefix + i; every row writes its K/V
 # before attention in each layer, so row i attends to exactly positions <= prefix + i: causal prefill). A 1-row,
 # 12-token packed prefill was host-bound at ~57 ms (a Python launch stream of ~1000 kernels), and long_prompt, whose
-# prompts are 98.7% prefix-cache hits, spent half its time in such steps (H200, 2026-10-19). 0 = off.
-PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_TOKENS", "64"))
+# prompts are 98.7% prefix-cache hits, spent half its time in such steps (H200, 2026-10-19). Measured long_prompt:
+# 20 req/s off, 33.3 at 64 tokens, 36.7 at 128 and at 256. 0 = off.
+PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_TOKENS", "128"))
 
 
 def decode_rows(caches, chunks, pools):

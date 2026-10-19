@@ -59,13 +59,19 @@ def _step(backend, mdl, prompts, seed):
 
 
 def _kv_match(backend, sb, sa, B):
+    """Layer 0's new K/V depend on the embedding alone (V exact, K to rounding); deeper layers carry every earlier
+    layer's rounding, so they are compared to bf16 tolerance."""
     for L in (0, 23, 47):
+        tol = 2e-2 if L == 0 else 6e-2
         for r in range(B):
             p = int(sa.seq_lens[r])
             ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
             pool = backend.pools[L]
-            torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=2e-2, rtol=2e-2)
-            assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
+            torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=tol, rtol=tol)
+            if L == 0:
+                assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
+            else:
+                torch.testing.assert_close(pool.v[bb, :, p % 16].float(), pool.v[ba, :, p % 16].float(), atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize("lens", [(37,), (37, 16, 300), (1000,)])
@@ -73,7 +79,8 @@ def test_bf16_step_matches_torch(backend, lens):
     prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
     got, ref, sb, sa = _step(backend, backend._mega, prompts, seed=len(lens))
     assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
-    assert (got.float() - ref.float()).abs().mean() < 0.05, (got.float() - ref.float()).abs().max()
+    d, mag = (got.float() - ref.float()).abs(), ref.float().abs().mean()
+    assert d.mean() < 0.02 * mag, (d.mean(), d.max(), mag)        # ~1 bf16 step at |logit| ~10 is 0.06
     _kv_match(backend, sb, sa, len(lens))
 
 

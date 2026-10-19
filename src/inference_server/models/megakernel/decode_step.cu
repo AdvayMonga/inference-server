@@ -423,19 +423,6 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                 }
                 __syncthreads();
             }
-            // The attention items occupy B * 4 * nsplit blocks (4 of 132 at batch 1, short context) for ~16 us; the
-            // idle ones pull o_proj's and the router's weights into L2 meanwhile, so P4 and P5 read them from there.
-            const int busy = B * NKV * nsplit;
-            if (blockIdx.x >= busy) {
-                const size_t stride = (size_t)(gridDim.x - busy) * THREADS * 128;
-                const size_t first = ((size_t)(blockIdx.x - busy) * THREADS + tid) * 128;
-                const char* wo = reinterpret_cast<const char*>(lw.wo);
-                for (size_t off = first; off < (size_t)H * NQ * D * 2; off += stride)
-                    asm volatile("prefetch.global.L2 [%0];" :: "l"(wo + off));
-                const char* wr = reinterpret_cast<const char*>(lw.wr);
-                for (size_t off = first; off < (size_t)E * H * 2; off += stride)
-                    asm volatile("prefetch.global.L2 [%0];" :: "l"(wr + off));
-            }
         }
         STAMP(2);
 
