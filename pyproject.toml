@@ -9,7 +9,7 @@ description = "LLM inference engine from scratch: continuous batching, paged KV 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.142.4",
+    "fastapi>=0.143.0",
     "uvicorn[standard]>=0.54.0",
     "torch>=2.14.1",
     "transformers>=5.18.0",
@@ -23,7 +23,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ruff>=0.16.10",
+    "ruff>=0.17.0",
     "matplotlib>=3.8",
 ]
 # Paged batch prefill attention (CUSTOM_BACKEND_PREFILL_ATTN=flashinfer); JIT-compiles against the local CUDA toolkit.
