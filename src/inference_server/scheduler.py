@@ -1,7 +1,9 @@
 """Scheduler interface and ContinuousBatchScheduler implementation."""
 
 import asyncio
+import gc
 import logging
+import os
 import threading
 import time
 import uuid
@@ -19,6 +21,9 @@ from inference_server.telemetry import RequestRecord, RowStore
 from inference_server.timeline import Timeline
 
 logger = logging.getLogger(__name__)
+
+
+GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "5000"))   # steps between the scheduler's own full collections
 
 
 class QueueFullError(Exception):
@@ -368,6 +373,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         """Single-threaded scheduler loop."""
         device = self.backend.device_str
         errors_in_a_row = 0
+        self._steps_since_freeze = 0
+        gc.collect()
+        gc.freeze()                                 # everything built at load (weights, caches) is never walked again
         while not self._stop_event.is_set():
             # If nothing in-flight and nothing pending, wait on the cv.
             if not self._active and not self._prefilling:
@@ -417,6 +425,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                 raise
                 errors_in_a_row = 0
                 self._step_event(step_t0)
+                self._steps_since_freeze += 1
+                if self._steps_since_freeze >= GC_FREEZE_STEPS:
+                    # A full collection walks every live object; the prefix cache's nodes and the rows' host mirrors
+                    # run to millions, so an automatic one stalled a step for ~2 s (long_prompt, 2026-10-18). Collect
+                    # on our own schedule, then freeze the survivors out of the collector's reach.
+                    t_gc = time.perf_counter()
+                    gc.collect()
+                    gc.freeze()
+                    self._steps_since_freeze = 0
+                    self._timeline.event("gc", dur_s=time.perf_counter() - t_gc, frozen=gc.get_freeze_count())
             except Exception as e:
                 # A failed iteration must NOT end the worker. It used to: any exception escaped
                 # to _fail_all and the thread exited, after which the server accepted requests
