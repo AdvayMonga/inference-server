@@ -376,6 +376,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._steps_since_freeze = 0
         gc.collect()
         gc.freeze()                                 # everything built at load (weights, caches) is never walked again
+        gc.disable()                                # no allocation-triggered collections: 9-12 a minute of 20+ ms under
+                                                    # long_prompt even with the frozen heap; the step loop collects instead
         while not self._stop_event.is_set():
             # If nothing in-flight and nothing pending, wait on the cv.
             if not self._active and not self._prefilling:

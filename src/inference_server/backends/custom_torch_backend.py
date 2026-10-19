@@ -336,9 +336,11 @@ class CustomTorchBackend(InferenceBackend):
         if os.environ.get("CUSTOM_BACKEND_FUSE_QKV", "1") == "1":
             for layer in self.model.model.layers:
                 layer.self_attn.fuse_qkv()
-        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
+        # fp8 experts by default on CUDA (CUSTOM_BACKEND_QUANT=bf16 keeps them bf16). The experts are ~97% of the
+        # weight bytes; at batch 128 a decode step streams nearly all of them. H200 2026-10-19, with 256 decode rows:
+        # saturated 3.9 -> 6.3 req/s, long_prompt 20 -> 20, single_stream 4.57 -> 4.79 ms; dev-tier gate PASS.
+        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "fp8" if self.device.type == "cuda" else "").lower()
         if quant == "fp8" and self.device.type == "cuda":
-            # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
             for layer in self.model.model.layers:
                 layer.mlp.experts.quantize_fp8()
             torch.cuda.empty_cache()
