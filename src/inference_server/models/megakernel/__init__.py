@@ -61,6 +61,7 @@ class Model:
     def __init__(self, model, device, fp8: bool = FP8):
         from inference_server.models.qwen3_moe import quantize_rowwise
         m = model.model
+        fp8 = fp8 or bool(m.layers[0].mlp.experts.fp8)        # fp8 experts (CUSTOM_BACKEND_QUANT=fp8) are used as they are
         self.device, self.fp8 = device, fp8
         self.n_layers = len(m.layers)
         self._keep: list[torch.Tensor] = []                  # tensors the table points to that the model does not own

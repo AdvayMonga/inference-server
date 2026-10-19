@@ -124,3 +124,47 @@ def test_scatter_add_weighted_matches_index_add(T, top_k, N):
     out = torch.zeros(T, N, device="cuda")
     moe_kernel.scatter_add_weighted(y, tok, pair_w, out)
     torch.testing.assert_close(out, ref, atol=2e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("T,top_k,E", [(1, 8, 128), (64, 8, 128)])
+def test_fp8_weights_match_the_dequantized_bf16_gemms(T, top_k, E):
+    """Both Triton GEMMs with fp8 e4m3 weights and a per-channel scale, against the same GEMMs on the dequantized
+    weights (the numerics the megakernel uses too: W8A16, scale on the fp32 accumulator)."""
+    from inference_server.models import moe_kernel
+    from inference_server.models.qwen3_moe import quantize_rowwise
+    torch.manual_seed(T)
+    K, N = 256, 384
+    flat = torch.randn(T, K, dtype=torch.bfloat16, device="cuda")
+    w = torch.randn(E, N, K, dtype=torch.bfloat16, device="cuda") * 0.05
+    q, s = quantize_rowwise(w)
+    deq = (q.float() * s[..., None]).to(torch.bfloat16)
+    experts = torch.stack([torch.randperm(E, device="cuda")[:top_k] for _ in range(T)])
+    sorted_e, order = torch.sort(experts.view(-1), stable=True)
+    tok = (order // top_k).to(torch.int32)
+    M = tok.numel()
+    sorted_ids, expert_ids = moe_kernel.align(sorted_e, E, 16)
+    ref = moe_kernel.moe_gemm(flat, tok, deq, sorted_ids, expert_ids, M)
+    got = moe_kernel.moe_gemm(flat, tok, q, sorted_ids, expert_ids, M, w_scale=s.contiguous())
+    torch.testing.assert_close(got.float(), ref.float(), atol=5e-2, rtol=3e-2)
+    pair_w = torch.rand(M, device="cuda")
+    act = torch.randn(M, K, dtype=torch.bfloat16, device="cuda")
+    wd = torch.randn(E, N, K, dtype=torch.bfloat16, device="cuda") * 0.05
+    qd, sd = quantize_rowwise(wd)
+    deqd = (qd.float() * sd[..., None]).to(torch.bfloat16)
+    out_ref = torch.zeros(T, N, dtype=torch.float32, device="cuda")
+    out_got = torch.zeros(T, N, dtype=torch.float32, device="cuda")
+    moe_kernel.moe_gemm_scatter(act, deqd, sorted_ids, expert_ids, M, tok, pair_w, out_ref)
+    moe_kernel.moe_gemm_scatter(act, qd, sorted_ids, expert_ids, M, tok, pair_w, out_got, w_scale=sd.contiguous())
+    torch.testing.assert_close(out_got, out_ref, atol=5e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize("M,K", [(3, 2048), (1000, 768)])
+def test_quant_rows_matches_quantize_rowwise(M, K):
+    from inference_server.models import moe_kernel
+    from inference_server.models.qwen3_moe import quantize_rowwise
+    torch.manual_seed(M)
+    x = torch.randn(M, K, dtype=torch.bfloat16, device="cuda") * 3
+    q, s = moe_kernel.quant_rows(x)
+    q_ref, s_ref = quantize_rowwise(x)
+    torch.testing.assert_close(s, s_ref)
+    assert (q.float() != q_ref.float()).float().mean() < 1e-3          # a rounding-boundary element or two at most
