@@ -897,8 +897,9 @@ class CustomTorchBackend(InferenceBackend):
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[2] <= self._graph_max_cols
+            greedy_tokens = None
             if self._mega_on and n <= self._mega_max_rows:
-                logits = self._decode_megakernel(current_tokens, state)
+                logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
             elif self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
@@ -907,6 +908,7 @@ class CustomTorchBackend(InferenceBackend):
             state.advance()       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
+            greedy_tokens = None
             rows = batched_kv
             n = len(rows)
             ctx = BatchedPagedKVCache(rows)
@@ -920,7 +922,9 @@ class CustomTorchBackend(InferenceBackend):
             logits = self.model(current_tokens, position_ids=position_ids, kv_cache=ctx, attn_mask=mask)
 
         last = logits[:, -1, :]  # [N, V]
-        if sampling_per_row is None:
+        if greedy_tokens is not None and (sampling_per_row is None or all(p.temperature <= 0.0 for p in sampling_per_row)):
+            next_tokens = greedy_tokens          # the kernel's own argmax: no sampling kernels between cooperative launches
+        elif sampling_per_row is None:
             next_tokens = sample(last, GREEDY)
         else:
             next_tokens = sample_batched(last, sampling_per_row)
@@ -929,10 +933,12 @@ class CustomTorchBackend(InferenceBackend):
     # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
 
     def _decode_megakernel(self, current_tokens, state):
-        """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head -> [B, 1, V]."""
+        """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head, greedy
+        argmax -> (logits [B, 1, V], tokens [B]). Nothing else is launched around it: a cooperative kernel overlaps no
+        other kernel, so each small launch beside it cost ~70 us of idle GPU (measured 2026-10-18)."""
         from inference_server.models import megakernel as mk
-        return mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens.to(torch.int32),
-                              state.bt.to(torch.int32)).unsqueeze(1)
+        logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
+        return logits.unsqueeze(1), tokens
 
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
 

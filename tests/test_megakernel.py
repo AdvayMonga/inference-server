@@ -50,8 +50,9 @@ def _step(backend, mdl, prompts, seed):
     sa = _state(backend, prompts)
     ref = backend.model(tokens.view(-1, 1), position_ids=sa.seq_lens.view(-1, 1), paged_ctx=sa)[:, 0]
     sb = _state(backend, prompts)
-    got = mk.decode_step(mdl, tokens, sb.seq_lens.to(torch.int32), sb.bt.to(torch.int32))
+    got, nxt = mk.decode_step(mdl, tokens, sb.seq_lens, sb.bt)
     torch.cuda.synchronize()
+    assert torch.equal(nxt, got.float().argmax(-1)), "the kernel's greedy token is its own logits' argmax"
     return got, ref, sb, sa
 
 

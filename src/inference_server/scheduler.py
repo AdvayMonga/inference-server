@@ -910,6 +910,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._pending is None:
             return torch.tensor([r.current_token for r in batch], dtype=torch.long, device=device)
         out_prev, snap_prev = self._pending[0], self._pending[1]
+        if len(snap_prev) == n and all(a is b for a, b in zip(snap_prev, batch)):
+            return out_prev          # the same rows in the same order: no host round trip, so this launch queues
+                                     # behind the running step instead of waiting for it (a pageable copy syncs the stream)
         where = {id(r): i for i, r in enumerate(snap_prev)}
         current = torch.empty(n, dtype=torch.long, device=out_prev.device)
         dst = [i for i, r in enumerate(batch) if id(r) in where]
