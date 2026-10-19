@@ -1,6 +1,7 @@
 """FastAPI server — accepts text, generates LLM responses via the backend."""
 
 import asyncio
+import gc
 import json
 import logging
 import time
@@ -57,6 +58,22 @@ class GenerateResponse(BaseModel):
     prompt_tokens: int
     cache_hit_tokens: int | None
     trace_id: str
+
+
+_gc_t0 = [0.0]
+
+
+def _gc_watch(phase: str, info: dict) -> None:
+    """Log any collection that stalls the process (the scheduler freezes the heap to keep them short)."""
+    if phase == "start":
+        _gc_t0[0] = time.perf_counter()
+        return
+    d = time.perf_counter() - _gc_t0[0]
+    if d > 0.02:
+        logger.warning("gc generation %d took %.0f ms (%d collected)", info["generation"], d * 1e3, info["collected"])
+
+
+gc.callbacks.append(_gc_watch)
 
 
 def build_backend(settings: Settings) -> tuple[InferenceBackend, CacheManager]:

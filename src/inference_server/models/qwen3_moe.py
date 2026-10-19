@@ -211,13 +211,23 @@ class Qwen3Experts(nn.Module):
     def down(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
         return self._mm(a, "down_proj", offs)
 
+    def weights(self, name: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """(weight stack, per-channel scale or None) for the Triton kernels."""
+        if self.fp8:
+            return getattr(self, f"{name}_fp8"), getattr(self, f"{name}_scale")
+        return getattr(self, name), None
+
     def _mm(self, a: torch.Tensor, name: str, offs: torch.Tensor) -> torch.Tensor:
         """Grouped GEMM of the expert-sorted rows `a` against weight stack `name`, groups ending at `offs`."""
         if not self.fp8:
             return torch._grouped_mm(a, getattr(self, name).transpose(-2, -1), offs=offs)
         w, s = getattr(self, f"{name}_fp8"), getattr(self, f"{name}_scale")
         if a.is_cuda:
-            a8, sa = quantize_rowwise(a)
+            if fused._on(a):
+                from inference_server.models import moe_kernel
+                a8, sa = moe_kernel.quant_rows(a.contiguous())
+            else:
+                a8, sa = quantize_rowwise(a)
             return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
         # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
         deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
@@ -252,11 +262,13 @@ class Qwen3SparseMoE(nn.Module):
         E = self.experts.num_experts
         T = flat.shape[0]
         M = T * self.top_k
-        if on and not self.experts.fp8 and M <= MOE_KERNEL_MAX_ROWS:
-            # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py); the
-            # routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the down GEMM scatters weighted rows
-            # into an fp32 output.
+        if on and M <= MOE_KERNEL_MAX_ROWS:
+            # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py), bf16 or
+            # fp8 with a per-channel scale; the routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the
+            # down GEMM scatters weighted rows into an fp32 output.
             from inference_server.models import moe_kernel
+            gu, gu_s = self.experts.weights("gate_up_proj")
+            dn, dn_s = self.experts.weights("down_proj")
             if T <= ROUTE_FUSED_MAX_TOKENS:
                 sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, self.top_k,
                                                                              self.norm_topk_prob, 16)
@@ -265,10 +277,10 @@ class Qwen3SparseMoE(nn.Module):
                 sorted_e, order = torch.sort(experts.view(-1), stable=True)
                 sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E,
                                                                              self.top_k, 16)
-            h = moe_kernel.moe_gemm(flat, tok, self.experts.gate_up_proj, sorted_ids, expert_ids, M)
+            h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, w_scale=gu_s)
             act = fused.silu_mul(h)
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
-            moe_kernel.moe_gemm_scatter(act, self.experts.down_proj, sorted_ids, expert_ids, M, tok, pair_w, out)
+            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, w_scale=dn_s)
             return out
         weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
                             else route(logits, self.top_k, self.norm_topk_prob))

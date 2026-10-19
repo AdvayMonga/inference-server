@@ -336,9 +336,11 @@ class CustomTorchBackend(InferenceBackend):
         if os.environ.get("CUSTOM_BACKEND_FUSE_QKV", "1") == "1":
             for layer in self.model.model.layers:
                 layer.self_attn.fuse_qkv()
-        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "").lower()
+        # fp8 experts by default on CUDA (CUSTOM_BACKEND_QUANT=bf16 keeps them bf16). The experts are ~97% of the
+        # weight bytes; at batch 128 a decode step streams nearly all of them. H200 2026-10-19, with 256 decode rows:
+        # saturated 3.9 -> 6.3 req/s, long_prompt 20 -> 20, single_stream 4.57 -> 4.79 ms; dev-tier gate PASS.
+        quant = os.environ.get("CUSTOM_BACKEND_QUANT", "fp8" if self.device.type == "cuda" else "").lower()
         if quant == "fp8" and self.device.type == "cuda":
-            # The experts are ~97% of the weight bytes: fp8 there halves what every decode step streams.
             for layer in self.model.model.layers:
                 layer.mlp.experts.quantize_fp8()
             torch.cuda.empty_cache()
@@ -347,6 +349,17 @@ class CustomTorchBackend(InferenceBackend):
             logger.warning("CUSTOM_BACKEND_QUANT=fp8 needs CUDA; ignoring")
         elif quant == "int8":
             logger.warning("CUSTOM_BACKEND_QUANT=int8 is not supported for qwen3_moe; ignoring")
+
+        # The decode-step megakernel (models/megakernel): one cooperative kernel for the whole step, for decode steps of
+        # up to MEGAKERNEL_MAX_ROWS rows; built before the pools are sized (the fp8 expert copies take ~29 GB).
+        # Measured 2026-10-18 (H200, v1 per-layer kernel): it beat the graphs at batch 1 (4.1 vs 5.6 ms) and 2 (5.4 vs
+        # 5.7); from 4 on both were bound by streaming ~30 distinct experts' weights and the graphs were faster.
+        from inference_server.models import megakernel as mk
+        self._mega_on = self.device.type == "cuda" and mk.ENABLED and mk.available()
+        self._mega_max_rows = int(os.environ.get("MEGAKERNEL_MAX_ROWS", "2"))
+        self._mega = mk.Model(self.model, self.device) if self._mega_on else None
+        if self._mega is not None:
+            logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
 
         # Pre-allocate paged block pools shared across sessions — see kv_reserve.
         from inference_server.config import settings
@@ -368,6 +381,8 @@ class CustomTorchBackend(InferenceBackend):
             n_blocks = 512
         self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
+        if self._mega is not None:
+            self._mega.bind_pools(self.pools)
 
         from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
         cache_cls = RadixPrefixCache if settings.prefix_cache_impl == "radix" else PrefixCache
@@ -396,14 +411,7 @@ class CustomTorchBackend(InferenceBackend):
         # Mixed prefill as one packed forward, and decode rows join it (PREFILL_PACKED=0: the right-padded wave and a
         # separate decode step; on CPU/MPS packed is opt-in, for the tests).
         self.packed_prefill = os.environ.get("PREFILL_PACKED", "1" if self.device.type == "cuda" else "0") == "1"
-        # The decode-layer megakernel (models/megakernel): one cooperative kernel per layer for batch <= 16.
-        from inference_server.models import megakernel as _mk
-        self._mega_on = self.device.type == "cuda" and _mk.ENABLED and _mk.available()
-        # Measured 2026-10-18 (H200): the kernel's step beats the graphs at batch 1 (4.1 vs 5.6 ms) and 2 (5.4 vs
-        # 5.7); from 4 on both are bound by streaming ~30 distinct experts' weights and the graphs are faster.
-        self._mega_max_rows = int(os.environ.get("MEGAKERNEL_MAX_ROWS", "2"))
-        self._mega = None
-        self._graph_on = self.device.type == "cuda" and \
+        self._graph_on =self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_CUDA_GRAPH", "1") == "1"
         self._compile_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"      # MoE included since 2026-10-17 (an A/B)
@@ -891,8 +899,9 @@ class CustomTorchBackend(InferenceBackend):
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[2] <= self._graph_max_cols
+            greedy_tokens = None
             if self._mega_on and n <= self._mega_max_rows:
-                logits = self._decode_megakernel(current_tokens, state)
+                logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
             elif self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
@@ -901,6 +910,7 @@ class CustomTorchBackend(InferenceBackend):
             state.advance()       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
+            greedy_tokens = None
             rows = batched_kv
             n = len(rows)
             ctx = BatchedPagedKVCache(rows)
@@ -914,30 +924,23 @@ class CustomTorchBackend(InferenceBackend):
             logits = self.model(current_tokens, position_ids=position_ids, kv_cache=ctx, attn_mask=mask)
 
         last = logits[:, -1, :]  # [N, V]
-        if sampling_per_row is None:
+        if greedy_tokens is not None and (sampling_per_row is None or all(p.temperature <= 0.0 for p in sampling_per_row)):
+            next_tokens = greedy_tokens          # the kernel's own argmax: no sampling kernels between cooperative launches
+        elif sampling_per_row is None:
             next_tokens = sample(last, GREEDY)
         else:
             next_tokens = sample_batched(last, sampling_per_row)
         return next_tokens, batched_kv
 
-    # --- the decode-layer megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel per layer ---
+    # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
 
     def _decode_megakernel(self, current_tokens, state):
-        """Embedding, 48 megakernel launches (each writes its layer's K/V and returns the residual stream), final
-        norm, lm_head. The CUDA graphs are not used on this path (a cooperative launch per layer is cheap enough)."""
+        """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head, greedy
+        argmax -> (logits [B, 1, V], tokens [B]). Nothing else is launched around it: a cooperative kernel overlaps no
+        other kernel, so each small launch beside it cost ~70 us of idle GPU (measured 2026-10-18)."""
         from inference_server.models import megakernel as mk
-        model = self.model.model
-        if self._mega is None:
-            self._mega = ([mk.LayerWeights(layer, model.rope.inv_freq) for layer in model.layers],
-                          mk.Scratch(self.device))
-        weights, scratch = self._mega
-        h = model.embed_tokens(current_tokens.view(-1))                        # [B, H]
-        pos = state.seq_lens.to(torch.int32)
-        bt32 = state.bt.to(torch.int32)                                        # [layers, B, cols], once
-        for L, layer_w in enumerate(weights):
-            pool = self.pools[L]
-            h = mk.decode_layer(h, pos, bt32[state._li[L]], pool.k, pool.v, layer_w, scratch)
-        return self.model.lm_head(model.norm(h)).unsqueeze(1)                 # [B, 1, V]
+        logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
+        return logits.unsqueeze(1), tokens
 
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
 

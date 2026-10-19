@@ -677,9 +677,11 @@ class BatchedDecodeState:
                 self._host_blocks[r][i].append(ids[i][j])
         for r in crossing:
             self._host_alloc[r] += 1
-        new = torch.tensor(ids, dtype=torch.long, device=self.device)                  # [layers, crossing]
-        rows_t = torch.tensor(crossing, dtype=torch.long, device=self.device)
-        lbs_t = torch.tensor(lbs, dtype=torch.long, device=self.device)
+        # pinned, non-blocking copies: a pageable copy would first sync the stream, i.e. wait for the running step
+        cuda = self.device.type == "cuda"
+        new, rows_t, lbs_t = ((torch.tensor(v, dtype=torch.long).pin_memory().to(self.device, non_blocking=True) if cuda
+                               else torch.tensor(v, dtype=torch.long, device=self.device))
+                              for v in (ids, crossing, lbs))                                      # new: [layers, crossing]
         self.bt[:, rows_t, lbs_t] = new
         self.n_alloc[rows_t] += 1
 

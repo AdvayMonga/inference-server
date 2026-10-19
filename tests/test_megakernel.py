@@ -1,5 +1,7 @@
-"""The decode-layer megakernel against the torch decode layer on the real model (CUDA, nvcc, the 60 GB weights:
-MEGAKERNEL_TEST=1). One decode step per layer tested, B in (1, 3); the new token's K/V written into the pool too."""
+"""The decode-step megakernel against the torch decode forward on the real model (CUDA, nvcc, the 60 GB weights:
+MEGAKERNEL_TEST=1). One whole step, B in (1, 3), contexts under and over one 256-position chunk; the logits' argmax
+must agree on every row, and the new token's K/V written into every layer's pool must match. bf16 experts are
+compared tightly; fp8 experts (the default) are a different quantisation, so only the argmax is required there."""
 
 import os
 
@@ -13,11 +15,20 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available() or os.environ.get(
 @pytest.fixture(scope="module")
 def backend():
     os.environ["CUSTOM_BACKEND_CUDA_GRAPH"] = "0"
+    os.environ["MEGAKERNEL_FP8"] = "1"                 # the fp8 tables are built before the pools take the free memory
     from inference_server.backends.custom_torch_backend import CustomTorchBackend
     name = os.environ.get("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
     b = CustomTorchBackend("cuda", name)
     b.load_model(name)
     return b
+
+
+@pytest.fixture(scope="module")
+def bf16_model(backend):
+    from inference_server.models import megakernel as mk
+    m = mk.Model(backend.model, backend.device, fp8=False)               # points at the bf16 weights, no copy
+    m.bind_pools(backend.pools)
+    return m
 
 
 def _state(b, prompts):
@@ -31,29 +42,42 @@ def _state(b, prompts):
     return st
 
 
-@pytest.mark.parametrize("L", [0, 24, 47])
-@pytest.mark.parametrize("lens", [(37,), (37, 16, 300)])
-def test_layer_matches_torch_and_writes_the_kv(backend, L, lens):
+def _step(backend, mdl, prompts, seed):
+    """(kernel logits, torch logits, kernel state, torch state) for one decode step after the prompts."""
     from inference_server.models import megakernel as mk
-    assert mk.available()
-    model = backend.model.model
-    torch.manual_seed(L)
-    prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
-    B = len(prompts)
-    h = torch.randn(B, 2048, dtype=torch.bfloat16, device="cuda")
-    layer = model.layers[L]
+    torch.manual_seed(seed)
+    tokens = torch.randint(1000, 30000, (len(prompts),), device="cuda")
     sa = _state(backend, prompts)
-    sa._begin_step()                      # append does this at the first live layer; a deep layer is called directly
-    pos = sa.seq_lens.clone()
-    cos, sin = (t.to(h.dtype) for t in model.rope(pos.unsqueeze(1)))
-    ref, _ = layer(h.unsqueeze(1), cos, sin, paged_ctx=sa, kv_layer_idx=L)
+    ref = backend.model(tokens.view(-1, 1), position_ids=sa.seq_lens.view(-1, 1), paged_ctx=sa)[:, 0]
     sb = _state(backend, prompts)
-    got = mk.decode_layer(h, sb.seq_lens.to(torch.int32), sb.bt[sb._li[L]].to(torch.int32), backend.pools[L].k,
-                          backend.pools[L].v, mk.LayerWeights(layer, model.rope.inv_freq), mk.Scratch(backend.device))
-    torch.testing.assert_close(got.float(), ref[:, 0].float(), atol=6e-2, rtol=3e-2)
-    for r in range(B):
-        p = int(pos[r])
-        ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
-        torch.testing.assert_close(backend.pools[L].k[bb, :, p % 16].float(), backend.pools[L].k[ba, :, p % 16].float(),
-                                   atol=2e-2, rtol=2e-2)
-        assert torch.equal(backend.pools[L].v[bb, :, p % 16], backend.pools[L].v[ba, :, p % 16])
+    got, nxt = mk.decode_step(mdl, tokens, sb.seq_lens, sb.bt)
+    torch.cuda.synchronize()
+    assert torch.equal(nxt, got.float().argmax(-1)), "the kernel's greedy token is its own logits' argmax"
+    return got, ref, sb, sa
+
+
+def _kv_match(backend, sb, sa, B):
+    for L in (0, 23, 47):
+        for r in range(B):
+            p = int(sa.seq_lens[r])
+            ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
+            pool = backend.pools[L]
+            torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=2e-2, rtol=2e-2)
+            assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
+
+
+@pytest.mark.parametrize("lens", [(37,), (37, 16, 300), (1000,)])
+def test_bf16_step_matches_torch(backend, bf16_model, lens):
+    prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
+    got, ref, sb, sa = _step(backend, bf16_model, prompts, seed=len(lens))
+    assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
+    assert (got.float() - ref.float()).abs().mean() < 0.05, (got.float() - ref.float()).abs().max()
+    _kv_match(backend, sb, sa, len(lens))
+
+
+@pytest.mark.parametrize("lens", [(37,), (37, 16, 300)])
+def test_fp8_step_agrees_on_the_argmax(backend, lens):
+    prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
+    got, ref, sb, sa = _step(backend, backend._mega, prompts, seed=10 + len(lens))
+    assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
+    _kv_match(backend, sb, sa, len(lens))

@@ -36,7 +36,9 @@ class Settings:
     port: int = 8000
 
     # Batching
-    max_batch_size: int = 128     # rows decoded together; the KV pools are sized from free memory
+    # Rows decoded together; the KV pools are sized from free memory. 256: H200 2026-10-19 with fp8 experts, saturated
+    # 4.6 req/s at 128 (clients beyond 128 wait in the queue and miss TTFT), 6.3 at 256, 6.2 at 512.
+    max_batch_size: int = 256
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
