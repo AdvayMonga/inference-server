@@ -292,6 +292,44 @@ class _StateRow:
         self.seq_len = state._host_len[r]
 
 
+# Prefill chunks of at most this many tokens in total run as decode rows through the captured decode graphs (one row
+# per token, all of a request's rows sharing its block table, row i at position prefix + i; every row writes its K/V
+# before attention in each layer, so row i attends to exactly positions <= prefix + i: causal prefill). A 1-row,
+# 12-token packed prefill was host-bound at ~57 ms (a Python launch stream of ~1000 kernels), and long_prompt, whose
+# prompts are 98.7% prefix-cache hits, spent half its time in such steps (H200, 2026-10-19). 0 = off.
+PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_TOKENS", "64"))
+
+
+def decode_rows(caches, chunks, pools):
+    """Expand prefill chunks into decode rows: reserve every chunk's blocks in every live pool (same order in each), and
+    return (tokens, positions, owner row per token, table [K, live layers, cols] of block ids, 0-padded). The caches'
+    block lists grow here; their lengths move on only after the forward (`commit_rows`)."""
+    live = [L for L, p in enumerate(pools) if p is not None]
+    bs = pools[live[0]].block_size
+    tokens, pos, owner = [], [], []
+    for k, (cache, chunk) in enumerate(zip(caches, chunks)):
+        p0 = cache.seq_len
+        need = (p0 + len(chunk) + bs - 1) // bs
+        for L in live:
+            bt = cache.block_tables[L]
+            while len(bt) < need:
+                bt.append(pools[L].alloc())
+        tokens += chunk
+        pos += range(p0, p0 + len(chunk))
+        owner += [k] * len(chunk)
+    cols = max(len(c.block_tables[live[0]]) for c in caches)
+    table = [[c.block_tables[L] + [0] * (cols - len(c.block_tables[L])) for L in live] for c in caches]
+    return tokens, pos, owner, table
+
+
+def commit_rows(caches, chunks, pools) -> None:
+    """The chunks' K/V are written: every live layer's length moves on by the chunk."""
+    for cache, chunk in zip(caches, chunks):
+        for L, pool in enumerate(pools):
+            if pool is not None:
+                cache.seq_lens[L] += len(chunk)
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom forward (Qwen3MoeForCausalLM)."""
 
@@ -803,6 +841,11 @@ class CustomTorchBackend(InferenceBackend):
                 out.append((kv, tok if final else None, n))
             return out
         dev = self.device
+        if (decode is None and self._graph_on and 0 < sum(len(c) for _, c, _, _ in items) <= PREFILL_AS_DECODE_TOKENS
+                and max(self._graph_buckets) >= PREFILL_AS_DECODE_TOKENS):
+            out = self._prefill_as_decode(items)
+            if out is not None:
+                return out
         caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
         prefix = [c.seq_len for c in caches]
         chunks = [chunk for _, chunk, _, _ in items]
@@ -875,6 +918,50 @@ class CustomTorchBackend(InferenceBackend):
                                     "gpu_forward_s": (round(ev0.elapsed_time(ev1) / 1e3, 4)
                                                       if cuda and ev1.query() else None)}   # a step with no final row has not synced
         return (out, next_tokens) if decode is not None else out
+
+    @torch.no_grad()
+    def _prefill_as_decode(self, items):
+        """Short prefill chunks as one replay of the decode graph (`PREFILL_AS_DECODE_TOKENS`): the same result shape
+        as prefill_chunk_batch. None when the rows do not fit the graphs' block tables (the caller runs the packed
+        forward). On a failure every row's blocks are freed, as the packed path does."""
+        from types import SimpleNamespace
+        from inference_server.models.paged_kv_cache import PagedKVCache
+        t0 = time.perf_counter()
+        caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
+        chunks = [chunk for _, chunk, _, _ in items]
+        bs = self._block_size
+        if max((c.seq_len + len(ch) + bs - 1) // bs for c, ch in zip(caches, chunks)) > self._graph_max_cols:
+            return None
+        try:
+            tokens, pos, owner, table = decode_rows(caches, chunks, self.pools)
+            if not self._graphs:
+                self._capture_all_graphs()
+            dev, n = self.device, len(tokens)
+            pin = (lambda v, dt: torch.tensor(v, dtype=dt).pin_memory().to(dev, non_blocking=True))
+            tok_t, pos_t, own_t = pin(tokens, torch.long), pin(pos, torch.long), pin(owner, torch.long)
+            tab_t = pin(table, torch.long)                                                    # [K, layers, cols]
+            bt = tab_t[own_t].transpose(0, 1).contiguous()                                    # [layers, n, cols]
+            ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+            ev0.record()
+            logits = self._replay_decode(tok_t.unsqueeze(1), pos_t.unsqueeze(1),
+                                         SimpleNamespace(n_rows=n, seq_lens=pos_t, bt=bt), self._decode_bucket(n))
+            ev1.record()
+        except BaseException:
+            for c in caches:
+                c.free_all()
+            raise
+        commit_rows(caches, chunks, self.pools)
+        t1 = time.perf_counter()
+        out, end = [], -1
+        for k, (_, chunk, final, sampling) in enumerate(items):
+            end += len(chunk)
+            tok = int(sample(logits[end:end + 1, -1, :], sampling).item()) if final else None
+            out.append((caches[k], tok, caches[k].seq_len))
+        t2 = time.perf_counter()
+        self.last_prefill_timing = {"host_enqueue_s": round(t1 - t0, 4), "alloc_s": 0.0, "sync_wait_s": round(t2 - t1, 4),
+                                    "gpu_forward_s": round(ev0.elapsed_time(ev1) / 1e3, 4) if ev1.query() else None,
+                                    "as_decode": True}
+        return out
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
