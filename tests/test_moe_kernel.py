@@ -56,16 +56,18 @@ def test_align_fused_matches_align_and_the_scatter_gemm_matches_index_add(T, top
     torch.testing.assert_close(out, ref, atol=3e-2, rtol=2e-2)
 
 
-@pytest.mark.parametrize("T,top_k,E,renorm", [(1, 8, 128, True), (7, 8, 128, True), (32, 8, 128, False), (5, 2, 8, True),
-                                               (3, 1, 4, True)])
-def test_route_fused_matches_the_four_launch_routing(T, top_k, E, renorm):
+@pytest.mark.parametrize("router,T,top_k,E,renorm", [("route_fused",) + c for c in [(1, 8, 128, True), (7, 8, 128, True), (32, 8, 128, False), (5, 2, 8, True),
+                                               (3, 1, 4, True)]]
+                         + [("route_multi", 1, 8, 128, True), ("route_multi", 33, 8, 128, False),
+                            ("route_multi", 200, 8, 128, True), ("route_multi", 5, 2, 8, True)])
+def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     """Same grouping (every pair once, each block one expert), same weights, same scattered output."""
     from inference_server.models import moe_kernel
     from inference_server.models.qwen3_moe import route
     torch.manual_seed(T + 7)
     logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
     rw, rids = route(logits, top_k, renorm)
-    sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, top_k, renorm, 16)
+    sorted_ids, expert_ids, tok, pair_w = getattr(moe_kernel, router)(logits, E, top_k, renorm, 16)
     M = T * top_k
     assert sorted_ids.numel() == expert_ids.numel() * 16 and (sorted_ids < M).sum() == M
     real = sorted_ids[sorted_ids < M]

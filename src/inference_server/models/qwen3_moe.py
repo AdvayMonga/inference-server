@@ -162,7 +162,7 @@ if PREFILL_ATTN == "flashinfer":
 # Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
 MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
 # Up to this many tokens the whole router (softmax, top-k, grouping, padding) is one launch (moe_kernel.route_fused);
-# above it, topk_softmax + sort + align_fused. 0 = never.
+# above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router.
 ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "32"))
 
 FP8 = torch.float8_e4m3fn
@@ -269,14 +269,8 @@ class Qwen3SparseMoE(nn.Module):
             from inference_server.models import moe_kernel
             gu, gu_s = self.experts.weights("gate_up_proj")
             dn, dn_s = self.experts.weights("down_proj")
-            if T <= ROUTE_FUSED_MAX_TOKENS:
-                sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, self.top_k,
-                                                                             self.norm_topk_prob, 16)
-            else:
-                weights, experts = fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True)
-                sorted_e, order = torch.sort(experts.view(-1), stable=True)
-                sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E,
-                                                                             self.top_k, 16)
+            route = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
+            sorted_ids, expert_ids, tok, pair_w = route(logits, E, self.top_k, self.norm_topk_prob, 16)
             h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, w_scale=gu_s)
             act = fused.silu_mul(h)
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)

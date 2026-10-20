@@ -332,6 +332,94 @@ def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool
 
 
 @triton.jit
+def _route_topk_kernel(LOGITS, E_IDS, TOK, PAIR_W, COUNTS, stride_l, T, E: tl.constexpr, E_PAD: tl.constexpr,
+                       K: tl.constexpr, RENORM: tl.constexpr, BLOCK_T: tl.constexpr):
+    """route_multi, step 1 (a program per BLOCK_T tokens): softmax and top-K, each pair's expert / token / weight, and
+    the pairs per expert counted with atomics."""
+    t = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    cols = tl.arange(0, E_PAD)
+    tm = t < T
+    m2 = tm[:, None] & (cols < E)[None, :]
+    x = tl.load(LOGITS + t[:, None] * stride_l + cols[None, :], mask=m2, other=float("-inf")).to(tl.float32)
+    p = tl.exp(x - tl.max(x, axis=1)[:, None])
+    p = p / tl.sum(p, axis=1)[:, None]
+    p = tl.where(m2, p, -1.0)
+    total = tl.zeros((BLOCK_T,), tl.float32)
+    for j in tl.static_range(K):                                # the same picks and tie order as _route_kernel
+        v = tl.max(p, axis=1)
+        idx = tl.minimum(tl.min(tl.where(p == v[:, None], cols[None, :], E_PAD), axis=1), E - 1)
+        total += v
+        tl.store(E_IDS + t * K + j, idx.to(tl.int32), mask=tm)
+        tl.store(PAIR_W + t * K + j, v, mask=tm)
+        tl.store(TOK + t * K + j, t.to(tl.int32), mask=tm)
+        tl.atomic_add(COUNTS + idx, tl.full((BLOCK_T,), 1, tl.int32), mask=tm)
+        p = tl.where(cols[None, :] == idx[:, None], -1.0, p)
+    if RENORM:
+        for j in tl.static_range(K):
+            w = tl.load(PAIR_W + t * K + j, mask=tm, other=0.0)
+            tl.store(PAIR_W + t * K + j, w / total, mask=tm)
+
+
+@triton.jit
+def _route_offsets_kernel(COUNTS, PSTART, SORTED_IDS, EXPERT_IDS, M, n_blocks, max_blocks, E: tl.constexpr,
+                          E_PAD: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
+    """route_multi, step 2 (one program): each expert's padded first row, padding everywhere, block experts."""
+    bins = tl.arange(0, E_PAD)
+    counts = tl.load(COUNTS + bins, mask=bins < E, other=0)
+    padded = (counts + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    pstart = tl.cumsum(padded, 0) - padded
+    tl.store(PSTART + bins, pstart)
+    offs = tl.arange(0, BLOCK)
+    for s in range(0, n_blocks * BLOCK_M, BLOCK):              # padding rows read M, blocks past the end E
+        tl.store(SORTED_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + M, mask=(s + offs) < n_blocks * BLOCK_M)
+    for s in range(0, n_blocks, BLOCK):
+        tl.store(EXPERT_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + E, mask=(s + offs) < n_blocks)
+    tl.debug_barrier()
+    nb = padded // BLOCK_M
+    first = pstart // BLOCK_M
+    for j in range(0, max_blocks):
+        tl.store(EXPERT_IDS + first + j, bins, mask=(j < nb) & (bins < E))
+
+
+@triton.jit
+def _route_place_kernel(E_IDS, PSTART, CURSOR, SORTED_IDS, M, BLOCK: tl.constexpr):
+    """route_multi, step 3 (a program per BLOCK pairs): each pair takes the next row of its expert's run."""
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = i < M
+    e = tl.load(E_IDS + i, mask=m, other=0)
+    rank = tl.atomic_add(CURSOR + e, tl.full((BLOCK,), 1, tl.int32), mask=m)
+    tl.store(SORTED_IDS + tl.load(PSTART + e, mask=m, other=0) + rank, i.to(tl.int32), mask=m)
+
+
+def route_multi(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool,
+                block_m: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """route_fused's outputs for any number of tokens, without a sort (topk_softmax + torch.sort + align_fused took
+    radixSortKVInPlace alone to 5.4% of a 256-row decode step, H200 2026-10-19): a counting sort over three launches
+    and one zero-fill. Pairs within an expert's run land in an arbitrary order; each row's GEMM output does not
+    depend on its position."""
+    T, E = logits.shape
+    M = T * top_k
+    dev = logits.device
+    n_blocks = (M + E * (block_m - 1)) // block_m
+    sorted_ids = torch.empty(n_blocks * block_m, dtype=torch.int32, device=dev)
+    expert_ids = torch.empty(n_blocks, dtype=torch.int32, device=dev)
+    tok = torch.empty(M, dtype=torch.int32, device=dev)
+    pair_w = torch.empty(M, dtype=torch.float32, device=dev)
+    e_ids = torch.empty(M, dtype=torch.int32, device=dev)
+    e_pad = triton.next_power_of_2(E + 1)
+    counters = torch.zeros(3 * e_pad, dtype=torch.int32, device=dev)          # counts, cursors, padded starts
+    counts, cursor, pstart = counters[:e_pad], counters[e_pad:2 * e_pad], counters[2 * e_pad:]
+    BLOCK_T = 16
+    _route_topk_kernel[(triton.cdiv(T, BLOCK_T),)](logits, e_ids, tok, pair_w, counts, logits.stride(0), T, E=E,
+                                                   E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=BLOCK_T, num_warps=4)
+    _route_offsets_kernel[(1,)](counts, pstart, sorted_ids, expert_ids, M, n_blocks, triton.cdiv(M, block_m), E=E,
+                                E_PAD=e_pad, BLOCK_M=block_m, BLOCK=1024, num_warps=4)
+    BLOCK = 1024
+    _route_place_kernel[(triton.cdiv(M, BLOCK),)](e_ids, pstart, cursor, sorted_ids, M, BLOCK=BLOCK, num_warps=4)
+    return sorted_ids, expert_ids, tok, pair_w
+
+
+@triton.jit
 def _scatter_add_weighted_kernel(Y, TOK, PAIR_W, OUT, M, N, stride_y, stride_o,
                                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
     """out[tok[i]] += pair_w[i] * y[i] for a tile of rows: the MoE epilogue of the CUTLASS path in one pass."""
