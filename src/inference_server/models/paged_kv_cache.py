@@ -29,14 +29,49 @@ import torch.nn.functional as F
 from inference_server.models import fused
 
 
+class _PinnedRing:
+    """Pinned staging buffers for host -> device copies, reused in rotation: pinning a fresh buffer per copy
+    (cudaHostAlloc) was 40% of the scheduler thread at 1,000 decode rows (py-spy, H200 2026-10-20). A slot is reused
+    only once the copy that last read it has completed (its event)."""
+
+    SLOTS, ELEMS = 16, 1 << 20                                  # 16 x 8 MB
+
+    def __init__(self):
+        self.bufs = [torch.empty(self.ELEMS, dtype=torch.int64, pin_memory=True) for _ in range(self.SLOTS)]
+        self.events: list = [None] * self.SLOTS
+        self.i = 0
+
+    def copy(self, t: torch.Tensor, device: torch.device) -> torch.Tensor:
+        i = self.i
+        self.i = (i + 1) % self.SLOTS
+        if self.events[i] is not None:
+            self.events[i].synchronize()
+        n = t.numel()
+        src = self.bufs[i].view(t.dtype)[:n]
+        src.copy_(t.reshape(-1))
+        out = src.to(device, non_blocking=True).view(t.shape)
+        ev = torch.cuda.Event()
+        ev.record()
+        self.events[i] = ev
+        return out
+
+
+_ring: _PinnedRing | None = None
+
+
 def to_device(values, device: torch.device, dtype=torch.long) -> torch.Tensor:
     """A host list as a device tensor. On CUDA through pinned memory with a non-blocking copy: a pageable copy waits for
     every kernel queued on the stream, i.e. for the decode step running asynchronously (2026-10-19: such copies in row
-    removal made each evict phase wait ~12 ms under long prompts)."""
+    removal made each evict phase wait ~12 ms under long prompts). The pinned memory is a ring of reused buffers."""
+    global _ring
     t = torch.tensor(values, dtype=dtype)
     if device.type != "cuda":
         return t.to(device)
-    return t.pin_memory().to(device, non_blocking=True)
+    if t.numel() * t.element_size() > _PinnedRing.ELEMS * 8 or t.numel() == 0:
+        return t.pin_memory().to(device, non_blocking=True)
+    if _ring is None:
+        _ring = _PinnedRing()
+    return _ring.copy(t, device)
 
 
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,

@@ -56,7 +56,7 @@ def _moe_gemm_kernel(A, TOK, W, SCALE, A_SCALE, C, SORTED, EXPERT_IDS, M, N, K,
             k_ok = (k0 + offs_k) < K // SPLIT_K
             a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
             w = tl.load(w_ptrs, mask=k_ok[:, None] & n_ok[None, :], other=0.0)
-            acc += tl.dot(a, w)
+            acc = tl.dot(a, w, acc, max_num_imprecise_acc=0)     # fp32 accumulation, as torch's grouped GEMM
             a_ptrs += BLOCK_K
             w_ptrs += BLOCK_K * stride_wk
         acc = acc * tl.load(A_SCALE + src, mask=valid, other=0.0)[:, None]
@@ -184,7 +184,7 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK,
             k_ok = (k0 + offs_k) < K // SPLIT_K
             a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
             w = tl.load(w_ptrs, mask=k_ok[:, None] & n_ok[None, :], other=0.0)
-            acc += tl.dot(a, w)
+            acc = tl.dot(a, w, acc, max_num_imprecise_acc=0)     # fp32 accumulation, as torch's grouped GEMM
             a_ptrs += BLOCK_K
             w_ptrs += BLOCK_K * stride_wk
         acc = acc * tl.load(A_SCALE + rows, mask=valid, other=0.0)[:, None]
