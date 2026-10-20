@@ -896,10 +896,12 @@ class CustomTorchBackend(InferenceBackend):
                 rows = list(batched)                # CPU/MPS: the decode rows are PagedKVCache objects
             caches = caches + rows
             prefix = prefix + [r.seq_len for r in rows]
-            chunks = chunks + [[int(t)] for t in current.tolist()]
-            lens = lens + [1] * len(rows)
+            lens = lens + [1] * len(rows)           # the decode rows' tokens join on the device (no .tolist() sync)
         if self.packed_prefill:                     # one row of every chunk, no padding; logits at each row's last token
-            input_ids = to_device([t for c in chunks for t in c], dev).unsqueeze(0)
+            input_ids = to_device([t for c in chunks for t in c], dev)
+            if decode is not None:
+                input_ids = torch.cat([input_ids, current.view(-1).to(input_ids.device)])
+            input_ids = input_ids.unsqueeze(0)
             position_ids = to_device([p + i for p, n in zip(prefix, lens) for i in range(n)], dev).unsqueeze(0)
             ends, acc = [], 0
             for n in lens:
