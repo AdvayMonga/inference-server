@@ -276,7 +276,7 @@ def _gqa_decode_splitk_kernel(
     t1 = tl.minimum(t0 + per, n_tiles)
 
     q = tl.load(Q + seq * sq_n + heads[:, None] * sq_h + d[None, :],
-                mask=gm[:, None], other=0.0).to(Kp.dtype.element_ty)   # [G_PAD, D]
+                mask=gm[:, None], other=0.0)                           # [G_PAD, D], q's own type (bf16)
 
     m_i = tl.zeros([G_PAD], dtype=tl.float32) - 1e30
     l_i = tl.zeros([G_PAD], dtype=tl.float32)
@@ -287,14 +287,14 @@ def _gqa_decode_splitk_kernel(
         valid = offs < L
         blk = tl.load(BT + seq * bt_n + offs // BLOCK_SIZE, mask=valid, other=0)
         base = blk * sk_b + kvh * sk_h + (offs % BLOCK_SIZE) * sk_s
-        k = tl.load(Kp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0)
+        k = tl.load(Kp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0).to(q.dtype)   # fp8 KV widened
         s = tl.dot(q, tl.trans(k)) * scale                          # [G_PAD, BLOCK_N]
         s = tl.where(valid[None, :], s, -float("inf"))
         m_new = tl.maximum(m_i, tl.max(s, axis=1))
         alpha = tl.exp(m_i - m_new)
         p = tl.exp(s - m_new[:, None])
         l_i = l_i * alpha + tl.sum(p, axis=1)
-        v = tl.load(Vp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0)
+        v = tl.load(Vp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0).to(q.dtype)
         acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
         m_i = m_new
 
@@ -353,7 +353,7 @@ def paged_decode_attention(
     # Found by the layer-1 loop (BlameGraph kernels/evolve, 2026-10-14) and validated for head dim <= 128 only; wider
     # heads keep the tuned launch table below.
     if (D & (D - 1)) == 0 and 16 <= D <= 128 and (bs & (bs - 1)) == 0 and k_pool.dtype in (
-            torch.float16, torch.bfloat16):
+            torch.float16, torch.bfloat16, torch.float8_e4m3fn) and q.dtype in (torch.float16, torch.bfloat16):
         g_pad = max(16, 1 << (group - 1).bit_length())
         block_n = 64 if D <= 128 else (32 if D <= 256 else 16)
         block_n = max(block_n, bs) if bs <= 64 else block_n

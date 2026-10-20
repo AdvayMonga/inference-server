@@ -108,8 +108,10 @@ class Model:
     def bind_pools(self, pools) -> None:
         """The paged K/V pools, one per layer ([blocks, NKV, 16, D] bf16 each), into the table."""
         assert len(pools) == self.n_layers and all(p is not None for p in pools), "one live pool per layer"
+        self.kv8 = pools[0].k.dtype == torch.float8_e4m3fn            # KV_CACHE_DTYPE=fp8
         for row, p in zip(self._rows, pools):
-            assert p.k.dtype == torch.bfloat16 and tuple(p.k.shape[1:]) == (NKV, 16, D) and p.k.is_contiguous() and p.v.is_contiguous()
+            assert p.k.dtype in (torch.bfloat16, torch.float8_e4m3fn) and p.k.dtype == pools[0].k.dtype
+            assert tuple(p.k.shape[1:]) == (NKV, 16, D) and p.k.is_contiguous() and p.v.is_contiguous()
             row[11], row[12] = p.k.data_ptr(), p.v.data_ptr()
         self.table = torch.tensor(self._rows, dtype=torch.int64, device=self.device)
 
@@ -130,4 +132,4 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
             _NO_TIMES = torch.empty(0, dtype=torch.int64, device=tokens.device)
         times = _NO_TIMES
     return _ext().decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
-                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer)
+                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8)

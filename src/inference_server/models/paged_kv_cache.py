@@ -46,8 +46,8 @@ def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, sl
         fused.kv_store(pool.k, pool.v, bt, lb, slot, k_new, v_new)
         return
     bid = bt[rows, lb]
-    pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
-    pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+    pool.k[bid, :, slot, :] = k_new[:, :, 0, :].to(pool.k.dtype)
+    pool.v[bid, :, slot, :] = v_new[:, :, 0, :].to(pool.v.dtype)
 
 
 class KVCacheExhausted(RuntimeError):
@@ -503,8 +503,8 @@ class PagedKVCache:
         pos = seq_len + torch.arange(S_new, device=k_new.device)
         bids = torch.tensor(bt, device=k_new.device)[pos // block_size]
         slots = pos % block_size
-        pool.k[bids, :, slots, :] = k_per_tok
-        pool.v[bids, :, slots, :] = v_per_tok
+        pool.k[bids, :, slots, :] = k_per_tok.to(pool.k.dtype)
+        pool.v[bids, :, slots, :] = v_per_tok.to(pool.v.dtype)
 
         self.seq_lens[layer_idx] = seq_len + S_new
 
@@ -738,19 +738,22 @@ class BatchedDecodeState:
             self._host_len[r] += 1
 
 
-def blocks_for_budget(model, budget_bytes: int, block_size: int) -> int:
-    """Blocks per pool that fit `budget_bytes` across every layer owning K/V (K and V, the model's dtype)."""
-    elem = torch.empty((), dtype=next(model.parameters()).dtype).element_size()
+def blocks_for_budget(model, budget_bytes: int, block_size: int, kv_dtype: torch.dtype | None = None) -> int:
+    """Blocks per pool that fit `budget_bytes` across every layer owning K/V (K and V, in `kv_dtype`: default the
+    model's)."""
+    elem = torch.empty((), dtype=kv_dtype or next(model.parameters()).dtype).element_size()
     per_block = sum(2 * layer.self_attn.num_kv_heads * block_size * layer.self_attn.head_dim * elem
                     for layer in model.model.layers if not layer.self_attn.is_kv_shared)
     return max(1, budget_bytes // per_block)
 
 
-def make_pools(model, num_blocks_per_pool: int = 1024, block_size: int = 16) -> list[BlockPool | None]:
+def make_pools(model, num_blocks_per_pool: int = 1024, block_size: int = 16,
+               kv_dtype: torch.dtype | None = None) -> list[BlockPool | None]:
     """Build the BlockPool list matching a Qwen3MoeForCausalLM's layers: one pool of
-    `num_blocks_per_pool` per layer that owns K/V, None for a layer that does not."""
+    `num_blocks_per_pool` per layer that owns K/V, None for a layer that does not. `kv_dtype`: the
+    pools' element type (default the model's; float8_e4m3fn halves the bytes per token, unit scale)."""
     device = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
+    dtype = kv_dtype or next(model.parameters()).dtype
     pools: list[BlockPool | None] = []
     for layer in model.model.layers:
         attn = layer.self_attn

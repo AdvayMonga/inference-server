@@ -111,8 +111,8 @@ class _PrefillGraphCtx:
         bids = bt[pos // self.bs]
         slots = pos % self.bs
         pool = self.pools[layer_idx]
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)   # [bucket, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)   # [bucket, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
 
     def block_table_tensor(self, layer_idx):
         return self.block_tables[layer_idx].to(torch.int32).clamp_min(0)
@@ -234,8 +234,8 @@ class _PrefillCtx:
             self._wave_pos = (scratch, bids, slots)
         _, bids, slots = self._wave_pos
 
-        pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3)            # [K, S, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3)
+        pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3).to(pool.k.dtype)   # [K, S, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3).to(pool.v.dtype)
 
         for b, cache in enumerate(self.caches):   # bookkeeping only — no GPU work
             cache.seq_lens[layer_idx] += self._suffix[b]
@@ -274,8 +274,8 @@ class _PackedCtx(_PrefillCtx):
         if not same or self._wave_pos is None:
             self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)                                  # [T, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)                 # [T, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
         for b, cache in enumerate(self.caches):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
@@ -417,6 +417,14 @@ class CustomTorchBackend(InferenceBackend):
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
 
+        # The KV pools' element type: KV_CACHE_DTYPE=fp8 (CUDA) stores K/V as float8_e4m3fn with a unit scale, as
+        # vLLM's uncalibrated fp8 cache does: twice the tokens per GB (96 KB a token in bf16 for this model) and half
+        # the bytes each attention read streams; readers widen to bf16 before any product. Default bf16.
+        kv = os.environ.get("KV_CACHE_DTYPE", "bf16").lower()
+        self.kv_dtype = torch.float8_e4m3fn if (kv == "fp8" and self.device.type == "cuda") else None
+        if kv == "fp8" and self.kv_dtype is None:
+            logger.warning("KV_CACHE_DTYPE=fp8 needs CUDA; the pools stay in the model's dtype")
+
         # Pre-allocate paged block pools shared across sessions — see kv_reserve.
         from inference_server.config import settings
         from inference_server.models.paged_kv_cache import blocks_for_budget
@@ -429,13 +437,14 @@ class CustomTorchBackend(InferenceBackend):
             # on long prompts). The remaining share is for CUDA graphs and smaller transients.
             peak = self._prefill_peak_bytes(settings.max_prefill_tokens or self.max_positions or 4096)
             free, _ = torch.cuda.mem_get_info(self.device)
-            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz)
+            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz,
+                                         self.kv_dtype)
             logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free minus a %.1f GiB prefill peak "
                         "at %d tokens)", n_blocks, bsz, 100 * settings.kv_cache_memory_fraction, free / 2**30,
                         peak / 2**30, settings.max_prefill_tokens)
         else:
             n_blocks = 512
-        self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
+        self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz, kv_dtype=self.kv_dtype)
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
         if self._mega is not None:
             self._mega.bind_pools(self.pools)

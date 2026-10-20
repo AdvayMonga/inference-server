@@ -40,7 +40,7 @@ struct Layer {
     const bf16* wr;
     const void* gate_up; const float* gu_scale;      // [E, 2I, H] fp8 e4m3 + [E, 2I] fp32 scale, or bf16 and null
     const void* down; const float* down_scale;       // [E, H, I] likewise
-    bf16* pool_k; bf16* pool_v;                      // [blocks, NKV, BS, D]
+    void* pool_k; void* pool_v;                      // [blocks, NKV, BS, D], bf16 or fp8 e4m3 (Args::kv8)
 };
 static_assert(sizeof(Layer) == 13 * 8, "Layer is 13 pointers");
 
@@ -54,6 +54,7 @@ struct Args {
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
     int stamp_layer;                                                                       // the layer `times` stamps
+    int kv8;                                                                               // the pools hold fp8 e4m3
 };
 
 __device__ __forceinline__ float bf2f(bf16 x) { return __bfloat162float(x); }
@@ -321,18 +322,29 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                             kb[u] = f2bf(n[u] * cs[u] - n[u + 2] * sn[u]);
                             kb[u + 2] = f2bf(n[u + 2] * cs[u] + n[u] * sn[u]);
                         }
+                        auto held = [&](float x) { return a.kv8 ? float(__nv_fp8_e4m3(x)) : x; };   // as the pool holds it
 #pragma unroll
-                        for (int u = 0; u < 2; ++u) { kn_s[lane + 32 * u] = bf2f(kb[u]); kn_s[lane + 32 * u + D / 2] = bf2f(kb[u + 2]); }
+                        for (int u = 0; u < 2; ++u) { kn_s[lane + 32 * u] = held(bf2f(kb[u])); kn_s[lane + 32 * u + D / 2] = held(bf2f(kb[u + 2])); }
 #pragma unroll
-                        for (int u = 0; u < 4; ++u) vn_s[lane + 32 * u] = bf2f(vrow[lane + 32 * u]);
+                        for (int u = 0; u < 4; ++u) vn_s[lane + 32 * u] = held(bf2f(vrow[lane + 32 * u]));
                         if (hq % GQA == 0) {                                    // the group's first head writes the pool
                             const int bid = (int)bt[b * a.bt_cols + pos / BS], slot = pos % BS;
-                            bf16* kdst = lw.pool_k + (((size_t)bid * NKV + g) * BS + slot) * D;
-                            bf16* vdst = lw.pool_v + (((size_t)bid * NKV + g) * BS + slot) * D;
+                            const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
+                            if (a.kv8) {
+                                __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
+                                __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
 #pragma unroll
-                            for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
+                                for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(kb[u])); kdst[lane + 32 * u + D / 2] = __nv_fp8_e4m3(bf2f(kb[u + 2])); }
 #pragma unroll
-                            for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
+                                for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(vrow[lane + 32 * u]));
+                            } else {
+                                bf16* kdst = reinterpret_cast<bf16*>(lw.pool_k) + off;
+                                bf16* vdst = reinterpret_cast<bf16*>(lw.pool_v) + off;
+#pragma unroll
+                                for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
+#pragma unroll
+                                for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
+                            }
                         }
                     }
                 }
@@ -346,16 +358,31 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                         for (int i = 0; i < D; ++i) acc += q_s[i] * kn_s[i];
                     } else {
                         const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
-                        const bf16* krow = lw.pool_k + (((size_t)bid * NKV + g) * BS + slot) * D;
-                        uint4 kv4[D / 8];
+                        const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
+                        if (a.kv8) {                                            // 128 B a row: 8 loads of 16
+                            const uint4* krow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_k) + off);
+                            uint4 kv4[D / 16];
 #pragma unroll
-                        for (int i = 0; i < D / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
+                            for (int i = 0; i < D / 16; ++i) kv4[i] = krow[i];
 #pragma unroll
-                        for (int i = 0; i < D / 8; ++i) {
-                            float kf[8];
-                            bf16_to_f32<8>(&kv4[i], kf);
+                            for (int i = 0; i < D / 16; ++i) {
+                                float kf[16];
+                                fp8_to_f32<16>(&kv4[i], kf);
 #pragma unroll
-                            for (int jj = 0; jj < 8; ++jj) acc += q_s[i * 8 + jj] * kf[jj];
+                                for (int jj = 0; jj < 16; ++jj) acc += q_s[i * 16 + jj] * kf[jj];
+                            }
+                        } else {
+                            const bf16* krow = reinterpret_cast<const bf16*>(lw.pool_k) + off;
+                            uint4 kv4[D / 8];
+#pragma unroll
+                            for (int i = 0; i < D / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
+#pragma unroll
+                            for (int i = 0; i < D / 8; ++i) {
+                                float kf[8];
+                                bf16_to_f32<8>(&kv4[i], kf);
+#pragma unroll
+                                for (int jj = 0; jj < 8; ++jj) acc += q_s[i * 8 + jj] * kf[jj];
+                            }
                         }
                     }
                     sc = acc;
@@ -386,7 +413,9 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                             v = vn_s[d];
                         } else {
                             const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
-                            v = bf2f(lw.pool_v[(((size_t)bid * NKV + g) * BS + slot) * D + d]);
+                            const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D + d;
+                            v = a.kv8 ? float(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_v)[off])
+                                      : bf2f(reinterpret_cast<const bf16*>(lw.pool_v)[off]);
                         }
                         acc += p_s[tt] * v;
                     }
@@ -675,7 +704,7 @@ template <bool FP8> static void* pick(int B) {
 std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch::Tensor pos, torch::Tensor bt, torch::Tensor layers, torch::Tensor embed,
                           torch::Tensor final_norm, torch::Tensor lm_head, torch::Tensor inv_freq, torch::Tensor scratch_f32,
                           torch::Tensor scratch_bf16, torch::Tensor scratch_i32, double scale, bool fp8, torch::Tensor times,
-                          int64_t stamp_layer) {
+                          int64_t stamp_layer, bool kv8) {
     TORCH_CHECK(tokens.is_cuda() && tokens.dtype() == torch::kInt64 && tokens.dim() == 1 && tokens.is_contiguous(), "tokens [B] int64");
     const int B = tokens.size(0);
     TORCH_CHECK(B >= 1 && B <= BMAX, "batch 1..16");
@@ -721,6 +750,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     }
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
     a.stamp_layer = (int)stamp_layer;
+    a.kv8 = kv8 ? 1 : 0;
     void* args[] = {&a};
     auto stream = at::cuda::getCurrentCUDAStream();
     cudaError_t err = cudaLaunchCooperativeKernel(fp8 ? pick<true>(B) : pick<false>(B), dim3(num_sms()), dim3(THREADS), args, SMEM_BYTES, stream);

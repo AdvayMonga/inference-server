@@ -82,3 +82,31 @@ def test_packed_attention_matches_the_padded_reference():
     for r, n in enumerate(suffixes):
         torch.testing.assert_close(got[s:s + n], ref[r, :n], atol=1e-5, rtol=1e-5)
         s += n
+
+
+def test_fp8_pools_hold_the_suffix_and_attention_reads_them_widened():
+    """KV_CACHE_DTYPE=fp8: the context's writes cast into float8_e4m3fn pools, the padded attention reads them back
+    widened, and the result is the bf16-pool result to fp8 precision."""
+    torch.manual_seed(2)
+    Hq = 4
+    prefixes, suffixes = [6, 0, 11], [5, 3, 1]
+    S = max(suffixes)
+    q = torch.randn(3, Hq, S, D, dtype=torch.bfloat16)
+    k = torch.randn(3, H, S, D, dtype=torch.bfloat16)
+    v = torch.randn(3, H, S, D, dtype=torch.bfloat16)
+    outs = []
+    for dtype in (torch.bfloat16, torch.float8_e4m3fn):
+        pools = [BlockPool(64, BS, H, D, dtype, DEV)]
+        caches = []
+        for P in prefixes:
+            kv = PagedKVCache(pools=pools)
+            for pos in range(P):
+                kv.append(0, torch.full((1, H, 1, D), 0.25 * (pos % 4), dtype=torch.bfloat16),
+                          torch.full((1, H, 1, D), -0.5, dtype=torch.bfloat16))
+            caches.append(kv)
+        ctx = _PrefillCtx(caches, pools, prefixes, suffixes, DEV)
+        ctx.append(0, k, v)
+        assert pools[0].k.dtype == dtype
+        outs.append(sdpa_prefill(q, k, v, ctx, 0, D ** -0.5).float())
+    for r, n in enumerate(suffixes):                       # e4m3 keeps 3 mantissa bits: ~6% per element
+        torch.testing.assert_close(outs[1][r, :n], outs[0][r, :n], atol=0.15, rtol=0.15)
