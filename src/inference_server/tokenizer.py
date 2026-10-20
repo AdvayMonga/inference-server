@@ -90,6 +90,10 @@ class Tokenizer:
         """Convert token IDs back to text."""
         return self._tokenizer.decode(token_ids, skip_special_tokens=True)
 
+    def incremental(self) -> "IncrementalDetokenizer":
+        """A detokenizer for one streamed answer."""
+        return IncrementalDetokenizer(self.decode)
+
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID — used for streaming one token at a time."""
         return self._tokenizer.decode([token_id], skip_special_tokens=True)
@@ -117,3 +121,32 @@ class Tokenizer:
     @property
     def context_window(self) -> int:
         return self._context_window
+
+
+class IncrementalDetokenizer:
+    """The text of a growing token sequence, piece by piece (vLLM's prefix/read offsets): each call decodes a short
+    window, and tokens that end inside a multi-byte character are held until it is complete. Decoding each token alone
+    broke such characters (byte-level BPE splits an emoji over several tokens) and cost a decode call per token."""
+
+    def __init__(self, decode):
+        self._text = decode       # token ids -> text, special tokens skipped
+        self._ids: list[int] = []
+        self._prefix = 0          # start of the window whose text was already emitted up to `_read`
+        self._read = 0
+
+    def add(self, ids: list[int]) -> str:
+        """New text for these ids ("" while a character is incomplete)."""
+        self._ids.extend(ids)
+        done = self._text(self._ids[self._prefix:self._read])
+        full = self._text(self._ids[self._prefix:])
+        if len(full) > len(done) and not full.endswith("\ufffd"):
+            self._prefix, self._read = self._read, len(self._ids)
+            return full[len(done):]
+        return ""
+
+    def flush(self) -> str:
+        """Whatever is still held back at the end of the answer."""
+        done = self._text(self._ids[self._prefix:self._read])
+        full = self._text(self._ids[self._prefix:])
+        self._prefix = self._read = len(self._ids)
+        return full[len(done):]

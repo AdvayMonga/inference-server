@@ -269,8 +269,8 @@ class Qwen3SparseMoE(nn.Module):
             from inference_server.models import moe_kernel
             gu, gu_s = self.experts.weights("gate_up_proj")
             dn, dn_s = self.experts.weights("down_proj")
-            route = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
-            sorted_ids, expert_ids, tok, pair_w = route(logits, E, self.top_k, self.norm_topk_prob, 16)
+            router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
+            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, 16)
             h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, w_scale=gu_s)
             act = fused.silu_mul(h)
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)

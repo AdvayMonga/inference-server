@@ -33,6 +33,12 @@ OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "5000"))   # steps between the scheduler's own full collections
 
 
+def _deliver(items: list) -> None:
+    """On the event loop: one step's tokens (and end-of-stream markers) into their requests' queues, in order."""
+    for queue, item in items:
+        queue.put_nowait(item)
+
+
 class QueueFullError(Exception):
     """Raised by submit() when the pending queue has no capacity."""
 
@@ -235,6 +241,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Tokens bound for the HTTP side, handed over once per evict pass: one cross-thread wakeup per step instead of
+        # one per token (at 256 streams the event loop thread and this one fought for the GIL, 2026-10-19).
+        self._outbox: list = []
         # Counters
         self._total_admitted = 0
         self._total_completed = 0
@@ -516,6 +525,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             for i, _ in to_evict:
                 self.policy.on_request_finished(self._active[i].request)
             self._evict_rows(to_evict)
+        self._flush_outbox()
 
     def _evict_rows(self, items: list[tuple[int, str]]) -> None:
         """Evict several rows (index, state) with one batched-cache removal."""
@@ -1040,7 +1050,18 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _stream_token(self, request: ScheduledRequest, token: int) -> None:
         if request.token_queue is None or self._loop is None:
             return
-        self._loop.call_soon_threadsafe(request.token_queue.put_nowait, token)
+        self._outbox.append((request.token_queue, token))
+
+    def _end_stream(self, request: ScheduledRequest) -> None:
+        """The end-of-stream marker, behind every token already bound for this request."""
+        if request.token_queue is not None:
+            self._outbox.append((request.token_queue, None))
+        self._flush_outbox()
+
+    def _flush_outbox(self) -> None:
+        if self._outbox and self._loop is not None:
+            items, self._outbox = self._outbox, []
+            self._loop.call_soon_threadsafe(_deliver, items)
 
     def _resolve(self, request: ScheduledRequest, state: str = "ok") -> None:
         if self._loop is None:
@@ -1057,8 +1078,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             n = len(result)
             tpot = (total - ttft) / (n - 1) if n > 1 else 0.0
             self._metrics.record(ttft, tpot, total, n)
-        if request.token_queue is not None:
-            self._loop.call_soon_threadsafe(request.token_queue.put_nowait, None)
         # Release cached blocks tied to this prompt
         if self.backend.cache_adapter is not None:
             self.backend.cache_adapter.release(request.token_ids, session_id=request.session_id)
@@ -1067,6 +1086,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if not request.future.done():
                 request.future.set_result(result)
         self._loop.call_soon_threadsafe(_set)
+        self._end_stream(request)                 # after the result: a stream that ends finds it set
 
     def _reject(self, request: ScheduledRequest, exc: BaseException,
                 state: str | None = None) -> None:
@@ -1076,13 +1096,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._finish_row(request, state or ("rejected_429" if backpressure else "error"))
         if self._loop is None:
             return
-        if request.token_queue is not None:
-            self._loop.call_soon_threadsafe(request.token_queue.put_nowait, None)
 
         def _set():
             if not request.future.done():
                 request.future.set_exception(exc)
         self._loop.call_soon_threadsafe(_set)
+        self._end_stream(request)
 
     # --- Telemetry rows ---
 
