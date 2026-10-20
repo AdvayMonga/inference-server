@@ -24,15 +24,18 @@ H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-
 
 
 @functools.lru_cache(maxsize=None)
-def _ext():
+def _ext(kv8: bool = False, tma: bool = False):
+    """The extension built for fp8 (`kv8`) or bf16 KV pools and with (`tma`) or without the weight ring: build-time
+    flags, so a kernel carries only its own path (both as runtime flags cost the base path 16%, 2026-10-20)."""
     import sys
     from torch.utils.cpp_extension import load
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_step.cu")
-    return load(name="qwen3_decode_step", sources=[str(src)],
+    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
+                                   f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}"],
                 verbose=False)
 
 
@@ -40,7 +43,7 @@ def available() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
-        _ext()
+        _ext(os.environ.get("KV_CACHE_DTYPE", "").lower() == "fp8", TMA)     # the build the server will use
     except Exception as e:  # noqa: BLE001
         logger.warning("megakernel not built (%s)", str(e)[:300])
         return False
@@ -100,7 +103,7 @@ class Model:
         for name, t in (("embed", self.embed), ("lm_head", self.lm_head)):
             assert t.is_cuda and t.dtype == torch.bfloat16 and t.shape[1] == H and t.is_contiguous(), name
         self.inv_freq = m.rope.inv_freq.to(torch.float32).contiguous()
-        e = _ext()
+        e = _ext(os.environ.get("KV_CACHE_DTYPE", "").lower() == "fp8", TMA)     # scratch sizes: any build; this one is the server's
         self.f32 = torch.empty(e.scratch_f32_elems(), dtype=torch.float32, device=device)
         self.bf16 = torch.empty(e.scratch_bf16_elems(), dtype=torch.bfloat16, device=device)
         self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=device)
@@ -132,6 +135,6 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
         if _NO_TIMES is None:
             _NO_TIMES = torch.empty(0, dtype=torch.int64, device=tokens.device)
         times = _NO_TIMES
-    return _ext().decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
-                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8,
-                              TMA and tokens.numel() <= 2)
+    ext = _ext(bool(mdl.kv8), TMA)                   # the ring is built in; the kernel uses it at batch <= 2
+    return ext.decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
+                           mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8, TMA)

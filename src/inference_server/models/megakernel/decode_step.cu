@@ -17,6 +17,15 @@
 // Numerics follow the torch path: fp32 accumulation, bf16 rounding where it rounds; fp8 experts are weight-only
 // (activations stay bf16/fp32), x . (q * scale) accumulated in fp32. Dimensions are compile-time: the engine is
 // specialised to this model.
+// Built per (MEGA_KV8, MEGA_TMA): the KV pools' dtype and the weight ring are decided at build time (megakernel/_ext),
+// so neither path carries the other's code. Measured 2026-10-20 with both as runtime flags: the base path (bf16 KV,
+// no ring) was 5.21 ms a step against 4.48 for the kernel without them (B=1, 37-token context, fp8 experts).
+#ifndef MEGA_KV8
+#define MEGA_KV8 0
+#endif
+#ifndef MEGA_TMA
+#define MEGA_TMA 0
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -356,19 +365,16 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
     constexpr int RA = (BT <= 4) ? 2 : 1;                            // rows per warp item, the H-long GEMVs (qkv, lm_head)
     constexpr int R4 = (BT <= 2) ? 2 : 1;                            // o_proj
     using DN = Down<FP8>;
-    bool tma = false;                                                // weights streamed through the shared-memory ring
+    constexpr bool tma = MEGA_TMA && (BT <= 2);                      // weights streamed through the shared-memory ring
     unsigned long long* bars = reinterpret_cast<unsigned long long*>(smem_raw + 32);   // [NST], after red[8]
     unsigned char* ring = smem_raw + RING_OFF;
     uint32_t ph = 0;
-    if constexpr (BT <= 2) {
-        tma = a.tma != 0;
-        if (tma) {
-            if (tid == 0) {
-                for (int k = 0; k < NST; ++k) mbar_init(bars + k);
-                asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
-            }
-            __syncthreads();
+    if constexpr (tma) {
+        if (tid == 0) {
+            for (int k = 0; k < NST; ++k) mbar_init(bars + k);
+            asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
         }
+        __syncthreads();
     }
     uint4 wvA[RA][H / 256];                                          // the next H-long GEMV's first rows, loaded before the barrier
     if (!tma) {
@@ -489,7 +495,7 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                             kb[u] = f2bf(n[u] * cs[u] - n[u + 2] * sn[u]);
                             kb[u + 2] = f2bf(n[u + 2] * cs[u] + n[u] * sn[u]);
                         }
-                        if (a.kv8) {                                        // KV_CACHE_DTYPE=fp8
+                        if (MEGA_KV8) {                                        // KV_CACHE_DTYPE=fp8
                             __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
                             __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
 #pragma unroll
@@ -516,7 +522,7 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
                     const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
 #pragma unroll
                     for (int j = 0; j < GQA; ++j) s[j] = 0.f;
-                    if (a.kv8) {                                            // fp8 rows: 128 B each, widened as they land
+                    if (MEGA_KV8) {                                            // fp8 rows: 128 B each, widened as they land
                         const uint4* krow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_k) + off);
                         const uint4* vrow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_v) + off);
                         uint4 kv4[D / 16], vv4[D / 16];
@@ -1055,6 +1061,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     }
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
     a.stamp_layer = (int)stamp_layer;
+    TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
     a.kv8 = kv8 ? 1 : 0;
     a.tma = tma ? 1 : 0;
     void* args[] = {&a};

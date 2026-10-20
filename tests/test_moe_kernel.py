@@ -208,3 +208,43 @@ def test_tall_tiles_match_the_torch_grouped_gemms(T, top_k, E):
     y = torch._grouped_mm(h_ref, w2.transpose(-2, -1), offs=offs).float() * pair_w[order, None]
     ref = torch.zeros(T, K, device="cuda").index_add_(0, tok.long()[order], y)
     torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize("T,top_k,E,bm", [(64, 8, 128, 16), (1024, 8, 128, 64)])
+def test_fp8_activations_match_torch_scaled_grouped_mm(T, top_k, E, bm):
+    """W8A8: fp8 activations (per-row scale) x fp8 weights (per-channel scale) on the tensor cores equal torch's
+    _scaled_grouped_mm on the same rows and scales, for the gate_up GEMM and the scattered down GEMM."""
+    from inference_server.models import moe_kernel
+    torch.manual_seed(T + 3)
+    K, N = 256, 384
+    M = T * top_k
+    logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
+    sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_multi(logits, E, top_k, True, bm)
+    flat = torch.randn(T, K, dtype=torch.bfloat16, device="cuda")
+    w1 = torch.randn(E, N, K, dtype=torch.bfloat16, device="cuda") * 0.05
+    s1 = w1.abs().amax(-1).float() / 448.0                                  # per output channel
+    w1q = (w1.float() / s1[..., None]).clamp(-448, 448).to(torch.float8_e4m3fn)
+    a8, sa = moe_kernel.quant_rows(flat)
+    h = moe_kernel.moe_gemm(a8, tok, w1q, sorted_ids, expert_ids, M, block_m=bm, w_scale=s1, a_scale=sa)
+    pair_e = torch.full((M,), -1, dtype=torch.long, device="cuda")
+    for b in range(expert_ids.numel()):
+        ids = sorted_ids[b * bm:(b + 1) * bm]
+        ids = ids[ids < M].long()
+        pair_e[ids] = expert_ids[b].long()
+    order = torch.argsort(pair_e, stable=True)
+    offs = torch.searchsorted(pair_e[order], torch.arange(E, device="cuda"), right=True).to(torch.int32)
+    rows = tok.long()[order]
+    h_ref = torch._scaled_grouped_mm(a8[rows], w1q.transpose(-2, -1), sa[rows], s1, offs=offs, out_dtype=torch.bfloat16)
+    torch.testing.assert_close(h[order].float(), h_ref.float(), atol=3e-2, rtol=2e-2)
+    act = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+    w2 = torch.randn(E, K, N, dtype=torch.bfloat16, device="cuda") * 0.05
+    s2 = w2.abs().amax(-1).float() / 448.0
+    w2q = (w2.float() / s2[..., None]).clamp(-448, 448).to(torch.float8_e4m3fn)
+    act8, sact = moe_kernel.quant_rows(act)
+    out = torch.zeros(T, K, device="cuda")
+    moe_kernel.moe_gemm_scatter(act8, w2q, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=s2,
+                                a_scale=sact)
+    y = torch._scaled_grouped_mm(act8[order], w2q.transpose(-2, -1), sact[order], s2, offs=offs,
+                                 out_dtype=torch.bfloat16).float() * pair_w[order, None]
+    ref = torch.zeros(T, K, device="cuda").index_add_(0, rows, y)
+    torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)
