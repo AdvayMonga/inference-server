@@ -95,6 +95,7 @@ def test_decode_rows_joining_a_short_prefill_get_the_tokens_of_separate_steps():
     name = os.environ.get("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
     b = ctb.CustomTorchBackend("cuda", name)
     b.load_model(name)
+    b._mega_max_rows = 0                     # the plain decode step on the CUDA graphs too, like the joint replay
     ctb.PREFILL_AS_DECODE_TOKENS = 128
     text = ("Rivers carry sediment from mountains to the sea, building deltas where the current slows. ") * 30
     ids = b.tokenizer.encode(text)
