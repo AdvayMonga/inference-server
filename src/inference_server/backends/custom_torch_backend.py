@@ -162,8 +162,8 @@ class _PrefillCtx:
         self.pools = pools
         self._suffix = suffix_lens                 # python list of per-row real suffix lengths
         self._prefix = list(prefix_lens)           # and cached prefix lengths (prefill_attention.sdpa_prefill)
-        self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
-        self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
+        self.prefix_lens = to_device(list(prefix_lens), device, torch.int32)      # pinned: no wait on the stream
+        self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
         self._scratch = scratch                    # per-pool padding block (padding writes land here)
         self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
@@ -207,7 +207,7 @@ class _PrefillCtx:
         maxb = max((len(r) for r in rows), default=1)
         pad = self._scratch[layer_idx] if self._scratch is not None else 0
         flat = [r + [pad] * (maxb - len(r)) for r in rows]
-        return torch.tensor(flat, dtype=torch.int32, device=self.device)
+        return to_device(flat, self.device, torch.int32)
 
     def append(self, layer_idx, k_new, v_new):
         """One scatter for the whole wave. Was a Python loop over rows calling
@@ -828,6 +828,12 @@ class CustomTorchBackend(InferenceBackend):
         """Cache lookup only — no forward pass. Returns (seeded PagedKVCache, matched)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
         matched, shared = self.prefix_cache.lookup(token_ids)
+        if matched and matched >= len(token_ids):
+            # Every token cached: the next token needs a forward over the last one, and feeding it again at position
+            # len(ids) put it in the KV twice. Give back the last cached block; it is prefilled like any suffix.
+            for L, blocks in shared.items():
+                self.pools[L].release(blocks.pop())
+            matched -= self._block_size
         self.last_cache_hit_tokens = matched
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
         return cache, matched
@@ -884,14 +890,13 @@ class CustomTorchBackend(InferenceBackend):
             chunks = chunks + [[int(t)] for t in current.tolist()]
             lens = lens + [1] * len(rows)
         if self.packed_prefill:                     # one row of every chunk, no padding; logits at each row's last token
-            input_ids = torch.tensor([t for c in chunks for t in c], dtype=torch.long, device=dev).unsqueeze(0)
-            position_ids = torch.tensor([p + i for p, n in zip(prefix, lens) for i in range(n)],
-                                        dtype=torch.long, device=dev).unsqueeze(0)
+            input_ids = to_device([t for c in chunks for t in c], dev).unsqueeze(0)
+            position_ids = to_device([p + i for p, n in zip(prefix, lens) for i in range(n)], dev).unsqueeze(0)
             ends, acc = [], 0
             for n in lens:
                 acc += n
                 ends.append(acc - 1)
-            last_idx = torch.tensor(ends, device=dev)
+            last_idx = to_device(ends, dev)
         else:
             S = max(lens)
             input_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
@@ -939,8 +944,8 @@ class CustomTorchBackend(InferenceBackend):
     def joint_fits(self, n_rows: int, n_tokens: int, decode=None) -> bool:
         """Whether a step's prefill tokens (and `n_rows` running decode rows) fit one decode-graph replay."""
         from inference_server.models.paged_kv_cache import BatchedDecodeState
-        if decode is not None and not isinstance(decode[0], BatchedDecodeState):
-            return False
+        if decode is not None and (not self.packed_prefill or not isinstance(decode[0], BatchedDecodeState)):
+            return False                            # (a fallback from here is the packed joint forward)
         return (self._graph_on and 0 < n_tokens <= PREFILL_AS_DECODE_TOKENS
                 and n_rows + n_tokens <= max(self._graph_buckets))
 

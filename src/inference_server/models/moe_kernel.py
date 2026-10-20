@@ -355,6 +355,7 @@ def _route_topk_kernel(LOGITS, E_IDS, TOK, PAIR_W, COUNTS, stride_l, T, E: tl.co
         tl.atomic_add(COUNTS + idx, tl.full((BLOCK_T,), 1, tl.int32), mask=tm)
         p = tl.where(cols[None, :] == idx[:, None], -1.0, p)
     if RENORM:
+        tl.debug_barrier()                                      # the stores above, by whichever threads made them
         for j in tl.static_range(K):
             w = tl.load(PAIR_W + t * K + j, mask=tm, other=0.0)
             tl.store(PAIR_W + t * K + j, w / total, mask=tm)

@@ -84,6 +84,8 @@ class ScheduledRequest:
     cancelled: bool = False     # set by the HTTP side when the client goes away
     kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
+    admit_seq: int = 0          # admission order (the latest admitted is preempted first)
+    requeue_ts: float = 0.0     # when it was last requeued; its queue deadline counts from here (enqueue_ts stays)
 
     @property
     def prefill_ids(self) -> list[int]:
@@ -244,6 +246,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # Tokens bound for the HTTP side, handed over once per evict pass: one cross-thread wakeup per step instead of
         # one per token (at 256 streams the event loop thread and this one fought for the GIL, 2026-10-19).
         self._outbox: list = []
+        # Requeued (preempted) requests wait here until a row has finished: readmitted at once, a request takes back
+        # the blocks its preemption freed and is preempted again, and no decode step ever launches.
+        self._held: list[ScheduledRequest] = []
+        self._finished_since_hold = 0
+        self._admit_counter = 0
         # Counters
         self._total_admitted = 0
         self._total_completed = 0
@@ -375,6 +382,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "kv_free_blocks": kv_free_blocks,
             "kv_admit_blocked": self._kv_admit_blocked,
             "active_kv_reserved": self._active_kv_reserved,
+            "held_for_kv": len(self._held),
             "active_kv_budget": self.max_active_kv_tokens,
             "prefill_mode": self.prefill_mode,
             "prefill_chunk_size": self.prefill_chunk_size,
@@ -408,8 +416,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                                     # long_prompt even with the frozen heap; the step loop collects instead
         while not self._stop_event.is_set():
             # If nothing in-flight and nothing pending, wait on the cv.
-            if not self._active and not self._prefilling:
-                with self._pending_cv:
+            if not self._active and not self._prefilling and not self._held:   # held rows are work: _admit_pending
+                with self._pending_cv:                                          # releases them when nothing runs
                     if self._pending_count == 0 and not self._stop_event.is_set():
                         self._pending_cv.wait(timeout=0.1)
                     if self._pending_count == 0:
@@ -451,6 +459,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             # iteration retry; only escalate if we are down to a single row.
                             if len(self._active) > 1:
                                 self._preempt_newest(e)
+                            elif isinstance(e, KVCacheExhausted) and self._prefilling:
+                                self._requeue_prefilling()        # their blocks back; the one row goes on
                             else:
                                 raise
                 errors_in_a_row = 0
@@ -543,6 +553,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._batched_kv = None
         for row, state in rows:
             self._resolve(row.request, state)
+        self._finished_since_hold += len(rows)
 
     def _evict_row(self, idx: int, resolve: bool = True, state: str = "ok") -> None:
         row = self._active.pop(idx)
@@ -561,6 +572,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 ], dim=0)
         if resolve:
             self._resolve(row.request, state)
+            self._finished_since_hold += 1
 
     def _consume(self, request: "ScheduledRequest", plan: list) -> None:
         """Remove `request` from the policy and from this wave's plan (caller holds the lock)."""
@@ -594,10 +606,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self.policy.on_request_finished(req)
                     self._reject(req, RuntimeError("client disconnected"), state="cancelled")
                     continue
-                if (self.max_queue_wait_s <= 0 or not req.enqueue_ts
-                        or now - req.enqueue_ts <= self.max_queue_wait_s):
+                since = req.requeue_ts or req.enqueue_ts
+                if self.max_queue_wait_s <= 0 or not since or now - since <= self.max_queue_wait_s:
                     continue
-                waited = now - req.enqueue_ts
+                waited = now - since
                 self.policy.pick(req)
                 self._pending_count -= 1
                 self._total_rejected += 1
@@ -608,6 +620,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     f"deadline — server overloaded"), state="expired")
 
     def _admit_pending(self, device: str) -> None:
+        if self._held and (self._finished_since_hold or not self._active):
+            held, self._held, self._finished_since_hold = self._held, [], 0
+            with self._pending_cv:
+                for req in held:
+                    self.policy.on_request_arrived(req)
+                self._pending_count += len(held)
         cache = self.backend.cache_adapter
         to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
         plan: list[ScheduledRequest] = []
@@ -629,9 +647,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     break  # break, not return: fall through to the batched-prefill flush below
 
                 # Queue-time deadline: drop what is already too stale to be useful.
-                if (self.max_queue_wait_s > 0 and peeked.enqueue_ts
-                        and time.perf_counter() - peeked.enqueue_ts > self.max_queue_wait_s):
-                    waited = time.perf_counter() - peeked.enqueue_ts
+                since = peeked.requeue_ts or peeked.enqueue_ts
+                if (self.max_queue_wait_s > 0 and since
+                        and time.perf_counter() - since > self.max_queue_wait_s):
+                    waited = time.perf_counter() - since
                     self._consume(peeked, plan)
                     self._pending_count -= 1
                     self._total_rejected += 1
@@ -698,7 +717,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     break
 
                 req = peeked
-                req.admit_ts = time.perf_counter()
+                if not req.admit_ts:
+                    req.admit_ts = time.perf_counter()
+                self._admit_counter += 1
+                req.admit_seq = self._admit_counter
                 self._consume(req, plan)
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
@@ -889,6 +911,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             logger.warning("mixed prefill %s (%d rows): %s", "requeued" if requeue else "rejected", len(picked), e)
             for prow, _, _ in picked:
                 self._prefilling.remove(prow)
+                self._free_partial(prow)                  # the backend frees the chunks it took; this the rest
                 self._release_kv(prow.request)
                 self.policy.on_request_finished(prow.request)
                 if requeue and not prow.request.cancelled:
@@ -1161,7 +1184,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _preempt_newest(self, exc: BaseException) -> None:
         """Evict the most recently admitted active row to relieve KV pressure."""
         idx = max(range(len(self._active)),
-                  key=lambda i: self._active[i].request.arrival_seq)
+                  key=lambda i: self._active[i].request.admit_seq)
         row = self._active[idx]
         self._total_preempted += 1
         logger.warning("preempting session %s under KV pressure (%d active): %s",
@@ -1179,12 +1202,26 @@ class ContinuousBatchScheduler(SchedulerInterface):
         """Back to the pending queue (KV pressure): it is prefilled again from prompt + generated tokens when the pool
         allows, mostly a prefix-cache hit, and its stream continues where it stopped."""
         request.preemptions += 1
-        request.enqueue_ts = time.perf_counter()  # the queue deadline counts from the requeue
+        request.requeue_ts = time.perf_counter()  # its queue deadline counts from here; enqueue_ts (TTFT) stays
         self._timeline.event("requeue", trace_id=request.trace_id, generated=len(request.generated))
-        with self._pending_cv:
-            self.policy.on_request_arrived(request)
-            self._pending_count += 1
-            self._pending_cv.notify()
+        self._held.append(request)                # back in the queue once a row has finished (_admit_pending)
+
+    def _requeue_prefilling(self) -> None:
+        """Every row still prefilling gives its blocks back and is requeued."""
+        for prow in list(self._prefilling):
+            self._prefilling.remove(prow)
+            self._free_partial(prow)
+            self._release_kv(prow.request)
+            self.policy.on_request_finished(prow.request)
+            self._requeue(prow.request)
+
+    @staticmethod
+    def _free_partial(prow) -> None:
+        """A prefilling row's blocks and prefix-cache references (safe to call twice: the lists are empty after)."""
+        free = getattr(prow.partial_kv, "free_all", None)
+        if callable(free):
+            free()
+        prow.partial_kv = None
 
     def _output_reservation(self, request: ScheduledRequest) -> int:
         """Output tokens to reserve KV for at admission (see OUT_HISTORY)."""
@@ -1237,6 +1274,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _fail_pending(self, exc: BaseException, state: str | None = None) -> None:
         """Reject everything still queued, so no caller waits forever and every request gets a row."""
+        held, self._held = self._held, []
+        for req in held:
+            self._reject(req, exc, state=state)
         with self._pending_cv:
             for req in self.policy.pending():
                 self.policy.pick(req)

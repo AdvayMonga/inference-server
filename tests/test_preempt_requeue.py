@@ -93,3 +93,49 @@ async def test_admission_reserves_the_recent_90th_percentile_once_enough_request
     assert b.reservations[0] == 512                           # nothing finished yet: max_tokens
     assert b.reservations[-1] == 4                            # then the observed length
     assert sched._active_kv_reserved == 0 and b.reserved == 0
+
+
+class TightPoolBackend(ContinuingBackend):
+    """A pool that holds `cap` decoding rows: a decode step over more rows finds it empty."""
+
+    def __init__(self, cap):
+        super().__init__()
+        self.cap = cap
+
+    def decode_step_batched(self, current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row=None):
+        if current_tokens.shape[0] > self.cap:
+            raise KVCacheExhausted("pool empty")
+        return super().decode_step_batched(current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row)
+
+
+@pytest.mark.parametrize("async_decode", [False, True])
+@pytest.mark.asyncio
+async def test_preempted_rows_wait_for_a_finished_row_instead_of_livelocking(async_decode):
+    """Readmitted at once, a preempted row takes its blocks back and is preempted again with no step ever launched;
+    held until a row finishes, every request completes with its full output."""
+    prompts = [[1000 * (i + 1) + j for j in range(10 + i)] for i in range(6)]
+    mts = [6, 9, 4, 7, 5, 8]
+    got, sched, reqs = await asyncio.wait_for(_run(TightPoolBackend(cap=2), prompts, mts, async_decode), timeout=20)
+    assert got == [[200 + j for j in range(m)] for m in mts]
+    assert sum(r.preemptions for r in reqs) > 0 and sched.stats()["held_for_kv"] == 0
+    assert sched._active_kv_reserved == 0
+
+
+def test_a_fully_cached_prompt_leaves_its_last_block_to_the_prefill():
+    """Every token cached (len % 16 == 0): the lookup gives the last block back, so the last token is fed once."""
+    import torch
+    from types import SimpleNamespace
+    from inference_server.backends.custom_torch_backend import CustomTorchBackend
+    from inference_server.models.paged_kv_cache import BlockPool, RadixPrefixCache
+    pools = [BlockPool(64, 16, 1, 4, torch.float32, torch.device("cpu")) for _ in range(2)]
+    cache = RadixPrefixCache(pools)
+    ids = list(range(48))
+    tables = [[p.alloc() for _ in range(3)] for p in pools]
+    cache.store(ids, tables)
+    stub = SimpleNamespace(prefix_cache=cache, pools=pools, _block_size=16, last_cache_hit_tokens=0)
+    refs = [pools[0]._refcounts[b] for b in tables[0]]
+    kv, matched = CustomTorchBackend.prefill_lookup(stub, ids)
+    assert matched == 32 and kv.seq_len == 32 and kv.block_tables[0] == tables[0][:2]
+    assert [pools[0]._refcounts[b] for b in tables[0]] == [refs[0] + 1, refs[1] + 1, refs[2]]   # no ref on the last
+    kv2, m2 = CustomTorchBackend.prefill_lookup(stub, ids + [7])                                 # a longer prompt: all 3
+    assert m2 == 48
