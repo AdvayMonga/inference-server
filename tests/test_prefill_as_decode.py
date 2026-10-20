@@ -9,13 +9,13 @@ import pytest
 import torch
 
 from inference_server.backends.custom_torch_backend import commit_rows, decode_rows
-from inference_server.models.paged_kv_cache import BlockPool, PagedKVCache
+from inference_server.models.paged_kv_cache import PagedKVCache, pool_group
 
 BS, H, D = 4, 2, 8
 
 
 def _pools(n=3):
-    return [BlockPool(64, BS, H, D, torch.float32, torch.device("cpu")) for _ in range(n)]
+    return pool_group(n, 64, BS, H, D, torch.float32, torch.device("cpu"))
 
 
 def _cache(pools, prefix):
@@ -36,10 +36,9 @@ def test_rows_point_at_each_positions_block_and_lengths_move_on_commit():
     assert pos == [6, 7, 8, 0, 1, 2, 3, 4, 3]
     assert owner == [0, 0, 0, 1, 1, 1, 1, 1, 2]
     for t, (p, k) in enumerate(zip(pos, owner)):
-        for i in range(len(pools)):
-            assert table[k][i][p // BS] == caches[k].block_tables[i][p // BS]
-    # blocks: row 0 grows 2 -> 3 (positions 6..8), row 1 0 -> 2, row 2 stays 1; once per layer
-    assert [len(c.block_tables[0]) for c in caches] == [3, 2, 1]
+        assert table[k][p // BS] == caches[k].blocks[p // BS]
+    # blocks: row 0 grows 2 -> 3 (positions 6..8), row 1 0 -> 2, row 2 stays 1; one id serves every layer
+    assert [len(c.blocks) for c in caches] == [3, 2, 1]
     assert [free_before[i] - len(p._free) for i, p in enumerate(pools)] == [3, 3, 3]
     assert [c.seq_len for c in caches] == [6, 0, 3]
     commit_rows(caches, chunks, pools)

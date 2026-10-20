@@ -49,7 +49,7 @@ struct Scratch {
     int* ids; float* w; bf16* act; float* out2; float* rlogits;
 };
 struct Args {
-    const int64_t* tokens; const bf16* embed; const int64_t* pos; const int64_t* bt; int bt_cols;   // bt [layers, B, cols]
+    const int64_t* tokens; const bf16* embed; const int64_t* pos; const int64_t* bt; int bt_cols;   // bt [B, cols], every layer
     const Layer* layers; int n_layers; const bf16* final_norm; const bf16* lm_head; int V; bf16* logits;
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
@@ -380,7 +380,7 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
 
     for (int L = 0; L < a.n_layers; ++L) {
         const Layer lw = a.layers[L];
-        const int64_t* bt = a.bt + (size_t)L * B * a.bt_cols;
+        const int64_t* bt = a.bt;                                     // one block table for every layer
         STAMP(0);
         // ---- P1: the residual h (embedding at layer 0, else h1 + out2 of the previous layer) into shared memory in
         //      every block, block b writing row b out for P5; RMSNorm in place; the QKV GEMV over rows n.
@@ -1015,17 +1015,16 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     const int B = tokens.size(0);
     TORCH_CHECK(B >= 1 && B <= BMAX, "batch 1..16");
     TORCH_CHECK(pos.dtype() == torch::kInt64 && pos.numel() == B && pos.is_contiguous(), "pos [B] int64");
-    TORCH_CHECK(bt.dtype() == torch::kInt64 && bt.dim() == 3 && bt.size(1) == B && bt.is_contiguous(), "bt [layers, B, cols] int64");
+    TORCH_CHECK(bt.dtype() == torch::kInt64 && bt.dim() == 2 && bt.size(0) == B && bt.is_contiguous(), "bt [B, cols] int64");
     TORCH_CHECK(layers.dtype() == torch::kInt64 && layers.dim() == 2 && layers.size(1) == 13 && layers.is_cuda() && layers.is_contiguous(), "layers [L, 13] int64");
-    TORCH_CHECK(bt.size(0) == layers.size(0), "one block table per layer");
-    TORCH_CHECK(bt.size(2) * BS <= MAXSPLIT * CHUNK, "context longer than MAXSPLIT * CHUNK");   // no host sync here
+    TORCH_CHECK(bt.size(1) * BS <= MAXSPLIT * CHUNK, "context longer than MAXSPLIT * CHUNK");   // no host sync here
     TORCH_CHECK(embed.dtype() == torch::kBFloat16 && embed.size(1) == H && lm_head.dtype() == torch::kBFloat16 && lm_head.size(1) == H, "embed/lm_head [V, H] bf16");
     const int V = lm_head.size(0);
     auto logits = torch::empty({B, V}, tokens.options().dtype(torch::kBFloat16));
     auto next = torch::empty({B}, tokens.options());
     Args a;
     a.tokens = tokens.data_ptr<int64_t>(); a.embed = reinterpret_cast<const bf16*>(embed.data_ptr());
-    a.pos = pos.data_ptr<int64_t>(); a.bt = bt.data_ptr<int64_t>(); a.bt_cols = bt.size(2);
+    a.pos = pos.data_ptr<int64_t>(); a.bt = bt.data_ptr<int64_t>(); a.bt_cols = bt.size(1);
     a.keys = reinterpret_cast<unsigned long long*>(scratch_i32.data_ptr<int>() + BMAX * K); a.tokens_out = next.data_ptr<int64_t>();
     a.layers = reinterpret_cast<const Layer*>(layers.data_ptr<int64_t>()); a.n_layers = layers.size(0);
     a.final_norm = reinterpret_cast<const bf16*>(final_norm.data_ptr()); a.lm_head = reinterpret_cast<const bf16*>(lm_head.data_ptr());

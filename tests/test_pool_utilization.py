@@ -1,4 +1,5 @@
-"""pool_utilization must describe one pool, not two.
+"""pool_utilization must describe one pool, not two (since 2026-10-20 every layer's pool shares one allocator, so
+there is exactly one to describe).
 
 Symptom that exposed this: across a sweep of 8 -> 128 req/s (a 16x load range, with
 kv_admit_blocked climbing 0 -> 1176 over the same span) pool_utilization read exactly 0.5002 in
@@ -21,12 +22,24 @@ import pytest
 from inference_server.models.paged_kv_cache import PrefixCache, RadixPrefixCache
 
 
-class _StubPool:
-    """Only the two attributes stats() reads."""
+class _StubAlloc:
+    """Only the two attributes stats() reads of the pools' shared allocator."""
 
     def __init__(self, num_blocks: int, free_count: int):
         self.num_blocks = num_blocks
         self.free_count = free_count
+
+
+class _StubPool:
+    def __init__(self, alloc: _StubAlloc):
+        self.allocator = alloc
+        self.num_blocks = alloc.num_blocks
+
+
+def _pools(num_blocks: int, free_count: int, n: int = 2):
+    """`n` pools over one allocator, as make_pools builds them (every layer fills at the same rate)."""
+    alloc = _StubAlloc(num_blocks, free_count)
+    return [_StubPool(alloc) for _ in range(n)]
 
 
 def _caches(pools):
@@ -47,39 +60,22 @@ def _caches(pools):
 
 
 @pytest.mark.parametrize("impl", ["plain", "radix"])
-def test_utilization_never_mixes_pools(impl):
-    """The production layout: full-attention pools of 8192, sliding pools of 4096.
-
-    Here the sliding pool is 75% consumed and the full pool only 50%, so the sliding pool binds.
-    The old code paired free=1024 (from the sliding pool) with total=4096 (also the sliding
-    pool's, but only by coincidence of both being the min) — and as soon as the tightest pool is
-    not also the smallest, the two halves come from different pools entirely.
-    """
-    pools = [_StubPool(8192, 4096), _StubPool(4096, 1024)]
-    stats = _caches(pools)[impl].stats()
+def test_utilization_describes_the_one_allocator(impl):
+    """Every layer's pool draws its block ids from one shared allocator (a request's block id is the same in every
+    layer), so free and total come from that one object: the ratio describes the pool that exists."""
+    stats = _caches(_pools(4096, 1024, n=48))[impl].stats()
 
     assert stats["pool_utilization"] == 0.75
-    assert stats["pool_free_blocks"] == 1024, "free must come from the pool total describes"
-    assert stats["pool_total_blocks"] == 4096, "and total from that same pool"
-
-
-@pytest.mark.parametrize("impl", ["plain", "radix"])
-def test_utilization_reports_the_binding_pool(impl):
-    """Admission blocks when ANY pool cannot fit, so the tightest pool is the whole story.
-    A mean across pools would hide an exhausted one behind three empty ones."""
-    pools = [_StubPool(8192, 8000), _StubPool(8192, 100), _StubPool(4096, 4000)]
-    stats = _caches(pools)[impl].stats()
-
-    assert stats["pool_utilization"] == pytest.approx(1 - 100 / 8192, abs=1e-4)
-    assert stats["pool_free_blocks"] == 100
+    assert stats["pool_free_blocks"] == 1024
+    assert stats["pool_total_blocks"] == 4096
 
 
 @pytest.mark.parametrize("impl", ["plain", "radix"])
 def test_utilization_moves_with_pressure(impl):
     """The property whose absence raised the alarm: it must respond to load."""
-    idle = _caches([_StubPool(4096, 4096)])[impl].stats()["pool_utilization"]
-    half = _caches([_StubPool(4096, 2048)])[impl].stats()["pool_utilization"]
-    full = _caches([_StubPool(4096, 0)])[impl].stats()["pool_utilization"]
+    idle = _caches(_pools(4096, 4096))[impl].stats()["pool_utilization"]
+    half = _caches(_pools(4096, 2048))[impl].stats()["pool_utilization"]
+    full = _caches(_pools(4096, 0))[impl].stats()["pool_utilization"]
 
     assert idle == 0.0 and full == 1.0
     assert idle < half < full
@@ -87,9 +83,7 @@ def test_utilization_moves_with_pressure(impl):
 
 @pytest.mark.parametrize("impl", ["plain", "radix"])
 def test_utilization_stays_in_range(impl):
-    """Mixing pools could produce a ratio above 1.0. A utilization cannot exceed 1."""
-    pools = [_StubPool(16384, 16000), _StubPool(256, 4)]
-    u = _caches(pools)[impl].stats()["pool_utilization"]
+    u = _caches(_pools(256, 4))[impl].stats()["pool_utilization"]
 
     assert 0.0 <= u <= 1.0
 

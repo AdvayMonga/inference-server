@@ -96,9 +96,9 @@ class _PrefillGraphCtx:
 
     is_prefill = True
 
-    def __init__(self, pools, block_tables, prefix_lens, suffix_lens, bucket, bs):
+    def __init__(self, pools, block_table, prefix_lens, suffix_lens, bucket, bs):
         self.pools = pools
-        self.block_tables = block_tables      # per-pool static [1, cols] long (None for shared)
+        self.bt = block_table                 # static [1, cols] long, one table for every layer
         self.prefix_lens = prefix_lens        # static [1] int32 — set per replay
         self.suffix_lens = suffix_lens        # static [1] int32 — set per replay
         self.bs = bs
@@ -107,15 +107,14 @@ class _PrefillGraphCtx:
     def append(self, layer_idx, k_new, v_new):
         # Absolute positions computed IN-GRAPH from the runtime prefix length.
         pos = self.prefix_lens[0].long() + self._ar        # [bucket]
-        bt = self.block_tables[layer_idx][0]               # [cols]
-        bids = bt[pos // self.bs]
+        bids = self.bt[0][pos // self.bs]
         slots = pos % self.bs
         pool = self.pools[layer_idx]
         pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)   # [bucket, Hkv, D]
         pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
 
     def block_table_tensor(self, layer_idx):
-        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0)
+        return self.bt.to(torch.int32).clamp_min(0)
 
 
 class _GraphCtx:
@@ -125,14 +124,12 @@ class _GraphCtx:
     captured graph reads/writes fixed addresses and a replay just needs fresh values copied in.
     """
 
-    def __init__(self, pools, seq_lens, block_tables, bs, bt_all=None):
+    def __init__(self, pools, seq_lens, block_table, bs):
         self.pools = pools
         self.seq_lens = seq_lens          # static [maxN] long
-        self.block_tables = block_tables  # static per-layer [maxN, MAX_COLS] long
+        self.bt = block_table             # static [maxN, MAX_COLS] long, one table for every layer
         self.bs = bs
-        self.bt_all = bt_all              # the same tables stacked [live layers, maxN, MAX_COLS], when given
         self._live = [L for L, p in enumerate(pools) if p is not None]
-        self._li = {L: i for i, L in enumerate(self._live)}
 
     def append(self, layer_idx, k_new, v_new):
         if layer_idx == self._live[0]:   # per-step values once per forward, not per layer (captured as such)
@@ -140,13 +137,11 @@ class _GraphCtx:
             self._lb = self.seq_lens // self.bs
             self._slot = self.seq_lens % self.bs
             self._sl32 = (self.seq_lens + 1).to(torch.int32)
-            self._bt32 = self.bt_all.to(torch.int32).clamp_min_(0) if self.bt_all is not None else None
-        write_token(self.pools[layer_idx], self.block_tables[layer_idx], self._rows, self._lb, self._slot, k_new, v_new)
+            self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
+        write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
-        if self._bt32 is not None:
-            return self._bt32[self._li[layer_idx]], self._sl32
-        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), self._sl32
+        return self._bt32, self._sl32
 
 
 class _PrefillCtx:
@@ -165,47 +160,48 @@ class _PrefillCtx:
         self.prefix_lens = to_device(list(prefix_lens), device, torch.int32)      # pinned: no wait on the stream
         self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
-        self._scratch = scratch                    # per-pool padding block (padding writes land here)
+        self._scratch = scratch                    # the padding block id (padding writes land here), every pool
         self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
         self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
         padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
         self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
-        self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
-        self._wave_table, self._wave_layer = None, -1   # the table shared by every layer with the same block ids
+        self._bt_cache = {}                        # layer -> the wave's [K, maxb] table, built once
+        self._wave_table = None                    # the one block table (a block id is the same in every layer)
         self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens
         self.alloc_s = 0.0                         # host seconds in block allocation over the wave
+        self._blocks_done = False
 
-    def _ensure_blocks(self, layer_idx):
-        """Reserve every row's blocks for this layer up front (Python only, no GPU work; `alloc_s` totals it, the
+    def _ensure_blocks(self):
+        """Reserve every row's blocks up front, once a wave (Python only, no GPU work; `alloc_s` totals it, the
         prefix cache's reclaim included)."""
+        if self._blocks_done:
+            return
         t0 = time.perf_counter()
-        pool = self.pools[layer_idx]
-        bs = pool.block_size
+        bs = next(p for p in self.pools if p is not None).block_size
         for b, cache in enumerate(self.caches):
-            bt = cache.block_tables[layer_idx]
-            need = (cache.seq_lens[layer_idx] + self._suffix[b] + bs - 1) // bs
+            bt = cache.blocks
+            need = (cache.seq_len + self._suffix[b] + bs - 1) // bs
             while len(bt) < need:
-                bt.append(pool.alloc())
+                bt.append(cache.alloc.alloc())
+        self._blocks_done = True
         self.alloc_s += time.perf_counter() - t0
 
     def _wave_bt(self, layer_idx):
-        """This layer's [K, maxb] block table (long) and whether it is the wave's shared one: every layer allocates
-        in the same order, so one table serves them all; a layer with different ids gets its own."""
-        self._ensure_blocks(layer_idx)
-        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
-                                                    for c in self.caches)
+        """The wave's [K, maxb] block table (long), built at the first layer, and whether it existed already."""
+        same = self._wave_table is not None
         if not same:
-            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx
+            self._ensure_blocks()
+            self._wave_table = self._table().long()
         self._bt_cache[layer_idx] = self._wave_table
         return self._wave_table, same
 
-    def _table(self, layer_idx):
-        """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
-        rows = [c.block_tables[layer_idx] for c in self.caches]
+    def _table(self):
+        """[K, maxb] int32 block table — ONE host->device copy, not one per row."""
+        rows = [c.blocks for c in self.caches]
         maxb = max((len(r) for r in rows), default=1)
-        pad = self._scratch[layer_idx] if self._scratch is not None else 0
+        pad = self._scratch if self._scratch is not None else 0
         flat = [r + [pad] * (maxb - len(r)) for r in rows]
         return to_device(flat, self.device, torch.int32)
 
@@ -219,7 +215,7 @@ class _PrefillCtx:
         bt, same = self._wave_bt(layer_idx)
 
         S = k_new.shape[2]
-        scratch = self._scratch[layer_idx] if self._scratch is not None else None
+        scratch = self._scratch
         if not same or self._wave_pos is None or self._wave_pos[0] != scratch:
             # Where every row's suffix lands: the same for every layer (same prefix lengths, same block ids, scratch
             # blocks allocated in lockstep), so built once a wave from device tensors. The per-layer
@@ -244,7 +240,7 @@ class _PrefillCtx:
         # append() already built it for this layer; rebuilt only when asked for again.
         bt = self._bt_cache.pop(layer_idx, None)
         if bt is None:
-            return self._table(layer_idx)
+            return self._wave_bt(layer_idx)[0].to(torch.int32)
         return bt.to(torch.int32)
 
 
@@ -285,9 +281,9 @@ class _StateRow:
     packed context places its one token like any other row's chunk. Allocation happened in prepare_step."""
 
     def __init__(self, state, r, n_layers):
-        self.block_tables = [None] * n_layers
-        for L, i in state._li.items():
-            self.block_tables[L] = state._host_blocks[r][i]
+        self.blocks = state._host_blocks[r]
+        self.alloc = state.alloc
+        self.block_tables = [self.blocks if p is not None else None for p in state.pools]
         self.seq_lens = [state._host_len[r]] * n_layers
         self.seq_len = state._host_len[r]
 
@@ -302,24 +298,22 @@ PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_
 
 
 def decode_rows(caches, chunks, pools):
-    """Expand prefill chunks into decode rows: reserve every chunk's blocks in every live pool (same order in each), and
-    return (tokens, positions, owner row per token, table [K, live layers, cols] of block ids, 0-padded). The caches'
-    block lists grow here; their lengths move on only after the forward (`commit_rows`)."""
-    live = [L for L, p in enumerate(pools) if p is not None]
-    bs = pools[live[0]].block_size
+    """Expand prefill chunks into decode rows: reserve every chunk's blocks (one id per block, for every layer), and
+    return (tokens, positions, owner row per token, table [K, cols] of block ids, 0-padded). The caches' block lists
+    grow here; their lengths move on only after the forward (`commit_rows`)."""
+    bs = next(p for p in pools if p is not None).block_size
     tokens, pos, owner = [], [], []
     for k, (cache, chunk) in enumerate(zip(caches, chunks)):
         p0 = cache.seq_len
         need = (p0 + len(chunk) + bs - 1) // bs
-        for L in live:
-            bt = cache.block_tables[L]
-            while len(bt) < need:
-                bt.append(pools[L].alloc())
+        bt = cache.blocks
+        while len(bt) < need:
+            bt.append(cache.alloc.alloc())
         tokens += chunk
         pos += range(p0, p0 + len(chunk))
         owner += [k] * len(chunk)
-    cols = max(len(c.block_tables[live[0]]) for c in caches)
-    table = [[c.block_tables[L] + [0] * (cols - len(c.block_tables[L])) for L in live] for c in caches]
+    cols = max(len(c.blocks) for c in caches)
+    table = [c.blocks + [0] * (cols - len(c.blocks)) for c in caches]
     return tokens, pos, owner, table
 
 
@@ -445,6 +439,7 @@ class CustomTorchBackend(InferenceBackend):
         else:
             n_blocks = 512
         self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz, kv_dtype=self.kv_dtype)
+        self._alloc = next(p for p in self.pools if p is not None).allocator      # one id space for every layer
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
         if self._mega is not None:
             self._mega.bind_pools(self.pools)
@@ -482,7 +477,7 @@ class CustomTorchBackend(InferenceBackend):
             os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"      # MoE included since 2026-10-17 (an A/B)
         self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
-        self._scratch = None                 # one padding block per pool, shared by every bucket
+        self._scratch = None                 # the padding block id, shared by every bucket (every pool)
 
         # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
         # tail the profiler found — the bandwidth lever on A100). Decode-only because prefill's
@@ -566,7 +561,7 @@ class CustomTorchBackend(InferenceBackend):
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
                 # Store the prompt's full blocks for future sharing (before releasing our refs).
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.blocks)
                 return visible
             finally:
                 cache.free_all()
@@ -611,7 +606,7 @@ class CustomTorchBackend(InferenceBackend):
                     step = torch.tensor([[tok]], device=self.device)
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.blocks)
             finally:
                 cache.free_all()
 
@@ -659,7 +654,7 @@ class CustomTorchBackend(InferenceBackend):
             cache.free_all()            # do not abandon partially allocated blocks
             raise
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
-        self.prefix_cache.store(token_ids, cache.block_tables)
+        self.prefix_cache.store(token_ids, cache.blocks)
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
@@ -760,7 +755,7 @@ class CustomTorchBackend(InferenceBackend):
                     continue
                 ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = columns Pmax..Pmax+L
                 cache.append(i, ki_t[k:k + 1, :, Pmax:Pmax + L, :], vi_t[k:k + 1, :, Pmax:Pmax + L, :])
-            self.prefix_cache.store(prompts[k], cache.block_tables)
+            self.prefix_cache.store(prompts[k], cache.blocks)
             results.append((cache, first, len(prompts[k])))
         return results
 
@@ -828,7 +823,7 @@ class CustomTorchBackend(InferenceBackend):
         results = []
         for k in range(len(prompts)):
             first = int(sample(logits[k:k + 1, 0, :], GREEDY).item())
-            self.prefix_cache.store(prompts[k], caches[k].block_tables)
+            self.prefix_cache.store(prompts[k], caches[k].blocks)
             results.append((caches[k], first, len(prompts[k])))
         return results
 
@@ -840,8 +835,7 @@ class CustomTorchBackend(InferenceBackend):
         if matched and matched >= len(token_ids):
             # Every token cached: the next token needs a forward over the last one, and feeding it again at position
             # len(ids) put it in the KV twice. Give back the last cached block; it is prefilled like any suffix.
-            for L, blocks in shared.items():
-                self.pools[L].release(blocks.pop())
+            self._alloc.release(shared.pop())
             matched -= self._block_size
         self.last_cache_hit_tokens = matched
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
@@ -978,19 +972,19 @@ class CustomTorchBackend(InferenceBackend):
             return None
         if state is not None:
             state.prepare_step()                    # any block a decode row crosses into
-            if state.bt.shape[2] > self._graph_max_cols:
+            if state.bt.shape[1] > self._graph_max_cols:
                 return None
         try:
             tokens, pos, owner, table = decode_rows(caches, chunks, self.pools)
             if not self._graphs:
                 self._capture_all_graphs()
             dev, n = self.device, len(tokens)
-            tok_t, pos_t, own_t, tab_t = (to_device(v, dev) for v in (tokens, pos, owner, table))   # table [K, L, cols]
-            bt = tab_t[own_t].transpose(0, 1)                                                 # [layers, n, cols]
+            tok_t, pos_t, own_t, tab_t = (to_device(v, dev) for v in (tokens, pos, owner, table))   # table [K, cols]
+            bt = tab_t[own_t]                                                                 # [n, cols]
             nd = state.n_rows if state is not None else 0
             if nd:
-                cols = max(bt.shape[2], state.bt.shape[2])
-                bt = torch.cat([state._grow_cols(state.bt, cols), state._grow_cols(bt, cols)], dim=1)
+                cols = max(bt.shape[1], state.bt.shape[1])
+                bt = torch.cat([state._grow_cols(state.bt, cols), state._grow_cols(bt, cols)], dim=0)
                 tok_t = torch.cat([current.view(-1), tok_t])
                 pos_t = torch.cat([state.seq_lens, pos_t])
             ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
@@ -1025,7 +1019,7 @@ class CustomTorchBackend(InferenceBackend):
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
-        self.prefix_cache.store(token_ids, full_kv.block_tables)
+        self.prefix_cache.store(token_ids, full_kv.blocks)
 
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
@@ -1045,7 +1039,7 @@ class CustomTorchBackend(InferenceBackend):
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
-            fits = state.bt.shape[2] <= self._graph_max_cols
+            fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
             if self._mega_on and n <= self._mega_max_rows:
                 logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
@@ -1112,15 +1106,9 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
-        # One stacked table for every live layer; the per-layer views feed the kernels. Replay then refreshes
-        # all layers in a handful of launches instead of a fill + copy per layer (96 at 48 layers).
-        live = [L for L, pool in enumerate(self.pools) if pool is not None]
-        scratch_col = torch.tensor([self._scratch[L] for L in live], dtype=torch.long, device=dev)[:, None, None]
-        g_bt_all = scratch_col.expand(len(live), bucket, cols).clone()
-        g_bt = [None] * len(self.pools)
-        for i, L in enumerate(live):
-            g_bt[L] = g_bt_all[i]
-        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size, bt_all=g_bt_all)
+        # One table for every layer (a block id is the same in each layer's pool); replay refreshes it in two copies.
+        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.long, device=dev)
+        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
         try:
@@ -1141,7 +1129,7 @@ class CustomTorchBackend(InferenceBackend):
             with torch.cuda.graph(graph):   # private pool per bucket — see docstring
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos, "seqlens": g_seqlens,
-                                    "bt": g_bt, "bt_all": g_bt_all, "live": live, "scratch_col": scratch_col, "out": out}
+                                    "bt": g_bt, "out": out}
             print(f"[graphs]   bucket {bucket} captured in {time.perf_counter() - t_b:.1f}s",
                   flush=True)
         except Exception:
@@ -1150,14 +1138,11 @@ class CustomTorchBackend(InferenceBackend):
             self._graphs.clear()
 
     def _ensure_scratch(self) -> None:
-        """One padding block per pool, shared by every captured graph (decode + prefill).
+        """One padding block (the same id in every pool), shared by every captured graph (decode + prefill).
         Dummy/padding rows point here. Held for the process — never released."""
         if self._scratch is not None:
             return
-        self._scratch = [None] * len(self.pools)
-        for L, pool in enumerate(self.pools):
-            if pool is not None:
-                self._scratch[L] = pool.alloc()
+        self._scratch = self._alloc.alloc()
 
     def _capture_all_graphs(self) -> None:
         """Capture every bucket up-front, largest first. Done on the first decode (inside
@@ -1209,8 +1194,8 @@ class CustomTorchBackend(InferenceBackend):
         g["pos"][:n].copy_(position_ids)
         g["seqlens"][:n].copy_(state.seq_lens)
         g["seqlens"][n:] = 1
-        g["bt_all"].copy_(g["scratch_col"].expand_as(g["bt_all"]))   # reset dummies + stale columns to scratch
-        g["bt_all"][:, :n, :state.bt.shape[2]].copy_(state.bt.clamp_min(0))   # every layer in one copy
+        g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
+        g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
         g["graph"].replay()
         return g["out"][:n]
 
@@ -1235,12 +1220,8 @@ class CustomTorchBackend(InferenceBackend):
         suffix_lens = torch.full((1,), bucket, dtype=torch.int32, device=dev)   # all real during capture
         logits_index = torch.full((1,), bucket - 1, dtype=torch.long, device=dev)
         self._ensure_scratch()
-        bts = [None] * len(self.pools)
-        for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            bts[L] = torch.full((1, cols), self._scratch[L], dtype=torch.long, device=dev)
-        ctx = _PrefillGraphCtx(self.pools, bts, prefix_lens, suffix_lens, bucket, bs)
+        bt = torch.full((1, cols), self._scratch, dtype=torch.long, device=dev)
+        ctx = _PrefillGraphCtx(self.pools, bt, prefix_lens, suffix_lens, bucket, bs)
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -1259,7 +1240,7 @@ class CustomTorchBackend(InferenceBackend):
         _K._TILED_PREFILL = prev
         self._prefill_graphs[(bucket, variant)] = {
                                        "graph": g, "ids": ids, "suffix_lens": suffix_lens,
-                                        "bts": bts, "out": out,
+                                        "bt": bt, "out": out,
                                         "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx,
                                         "logits_index": logits_index}
         logger.info("Captured CUDA prefill graph (bucket=%d, tiled=%s)", bucket, variant)
@@ -1318,19 +1299,17 @@ class CustomTorchBackend(InferenceBackend):
         dev, bs = self.device, self._block_size
         total = matched + S
         need = (total + bs - 1) // bs                     # only the blocks this prompt REALLY uses
+        bt = cache.blocks                                 # already holds the shared prefix blocks
+        while len(bt) < need:
+            bt.append(cache.alloc.alloc())
         for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            bt = cache.block_tables[L]                    # already holds the shared prefix blocks
-            while len(bt) < need:
-                bt.append(pool.alloc())
-            cache.seq_lens[L] = total
-            # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
-            # positions, so the entries past this prompt's real blocks must point somewhere
-            # harmless — otherwise padding K/V lands in whichever request used this buffer last.
-            g["bts"][L][0].fill_(self._scratch[L])
-            row = torch.tensor(bt, device=dev)
-            g["bts"][L][0, :row.shape[0]].copy_(row)
+            if pool is not None:
+                cache.seq_lens[L] = total
+        # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
+        # positions, so the entries past this prompt's real blocks must point somewhere
+        # harmless — otherwise padding K/V lands in whichever request used this buffer last.
+        g["bt"][0].fill_(self._scratch)
+        g["bt"][0, :len(bt)].copy_(torch.tensor(bt, device=dev))
         g["ids"].zero_()
         g["ids"][0, :S].copy_(torch.tensor(prompt_ids[matched:], device=dev))
         g["pos"][0].copy_(torch.arange(matched, matched + bucket, device=dev))
@@ -1339,7 +1318,7 @@ class CustomTorchBackend(InferenceBackend):
         g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
-        self.prefix_cache.store(prompt_ids, cache.block_tables)
+        self.prefix_cache.store(prompt_ids, cache.blocks)
         return cache, first, matched + S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):

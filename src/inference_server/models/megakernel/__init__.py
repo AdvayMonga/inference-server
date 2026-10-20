@@ -122,8 +122,8 @@ _NO_TIMES = None
 
 def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.Tensor,
                 times: torch.Tensor | None = None, stamp_layer: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-    """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [layers, B, cols]
-    int64 block tables, as the batched state keeps them. Writes every layer's K/V for the new token into the pools and
+    """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [B, cols] int64
+    block table (one for every layer), as the batched state keeps it. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
     `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug."""
     assert mdl.table is not None, "bind_pools() first"

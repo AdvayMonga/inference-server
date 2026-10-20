@@ -75,7 +75,7 @@ def _kv_match(backend, sb, sa, B):
     for L in (0, 23, 47):
         for r in range(B):
             p = int(sa.seq_lens[r])
-            ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
+            ba, bb = sa.bt[r, p // 16].item(), sb.bt[r, p // 16].item()
             pool = backend.pools[L]
             for x in (pool.k, pool.v):
                 a, b = x[ba, :, p % 16].float(), x[bb, :, p % 16].float()

@@ -43,7 +43,7 @@ def _run_prompt(pools, pc, prompt):
     n = len(prompt) - m
     if n > 0:
         c.append(0, torch.zeros(1, 1, n, 8), torch.zeros(1, 1, n, 8))
-    pc.store(prompt, c.block_tables)
+    pc.store(prompt, c.blocks)
     c.free_all()
     return m
 

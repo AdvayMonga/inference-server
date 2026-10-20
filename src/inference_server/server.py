@@ -124,11 +124,29 @@ def build_scheduler(backend: InferenceBackend, settings: Settings, *,
     )
 
 
+def raise_fd_limit(logger: logging.Logger | None = None) -> int:
+    """Lift the open-files soft limit to the hard limit: a stream is a socket for its whole answer, and at 1,024
+    concurrent streams the default soft limit (1024) made the server drop connections and the telemetry writer fail
+    to open its file (H200, 2026-10-20: 542 of 1,593 requests got no response at 53 req/s of long answers)."""
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = hard if hard != resource.RLIM_INFINITY else max(soft, 1 << 20)
+    if want > soft:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+            soft = want
+        except (ValueError, OSError) as e:                       # a container may refuse: keep what we have
+            if logger:
+                logger.warning("could not raise the open-files limit from %d: %s", soft, e)
+    return soft
+
+
 @asynccontextmanager
 async def lifespan(app):
     """Load model, tokenizer, cache, and batcher at startup."""
     setup_logging(settings.log_format, getattr(logging, settings.log_level.upper(), logging.INFO))
     app.state.ready = False
+    logging.getLogger(__name__).info("open-files limit %d", raise_fd_limit(logging.getLogger(__name__)))
     print_hardware_summary(settings)
 
     tokenizer = Tokenizer(settings.model_name, settings.context_window)

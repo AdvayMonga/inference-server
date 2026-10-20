@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import torch
 
 from inference_server.backends.custom_torch_backend import _PackedCtx, _PrefillCtx
-from inference_server.models.paged_kv_cache import BlockPool, PagedKVCache
+from inference_server.models.paged_kv_cache import BlockPool, PagedKVCache, pool_group
 from inference_server.models.prefill_attention import sdpa_prefill, sdpa_prefill_packed
 
 DEV = torch.device("cpu")
@@ -13,7 +13,7 @@ BS, H, D = 4, 2, 8
 
 
 def _pools(n=2):
-    return [BlockPool(64, BS, H, D, torch.float32, DEV) for _ in range(n)]
+    return pool_group(n, 64, BS, H, D, torch.float32, DEV)
 
 
 def _rows(pools, prefixes):
@@ -41,8 +41,8 @@ def test_packed_context_writes_the_same_kv_as_the_padded_wave():
         k_pad[r, :, :n], v_pad[r, :, :n] = k_rows[r], v_rows[r]
     k_packed = torch.cat(k_rows, dim=1).unsqueeze(0)              # [1, H, T, D]
     v_packed = torch.cat(v_rows, dim=1).unsqueeze(0)
-    scratch_a = [p.alloc() for p in pools_a]                   # the padded wave parks its padding tokens here
-    scratch_b = [p.alloc() for p in pools_b]
+    scratch_a = pools_a[0].alloc()                             # the padded wave parks its padding tokens here
+    scratch_b = pools_b[0].alloc()                             # (one block id, the same in every pool)
     padded = _PrefillCtx(ca, pools_a, prefixes, suffixes, DEV, scratch=scratch_a)
     packed = _PackedCtx(cb, pools_b, prefixes, suffixes, DEV, scratch=scratch_b)
     for L in range(2):
@@ -50,9 +50,9 @@ def test_packed_context_writes_the_same_kv_as_the_padded_wave():
         packed.append(L, k_packed, v_packed)
     for L in range(2):
         real = torch.ones(64, dtype=torch.bool)
-        real[scratch_a[L]] = False
+        real[scratch_a] = False
         assert torch.equal(pools_a[L].k[real], pools_b[L].k[real]) and torch.equal(pools_a[L].v[real], pools_b[L].v[real])
-        assert torch.equal(pools_b[L].k[scratch_b[L]], torch.zeros(H, BS, D))   # packed never touches the scratch block
+        assert torch.equal(pools_b[L].k[scratch_b], torch.zeros(H, BS, D))   # packed never touches the scratch block
         assert [c.seq_lens[L] for c in ca] == [c.seq_lens[L] for c in cb] == [11, 3, 12]
     assert packed.tokens is None and packed._pos.tolist() == [6, 7, 8, 9, 10, 0, 1, 2, 11]
 

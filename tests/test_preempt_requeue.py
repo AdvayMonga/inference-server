@@ -126,16 +126,17 @@ def test_a_fully_cached_prompt_leaves_its_last_block_to_the_prefill():
     import torch
     from types import SimpleNamespace
     from inference_server.backends.custom_torch_backend import CustomTorchBackend
-    from inference_server.models.paged_kv_cache import BlockPool, RadixPrefixCache
-    pools = [BlockPool(64, 16, 1, 4, torch.float32, torch.device("cpu")) for _ in range(2)]
+    from inference_server.models.paged_kv_cache import RadixPrefixCache, pool_group
+    pools = pool_group(2, 64, 16, 1, 4, torch.float32, torch.device("cpu"))
     cache = RadixPrefixCache(pools)
     ids = list(range(48))
-    tables = [[p.alloc() for _ in range(3)] for p in pools]
-    cache.store(ids, tables)
-    stub = SimpleNamespace(prefix_cache=cache, pools=pools, _block_size=16, last_cache_hit_tokens=0)
-    refs = [pools[0]._refcounts[b] for b in tables[0]]
+    blocks = [pools[0].alloc() for _ in range(3)]
+    cache.store(ids, blocks)
+    stub = SimpleNamespace(prefix_cache=cache, pools=pools, _alloc=pools[0].allocator, _block_size=16,
+                           last_cache_hit_tokens=0)
+    refs = [pools[0]._refcounts[b] for b in blocks]
     kv, matched = CustomTorchBackend.prefill_lookup(stub, ids)
-    assert matched == 32 and kv.seq_len == 32 and kv.block_tables[0] == tables[0][:2]
-    assert [pools[0]._refcounts[b] for b in tables[0]] == [refs[0] + 1, refs[1] + 1, refs[2]]   # no ref on the last
+    assert matched == 32 and kv.seq_len == 32 and kv.blocks == blocks[:2]
+    assert [pools[0]._refcounts[b] for b in blocks] == [refs[0] + 1, refs[1] + 1, refs[2]]   # no ref on the last
     kv2, m2 = CustomTorchBackend.prefill_lookup(stub, ids + [7])                                 # a longer prompt: all 3
     assert m2 == 48

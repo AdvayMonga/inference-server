@@ -33,6 +33,6 @@ def test_fp8_kv_step_matches_torch_on_the_same_pools(backend, lens):
     assert d.mean() < 0.1 * mag, (d.mean(), d.max(), mag)
     for r in range(len(lens)):                                  # layer 0's new K/V, as stored, agree to fp8 rounding
         p = int(sa.seq_lens[r])
-        ba, bb = sa.bt[sa._li[0]][r, p // 16].item(), sb.bt[sb._li[0]][r, p // 16].item()
+        ba, bb = sa.bt[r, p // 16].item(), sb.bt[r, p // 16].item()
         for pool in (backend.pools[0].k, backend.pools[0].v):
             torch.testing.assert_close(pool[bb, :, p % 16].float(), pool[ba, :, p % 16].float(), atol=0.1, rtol=0.13)
