@@ -26,6 +26,15 @@
 #ifndef MEGA_TMA
 #define MEGA_TMA 0
 #endif
+// Blocks per SM (MEGAKERNEL_BPS): 2 doubles the warps hiding memory latency (ncu, 2026-10-20: 8 warps an SM, no
+// eligible warp 89% of cycles, DRAM at 19%) at half the registers each; only where the phases' shared memory fits
+// twice, so never with the weight ring.
+#ifndef MEGA_BPS
+#define MEGA_BPS 1
+#endif
+#if MEGA_TMA && MEGA_BPS > 1
+#error "the weight ring takes the whole shared memory: one block per SM"
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -351,7 +360,7 @@ __device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; a
 #define STAMP_ALWAYS(i) do { if (a.times && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
 
 template <int BT, bool FP8>
-__global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
+__global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
     cg::grid_group grid = cg::this_grid();
     const int B = a.B, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -1002,7 +1011,18 @@ static int num_sms() {
     return n;
 }
 
-constexpr size_t SMEM_BYTES = 64 + (size_t)BMAX * NQ * D * 2;   // the largest phase: attn rows for o_proj (128 KB)
+constexpr size_t SMEM_BYTES = 64 + (size_t)BMAX * NQ * D * 2;   // the largest phase at BMAX: attn rows for o_proj (128 KB)
+constexpr size_t ATTN_SMEM = 64 + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + (THREADS / 2) * 8 * 4;
+template <int BT> constexpr size_t smem_bytes() {           // what the BT-row instantiation touches (the ring included when built)
+    size_t m = ATTN_SMEM;
+    for (size_t v : {(size_t)64 + 2 * BT * H * 2, (size_t)64 + BT * H * 2 + BT * K * 8, (size_t)64 + (size_t)BT * NQ * D * 2,
+                     (MEGA_TMA && BT <= 2) ? (size_t)RING_OFF + NST * STAGE : (size_t)0})
+        m = v > m ? v : m;
+    return m;
+}
+static size_t smem_for(int B) {
+    return B <= 1 ? smem_bytes<1>() : B <= 2 ? smem_bytes<2>() : B <= 4 ? smem_bytes<4>() : B <= 8 ? smem_bytes<8>() : smem_bytes<16>();
+}
 static_assert(64 + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + (THREADS / 2) * 8 * 4 <= SMEM_BYTES, "attention smem");
 static_assert(64 + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
 static_assert(RING_OFF + NST * STAGE <= SMEM_BYTES && 64 + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases");
@@ -1054,11 +1074,15 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     static bool attr_set = false;
     if (!attr_set) {
         for (int b : {1, 2, 4, 8, 16}) {
-            cudaFuncSetAttribute(pick<true>(b), cudaFuncAttributeMaxDynamicSharedMemorySize, (int)SMEM_BYTES);
-            cudaFuncSetAttribute(pick<false>(b), cudaFuncAttributeMaxDynamicSharedMemorySize, (int)SMEM_BYTES);
+            cudaFuncSetAttribute(pick<true>(b), cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_for(b));
+            cudaFuncSetAttribute(pick<false>(b), cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_for(b));
         }
         attr_set = true;
     }
+    const size_t smem = smem_for(B);
+    int smem_per_sm = 0;
+    cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, 0);
+    const int bps = (MEGA_BPS > 1 && (int)(MEGA_BPS * (smem + 1024)) <= smem_per_sm) ? MEGA_BPS : 1;   // 1 KB a block is the driver's
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
     a.stamp_layer = (int)stamp_layer;
     TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
@@ -1066,7 +1090,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     a.tma = tma ? 1 : 0;
     void* args[] = {&a};
     auto stream = at::cuda::getCurrentCUDAStream();
-    cudaError_t err = cudaLaunchCooperativeKernel(fp8 ? pick<true>(B) : pick<false>(B), dim3(num_sms()), dim3(THREADS), args, SMEM_BYTES, stream);
+    cudaError_t err = cudaLaunchCooperativeKernel(fp8 ? pick<true>(B) : pick<false>(B), dim3(num_sms() * bps), dim3(THREADS), args, smem, stream);
     TORCH_CHECK(err == cudaSuccess, "cooperative launch failed: ", cudaGetErrorString(err));
     return {logits, next};
 }
