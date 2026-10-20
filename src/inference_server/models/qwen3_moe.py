@@ -159,8 +159,16 @@ if PREFILL_ATTN == "flashinfer":
     if not _fi.available():
         PREFILL_ATTN = "sdpa"
 
-# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
-MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never. Was 2048
+# (256 rows x 8): a 1,024-row decode step fell to the torch path below (a radix sort and two grouped GEMMs over bf16
+# activations) and took 44 ms (H200, 2026-10-20).
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "16384"))
+
+
+def moe_block_m(pairs: int) -> int:
+    """Rows per GEMM tile for `pairs` (token, slot) pairs: 16 at decode sizes (a tile is one expert's few rows); taller
+    tiles once each expert has tens of rows, so its weights are read once per tile of 64 rows, not of 16."""
+    return 16 if pairs <= 2048 else 32 if pairs <= 4096 else 64
 # Up to this many tokens the whole router (softmax, top-k, grouping, padding) is one launch (moe_kernel.route_fused);
 # above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router.
 ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "32"))
@@ -270,11 +278,12 @@ class Qwen3SparseMoE(nn.Module):
             gu, gu_s = self.experts.weights("gate_up_proj")
             dn, dn_s = self.experts.weights("down_proj")
             router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
-            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, 16)
-            h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, w_scale=gu_s)
+            bm = moe_block_m(M)
+            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm)
+            h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s)
             act = fused.silu_mul(h)
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
-            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, w_scale=dn_s)
+            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s)
             return out
         weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
                             else route(logits, self.top_k, self.norm_topk_prob))

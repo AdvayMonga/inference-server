@@ -507,6 +507,8 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
         self._prefill_graphs: dict = {}
+        if self._graph_on:
+            self._capture_all_graphs()       # at load: on the first decode it was a 3.5 s step for the first requests
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the

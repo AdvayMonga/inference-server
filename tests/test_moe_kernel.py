@@ -170,3 +170,41 @@ def test_quant_rows_matches_quantize_rowwise(M, K):
     q_ref, s_ref = quantize_rowwise(x)
     torch.testing.assert_close(s, s_ref)
     assert (q.float() != q_ref.float()).float().mean() < 1e-3          # a rounding-boundary element or two at most
+
+
+@pytest.mark.parametrize("T,top_k,E", [(400, 8, 128), (1024, 8, 128), (2048, 8, 128)])
+def test_tall_tiles_match_the_torch_grouped_gemms(T, top_k, E):
+    """Past 2048 pairs the GEMMs run 32- and 64-row tiles (qwen3_moe.moe_block_m): the gate_up GEMM over the routed
+    rows and the scattered down GEMM match the torch grouped GEMMs on the same routing."""
+    from inference_server.models import moe_kernel
+    from inference_server.models.qwen3_moe import moe_block_m, route
+    torch.manual_seed(T)
+    K, N = 256, 384
+    M = T * top_k
+    bm = moe_block_m(M)
+    assert bm == (32 if M <= 4096 else 64)
+    logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
+    rw, rids = route(logits, top_k, True)
+    sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_multi(logits, E, top_k, True, bm)
+    assert sorted_ids.numel() == expert_ids.numel() * bm and (sorted_ids < M).sum() == M
+    flat = torch.randn(T, K, dtype=torch.bfloat16, device="cuda")
+    w1 = torch.randn(E, N, K, dtype=torch.bfloat16, device="cuda") * 0.05
+    w2 = torch.randn(E, K, N, dtype=torch.bfloat16, device="cuda") * 0.05
+    h = moe_kernel.moe_gemm(flat, tok, w1, sorted_ids, expert_ids, M, block_m=bm)
+    out = torch.zeros(T, K, device="cuda")
+    moe_kernel.moe_gemm_scatter(h, w2, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm)
+    # reference on the kernel's own routing (pair i -> expert of its block), through torch's grouped GEMMs
+    pair_e = torch.full((M,), -1, dtype=torch.long, device="cuda")
+    for b in range(expert_ids.numel()):
+        ids = sorted_ids[b * bm:(b + 1) * bm]
+        ids = ids[ids < M].long()
+        pair_e[ids] = expert_ids[b].long()
+    assert (pair_e >= 0).all()
+    order = torch.argsort(pair_e, stable=True)
+    sorted_e = pair_e[order]
+    offs = torch.searchsorted(sorted_e, torch.arange(E, device="cuda"), right=True).to(torch.int32)
+    h_ref = torch._grouped_mm(flat[tok.long()[order]], w1.transpose(-2, -1), offs=offs)
+    torch.testing.assert_close(h[order].float(), h_ref.float(), atol=3e-2, rtol=2e-2)
+    y = torch._grouped_mm(h_ref, w2.transpose(-2, -1), offs=offs).float() * pair_w[order, None]
+    ref = torch.zeros(T, K, device="cuda").index_add_(0, tok.long()[order], y)
+    torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)

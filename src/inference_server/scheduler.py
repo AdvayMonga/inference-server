@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 # ran 1,024. A row that outgrows its reservation and finds the pool empty is preempted and requeued, not rejected.
 OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 
-GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "5000"))   # steps between the scheduler's own full collections
+# The scheduler thread runs the collector itself (automatic collections are off): a young-generation collection
+# every GC_YOUNG_STEPS steps, a full one, with the survivors frozen after it, every GC_FREEZE_STEPS. A full collection
+# walks every unfrozen live object and took 0.2-1.3 s each 5,000 steps under long answers (H200, 2026-10-20), a stall
+# in every 60 s window; young collections free the step loop's garbage in a few ms.
+GC_YOUNG_STEPS = int(os.environ.get("GC_YOUNG_STEPS", "200"))
+GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "50000"))
 
 
 def _deliver(items: list) -> None:
@@ -466,15 +471,19 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 errors_in_a_row = 0
                 self._step_event(step_t0)
                 self._steps_since_freeze += 1
-                if self._steps_since_freeze >= GC_FREEZE_STEPS:
+                if self._steps_since_freeze % GC_YOUNG_STEPS == 0:
                     # A full collection walks every live object; the prefix cache's nodes and the rows' host mirrors
                     # run to millions, so an automatic one stalled a step for ~2 s (long_prompt, 2026-10-18). Collect
-                    # on our own schedule, then freeze the survivors out of the collector's reach.
+                    # on our own schedule: the young generations often, everything rarely, then freeze the survivors
+                    # out of the collector's reach.
                     t_gc = time.perf_counter()
-                    gc.collect()
-                    gc.freeze()
-                    self._steps_since_freeze = 0
-                    self._timeline.event("gc", dur_s=time.perf_counter() - t_gc, frozen=gc.get_freeze_count())
+                    full = self._steps_since_freeze >= GC_FREEZE_STEPS
+                    n = gc.collect() if full else gc.collect(1)
+                    if full:
+                        gc.freeze()
+                        self._steps_since_freeze = 0
+                    self._timeline.event("gc", dur_s=time.perf_counter() - t_gc, full=full, collected=n,
+                                         frozen=gc.get_freeze_count())
             except Exception as e:
                 # A failed iteration must NOT end the worker. It used to: any exception escaped
                 # to _fail_all and the thread exited, after which the server accepted requests

@@ -194,13 +194,18 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
     _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
                                          a.stride(0), w.stride(1), w.stride(2), out.stride(0),
                                          E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                         SPLIT_K=1, W_FP8=fp8, num_warps=4, num_stages=NUM_STAGES)
+                                         SPLIT_K=1, W_FP8=fp8, num_warps=_warps(block_m), num_stages=NUM_STAGES)
 
 
 # Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
 # took gate_up 29 -> 18 us and down 29 -> 17 us at batch 1 (the ncu diagnosis had been occupancy: splitting K bought
 # nothing at any tile; stages and the tile shape did). The same config won at M = 64 (85 -> 76, 50 -> 44 us).
 BLOCK_N, BLOCK_K, NUM_STAGES = 64, 128, 4
+
+
+def _warps(block_m: int) -> int:
+    """4 warps for the decode tiles (16 and 32 rows), 8 for 64-row tiles (a 64 x 64 fp32 accumulator per program)."""
+    return 8 if block_m >= 64 else 4
 
 
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
@@ -222,8 +227,8 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, w_scale if fp8 else a, C, sorted_ids,
                                        expert_ids, M, N, K, a.stride(0), w.stride(1), w.stride(2), C.stride(0),
                                        E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, W_FP8=fp8, num_warps=4,
-                                       num_stages=NUM_STAGES)
+                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, W_FP8=fp8,
+                                       num_warps=_warps(block_m), num_stages=NUM_STAGES)
     return C
 
 
