@@ -852,20 +852,28 @@ class ContinuousBatchScheduler(SchedulerInterface):
             picked.append((prow, chunk, final))
         # Decode rows join the packed forward: one step for the chunks and their tokens (the weights are streamed once
         # for both), instead of a prefill forward followed by a decode step they wait through.
+        # A step small enough for one decode-graph replay always joins (the backend's joint_fits); bigger ones only
+        # with PREFILL_JOINT, through the packed forward.
         decode, batch = None, None
-        if (self.prefill_joint and self._active and self.async_decode and self._batched_kv is not None
-                and getattr(self.backend, "packed_prefill", False)):
+        n_tok = sum(len(c) for _, c, _ in picked)
+        joint = self._active and self.async_decode and self._batched_kv is not None and (
+            (self.prefill_joint and getattr(self.backend, "packed_prefill", False))
+            or (hasattr(self.backend, "joint_fits") and self.backend.joint_fits(len(self._active), n_tok)))
+        if joint:
             # The launch comes before this iteration's evict here, so consume the previous step's tokens first: the
             # launch's _finish_pending overwrites current_token, and a token still marked fresh would never be streamed
             # (the joint path once dropped one token at every pure-decode -> joint transition: "merged [intervals").
             self._evict_finished()
-            batch = list(self._active)
-            decode = (self._batched_kv, self._current_tokens(batch, device), [r.request.sampling for r in batch])
+            if self._active and self._batched_kv is not None:     # that evict may have emptied the batch (it once
+                batch = list(self._active)                          # handed the forward a None batch: TypeError)
+                decode = (self._batched_kv, self._current_tokens(batch, device),
+                          [r.request.sampling for r in batch])
         try:
             with self._timeline.phase("prefill_mixed", rows=len(picked), tokens=sum(len(c) for _, c, _ in picked),
                                       decode_rows=len(batch) if batch else 0):
                 items = [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked]
-                results = (self.backend.prefill_chunk_batch(items, decode=decode) if decode is not None
+                results = (self.backend.prefill_chunk_batch(items, decode=decode, defer_tokens=self._defer_first)
+                           if decode is not None
                            else self.backend.prefill_chunk_batch(items, defer_tokens=True) if self._defer_first
                            else self.backend.prefill_chunk_batch(items))
             if decode is not None:
