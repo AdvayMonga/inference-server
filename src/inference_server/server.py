@@ -133,9 +133,16 @@ async def lifespan(app):
 
     tokenizer = Tokenizer(settings.model_name, settings.context_window)
     loop = asyncio.get_event_loop()
-    backend, cache_manager = await loop.run_in_executor(None, build_backend, settings)
-    scheduler = build_scheduler(backend, settings)
-    scheduler.start()
+    if settings.engine_process:                    # the engine in a child process (engine_process.py)
+        from inference_server.engine_process import EngineClient
+        scheduler = EngineClient()
+        await loop.run_in_executor(None, scheduler.launch)
+        scheduler.start()
+        backend, cache_manager = scheduler.backend, scheduler.cache_adapter
+    else:
+        backend, cache_manager = await loop.run_in_executor(None, build_backend, settings)
+        scheduler = build_scheduler(backend, settings)
+        scheduler.start()
 
     app.state.backend = backend
     app.state.tokenizer = tokenizer

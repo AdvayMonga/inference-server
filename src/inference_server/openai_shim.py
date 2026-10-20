@@ -258,6 +258,9 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:             # with ENGINE_PROCESS the engine's verdict arrives here
+            raise HTTPException(status_code=400, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _stream(req, first, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -371,6 +374,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
             first = await _first_token(req)
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:             # with ENGINE_PROCESS the engine's verdict arrives here
+            raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _chat_stream(req, first, tokenizer, cid, created, body.model, len(token_ids), max_tokens),

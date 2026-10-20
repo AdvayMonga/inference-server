@@ -64,6 +64,8 @@ class Settings:
     # Decode step n launched with step n-1's tokens still on the device; n-1's tokens processed while n runs
     # (H200, 2026-10-16: single_stream TPOT p99 9.5 → 9.24 ms, decode step at batch 128 33.9 → 27.8 ms).
     async_decode: bool = True
+    # The backend and scheduler in a child process (engine_process.py), HTTP and streams in this one: no shared GIL.
+    engine_process: bool = False
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
@@ -148,6 +150,7 @@ def load_settings() -> Settings:
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
         max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
         async_decode=os.environ.get("ASYNC_DECODE", str(Settings.async_decode)).lower() in ("1", "true"),
+        engine_process=os.environ.get("ENGINE_PROCESS", str(Settings.engine_process)).lower() in ("1", "true"),
         prefix_cache_impl=os.environ.get("PREFIX_CACHE_IMPL", Settings.prefix_cache_impl),
         prefix_cache_max_entries=int(os.environ.get(
             "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),
