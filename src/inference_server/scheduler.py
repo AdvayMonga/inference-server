@@ -1,6 +1,7 @@
 """Scheduler interface and ContinuousBatchScheduler implementation."""
 
 import asyncio
+import collections
 import gc
 import logging
 import os
@@ -22,6 +23,12 @@ from inference_server.timeline import Timeline
 
 logger = logging.getLogger(__name__)
 
+
+# Output tokens a request reserves KV for at admission: max_tokens until OUT_MIN_SEEN requests have finished, then the
+# 90th percentile of the last OUT_HISTORY outputs (capped by what is left of its max_tokens). Reserving max_tokens capped
+# a long-output batch near 670 rows of a 1M-token pool (H200, 2026-10-19) where vLLM, which reserves none and preempts,
+# ran 1,024. A row that outgrows its reservation and finds the pool empty is preempted and requeued, not rejected.
+OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 
 GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "5000"))   # steps between the scheduler's own full collections
 
@@ -69,6 +76,13 @@ class ScheduledRequest:
     decode_width_steps: int = 0
     decode_width_max: int = 0
     cancelled: bool = False     # set by the HTTP side when the client goes away
+    kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
+    preemptions: int = 0        # times it was preempted under KV pressure and requeued
+
+    @property
+    def prefill_ids(self) -> list[int]:
+        """What a prefill feeds: the prompt, plus the tokens already generated when a preempted request resumes."""
+        return self.token_ids + self.generated if self.generated else self.token_ids
 
     def __post_init__(self):
         if not self.trace_id:
@@ -227,7 +241,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._total_rejected = 0
         self._pending_high_water = 0
         self._kv_admit_blocked = 0
-        self._active_kv_reserved = 0  # sum of (prompt_len + max_tokens) over in-flight rows
+        self._active_kv_reserved = 0  # sum of the in-flight rows' reservations (request.kv_res)
+        self._out_hist: collections.deque[int] = collections.deque(maxlen=OUT_HISTORY)   # finished outputs' lengths
         self._prefill_chunks_processed = 0
         self._total_iteration_errors = 0
         self._total_preempted = 0
@@ -512,8 +527,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         rows = [(self._active[i], state) for i, state in items]
         for i in reversed(idxs):
             row = self._active.pop(i)
-            self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
-            self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
+            self._release_kv(row.request)
         self._batched_kv = self.backend.remove_rows_from_cache(self._batched_kv, idxs)
         if not self._active:
             self._batched_kv = None
@@ -522,8 +536,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _evict_row(self, idx: int, resolve: bool = True, state: str = "ok") -> None:
         row = self._active.pop(idx)
-        self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
-        self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
+        self._release_kv(row.request)
         if self._batched_kv is not None:
             # Always route through the backend so paged caches can free blocks (no-op GC
             # for DynamicCache). Null afterward when the batch empties.
@@ -619,12 +632,14 @@ class ContinuousBatchScheduler(SchedulerInterface):
                         f"deadline — server overloaded"), state="expired")
                     continue
 
-                reservation = len(peeked.token_ids) + peeked.max_tokens
+                prompt_n = len(peeked.prefill_ids)
+                out_res = self._output_reservation(peeked)
+                reservation = prompt_n + out_res
 
                 # Prefill-wave gate (batched mode): the padded wave must fit the activation budget.
-                if to_admit and (len(to_admit) + 1) * max(longest, len(peeked.token_ids)) > self.max_prefill_tokens:
+                if to_admit and (len(to_admit) + 1) * max(longest, prompt_n) > self.max_prefill_tokens:
                     self._timeline.event("admit_blocked", reason="prefill_tokens", trace_id=peeked.trace_id,
-                                         wave=len(to_admit), longest=max(longest, len(peeked.token_ids)))
+                                         wave=len(to_admit), longest=max(longest, prompt_n))
                     break
 
                 # Active-KV gate: protects against decode-time OOM.
@@ -667,7 +682,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
-                if not self.backend.kv_reserve(len(peeked.token_ids), peeked.max_tokens):
+                if not self.backend.kv_reserve(prompt_n, out_res):
                     self._kv_admit_blocked += 1
                     self._timeline.event("admit_blocked", reason="backend_pools", trace_id=peeked.trace_id)
                     break
@@ -677,16 +692,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._consume(req, plan)
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
+                req.kv_res = (prompt_n, out_res)
             self._timeline.event("admit", trace_id=req.trace_id, mode=self.prefill_mode,
                                  reservation=reservation, queue_wait_s=req.admit_ts - req.enqueue_ts)
             if self.prefill_mode == "batched":
                 to_admit.append(req)  # defer the forward; one prefill_batch after the loop
-                longest = max(longest, len(req.token_ids))
+                longest = max(longest, len(req.prefill_ids))
                 continue
             try:
                 if self.prefill_mode in ("chunked", "mixed"):
                     # Lookup only; the forward happens in _advance_prefill_chunk / _advance_prefill_mixed
-                    partial_kv, matched = self.backend.prefill_lookup(req.token_ids, req.session_id)
+                    partial_kv, matched = self.backend.prefill_lookup(req.prefill_ids, req.session_id)
                     req.cache_hit_tokens = self.backend.last_cache_hit_tokens
                     self._prefilling.append(_PrefillingRow(
                         request=req, matched=matched,
@@ -695,14 +711,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._total_admitted += 1
                     continue
 
-                with self._timeline.phase("prefill", trace_id=req.trace_id, tokens=len(req.token_ids)):
-                    kv, first_token, kv_len = self.backend.prefill(req.token_ids, req.session_id)
+                with self._timeline.phase("prefill", trace_id=req.trace_id, tokens=len(req.prefill_ids)):
+                    kv, first_token, kv_len = self.backend.prefill(req.prefill_ids, req.session_id)
                 req.cache_hit_tokens = self.backend.last_cache_hit_tokens
             except Exception as e:
                 e = _as_backpressure(e)
                 logger.warning("prefill rejected for session %s: %s", req.session_id, e)
-                self._active_kv_reserved -= reservation
-                self.backend.kv_release(len(req.token_ids), req.max_tokens)
+                self._release_kv(req)
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
                 continue
@@ -721,14 +736,13 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._wave_sizes[len(reqs)] = self._wave_sizes.get(len(reqs), 0) + 1
             self.backend.last_batch_cache_hit_tokens = None   # never read a previous wave's hits
             with self._timeline.phase("prefill_batch", wave=len(reqs),
-                                      tokens=sum(len(r.token_ids) for r in reqs)):
-                results = self.backend.prefill_batch([r.token_ids for r in reqs])
+                                      tokens=sum(len(r.prefill_ids) for r in reqs)):
+                results = self.backend.prefill_batch([r.prefill_ids for r in reqs])
         except Exception as e:
             e = _as_backpressure(e)
             logger.warning("batched prefill rejected (%d reqs): %s", len(reqs), e)
             for req in reqs:
-                self._active_kv_reserved -= len(req.token_ids) + req.max_tokens
-                self.backend.kv_release(len(req.token_ids), req.max_tokens)
+                self._release_kv(req)
                 self.policy.on_request_finished(req)
                 self._reject(req, e)
             return
@@ -750,7 +764,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         prefill/decode-decoupled (`_prefilling` phase + `prefill_chunk` primitive), so disagg adds a
         transfer here + a remote prefill loop, not a rewrite. Used by both monolithic admit and the
         chunked final-chunk path."""
-        request.first_token_ts = time.perf_counter()
+        if not request.first_token_ts:             # a resumed (preempted) request keeps its real first-token time
+            request.first_token_ts = time.perf_counter()
         self._splice_in(kv, kv_len, device)
         self._active.append(_ActiveRow(request=request, current_token=first_token, real_kv_len=kv_len))
         self._timeline.event("first_token", trace_id=request.trace_id, kv_len=kv_len,
@@ -763,7 +778,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if not self._prefilling:
             return
         prow = self._prefilling[0]
-        ids = prow.request.token_ids
+        ids = prow.request.prefill_ids
 
         if prow.matched == len(ids):
             # Full cache hit — feed last token as a one-token primer (mirrors monolithic).
@@ -781,8 +796,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         except Exception as e:
             logger.exception("prefill_chunk failed for session %s", prow.request.session_id)
             self._prefilling.pop(0)
-            self._active_kv_reserved -= len(prow.request.token_ids) + prow.request.max_tokens
-            self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
+            self._release_kv(prow.request)
             self.policy.on_request_finished(prow.request)
             self._reject(prow.request, e)
             return
@@ -812,7 +826,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for prow in self._prefilling:
             if budget <= 0 or len(picked) >= self.prefill_step_rows:
                 break
-            ids = prow.request.token_ids
+            ids = prow.request.prefill_ids
             if prow.matched == len(ids) and prow.tokens_fed == prow.matched:
                 chunk, final = [ids[-1]], True
             else:
@@ -852,14 +866,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if detail:
                 self._timeline.event("prefill_detail", rows=len(picked), **detail)
         except Exception as e:
+            requeue = isinstance(e, KVCacheExhausted)
             e = _as_backpressure(e)
-            logger.warning("mixed prefill rejected (%d rows): %s", len(picked), e)
+            logger.warning("mixed prefill %s (%d rows): %s", "requeued" if requeue else "rejected", len(picked), e)
             for prow, _, _ in picked:
                 self._prefilling.remove(prow)
-                self._active_kv_reserved -= len(prow.request.token_ids) + prow.request.max_tokens
-                self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
+                self._release_kv(prow.request)
                 self.policy.on_request_finished(prow.request)
-                self._reject(prow.request, e)
+                if requeue and not prow.request.cancelled:
+                    self._requeue(prow.request)
+                else:
+                    self._reject(prow.request, e)
             return
         for (prow, chunk, final), (kv, last_token, kv_len) in zip(picked, results):
             prow.partial_kv = kv
@@ -868,7 +885,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._metrics.record_chunk()
             if final:
                 try:
-                    self.backend.prefill_store(prow.request.token_ids, kv, prow.matched, prow.request.session_id)
+                    self.backend.prefill_store(prow.request.prefill_ids, kv, prow.matched, prow.request.session_id)
                 except Exception:
                     logger.exception("prefill_store failed for session %s", prow.request.session_id)
                 self._prefilling.remove(prow)
@@ -1032,6 +1049,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._finish_row(request, state)
         if state == "ok":
             self._total_completed += 1
+            self._out_hist.append(len(result))
         if state == "ok" and request.first_token_ts > 0 and request.enqueue_ts > 0:
             now = time.perf_counter()
             ttft = request.first_token_ts - request.enqueue_ts
@@ -1123,9 +1141,39 @@ class ContinuousBatchScheduler(SchedulerInterface):
                        row.request.session_id, len(self._active), exc)
         self.policy.on_request_finished(row.request)
         self._evict_row(idx, resolve=False)       # releases reservation AND frees paged blocks
+        if isinstance(exc, KVCacheExhausted) and not row.request.cancelled:
+            self._requeue(row.request)            # prefilled again later: prompt + what it generated
+            return
         self._reject(row.request, QueueFullError(
             f"preempted under KV pressure after {len(row.request.generated)} tokens"),
             state="preempted")
+
+    def _requeue(self, request: ScheduledRequest) -> None:
+        """Back to the pending queue (KV pressure): it is prefilled again from prompt + generated tokens when the pool
+        allows, mostly a prefix-cache hit, and its stream continues where it stopped."""
+        request.preemptions += 1
+        request.enqueue_ts = time.perf_counter()  # the queue deadline counts from the requeue
+        self._timeline.event("requeue", trace_id=request.trace_id, generated=len(request.generated))
+        with self._pending_cv:
+            self.policy.on_request_arrived(request)
+            self._pending_count += 1
+            self._pending_cv.notify()
+
+    def _output_reservation(self, request: ScheduledRequest) -> int:
+        """Output tokens to reserve KV for at admission (see OUT_HISTORY)."""
+        left = max(1, request.max_tokens - len(request.generated))
+        if len(self._out_hist) < OUT_MIN_SEEN:
+            return left
+        q = sorted(self._out_hist)[int(OUT_QUANTILE * (len(self._out_hist) - 1))]
+        return max(1, min(left, q))
+
+    def _release_kv(self, request: ScheduledRequest) -> None:
+        """Give back what admission reserved for this request (once)."""
+        p, o = request.kv_res
+        if p or o:
+            self._active_kv_reserved -= p + o
+            self.backend.kv_release(p, o)
+            request.kv_res = (0, 0)
 
     def _fail_inflight(self, exc: BaseException, state: str | None = None) -> None:
         """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.
@@ -1136,7 +1184,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         """
         for i in range(len(self._active) - 1, -1, -1):
             row = self._active[i]
-            self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
+            self._release_kv(row.request)
             if self._batched_kv is not None:
                 try:
                     self._batched_kv = self.backend.remove_row_from_cache(self._batched_kv, i)
@@ -1145,7 +1193,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self.policy.on_request_finished(row.request)
             self._reject(row.request, exc, state=state)
         for prow in self._prefilling:
-            self.backend.kv_release(len(prow.request.token_ids), prow.request.max_tokens)
+            self._release_kv(prow.request)
             free = getattr(prow.partial_kv, "free_all", None)
             if callable(free):
                 try:

@@ -690,7 +690,17 @@ class BatchedDecodeState:
             return
         lbs = [self._host_len[r] // bs for r in crossing]
         self.bt = self._grow_cols(self.bt, max(lbs) + 1)
-        ids = [[self.pools[L].alloc() for _ in crossing] for L in self._live]
+        ids: list[list[int]] = []
+        try:                                       # all or nothing: a pool that runs dry leaves nothing half-taken
+            for L in self._live:
+                ids.append([])
+                for _ in crossing:
+                    ids[-1].append(self.pools[L].alloc())
+        except KVCacheExhausted:
+            for L, got in zip(self._live, ids):
+                for bid in got:
+                    self.pools[L].release(bid)
+            raise
         for i, _L in enumerate(self._live):
             for j, r in enumerate(crossing):
                 self._host_blocks[r][i].append(ids[i][j])
