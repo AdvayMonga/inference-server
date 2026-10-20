@@ -68,10 +68,9 @@ def _kv_match(backend, sb, sa, B):
             ba, bb = sa.bt[sa._li[L]][r, p // 16].item(), sb.bt[sb._li[L]][r, p // 16].item()
             pool = backend.pools[L]
             torch.testing.assert_close(pool.k[bb, :, p % 16].float(), pool.k[ba, :, p % 16].float(), atol=tol, rtol=tol)
-            if L == 0:
-                assert torch.equal(pool.v[bb, :, p % 16], pool.v[ba, :, p % 16])
-            else:
-                torch.testing.assert_close(pool.v[bb, :, p % 16].float(), pool.v[ba, :, p % 16].float(), atol=tol, rtol=tol)
+            # V is the qkv projection itself: cuBLAS and the kernel's GEMV round its sums differently, so even layer
+            # 0's V agrees to bf16 rounding, not bit for bit
+            torch.testing.assert_close(pool.v[bb, :, p % 16].float(), pool.v[ba, :, p % 16].float(), atol=tol, rtol=tol)
 
 
 @pytest.mark.parametrize("lens", [(37,), (37, 16, 300), (1000,)])

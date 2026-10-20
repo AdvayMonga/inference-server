@@ -5,8 +5,8 @@
 // items per warp, each a DRAM round trip, then a barrier), so each GEMV phase's first weight rows are loaded into
 // registers before the barrier that precedes it, and the attention phase prepares its own q/k/v. Per layer:
 //   P1 residual h = (L == 0 ? embed[token] : h1 + out2) in every block, RMSNorm, QKV GEMV      -> qkv [B, 5120]
-//   P2 attention per (row, q head, 256-position chunk): the block norms+ropes its q head itself and scores the new
-//      token's k/v from registers (the group's first head writes them into the pool); one chunk -> attn, else partial
+//   P2 attention per (row, kv group, 256-position chunk): the block norms+ropes the group's q heads itself, the
+//      chunk holding the new token writes its k/v into the paged pool first; one chunk -> attn, else partial o/m/l
 //   P3 (only when some row spans several chunks) combine the chunks                               -> attn [B, 4096]
 //   P4 o_proj GEMV                                                                                -> o [B, 2048]
 //   P5 h1 = bf16(h + o), n2 = RMSNorm(h1) in every block; router logits over the grid             -> logits [B, 128]
@@ -29,7 +29,7 @@ namespace cg = cooperative_groups;
 constexpr int H = 2048, NQ = 32, NKV = 4, D = 128, QKV = NQ * D + 2 * NKV * D, I = 768, E = 128, K = 8;
 constexpr int BS = 16, BMAX = 16, THREADS = 256, WARPS = THREADS / 32, CHUNK = 256, MAXSPLIT = 128;
 constexpr int GQA = NQ / NKV;                                        // q heads per kv head
-static_assert(THREADS == 2 * D && CHUNK == THREADS, "the attention phase: a thread per position, two per output");
+static_assert(GQA == WARPS, "the attention phase preps one q head per warp");
 constexpr float EPS = 1e-6f;
 
 using bf16 = __nv_bfloat16;
@@ -237,8 +237,12 @@ __device__ __forceinline__ void mbar_wait(unsigned long long* b, uint32_t parity
 template <typename Issue, typename Consume>
 __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsigned char* ring, uint32_t& ph,
                                          Issue issue, Consume consume) {
-    if (threadIdx.x == 0)
+    if (threadIdx.x == 0) {
+        // the ring's bytes were last written by ordinary stores (the attention phase stages V there): order those
+        // before the async proxy's copies
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         for (int s = 0; s < min(nst, NST); ++s) issue(s, ring + s * STAGE, bars + s);
+    }
     for (int s = 0; s < nst; ++s) {
         const int k = s % NST;
         mbar_wait(bars + k, (ph >> k) & 1u);
@@ -435,161 +439,189 @@ __global__ void __launch_bounds__(THREADS, 1) decode_step_kernel(Args a) {
         STAMP(1);
         grid.sync();
 
-        // ---- P2: attention per (row b, q head hq, 256-position chunk c): 32 items a row instead of 4, so the phase
-        //      runs on 32x more SMs at batch 1 (one block per kv group left 128 of 132 SMs idle for ~16 us a layer,
-        //      2026-10-19). Warp 0 norms+ropes+scales the q head into shared memory (a lane holds elements lane, +32,
-        //      +64, +96, so the rope pairs (i, i+64) never leave the lane); in the chunk holding the new token warp 1
-        //      norms+ropes its k and takes its v, scored from registers here rather than from the pool (other blocks
-        //      write the pool), and the group's first head writes both into the pool. Thread t scores position t0 + t;
-        //      PV with thread d owning output d over half the positions (V rows read coalesced, 256 B a position).
+        // ---- P2: attention per (row b, kv group g, 256-position chunk c). First the block prepares the group: warp w
+        //      norms+ropes+scales q head g*8+w into shared memory (a lane holds elements lane, +32, +64, +96, so the rope
+        //      pairs (i, i+64) never leave the lane); in the chunk holding the new token, warp 0 also norms+ropes k and
+        //      writes k and v into the paged pool. Then thread t scores position t0 + t against the 8 heads (k/v rows
+        //      with every load in flight), chunk softmax stats, and PV with each thread owning 8 consecutive d of one
+        //      head over half the positions (16-byte smem loads, 8 FMAs per load).
         {
-            float* q_s = reinterpret_cast<float*>(smem);                       // [D]
-            float* kn_s = q_s + D;                                              // [D] the new token's k, bf16-rounded
-            float* vn_s = kn_s + D;                                             // [D] and its v
-            float* p_s = vn_s + D;                                              // [CHUNK]
-            float* red2 = p_s + CHUNK;                                          // [WARPS]
-            float* pv_s = red2 + WARPS;                                         // [D] the second half's partial sums
-            for (int item = blockIdx.x; item < B * NQ * nsplit; item += gridDim.x) {
-                const int c = item % nsplit, hq = (item / nsplit) % NQ, b = item / (nsplit * NQ), g = hq / GQA;
+            float* q_s = reinterpret_cast<float*>(smem);                                   // [GQA][D]
+            bf16* v_s = reinterpret_cast<bf16*>(smem + GQA * D * 4);                       // [CHUNK][D]
+            float* p_s = reinterpret_cast<float*>(smem + GQA * D * 4 + CHUNK * D * 2);     // [GQA][CHUNK]
+            float* red2 = p_s + GQA * CHUNK;                                               // [GQA][WARPS]
+            float* pv_s = red2 + GQA * WARPS;                                              // [THREADS/2][8]
+            for (int item = blockIdx.x; item < B * NKV * nsplit; item += gridDim.x) {
+                const int c = item % nsplit, g = (item / nsplit) % NKV, b = item / (nsplit * NKV);
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
                 if (t0 >= kv_len) continue;
                 const int tn = min(CHUNK, kv_len - t0);
-                const bool has_new = c == pos / CHUNK;
-                if (warp == 0 || (warp == 1 && has_new)) {
+                {
                     float cs[2], sn[2];
 #pragma unroll
                     for (int u = 0; u < 2; ++u) { const float f = pos * a.inv_freq[lane + 32 * u]; cs[u] = rbf(cosf(f)); sn[u] = rbf(sinf(f)); }
-                    const bf16* row = warp == 0 ? a.sc.qkv + b * QKV + hq * D : a.sc.qkv + b * QKV + NQ * D + g * D;
-                    const bf16* nw = warp == 0 ? lw.q_norm : lw.k_norm;
+                    const bf16* qrow = a.sc.qkv + b * QKV + (g * GQA + warp) * D;
                     float x[4];
 #pragma unroll
-                    for (int u = 0; u < 4; ++u) x[u] = bf2f(row[lane + 32 * u]);
+                    for (int u = 0; u < 4; ++u) x[u] = bf2f(qrow[lane + 32 * u]);
                     const float r = rsqrtf(warp_sum(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]) / D + EPS);
                     float n[4];
 #pragma unroll
-                    for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(nw[lane + 32 * u]) * rbf(x[u] * r));
-                    if (warp == 0) {
+                    for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(lw.q_norm[lane + 32 * u]) * rbf(x[u] * r));
 #pragma unroll
-                        for (int u = 0; u < 2; ++u) {
-                            q_s[lane + 32 * u] = rbf(n[u] * cs[u] - n[u + 2] * sn[u]) * a.scale;
-                            q_s[lane + 32 * u + D / 2] = rbf(n[u + 2] * cs[u] + n[u] * sn[u]) * a.scale;
-                        }
-                    } else {
+                    for (int u = 0; u < 2; ++u) {
+                        q_s[warp * D + lane + 32 * u] = rbf(n[u] * cs[u] - n[u + 2] * sn[u]) * a.scale;
+                        q_s[warp * D + lane + 32 * u + D / 2] = rbf(n[u + 2] * cs[u] + n[u] * sn[u]) * a.scale;
+                    }
+                    if (warp == 0 && c == pos / CHUNK) {                  // this chunk holds the new token: its k and v
+                        const bf16* krow = a.sc.qkv + b * QKV + NQ * D + g * D;
                         const bf16* vrow = a.sc.qkv + b * QKV + NQ * D + NKV * D + g * D;
+#pragma unroll
+                        for (int u = 0; u < 4; ++u) x[u] = bf2f(krow[lane + 32 * u]);
+                        const float rk = rsqrtf(warp_sum(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]) / D + EPS);
+#pragma unroll
+                        for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(lw.k_norm[lane + 32 * u]) * rbf(x[u] * rk));
+                        const int bid = (int)bt[b * a.bt_cols + pos / BS], slot = pos % BS;
+                        const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
                         bf16 kb[4];
 #pragma unroll
                         for (int u = 0; u < 2; ++u) {
                             kb[u] = f2bf(n[u] * cs[u] - n[u + 2] * sn[u]);
                             kb[u + 2] = f2bf(n[u + 2] * cs[u] + n[u] * sn[u]);
                         }
-                        auto held = [&](float x) { return a.kv8 ? float(__nv_fp8_e4m3(x)) : x; };   // as the pool holds it
+                        if (a.kv8) {                                        // KV_CACHE_DTYPE=fp8
+                            __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
+                            __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
 #pragma unroll
-                        for (int u = 0; u < 2; ++u) { kn_s[lane + 32 * u] = held(bf2f(kb[u])); kn_s[lane + 32 * u + D / 2] = held(bf2f(kb[u + 2])); }
+                            for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(kb[u])); kdst[lane + 32 * u + D / 2] = __nv_fp8_e4m3(bf2f(kb[u + 2])); }
 #pragma unroll
-                        for (int u = 0; u < 4; ++u) vn_s[lane + 32 * u] = held(bf2f(vrow[lane + 32 * u]));
-                        if (hq % GQA == 0) {                                    // the group's first head writes the pool
-                            const int bid = (int)bt[b * a.bt_cols + pos / BS], slot = pos % BS;
-                            const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
-                            if (a.kv8) {
-                                __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
-                                __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
+                            for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(vrow[lane + 32 * u]));
+                        } else {
+                            bf16* kdst = reinterpret_cast<bf16*>(lw.pool_k) + off;
+                            bf16* vdst = reinterpret_cast<bf16*>(lw.pool_v) + off;
 #pragma unroll
-                                for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(kb[u])); kdst[lane + 32 * u + D / 2] = __nv_fp8_e4m3(bf2f(kb[u + 2])); }
+                            for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
 #pragma unroll
-                                for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(vrow[lane + 32 * u]));
-                            } else {
-                                bf16* kdst = reinterpret_cast<bf16*>(lw.pool_k) + off;
-                                bf16* vdst = reinterpret_cast<bf16*>(lw.pool_v) + off;
-#pragma unroll
-                                for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
-#pragma unroll
-                                for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
-                            }
+                            for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
                         }
                     }
                 }
                 __syncthreads();
-                float sc = -INFINITY;
+                float s[GQA];
+#pragma unroll
+                for (int j = 0; j < GQA; ++j) s[j] = -INFINITY;
                 if (tid < tn) {
                     const int t = t0 + tid;
-                    float acc = 0.f;
-                    if (t == pos) {
-#pragma unroll 16
-                        for (int i = 0; i < D; ++i) acc += q_s[i] * kn_s[i];
+                    const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
+                    const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
+#pragma unroll
+                    for (int j = 0; j < GQA; ++j) s[j] = 0.f;
+                    if (a.kv8) {                                            // fp8 rows: 128 B each, widened as they land
+                        const uint4* krow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_k) + off);
+                        const uint4* vrow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_v) + off);
+                        uint4 kv4[D / 16], vv4[D / 16];
+#pragma unroll
+                        for (int i = 0; i < D / 16; ++i) { kv4[i] = krow[i]; vv4[i] = vrow[i]; }
+#pragma unroll
+                        for (int i = 0; i < D / 16; ++i) {
+                            float vf[16];
+                            fp8_to_f32<16>(&vv4[i], vf);
+#pragma unroll
+                            for (int jj = 0; jj < 16; ++jj) v_s[tid * D + i * 16 + jj] = f2bf(vf[jj]);
+                            float kf[16];
+                            fp8_to_f32<16>(&kv4[i], kf);
+#pragma unroll
+                            for (int j = 0; j < GQA; ++j) {
+                                const float* q = q_s + j * D + i * 16;
+#pragma unroll
+                                for (int jj = 0; jj < 16; ++jj) s[j] += q[jj] * kf[jj];
+                            }
+                        }
                     } else {
-                        const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
-                        const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
-                        if (a.kv8) {                                            // 128 B a row: 8 loads of 16
-                            const uint4* krow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_k) + off);
-                            uint4 kv4[D / 16];
+                        const bf16* krow = reinterpret_cast<const bf16*>(lw.pool_k) + off;
+                        const bf16* vrow = reinterpret_cast<const bf16*>(lw.pool_v) + off;
+                        uint4 kv4[D / 8];
 #pragma unroll
-                            for (int i = 0; i < D / 16; ++i) kv4[i] = krow[i];
+                        for (int i = 0; i < D / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
 #pragma unroll
-                            for (int i = 0; i < D / 16; ++i) {
-                                float kf[16];
-                                fp8_to_f32<16>(&kv4[i], kf);
+                        for (int i = 0; i < D / 8; ++i) *reinterpret_cast<uint4*>(v_s + tid * D + i * 8) = *reinterpret_cast<const uint4*>(vrow + i * 8);
 #pragma unroll
-                                for (int jj = 0; jj < 16; ++jj) acc += q_s[i * 16 + jj] * kf[jj];
-                            }
-                        } else {
-                            const bf16* krow = reinterpret_cast<const bf16*>(lw.pool_k) + off;
-                            uint4 kv4[D / 8];
+                        for (int i = 0; i < D / 8; ++i) {
+                            float kf[8];
+                            bf16_to_f32<8>(&kv4[i], kf);
 #pragma unroll
-                            for (int i = 0; i < D / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
+                            for (int j = 0; j < GQA; ++j) {
+                                const float* q = q_s + j * D + i * 8;
 #pragma unroll
-                            for (int i = 0; i < D / 8; ++i) {
-                                float kf[8];
-                                bf16_to_f32<8>(&kv4[i], kf);
-#pragma unroll
-                                for (int jj = 0; jj < 8; ++jj) acc += q_s[i * 8 + jj] * kf[jj];
+                                for (int jj = 0; jj < 8; ++jj) s[j] += q[jj] * kf[jj];
                             }
                         }
                     }
-                    sc = acc;
                 }
-                float wm = warp_max(sc);
-                if (lane == 0) red2[warp] = wm;
                 __syncthreads();
-                float m = red2[0];
+                float m[GQA], l[GQA];
 #pragma unroll
-                for (int w = 1; w < WARPS; ++w) m = fmaxf(m, red2[w]);
+                for (int j = 0; j < GQA; ++j) { const float wm = warp_max(s[j]); if (lane == 0) red2[j * WARPS + warp] = wm; }
                 __syncthreads();
-                const float pv = (tid < tn) ? __expf(sc - m) : 0.f;
-                p_s[tid] = pv;
-                const float ws = warp_sum(pv);
-                if (lane == 0) red2[warp] = ws;
-                __syncthreads();
-                float l = 0.f;
 #pragma unroll
-                for (int w = 0; w < WARPS; ++w) l += red2[w];
-                {   // PV: output d over the positions of this half
-                    const int d = tid & (D - 1), half = tid >> 7;
-                    float acc = 0.f;
-#pragma unroll 4
-                    for (int tt = half; tt < tn; tt += 2) {
-                        const int t = t0 + tt;
-                        float v;
-                        if (t == pos) {
-                            v = vn_s[d];
-                        } else {
-                            const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
-                            const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D + d;
-                            v = a.kv8 ? float(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_v)[off])
-                                      : bf2f(reinterpret_cast<const bf16*>(lw.pool_v)[off]);
-                        }
-                        acc += p_s[tt] * v;
+                for (int j = 0; j < GQA; ++j) {
+                    float mm = red2[j * WARPS];
+#pragma unroll
+                    for (int w = 1; w < WARPS; ++w) mm = fmaxf(mm, red2[j * WARPS + w]);
+                    m[j] = mm;
+                }
+                __syncthreads();
+#pragma unroll
+                for (int j = 0; j < GQA; ++j) {
+                    const float pv = (tid < tn) ? __expf(s[j] - m[j]) : 0.f;
+                    p_s[j * CHUNK + tid] = pv;
+                    const float ws = warp_sum(pv);
+                    if (lane == 0) red2[j * WARPS + warp] = ws;
+                }
+                __syncthreads();
+#pragma unroll
+                for (int j = 0; j < GQA; ++j) {
+                    float ss = 0.f;
+#pragma unroll
+                    for (int w = 0; w < WARPS; ++w) ss += red2[j * WARPS + w];
+                    l[j] = ss;
+                }
+                {   // PV: item = (head j, 8-wide d group), two threads per item over interleaved positions
+                    const int it = tid & 127, half = tid >> 7, j = it / (D / 8), d0 = (it % (D / 8)) * 8;
+                    float acc[8];
+#pragma unroll
+                    for (int u = 0; u < 8; ++u) acc[u] = 0.f;
+                    for (int t = half; t < tn; t += 2) {
+                        const float p = p_s[j * CHUNK + t];
+                        const uint4 vv = *reinterpret_cast<const uint4*>(v_s + t * D + d0);
+                        float vf[8];
+                        bf16_to_f32<8>(&vv, vf);
+#pragma unroll
+                        for (int u = 0; u < 8; ++u) acc[u] += p * vf[u];
                     }
-                    if (half == 1) pv_s[d] = acc;
+                    if (half == 1) {
+#pragma unroll
+                        for (int u = 0; u < 8; ++u) pv_s[it * 8 + u] = acc[u];
+                    }
                     __syncthreads();
                     if (half == 0) {
-                        acc += pv_s[d];
-                        if (nsplit == 1) a.sc.attn[b * (NQ * D) + hq * D + d] = f2bf(acc / l);
-                        else a.sc.part_o[(((size_t)b * NQ + hq) * MAXSPLIT + c) * D + d] = acc;
+                        const int hq = g * GQA + j;
+                        if (nsplit == 1) {
+                            bf16* dst = a.sc.attn + b * (NQ * D) + hq * D + d0;
+                            const float inv = 1.f / l[j];
+#pragma unroll
+                            for (int u = 0; u < 8; ++u) dst[u] = f2bf((acc[u] + pv_s[it * 8 + u]) * inv);
+                        } else {
+                            float* dst = a.sc.part_o + (((size_t)b * NQ + hq) * MAXSPLIT + c) * D + d0;
+#pragma unroll
+                            for (int u = 0; u < 8; ++u) dst[u] = acc[u] + pv_s[it * 8 + u];
+                        }
                     }
                 }
-                if (nsplit > 1 && tid == 0) {
-                    a.sc.part_m[((size_t)b * NQ + hq) * MAXSPLIT + c] = m;
-                    a.sc.part_l[((size_t)b * NQ + hq) * MAXSPLIT + c] = l;
+                if (nsplit > 1 && tid < GQA) {
+                    const int hq = g * GQA + tid;
+                    a.sc.part_m[((size_t)b * NQ + hq) * MAXSPLIT + c] = m[tid];
+                    a.sc.part_l[((size_t)b * NQ + hq) * MAXSPLIT + c] = l[tid];
                 }
                 __syncthreads();
             }
@@ -965,7 +997,7 @@ static int num_sms() {
 }
 
 constexpr size_t SMEM_BYTES = 64 + (size_t)BMAX * NQ * D * 2;   // the largest phase: attn rows for o_proj (128 KB)
-static_assert(64 + (4 * D + CHUNK + WARPS) * 4 <= SMEM_BYTES, "attention smem");
+static_assert(64 + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + (THREADS / 2) * 8 * 4 <= SMEM_BYTES, "attention smem");
 static_assert(64 + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
 static_assert(RING_OFF + NST * STAGE <= SMEM_BYTES && 64 + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases");
 static_assert(64 + BMAX * H * 2 + BMAX * K * 8 <= SMEM_BYTES, "P6 smem");
