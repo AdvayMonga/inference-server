@@ -23,8 +23,8 @@ from typing import Generator
 
 import torch
 
-from inference_server.backends.base import InferenceBackend, stop_token_ids
-from inference_server.models.paged_kv_cache import write_token
+from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
+from inference_server.models.paged_kv_cache import to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -331,8 +331,25 @@ def commit_rows(caches, chunks, pools) -> None:
                 cache.seq_lens[L] += len(chunk)
 
 
+def first_tokens(rows: torch.Tensor, samplings: list, defer: bool) -> list:
+    """Sample one token per row of `rows` [K, V]: ints (one device sync), or DeviceTokens whose pinned copies land
+    behind one event (`defer`, CUDA): the caller reads them after it has queued more work."""
+    if not samplings:
+        return []
+    toks = sample_batched(rows, samplings)
+    if not defer or not toks.is_cuda:
+        return toks.tolist()
+    host = torch.empty(toks.shape, dtype=toks.dtype, pin_memory=True)
+    host.copy_(toks, non_blocking=True)
+    ev = torch.cuda.Event()
+    ev.record()
+    return [DeviceToken(toks, host, j, ev) for j in range(len(samplings))]
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom forward (Qwen3MoeForCausalLM)."""
+
+    defers_first_tokens = True      # prefill_chunk_batch(defer_tokens=True) returns DeviceTokens for final rows
 
     THINK_START = 100   # replaced at load by the tokenizer's <think> / </think> ids
     THINK_END = 101
@@ -826,14 +843,14 @@ class CustomTorchBackend(InferenceBackend):
         return partial_kv, last_token, partial_kv.seq_len
 
     @torch.no_grad()
-    def prefill_chunk_batch(self, items, decode=None):
+    def prefill_chunk_batch(self, items, decode=None, defer_tokens=False):
         """`items`: [(partial_kv | None, chunk_ids, is_final, sampling)] -> [(kv, last_token | None, kv_len)]. One
         forward over every chunk: packed into one row (default), or right-padded (PREFILL_PACKED=0); each row attends
         to its own blocks so far plus the chunk. With `decode` = (decode batch, current tokens [R], sampling per row)
         the running decode rows join the packed forward with one token each and the result is (results, next tokens
         [R]): one step for prefill chunks and decode tokens, the weights streamed once for both. On CPU/MPS without
         the packed path, one prefill_chunk per row. On a failure every prefill row's blocks are freed: the scheduler
-        rejects them all."""
+        rejects them all. `defer_tokens` (CUDA): final rows' tokens come back as DeviceTokens, no sync here."""
         from inference_server.models.paged_kv_cache import BatchedDecodeState, PagedKVCache
         if not self.packed_prefill and self.device.type != "cuda":
             out = []
@@ -844,7 +861,7 @@ class CustomTorchBackend(InferenceBackend):
         dev = self.device
         if (decode is None and self._graph_on and 0 < sum(len(c) for _, c, _, _ in items) <= PREFILL_AS_DECODE_TOKENS
                 and max(self._graph_buckets) >= PREFILL_AS_DECODE_TOKENS):
-            out = self._prefill_as_decode(items)
+            out = self._prefill_as_decode(items, defer_tokens)
             if out is not None:
                 return out
         caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
@@ -901,11 +918,10 @@ class CustomTorchBackend(InferenceBackend):
                 c.free_all()
             raise
         t1 = time.perf_counter()
-        out = []
-        for k, (_, chunk, final, sampling) in enumerate(items):
-            row = logits[0, k:k + 1, :] if self.packed_prefill else logits[k:k + 1, 0, :]
-            tok = int(sample(row, sampling).item()) if final else None
-            out.append((caches[k], tok, caches[k].seq_len))
+        finals = [k for k, it in enumerate(items) if it[2]]
+        rows = (logits[0] if self.packed_prefill else logits[:, 0])[to_device(finals, dev)] if finals else None
+        toks = dict(zip(finals, first_tokens(rows, [items[k][3] for k in finals], defer_tokens)))
+        out = [(caches[k], toks.get(k), caches[k].seq_len) for k in range(K)]
         next_tokens = None
         if decode is not None:
             next_tokens = sample_batched(logits[0, K:, :], sampling_rows)
@@ -921,7 +937,7 @@ class CustomTorchBackend(InferenceBackend):
         return (out, next_tokens) if decode is not None else out
 
     @torch.no_grad()
-    def _prefill_as_decode(self, items):
+    def _prefill_as_decode(self, items, defer_tokens=False):
         """Short prefill chunks as one replay of the decode graph (`PREFILL_AS_DECODE_TOKENS`): the same result shape
         as prefill_chunk_batch. None when the rows do not fit the graphs' block tables (the caller runs the packed
         forward). On a failure every row's blocks are freed, as the packed path does."""
@@ -953,11 +969,14 @@ class CustomTorchBackend(InferenceBackend):
             raise
         commit_rows(caches, chunks, self.pools)
         t1 = time.perf_counter()
-        out, end = [], -1
-        for k, (_, chunk, final, sampling) in enumerate(items):
+        ends, end = [], -1
+        for _, chunk, _, _ in items:
             end += len(chunk)
-            tok = int(sample(logits[end:end + 1, -1, :], sampling).item()) if final else None
-            out.append((caches[k], tok, caches[k].seq_len))
+            ends.append(end)
+        finals = [k for k, it in enumerate(items) if it[2]]
+        rows = logits[to_device([ends[k] for k in finals], self.device), -1] if finals else None
+        toks = dict(zip(finals, first_tokens(rows, [items[k][3] for k in finals], defer_tokens)))
+        out = [(caches[k], toks.get(k), caches[k].seq_len) for k in range(len(items))]
         t2 = time.perf_counter()
         self.last_prefill_timing = {"host_enqueue_s": round(t1 - t0, 4), "alloc_s": 0.0, "sync_wait_s": round(t2 - t1, 4),
                                     "gpu_forward_s": round(ev0.elapsed_time(ev1) / 1e3, 4) if ev1.query() else None,
@@ -1298,10 +1317,15 @@ class CustomTorchBackend(InferenceBackend):
 
     def remove_row_from_cache(self, batched_kv, row_idx):
         """Drop one row and release its blocks back to the pool."""
+        return self.remove_rows_from_cache(batched_kv, [row_idx])
+
+    def remove_rows_from_cache(self, batched_kv, row_idxs):
+        """Drop rows and release their blocks: on CUDA one compaction of the batched state, no stream sync."""
         if self.device.type == "cuda":
-            batched_kv.remove_row(row_idx)
+            batched_kv.remove_rows(row_idxs)
         else:
-            batched_kv.pop(row_idx).free_all()
+            for idx in sorted(row_idxs, reverse=True):
+                batched_kv.pop(idx).free_all()
         return batched_kv
 
     def kv_length(self, kv):

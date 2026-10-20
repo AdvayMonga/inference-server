@@ -29,6 +29,16 @@ import torch.nn.functional as F
 from inference_server.models import fused
 
 
+def to_device(values, device: torch.device, dtype=torch.long) -> torch.Tensor:
+    """A host list as a device tensor. On CUDA through pinned memory with a non-blocking copy: a pageable copy waits for
+    every kernel queued on the stream, i.e. for the decode step running asynchronously (2026-10-19: such copies in row
+    removal made each evict phase wait ~12 ms under long prompts)."""
+    t = torch.tensor(values, dtype=dtype)
+    if device.type != "cuda":
+        return t.to(device)
+    return t.pin_memory().to(device, non_blocking=True)
+
+
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
                 k_new: torch.Tensor, v_new: torch.Tensor) -> None:
     """One decode token per row into the pool: pool.k[bt[r, lb[r]], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
@@ -632,15 +642,15 @@ class BatchedDecodeState:
 
     def add_row(self, pkv: "PagedKVCache") -> None:
         """Adopt a prefilled PagedKVCache's blocks as a new batch row (no per-step cost)."""
-        self.seq_lens = torch.cat([self.seq_lens, torch.tensor([pkv.seq_len], device=self.device)])
+        self.seq_lens = torch.cat([self.seq_lens, to_device([pkv.seq_len], self.device)])
         tables = [pkv.block_tables[L] for L in self._live]
         n0 = max((len(t) for t in tables), default=0)
-        self.n_alloc = torch.cat([self.n_alloc, torch.tensor([n0], device=self.device)])
+        self.n_alloc = torch.cat([self.n_alloc, to_device([n0], self.device)])
         self._host_len.append(pkv.seq_len)
         self._host_alloc.append(n0)
         self._host_blocks.append([list(t) for t in tables])
         cols = max(n0, self.bt.shape[2] if self.bt is not None else 0)
-        row = torch.tensor([t + [0] * (cols - len(t)) for t in tables], dtype=torch.long, device=self.device)
+        row = to_device([t + [0] * (cols - len(t)) for t in tables], self.device)
         if self.bt is None:
             self.bt = row[:, None, :]
         else:
@@ -648,16 +658,25 @@ class BatchedDecodeState:
 
     def remove_row(self, idx: int) -> None:
         """Free row `idx`'s blocks and drop it from the batch."""
-        keep = [i for i in range(self.n_rows) if i != idx]
-        keep_t = torch.tensor(keep, dtype=torch.long, device=self.device)
-        blocks = self._host_blocks.pop(idx)                             # host mirror: no D2H
-        self._host_len.pop(idx)
-        self._host_alloc.pop(idx)
-        for i, L in enumerate(self._live):
-            pool = self.pools[L]
-            for bid in blocks[i]:
-                pool.release(bid)
-        self.bt = self.bt[:, keep_t] if keep else None
+        self.remove_rows([idx])
+
+    def remove_rows(self, idxs) -> None:
+        """Free these rows' blocks and drop them from the batch: one compaction for all of them, no stream sync."""
+        drop = set(idxs)
+        keep = [i for i in range(self.n_rows) if i not in drop]
+        for idx in sorted(drop, reverse=True):
+            blocks = self._host_blocks.pop(idx)                         # host mirror: no D2H
+            self._host_len.pop(idx)
+            self._host_alloc.pop(idx)
+            for i, L in enumerate(self._live):
+                pool = self.pools[L]
+                for bid in blocks[i]:
+                    pool.release(bid)
+        if not keep:
+            self.bt, self.seq_lens, self.n_alloc = None, self.seq_lens[:0], self.n_alloc[:0]
+            return
+        keep_t = to_device(keep, self.device)
+        self.bt = self.bt[:, keep_t]
         self.seq_lens = self.seq_lens[keep_t]
         self.n_alloc = self.n_alloc[keep_t]
 
@@ -677,11 +696,7 @@ class BatchedDecodeState:
                 self._host_blocks[r][i].append(ids[i][j])
         for r in crossing:
             self._host_alloc[r] += 1
-        # pinned, non-blocking copies: a pageable copy would first sync the stream, i.e. wait for the running step
-        cuda = self.device.type == "cuda"
-        new, rows_t, lbs_t = ((torch.tensor(v, dtype=torch.long).pin_memory().to(self.device, non_blocking=True) if cuda
-                               else torch.tensor(v, dtype=torch.long, device=self.device))
-                              for v in (ids, crossing, lbs))                                      # new: [layers, crossing]
+        new, rows_t, lbs_t = (to_device(v, self.device) for v in (ids, crossing, lbs))         # new: [layers, crossing]
         self.bt[:, rows_t, lbs_t] = new
         self.n_alloc[rows_t] += 1
 

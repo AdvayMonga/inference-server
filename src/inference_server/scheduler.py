@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 
 import torch
 
-from inference_server.backends.base import InferenceBackend
-from inference_server.models.paged_kv_cache import KVCacheExhausted
+from inference_server.backends.base import DeviceToken, InferenceBackend
+from inference_server.models.paged_kv_cache import KVCacheExhausted, to_device
 from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams
 from inference_server.scheduling_policy import FCFSPolicy, SchedulingPolicy
@@ -88,7 +88,7 @@ class SchedulerInterface(ABC):
 class _ActiveRow:
     """One slot in the running batch."""
     request: ScheduledRequest
-    current_token: int       # token to feed next forward pass
+    current_token: int | DeviceToken   # token to feed next forward pass (a DeviceToken until its host copy lands)
     real_kv_len: int         # actual KV cache length for this row
     fresh: bool = True       # current_token not yet appended/streamed/checked for EOS by _evict_finished
 
@@ -182,6 +182,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         # Mixed mode: prefill tokens fed between two decode steps, over every waiting row together, and the most
         # rows one step carries (0 = no cap).
         self.prefill_step_tokens = max(1, prefill_step_tokens)
+        # Async decode + a backend that can: a mixed step's first tokens stay on the device; the next decode step reads
+        # them there and they are read on the host after that step is queued (reading them at once waited for the
+        # decode step ahead of them: ~28 ms of each ~40 ms short-prefill step under long prompts, 2026-10-19).
+        self._defer_first = async_decode and getattr(backend, "defers_first_tokens", False)
         self.prefill_step_rows = prefill_step_rows if prefill_step_rows > 0 else 2**31
         self.prefill_joint = prefill_joint                # decode rows ride in the packed prefill forward
         self._decoded_this_iter = False            # the decode rows advanced inside this iteration's packed prefill
@@ -477,6 +481,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 continue
             if not row.fresh:                 # async decode: this row's latest token is still on the device
                 continue
+            if isinstance(tok, DeviceToken):
+                if not tok.ready():
+                    continue                  # its host copy has not landed: streamed on a later pass
+                tok = row.current_token = tok.value()
             row.fresh = False
 
             if self.backend.is_eos(tok):
@@ -489,10 +497,28 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if len(row.request.generated) >= row.request.max_tokens:
                 to_evict.append((i, "ok"))
 
-        for i, state in reversed(to_evict):
-            row = self._active[i]
-            self.policy.on_request_finished(row.request)
-            self._evict_row(i, state=state)
+        if to_evict:
+            for i, _ in to_evict:
+                self.policy.on_request_finished(self._active[i].request)
+            self._evict_rows(to_evict)
+
+    def _evict_rows(self, items: list[tuple[int, str]]) -> None:
+        """Evict several rows (index, state) with one batched-cache removal."""
+        if self._needs_mask or self._batched_kv is None or len(items) == 1:
+            for i, state in sorted(items, reverse=True):
+                self._evict_row(i, state=state)
+            return
+        idxs = sorted(i for i, _ in items)
+        rows = [(self._active[i], state) for i, state in items]
+        for i in reversed(idxs):
+            row = self._active.pop(i)
+            self._active_kv_reserved -= len(row.request.token_ids) + row.request.max_tokens
+            self.backend.kv_release(len(row.request.token_ids), row.request.max_tokens)
+        self._batched_kv = self.backend.remove_rows_from_cache(self._batched_kv, idxs)
+        if not self._active:
+            self._batched_kv = None
+        for row, state in rows:
+            self._resolve(row.request, state)
 
     def _evict_row(self, idx: int, resolve: bool = True, state: str = "ok") -> None:
         row = self._active.pop(idx)
@@ -816,6 +842,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                                       decode_rows=len(batch) if batch else 0):
                 items = [(p.partial_kv, c, final, p.request.sampling) for p, c, final in picked]
                 results = (self.backend.prefill_chunk_batch(items, decode=decode) if decode is not None
+                           else self.backend.prefill_chunk_batch(items, defer_tokens=True) if self._defer_first
                            else self.backend.prefill_chunk_batch(items))
             if decode is not None:
                 results, next_tokens = results
@@ -927,22 +954,31 @@ class ContinuousBatchScheduler(SchedulerInterface):
         """This step's input token per row: continuing rows from the previous step's device output, rows that joined
         since from the host."""
         n = len(batch)
-        if self._pending is None:
-            return torch.tensor([r.current_token for r in batch], dtype=torch.long, device=device)
-        out_prev, snap_prev = self._pending[0], self._pending[1]
-        if len(snap_prev) == n and all(a is b for a, b in zip(snap_prev, batch)):
-            return out_prev          # the same rows in the same order: no host round trip, so this launch queues
-                                     # behind the running step instead of waiting for it (a pageable copy syncs the stream)
-        where = {id(r): i for i, r in enumerate(snap_prev)}
-        current = torch.empty(n, dtype=torch.long, device=out_prev.device)
+        dev = torch.device(device)
+        where = {}
+        if self._pending is not None:
+            out_prev, snap_prev = self._pending[0], self._pending[1]
+            if len(snap_prev) == n and all(a is b for a, b in zip(snap_prev, batch)):
+                return out_prev      # the same rows in the same order: no host round trip, so this launch queues
+                                     # behind the running step instead of waiting for it
+            where = {id(r): i for i, r in enumerate(snap_prev)}
+            dev = out_prev.device
+        if not where and not any(isinstance(r.current_token, DeviceToken) for r in batch):
+            return to_device([r.current_token for r in batch], dev)
+        current = torch.empty(n, dtype=torch.long, device=dev)
         dst = [i for i, r in enumerate(batch) if id(r) in where]
         if dst:
-            src = torch.tensor([where[id(batch[i])] for i in dst], device=out_prev.device)
-            current[torch.tensor(dst, device=out_prev.device)] = out_prev[src]
-        new = [i for i, r in enumerate(batch) if id(r) not in where]
-        if new:
-            current[torch.tensor(new, device=out_prev.device)] = torch.tensor(
-                [batch[i].current_token for i in new], dtype=torch.long, device=out_prev.device)
+            current[to_device(dst, dev)] = out_prev[to_device([where[id(batch[i])] for i in dst], dev)]
+        host = [i for i, r in enumerate(batch) if id(r) not in where and not isinstance(r.current_token, DeviceToken)]
+        if host:
+            current[to_device(host, dev)] = to_device([batch[i].current_token for i in host], dev)
+        on_dev: dict[int, list[int]] = {}     # first tokens still on the device, grouped by the tensor holding them
+        for i, r in enumerate(batch):
+            if id(r) not in where and isinstance(r.current_token, DeviceToken):
+                on_dev.setdefault(id(r.current_token.tokens), []).append(i)
+        for idxs in on_dev.values():
+            toks = batch[idxs[0]].current_token.tokens
+            current[to_device(idxs, dev)] = toks[to_device([batch[i].current_token.index for i in idxs], dev)]
         return current
 
     def _launched(self, next_tokens: torch.Tensor, batch: list) -> None:
@@ -957,6 +993,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._pending is not None:
             self._finish_pending()                 # the previous step's tokens, while this step runs
         self._pending = (next_tokens, batch, host, event)
+        for row in batch:                          # first tokens read now: this step is already queued behind them
+            if isinstance(row.current_token, DeviceToken):
+                row.current_token = row.current_token.value()
 
     def _finish_pending(self) -> None:
         """Read the previous step's tokens and hand them to the rows that still exist (`_evict_finished` streams
