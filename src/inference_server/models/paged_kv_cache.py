@@ -443,7 +443,8 @@ class RadixPrefixCache:
                     if self._evict_lru_leaf() == 0:
                         break
                 if self._nodes >= self._capacity():
-                    return                       # cannot make room; stop growing the trie
+                    self._push_leaf(node)        # cannot make room; stop growing the trie (the path's end stays evictable)
+                    return
                 child = _RadixNode(chunk=key, parent=node, block=blocks[i])
                 self.alloc.acquire(blocks[i])
                 node.children[key] = child
