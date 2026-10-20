@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 ENABLED = os.environ.get("MEGAKERNEL", "1") == "1"      # on where it builds (CUDA + nvcc); MEGAKERNEL=0 for the graphs
 FP8 = os.environ.get("MEGAKERNEL_FP8", "0") == "1"      # measured 2026-10-18: no gain at batch 1 (the phases are latency-bound)
+TMA = os.environ.get("MEGAKERNEL_TMA", "0") == "1"      # weights streamed through a shared-memory ring (batch <= 2)
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
@@ -132,4 +133,5 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
             _NO_TIMES = torch.empty(0, dtype=torch.int64, device=tokens.device)
         times = _NO_TIMES
     return _ext().decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
-                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8)
+                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8,
+                              TMA and tokens.numel() <= 2)

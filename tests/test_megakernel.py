@@ -90,3 +90,23 @@ def test_fp8_step_agrees_on_the_argmax(backend, fp8_model, lens):
     got, ref, sb, sa = _step(backend, fp8_model, prompts, seed=10 + len(lens))
     assert torch.equal(got.float().argmax(-1), ref.float().argmax(-1))
     _kv_match(backend, sb, sa, len(lens))
+
+
+@pytest.mark.parametrize("lens", [(37,), (37, 300)])
+@pytest.mark.parametrize("which", ["bf16", "fp8"])
+def test_tma_streamed_weights_give_the_register_paths_tokens(backend, fp8_model, lens, which):
+    """MEGAKERNEL_TMA: the same step with every GEMV phase's weights streamed through the shared-memory ring (batch
+    <= 2); only the summation order differs, so the argmax agrees and the logits are close."""
+    from inference_server.models import megakernel as mk
+    mdl = backend._mega if which == "bf16" else fp8_model
+    prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]
+    outs = []
+    for tma in (False, True):
+        mk.TMA = tma
+        try:
+            got, _, _, _ = _step(backend, mdl, prompts, seed=40 + len(lens))
+        finally:
+            mk.TMA = False
+        outs.append(got.float())
+    assert torch.equal(outs[0].argmax(-1), outs[1].argmax(-1))
+    assert (outs[0] - outs[1]).abs().mean() < 0.02 * outs[0].abs().mean()
