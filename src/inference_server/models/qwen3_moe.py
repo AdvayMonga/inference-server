@@ -159,10 +159,26 @@ if PREFILL_ATTN == "flashinfer":
     if not _fi.available():
         PREFILL_ATTN = "sdpa"
 
-# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never (default).
-MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "2048"))
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernels (moe_kernel.py); 0 = never. Measured per
+# layer call on the H200 (2026-10-20, ms: torch grouped GEMMs / Triton bf16 activations / Triton W8A8): 256 rows
+# 0.38 / 0.34 / 0.29, 512 rows 0.39 / 0.44 / 0.30, 1,024 rows 0.47 / 0.70 / 0.50, 2,048 rows 0.61 / 1.17 / 0.83, 8,192
+# rows 2.95 / 4.00 / 2.86: the Triton paths win up to ~1,024 rows (8,192 pairs), W8A8 from 256 rows; beyond, torch's.
+# All three sit at 10-13% of fp8 peak at prefill sizes.
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "8192"))
+
+
+# From this many pairs the Triton GEMMs take fp8 activations too (W8A8 on the tensor cores, per-token scales: the same
+# quantization as the torch prefill path); below it the activations stay bf16 (decode at small batch is bound by the
+# weight stream, and bf16 rows are the cheaper tile there: see the table above).
+MOE_A8_MIN_PAIRS = int(os.environ.get("CUSTOM_BACKEND_MOE_A8_PAIRS", "2048"))
+
+
+def moe_block_m(pairs: int) -> int:
+    """Rows per GEMM tile for `pairs` (token, slot) pairs: 16 at decode sizes (a tile is one expert's few rows); taller
+    tiles once each expert has tens of rows, so its weights are read once per tile of 64 rows, not of 16."""
+    return 16 if pairs <= 2048 else 32 if pairs <= 4096 else 64
 # Up to this many tokens the whole router (softmax, top-k, grouping, padding) is one launch (moe_kernel.route_fused);
-# above it, topk_softmax + sort + align_fused. 0 = never.
+# above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router.
 ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "32"))
 
 FP8 = torch.float8_e4m3fn
@@ -269,18 +285,20 @@ class Qwen3SparseMoE(nn.Module):
             from inference_server.models import moe_kernel
             gu, gu_s = self.experts.weights("gate_up_proj")
             dn, dn_s = self.experts.weights("down_proj")
-            if T <= ROUTE_FUSED_MAX_TOKENS:
-                sorted_ids, expert_ids, tok, pair_w = moe_kernel.route_fused(logits, E, self.top_k,
-                                                                             self.norm_topk_prob, 16)
-            else:
-                weights, experts = fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True)
-                sorted_e, order = torch.sort(experts.view(-1), stable=True)
-                sorted_ids, expert_ids, tok, pair_w = moe_kernel.align_fused(sorted_e, order, weights, E,
-                                                                             self.top_k, 16)
-            h = moe_kernel.moe_gemm(flat, tok, gu, sorted_ids, expert_ids, M, w_scale=gu_s)
+            router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
+            bm = moe_block_m(M)
+            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm)
+            a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
+            a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
+            h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
             act = fused.silu_mul(h)
+            if a8:
+                act, sact = moe_kernel.quant_rows(act)
+            else:
+                sact = None
             out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
-            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, w_scale=dn_s)
+            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
+                                        a_scale=sact)
             return out
         weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
                             else route(logits, self.top_k, self.norm_topk_prob))

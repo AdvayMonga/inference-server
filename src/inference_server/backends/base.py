@@ -2,12 +2,32 @@
 
 import logging
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generator
 
 if TYPE_CHECKING:
     from inference_server.kv_cache.cache_manager import CacheManager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DeviceToken:
+    """A sampled token still on the device, `tokens[index]`, with its pinned host copy landing behind `event`. A prefill
+    returns these when asked to defer (`defer_tokens`): reading the token at once would wait for the decode step queued
+    ahead of it on the stream."""
+    tokens: object                  # [K] long, on the device
+    host: object                    # [K] long, pinned
+    index: int
+    event: object | None = None
+
+    def ready(self) -> bool:
+        return self.event is None or self.event.query()
+
+    def value(self) -> int:
+        if self.event is not None:
+            self.event.synchronize()
+        return int(self.host[self.index])
 
 
 def stop_token_ids(model_name: str, tokenizer) -> set[int]:
@@ -157,6 +177,12 @@ class InferenceBackend(ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not support remove_row_from_cache()"
         )
+
+    def remove_rows_from_cache(self, batched_kv: object, row_idxs: list[int]) -> object:
+        """Drop several rows at once (default: one at a time, highest index first)."""
+        for idx in sorted(row_idxs, reverse=True):
+            batched_kv = self.remove_row_from_cache(batched_kv, idx)
+        return batched_kv
 
     def splice_into_batched(
         self, batched_kv: object | None, new_kv: object, new_kv_len: int,

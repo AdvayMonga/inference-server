@@ -18,20 +18,26 @@ logger = logging.getLogger(__name__)
 
 ENABLED = os.environ.get("MEGAKERNEL", "1") == "1"      # on where it builds (CUDA + nvcc); MEGAKERNEL=0 for the graphs
 FP8 = os.environ.get("MEGAKERNEL_FP8", "0") == "1"      # measured 2026-10-18: no gain at batch 1 (the phases are latency-bound)
+TMA = os.environ.get("MEGAKERNEL_TMA", "1") == "1"      # weights through a shared-memory ring (batch <= 2): 4.48 -> 3.71 ms a step
+BPS = int(os.environ.get("MEGAKERNEL_BPS", "1"))        # blocks per SM where the shared memory allows (never with TMA)
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
 
 @functools.lru_cache(maxsize=None)
-def _ext():
+def _ext(kv8: bool = False, tma: bool = False):
+    """The extension built for fp8 (`kv8`) or bf16 KV pools and with (`tma`) or without the weight ring: build-time
+    flags, so a kernel carries only its own path (both as runtime flags cost the base path 16%, 2026-10-20)."""
     import sys
     from torch.utils.cpp_extension import load
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_step.cu")
-    return load(name="qwen3_decode_step", sources=[str(src)],
+    bps = 1 if tma else BPS
+    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
-                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo"],
+                extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
+                                   f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}"],
                 verbose=False)
 
 
@@ -39,7 +45,7 @@ def available() -> bool:
     if not torch.cuda.is_available():
         return False
     try:
-        _ext()
+        _ext(os.environ.get("KV_CACHE_DTYPE", "").lower() == "fp8", TMA)     # the build the server will use
     except Exception as e:  # noqa: BLE001
         logger.warning("megakernel not built (%s)", str(e)[:300])
         return False
@@ -99,7 +105,7 @@ class Model:
         for name, t in (("embed", self.embed), ("lm_head", self.lm_head)):
             assert t.is_cuda and t.dtype == torch.bfloat16 and t.shape[1] == H and t.is_contiguous(), name
         self.inv_freq = m.rope.inv_freq.to(torch.float32).contiguous()
-        e = _ext()
+        e = _ext(os.environ.get("KV_CACHE_DTYPE", "").lower() == "fp8", TMA)     # scratch sizes: any build; this one is the server's
         self.f32 = torch.empty(e.scratch_f32_elems(), dtype=torch.float32, device=device)
         self.bf16 = torch.empty(e.scratch_bf16_elems(), dtype=torch.bfloat16, device=device)
         self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=device)
@@ -108,8 +114,10 @@ class Model:
     def bind_pools(self, pools) -> None:
         """The paged K/V pools, one per layer ([blocks, NKV, 16, D] bf16 each), into the table."""
         assert len(pools) == self.n_layers and all(p is not None for p in pools), "one live pool per layer"
+        self.kv8 = pools[0].k.dtype == torch.float8_e4m3fn            # KV_CACHE_DTYPE=fp8
         for row, p in zip(self._rows, pools):
-            assert p.k.dtype == torch.bfloat16 and tuple(p.k.shape[1:]) == (NKV, 16, D) and p.k.is_contiguous() and p.v.is_contiguous()
+            assert p.k.dtype in (torch.bfloat16, torch.float8_e4m3fn) and p.k.dtype == pools[0].k.dtype
+            assert tuple(p.k.shape[1:]) == (NKV, 16, D) and p.k.is_contiguous() and p.v.is_contiguous()
             row[11], row[12] = p.k.data_ptr(), p.v.data_ptr()
         self.table = torch.tensor(self._rows, dtype=torch.int64, device=self.device)
 
@@ -119,15 +127,17 @@ _NO_TIMES = None
 
 def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.Tensor,
                 times: torch.Tensor | None = None, stamp_layer: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-    """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [layers, B, cols]
-    int64 block tables, as the batched state keeps them. Writes every layer's K/V for the new token into the pools and
+    """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [B, cols] int64
+    block table (one for every layer), as the batched state keeps it. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
-    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug."""
+    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug; given
+    [blocks, 16] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew."""
     assert mdl.table is not None, "bind_pools() first"
     global _NO_TIMES
     if times is None:
         if _NO_TIMES is None:
             _NO_TIMES = torch.empty(0, dtype=torch.int64, device=tokens.device)
         times = _NO_TIMES
-    return _ext().decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
-                              mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer)
+    ext = _ext(bool(mdl.kv8), TMA)                   # the ring is built in; the kernel uses it at batch <= 2
+    return ext.decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm, mdl.lm_head, mdl.inv_freq,
+                           mdl.f32, mdl.bf16, mdl.i32, float(mdl.scale), mdl.fp8, times, stamp_layer, mdl.kv8, TMA)

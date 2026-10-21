@@ -23,8 +23,8 @@ from typing import Generator
 
 import torch
 
-from inference_server.backends.base import InferenceBackend, stop_token_ids
-from inference_server.models.paged_kv_cache import write_token
+from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
+from inference_server.models.paged_kv_cache import to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -96,9 +96,9 @@ class _PrefillGraphCtx:
 
     is_prefill = True
 
-    def __init__(self, pools, block_tables, prefix_lens, suffix_lens, bucket, bs):
+    def __init__(self, pools, block_table, prefix_lens, suffix_lens, bucket, bs):
         self.pools = pools
-        self.block_tables = block_tables      # per-pool static [1, cols] long (None for shared)
+        self.bt = block_table                 # static [1, cols] long, one table for every layer
         self.prefix_lens = prefix_lens        # static [1] int32 — set per replay
         self.suffix_lens = suffix_lens        # static [1] int32 — set per replay
         self.bs = bs
@@ -107,15 +107,14 @@ class _PrefillGraphCtx:
     def append(self, layer_idx, k_new, v_new):
         # Absolute positions computed IN-GRAPH from the runtime prefix length.
         pos = self.prefix_lens[0].long() + self._ar        # [bucket]
-        bt = self.block_tables[layer_idx][0]               # [cols]
-        bids = bt[pos // self.bs]
+        bids = self.bt[0][pos // self.bs]
         slots = pos % self.bs
         pool = self.pools[layer_idx]
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)   # [bucket, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)   # [bucket, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
 
     def block_table_tensor(self, layer_idx):
-        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0)
+        return self.bt.to(torch.int32).clamp_min(0)
 
 
 class _GraphCtx:
@@ -125,14 +124,12 @@ class _GraphCtx:
     captured graph reads/writes fixed addresses and a replay just needs fresh values copied in.
     """
 
-    def __init__(self, pools, seq_lens, block_tables, bs, bt_all=None):
+    def __init__(self, pools, seq_lens, block_table, bs):
         self.pools = pools
         self.seq_lens = seq_lens          # static [maxN] long
-        self.block_tables = block_tables  # static per-layer [maxN, MAX_COLS] long
+        self.bt = block_table             # static [maxN, MAX_COLS] long, one table for every layer
         self.bs = bs
-        self.bt_all = bt_all              # the same tables stacked [live layers, maxN, MAX_COLS], when given
         self._live = [L for L, p in enumerate(pools) if p is not None]
-        self._li = {L: i for i, L in enumerate(self._live)}
 
     def append(self, layer_idx, k_new, v_new):
         if layer_idx == self._live[0]:   # per-step values once per forward, not per layer (captured as such)
@@ -140,13 +137,11 @@ class _GraphCtx:
             self._lb = self.seq_lens // self.bs
             self._slot = self.seq_lens % self.bs
             self._sl32 = (self.seq_lens + 1).to(torch.int32)
-            self._bt32 = self.bt_all.to(torch.int32).clamp_min_(0) if self.bt_all is not None else None
-        write_token(self.pools[layer_idx], self.block_tables[layer_idx], self._rows, self._lb, self._slot, k_new, v_new)
+            self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
+        write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
-        if self._bt32 is not None:
-            return self._bt32[self._li[layer_idx]], self._sl32
-        return self.block_tables[layer_idx].to(torch.int32).clamp_min(0), self._sl32
+        return self._bt32, self._sl32
 
 
 class _PrefillCtx:
@@ -162,52 +157,53 @@ class _PrefillCtx:
         self.pools = pools
         self._suffix = suffix_lens                 # python list of per-row real suffix lengths
         self._prefix = list(prefix_lens)           # and cached prefix lengths (prefill_attention.sdpa_prefill)
-        self.prefix_lens = torch.tensor(prefix_lens, dtype=torch.int32, device=device)
-        self.suffix_lens = torch.tensor(suffix_lens, dtype=torch.int32, device=device)
+        self.prefix_lens = to_device(list(prefix_lens), device, torch.int32)      # pinned: no wait on the stream
+        self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
-        self._scratch = scratch                    # per-pool padding block (padding writes land here)
+        self._scratch = scratch                    # the padding block id (padding writes land here), every pool
         self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
         self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
         padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
         self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
-        self._bt_cache = {}                        # layer -> [K, maxb] int32, built once per layer
-        self._wave_table, self._wave_layer = None, -1   # the table shared by every layer with the same block ids
+        self._bt_cache = {}                        # layer -> the wave's [K, maxb] table, built once
+        self._wave_table = None                    # the one block table (a block id is the same in every layer)
         self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens
         self.alloc_s = 0.0                         # host seconds in block allocation over the wave
+        self._blocks_done = False
 
-    def _ensure_blocks(self, layer_idx):
-        """Reserve every row's blocks for this layer up front (Python only, no GPU work; `alloc_s` totals it, the
+    def _ensure_blocks(self):
+        """Reserve every row's blocks up front, once a wave (Python only, no GPU work; `alloc_s` totals it, the
         prefix cache's reclaim included)."""
+        if self._blocks_done:
+            return
         t0 = time.perf_counter()
-        pool = self.pools[layer_idx]
-        bs = pool.block_size
+        bs = next(p for p in self.pools if p is not None).block_size
         for b, cache in enumerate(self.caches):
-            bt = cache.block_tables[layer_idx]
-            need = (cache.seq_lens[layer_idx] + self._suffix[b] + bs - 1) // bs
+            bt = cache.blocks
+            need = (cache.seq_len + self._suffix[b] + bs - 1) // bs
             while len(bt) < need:
-                bt.append(pool.alloc())
+                bt.append(cache.alloc.alloc())
+        self._blocks_done = True
         self.alloc_s += time.perf_counter() - t0
 
     def _wave_bt(self, layer_idx):
-        """This layer's [K, maxb] block table (long) and whether it is the wave's shared one: every layer allocates
-        in the same order, so one table serves them all; a layer with different ids gets its own."""
-        self._ensure_blocks(layer_idx)
-        same = self._wave_table is not None and all(c.block_tables[layer_idx] == c.block_tables[self._wave_layer]
-                                                    for c in self.caches)
+        """The wave's [K, maxb] block table (long), built at the first layer, and whether it existed already."""
+        same = self._wave_table is not None
         if not same:
-            self._wave_table, self._wave_layer = self._table(layer_idx).long(), layer_idx
+            self._ensure_blocks()
+            self._wave_table = self._table().long()
         self._bt_cache[layer_idx] = self._wave_table
         return self._wave_table, same
 
-    def _table(self, layer_idx):
-        """[K, maxb] int32 block table for this layer — ONE host->device copy, not one per row."""
-        rows = [c.block_tables[layer_idx] for c in self.caches]
+    def _table(self):
+        """[K, maxb] int32 block table — ONE host->device copy, not one per row."""
+        rows = [c.blocks for c in self.caches]
         maxb = max((len(r) for r in rows), default=1)
-        pad = self._scratch[layer_idx] if self._scratch is not None else 0
+        pad = self._scratch if self._scratch is not None else 0
         flat = [r + [pad] * (maxb - len(r)) for r in rows]
-        return torch.tensor(flat, dtype=torch.int32, device=self.device)
+        return to_device(flat, self.device, torch.int32)
 
     def append(self, layer_idx, k_new, v_new):
         """One scatter for the whole wave. Was a Python loop over rows calling
@@ -219,7 +215,7 @@ class _PrefillCtx:
         bt, same = self._wave_bt(layer_idx)
 
         S = k_new.shape[2]
-        scratch = self._scratch[layer_idx] if self._scratch is not None else None
+        scratch = self._scratch
         if not same or self._wave_pos is None or self._wave_pos[0] != scratch:
             # Where every row's suffix lands: the same for every layer (same prefix lengths, same block ids, scratch
             # blocks allocated in lockstep), so built once a wave from device tensors. The per-layer
@@ -234,8 +230,8 @@ class _PrefillCtx:
             self._wave_pos = (scratch, bids, slots)
         _, bids, slots = self._wave_pos
 
-        pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3)            # [K, S, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3)
+        pool.k[bids, :, slots, :] = k_new.permute(0, 2, 1, 3).to(pool.k.dtype)   # [K, S, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new.permute(0, 2, 1, 3).to(pool.v.dtype)
 
         for b, cache in enumerate(self.caches):   # bookkeeping only — no GPU work
             cache.seq_lens[layer_idx] += self._suffix[b]
@@ -244,7 +240,7 @@ class _PrefillCtx:
         # append() already built it for this layer; rebuilt only when asked for again.
         bt = self._bt_cache.pop(layer_idx, None)
         if bt is None:
-            return self._table(layer_idx)
+            return self._wave_bt(layer_idx)[0].to(torch.int32)
         return bt.to(torch.int32)
 
 
@@ -274,8 +270,8 @@ class _PackedCtx(_PrefillCtx):
         if not same or self._wave_pos is None:
             self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1)                                  # [T, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1)
+        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)                 # [T, Hkv, D]
+        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
         for b, cache in enumerate(self.caches):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
@@ -285,9 +281,9 @@ class _StateRow:
     packed context places its one token like any other row's chunk. Allocation happened in prepare_step."""
 
     def __init__(self, state, r, n_layers):
-        self.block_tables = [None] * n_layers
-        for L, i in state._li.items():
-            self.block_tables[L] = state._host_blocks[r][i]
+        self.blocks = state._host_blocks[r]
+        self.alloc = state.alloc
+        self.block_tables = [self.blocks if p is not None else None for p in state.pools]
         self.seq_lens = [state._host_len[r]] * n_layers
         self.seq_len = state._host_len[r]
 
@@ -302,24 +298,22 @@ PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_
 
 
 def decode_rows(caches, chunks, pools):
-    """Expand prefill chunks into decode rows: reserve every chunk's blocks in every live pool (same order in each), and
-    return (tokens, positions, owner row per token, table [K, live layers, cols] of block ids, 0-padded). The caches'
-    block lists grow here; their lengths move on only after the forward (`commit_rows`)."""
-    live = [L for L, p in enumerate(pools) if p is not None]
-    bs = pools[live[0]].block_size
+    """Expand prefill chunks into decode rows: reserve every chunk's blocks (one id per block, for every layer), and
+    return (tokens, positions, owner row per token, table [K, cols] of block ids, 0-padded). The caches' block lists
+    grow here; their lengths move on only after the forward (`commit_rows`)."""
+    bs = next(p for p in pools if p is not None).block_size
     tokens, pos, owner = [], [], []
     for k, (cache, chunk) in enumerate(zip(caches, chunks)):
         p0 = cache.seq_len
         need = (p0 + len(chunk) + bs - 1) // bs
-        for L in live:
-            bt = cache.block_tables[L]
-            while len(bt) < need:
-                bt.append(pools[L].alloc())
+        bt = cache.blocks
+        while len(bt) < need:
+            bt.append(cache.alloc.alloc())
         tokens += chunk
         pos += range(p0, p0 + len(chunk))
         owner += [k] * len(chunk)
-    cols = max(len(c.block_tables[live[0]]) for c in caches)
-    table = [[c.block_tables[L] + [0] * (cols - len(c.block_tables[L])) for L in live] for c in caches]
+    cols = max(len(c.blocks) for c in caches)
+    table = [c.blocks + [0] * (cols - len(c.blocks)) for c in caches]
     return tokens, pos, owner, table
 
 
@@ -331,8 +325,25 @@ def commit_rows(caches, chunks, pools) -> None:
                 cache.seq_lens[L] += len(chunk)
 
 
+def first_tokens(rows: torch.Tensor, samplings: list, defer: bool) -> list:
+    """Sample one token per row of `rows` [K, V]: ints (one device sync), or DeviceTokens whose pinned copies land
+    behind one event (`defer`, CUDA): the caller reads them after it has queued more work."""
+    if not samplings:
+        return []
+    toks = sample_batched(rows, samplings)
+    if not defer or not toks.is_cuda:
+        return toks.tolist()
+    host = torch.empty(toks.shape, dtype=toks.dtype, pin_memory=True)
+    host.copy_(toks, non_blocking=True)
+    ev = torch.cuda.Event()
+    ev.record()
+    return [DeviceToken(toks, host, j, ev) for j in range(len(samplings))]
+
+
 class CustomTorchBackend(InferenceBackend):
     """PyTorch backend driven by our custom forward (Qwen3MoeForCausalLM)."""
+
+    defers_first_tokens = True      # prefill_chunk_batch(defer_tokens=True) returns DeviceTokens for final rows
 
     THINK_START = 100   # replaced at load by the tokenizer's <think> / </think> ids
     THINK_END = 101
@@ -400,6 +411,14 @@ class CustomTorchBackend(InferenceBackend):
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
 
+        # The KV pools' element type: KV_CACHE_DTYPE=fp8 (CUDA) stores K/V as float8_e4m3fn with a unit scale, as
+        # vLLM's uncalibrated fp8 cache does: twice the tokens per GB (96 KB a token in bf16 for this model) and half
+        # the bytes each attention read streams; readers widen to bf16 before any product. Default bf16.
+        kv = os.environ.get("KV_CACHE_DTYPE", "bf16").lower()
+        self.kv_dtype = torch.float8_e4m3fn if (kv == "fp8" and self.device.type == "cuda") else None
+        if kv == "fp8" and self.kv_dtype is None:
+            logger.warning("KV_CACHE_DTYPE=fp8 needs CUDA; the pools stay in the model's dtype")
+
         # Pre-allocate paged block pools shared across sessions — see kv_reserve.
         from inference_server.config import settings
         from inference_server.models.paged_kv_cache import blocks_for_budget
@@ -412,13 +431,15 @@ class CustomTorchBackend(InferenceBackend):
             # on long prompts). The remaining share is for CUDA graphs and smaller transients.
             peak = self._prefill_peak_bytes(settings.max_prefill_tokens or self.max_positions or 4096)
             free, _ = torch.cuda.mem_get_info(self.device)
-            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz)
+            n_blocks = blocks_for_budget(self.model, int((free - peak) * settings.kv_cache_memory_fraction), bsz,
+                                         self.kv_dtype)
             logger.info("KV pools: %d blocks of %d tokens (%.0f%% of %.1f GiB free minus a %.1f GiB prefill peak "
                         "at %d tokens)", n_blocks, bsz, 100 * settings.kv_cache_memory_fraction, free / 2**30,
                         peak / 2**30, settings.max_prefill_tokens)
         else:
             n_blocks = 512
-        self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz)
+        self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz, kv_dtype=self.kv_dtype)
+        self._alloc = next(p for p in self.pools if p is not None).allocator      # one id space for every layer
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
         if self._mega is not None:
             self._mega.bind_pools(self.pools)
@@ -456,7 +477,7 @@ class CustomTorchBackend(InferenceBackend):
             os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"      # MoE included since 2026-10-17 (an A/B)
         self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
-        self._scratch = None                 # one padding block per pool, shared by every bucket
+        self._scratch = None                 # the padding block id, shared by every bucket (every pool)
 
         # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
         # tail the profiler found — the bandwidth lever on A100). Decode-only because prefill's
@@ -486,6 +507,8 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graph_on = self.device.type == "cuda" and \
             os.environ.get("CUSTOM_BACKEND_PREFILL_GRAPH", "0") == "1"
         self._prefill_graphs: dict = {}
+        if self._graph_on:
+            self._capture_all_graphs()       # at load: on the first decode it was a 3.5 s step for the first requests
 
     def set_cache_adapter(self, adapter) -> None:
         # Custom backend caches internally (self.prefix_cache + paged pools), not via the
@@ -540,7 +563,7 @@ class CustomTorchBackend(InferenceBackend):
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
                 # Store the prompt's full blocks for future sharing (before releasing our refs).
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.blocks)
                 return visible
             finally:
                 cache.free_all()
@@ -585,7 +608,7 @@ class CustomTorchBackend(InferenceBackend):
                     step = torch.tensor([[tok]], device=self.device)
                     logits = self.model(step, kv_cache=cache)
                     tok = int(sample(logits[:, -1, :], sampling).item())
-                self.prefix_cache.store(token_ids, cache.block_tables)
+                self.prefix_cache.store(token_ids, cache.blocks)
             finally:
                 cache.free_all()
 
@@ -633,7 +656,7 @@ class CustomTorchBackend(InferenceBackend):
             cache.free_all()            # do not abandon partially allocated blocks
             raise
         first_token = int(sample(logits[:, -1, :], GREEDY).item())
-        self.prefix_cache.store(token_ids, cache.block_tables)
+        self.prefix_cache.store(token_ids, cache.blocks)
         return cache, first_token, cache.seq_len
 
     @torch.no_grad()
@@ -734,7 +757,7 @@ class CustomTorchBackend(InferenceBackend):
                     continue
                 ki_t, vi_t = kvi  # [K,H,Pmax+Smax,D]; this row's real suffix = columns Pmax..Pmax+L
                 cache.append(i, ki_t[k:k + 1, :, Pmax:Pmax + L, :], vi_t[k:k + 1, :, Pmax:Pmax + L, :])
-            self.prefix_cache.store(prompts[k], cache.block_tables)
+            self.prefix_cache.store(prompts[k], cache.blocks)
             results.append((cache, first, len(prompts[k])))
         return results
 
@@ -802,7 +825,7 @@ class CustomTorchBackend(InferenceBackend):
         results = []
         for k in range(len(prompts)):
             first = int(sample(logits[k:k + 1, 0, :], GREEDY).item())
-            self.prefix_cache.store(prompts[k], caches[k].block_tables)
+            self.prefix_cache.store(prompts[k], caches[k].blocks)
             results.append((caches[k], first, len(prompts[k])))
         return results
 
@@ -811,6 +834,11 @@ class CustomTorchBackend(InferenceBackend):
         """Cache lookup only — no forward pass. Returns (seeded PagedKVCache, matched)."""
         from inference_server.models.paged_kv_cache import PagedKVCache
         matched, shared = self.prefix_cache.lookup(token_ids)
+        if matched and matched >= len(token_ids):
+            # Every token cached: the next token needs a forward over the last one, and feeding it again at position
+            # len(ids) put it in the KV twice. Give back the last cached block; it is prefilled like any suffix.
+            self._alloc.release(shared.pop())
+            matched -= self._block_size
         self.last_cache_hit_tokens = matched
         cache = PagedKVCache(pools=self.pools, shared_prefix=shared, shared_prefix_tokens=matched)
         return cache, matched
@@ -826,14 +854,14 @@ class CustomTorchBackend(InferenceBackend):
         return partial_kv, last_token, partial_kv.seq_len
 
     @torch.no_grad()
-    def prefill_chunk_batch(self, items, decode=None):
+    def prefill_chunk_batch(self, items, decode=None, defer_tokens=False):
         """`items`: [(partial_kv | None, chunk_ids, is_final, sampling)] -> [(kv, last_token | None, kv_len)]. One
         forward over every chunk: packed into one row (default), or right-padded (PREFILL_PACKED=0); each row attends
         to its own blocks so far plus the chunk. With `decode` = (decode batch, current tokens [R], sampling per row)
         the running decode rows join the packed forward with one token each and the result is (results, next tokens
         [R]): one step for prefill chunks and decode tokens, the weights streamed once for both. On CPU/MPS without
         the packed path, one prefill_chunk per row. On a failure every prefill row's blocks are freed: the scheduler
-        rejects them all."""
+        rejects them all. `defer_tokens` (CUDA): final rows' tokens come back as DeviceTokens, no sync here."""
         from inference_server.models.paged_kv_cache import BatchedDecodeState, PagedKVCache
         if not self.packed_prefill and self.device.type != "cuda":
             out = []
@@ -842,9 +870,9 @@ class CustomTorchBackend(InferenceBackend):
                 out.append((kv, tok if final else None, n))
             return out
         dev = self.device
-        if (decode is None and self._graph_on and 0 < sum(len(c) for _, c, _, _ in items) <= PREFILL_AS_DECODE_TOKENS
-                and max(self._graph_buckets) >= PREFILL_AS_DECODE_TOKENS):
-            out = self._prefill_as_decode(items)
+        n_tok = sum(len(c) for _, c, _, _ in items)
+        if self.joint_fits(decode[0].n_rows if decode is not None else 0, n_tok, decode):
+            out = self._prefill_as_decode(items, defer_tokens, decode)
             if out is not None:
                 return out
         caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
@@ -864,17 +892,18 @@ class CustomTorchBackend(InferenceBackend):
                 rows = list(batched)                # CPU/MPS: the decode rows are PagedKVCache objects
             caches = caches + rows
             prefix = prefix + [r.seq_len for r in rows]
-            chunks = chunks + [[int(t)] for t in current.tolist()]
-            lens = lens + [1] * len(rows)
+            lens = lens + [1] * len(rows)           # the decode rows' tokens join on the device (no .tolist() sync)
         if self.packed_prefill:                     # one row of every chunk, no padding; logits at each row's last token
-            input_ids = torch.tensor([t for c in chunks for t in c], dtype=torch.long, device=dev).unsqueeze(0)
-            position_ids = torch.tensor([p + i for p, n in zip(prefix, lens) for i in range(n)],
-                                        dtype=torch.long, device=dev).unsqueeze(0)
+            input_ids = to_device([t for c in chunks for t in c], dev)
+            if decode is not None:
+                input_ids = torch.cat([input_ids, current.view(-1).to(input_ids.device)])
+            input_ids = input_ids.unsqueeze(0)
+            position_ids = to_device([p + i for p, n in zip(prefix, lens) for i in range(n)], dev).unsqueeze(0)
             ends, acc = [], 0
             for n in lens:
                 acc += n
                 ends.append(acc - 1)
-            last_idx = torch.tensor(ends, device=dev)
+            last_idx = to_device(ends, dev)
         else:
             S = max(lens)
             input_ids = torch.zeros(len(items), S, dtype=torch.long, device=dev)
@@ -901,11 +930,10 @@ class CustomTorchBackend(InferenceBackend):
                 c.free_all()
             raise
         t1 = time.perf_counter()
-        out = []
-        for k, (_, chunk, final, sampling) in enumerate(items):
-            row = logits[0, k:k + 1, :] if self.packed_prefill else logits[k:k + 1, 0, :]
-            tok = int(sample(row, sampling).item()) if final else None
-            out.append((caches[k], tok, caches[k].seq_len))
+        finals = [k for k, it in enumerate(items) if it[2]]
+        rows = (logits[0] if self.packed_prefill else logits[:, 0])[to_device(finals, dev)] if finals else None
+        toks = dict(zip(finals, first_tokens(rows, [items[k][3] for k in finals], defer_tokens)))
+        out = [(caches[k], toks.get(k), caches[k].seq_len) for k in range(K)]
         next_tokens = None
         if decode is not None:
             next_tokens = sample_batched(logits[0, K:, :], sampling_rows)
@@ -920,32 +948,52 @@ class CustomTorchBackend(InferenceBackend):
                                                       if cuda and ev1.query() else None)}   # a step with no final row has not synced
         return (out, next_tokens) if decode is not None else out
 
+    def joint_fits(self, n_rows: int, n_tokens: int, decode=None) -> bool:
+        """Whether a step's prefill tokens (and `n_rows` running decode rows) fit one decode-graph replay."""
+        from inference_server.models.paged_kv_cache import BatchedDecodeState
+        if decode is not None and (not self.packed_prefill or not isinstance(decode[0], BatchedDecodeState)):
+            return False                            # (a fallback from here is the packed joint forward)
+        return (self._graph_on and 0 < n_tokens <= PREFILL_AS_DECODE_TOKENS
+                and n_rows + n_tokens <= max(self._graph_buckets))
+
     @torch.no_grad()
-    def _prefill_as_decode(self, items):
+    def _prefill_as_decode(self, items, defer_tokens=False, decode=None):
         """Short prefill chunks as one replay of the decode graph (`PREFILL_AS_DECODE_TOKENS`): the same result shape
-        as prefill_chunk_batch. None when the rows do not fit the graphs' block tables (the caller runs the packed
-        forward). On a failure every row's blocks are freed, as the packed path does."""
+        as prefill_chunk_batch. With `decode` (batched state, current tokens, sampling per row) the running decode rows
+        ride in the same replay, ahead of the prefill rows: one forward per step, the weights streamed once (vLLM's
+        mixed batch; separate steps streamed the experts twice). None when the rows do not fit the graphs' block
+        tables (the caller runs the packed forward). On a failure every prefill row's blocks are freed."""
         from types import SimpleNamespace
         from inference_server.models.paged_kv_cache import PagedKVCache
         t0 = time.perf_counter()
+        state, current, sampling_rows = decode if decode is not None else (None, None, None)
         caches = [kv if kv is not None else PagedKVCache(pools=self.pools) for kv, _, _, _ in items]
         chunks = [chunk for _, chunk, _, _ in items]
         bs = self._block_size
         if max((c.seq_len + len(ch) + bs - 1) // bs for c, ch in zip(caches, chunks)) > self._graph_max_cols:
             return None
+        if state is not None:
+            state.prepare_step()                    # any block a decode row crosses into
+            if state.bt.shape[1] > self._graph_max_cols:
+                return None
         try:
             tokens, pos, owner, table = decode_rows(caches, chunks, self.pools)
             if not self._graphs:
                 self._capture_all_graphs()
             dev, n = self.device, len(tokens)
-            pin = (lambda v, dt: torch.tensor(v, dtype=dt).pin_memory().to(dev, non_blocking=True))
-            tok_t, pos_t, own_t = pin(tokens, torch.long), pin(pos, torch.long), pin(owner, torch.long)
-            tab_t = pin(table, torch.long)                                                    # [K, layers, cols]
-            bt = tab_t[own_t].transpose(0, 1).contiguous()                                    # [layers, n, cols]
+            tok_t, pos_t, own_t, tab_t = (to_device(v, dev) for v in (tokens, pos, owner, table))   # table [K, cols]
+            bt = tab_t[own_t]                                                                 # [n, cols]
+            nd = state.n_rows if state is not None else 0
+            if nd:
+                cols = max(bt.shape[1], state.bt.shape[1])
+                bt = torch.cat([state._grow_cols(state.bt, cols), state._grow_cols(bt, cols)], dim=0)
+                tok_t = torch.cat([current.view(-1), tok_t])
+                pos_t = torch.cat([state.seq_lens, pos_t])
             ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
             ev0.record()
             logits = self._replay_decode(tok_t.unsqueeze(1), pos_t.unsqueeze(1),
-                                         SimpleNamespace(n_rows=n, seq_lens=pos_t, bt=bt), self._decode_bucket(n))
+                                         SimpleNamespace(n_rows=nd + n, seq_lens=pos_t, bt=bt.contiguous()),
+                                         self._decode_bucket(nd + n))
             ev1.record()
         except BaseException:
             for c in caches:
@@ -953,20 +1001,27 @@ class CustomTorchBackend(InferenceBackend):
             raise
         commit_rows(caches, chunks, self.pools)
         t1 = time.perf_counter()
-        out, end = [], -1
-        for k, (_, chunk, final, sampling) in enumerate(items):
+        next_tokens = None
+        if nd:
+            next_tokens = sample_batched(logits[:nd, -1], sampling_rows)
+            state.advance()                         # the decode rows' tokens are written; lengths move on
+        ends, end = [], nd - 1
+        for _, chunk, _, _ in items:
             end += len(chunk)
-            tok = int(sample(logits[end:end + 1, -1, :], sampling).item()) if final else None
-            out.append((caches[k], tok, caches[k].seq_len))
+            ends.append(end)
+        finals = [k for k, it in enumerate(items) if it[2]]
+        rows = logits[to_device([ends[k] for k in finals], self.device), -1] if finals else None
+        toks = dict(zip(finals, first_tokens(rows, [items[k][3] for k in finals], defer_tokens)))
+        out = [(caches[k], toks.get(k), caches[k].seq_len) for k in range(len(items))]
         t2 = time.perf_counter()
         self.last_prefill_timing = {"host_enqueue_s": round(t1 - t0, 4), "alloc_s": 0.0, "sync_wait_s": round(t2 - t1, 4),
                                     "gpu_forward_s": round(ev0.elapsed_time(ev1) / 1e3, 4) if ev1.query() else None,
-                                    "as_decode": True}
-        return out
+                                    "as_decode": True, "decode_rows": nd}
+        return (out, next_tokens) if decode is not None else out
 
     def prefill_store(self, token_ids, full_kv, matched, session_id="default"):
         """Store the prompt's full blocks for future sharing (PrefixCache dedupes by prefix)."""
-        self.prefix_cache.store(token_ids, full_kv.block_tables)
+        self.prefix_cache.store(token_ids, full_kv.blocks)
 
     @torch.no_grad()
     def decode_step_batched(self, current_tokens, batched_kv, attention_mask,
@@ -986,7 +1041,7 @@ class CustomTorchBackend(InferenceBackend):
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
-            fits = state.bt.shape[2] <= self._graph_max_cols
+            fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
             if self._mega_on and n <= self._mega_max_rows:
                 logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
@@ -1053,15 +1108,9 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
-        # One stacked table for every live layer; the per-layer views feed the kernels. Replay then refreshes
-        # all layers in a handful of launches instead of a fill + copy per layer (96 at 48 layers).
-        live = [L for L, pool in enumerate(self.pools) if pool is not None]
-        scratch_col = torch.tensor([self._scratch[L] for L in live], dtype=torch.long, device=dev)[:, None, None]
-        g_bt_all = scratch_col.expand(len(live), bucket, cols).clone()
-        g_bt = [None] * len(self.pools)
-        for i, L in enumerate(live):
-            g_bt[L] = g_bt_all[i]
-        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size, bt_all=g_bt_all)
+        # One table for every layer (a block id is the same in each layer's pool); replay refreshes it in two copies.
+        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.long, device=dev)
+        ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
         try:
@@ -1082,7 +1131,7 @@ class CustomTorchBackend(InferenceBackend):
             with torch.cuda.graph(graph):   # private pool per bucket — see docstring
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos, "seqlens": g_seqlens,
-                                    "bt": g_bt, "bt_all": g_bt_all, "live": live, "scratch_col": scratch_col, "out": out}
+                                    "bt": g_bt, "out": out}
             print(f"[graphs]   bucket {bucket} captured in {time.perf_counter() - t_b:.1f}s",
                   flush=True)
         except Exception:
@@ -1091,14 +1140,11 @@ class CustomTorchBackend(InferenceBackend):
             self._graphs.clear()
 
     def _ensure_scratch(self) -> None:
-        """One padding block per pool, shared by every captured graph (decode + prefill).
+        """One padding block (the same id in every pool), shared by every captured graph (decode + prefill).
         Dummy/padding rows point here. Held for the process — never released."""
         if self._scratch is not None:
             return
-        self._scratch = [None] * len(self.pools)
-        for L, pool in enumerate(self.pools):
-            if pool is not None:
-                self._scratch[L] = pool.alloc()
+        self._scratch = self._alloc.alloc()
 
     def _capture_all_graphs(self) -> None:
         """Capture every bucket up-front, largest first. Done on the first decode (inside
@@ -1150,8 +1196,8 @@ class CustomTorchBackend(InferenceBackend):
         g["pos"][:n].copy_(position_ids)
         g["seqlens"][:n].copy_(state.seq_lens)
         g["seqlens"][n:] = 1
-        g["bt_all"].copy_(g["scratch_col"].expand_as(g["bt_all"]))   # reset dummies + stale columns to scratch
-        g["bt_all"][:, :n, :state.bt.shape[2]].copy_(state.bt.clamp_min(0))   # every layer in one copy
+        g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
+        g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
         g["graph"].replay()
         return g["out"][:n]
 
@@ -1176,12 +1222,8 @@ class CustomTorchBackend(InferenceBackend):
         suffix_lens = torch.full((1,), bucket, dtype=torch.int32, device=dev)   # all real during capture
         logits_index = torch.full((1,), bucket - 1, dtype=torch.long, device=dev)
         self._ensure_scratch()
-        bts = [None] * len(self.pools)
-        for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            bts[L] = torch.full((1, cols), self._scratch[L], dtype=torch.long, device=dev)
-        ctx = _PrefillGraphCtx(self.pools, bts, prefix_lens, suffix_lens, bucket, bs)
+        bt = torch.full((1, cols), self._scratch, dtype=torch.long, device=dev)
+        ctx = _PrefillGraphCtx(self.pools, bt, prefix_lens, suffix_lens, bucket, bs)
         s = torch.cuda.Stream()
         s.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(s):
@@ -1200,7 +1242,7 @@ class CustomTorchBackend(InferenceBackend):
         _K._TILED_PREFILL = prev
         self._prefill_graphs[(bucket, variant)] = {
                                        "graph": g, "ids": ids, "suffix_lens": suffix_lens,
-                                        "bts": bts, "out": out,
+                                        "bt": bt, "out": out,
                                         "pos": pos, "prefix_lens": prefix_lens, "ctx": ctx,
                                         "logits_index": logits_index}
         logger.info("Captured CUDA prefill graph (bucket=%d, tiled=%s)", bucket, variant)
@@ -1259,19 +1301,17 @@ class CustomTorchBackend(InferenceBackend):
         dev, bs = self.device, self._block_size
         total = matched + S
         need = (total + bs - 1) // bs                     # only the blocks this prompt REALLY uses
+        bt = cache.blocks                                 # already holds the shared prefix blocks
+        while len(bt) < need:
+            bt.append(cache.alloc.alloc())
         for L, pool in enumerate(self.pools):
-            if pool is None:
-                continue
-            bt = cache.block_tables[L]                    # already holds the shared prefix blocks
-            while len(bt) < need:
-                bt.append(pool.alloc())
-            cache.seq_lens[L] = total
-            # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
-            # positions, so the entries past this prompt's real blocks must point somewhere
-            # harmless — otherwise padding K/V lands in whichever request used this buffer last.
-            g["bts"][L][0].fill_(self._scratch[L])
-            row = torch.tensor(bt, device=dev)
-            g["bts"][L][0, :row.shape[0]].copy_(row)
+            if pool is not None:
+                cache.seq_lens[L] = total
+        # Reset the whole static row to scratch FIRST. The graph writes all `bucket`
+        # positions, so the entries past this prompt's real blocks must point somewhere
+        # harmless — otherwise padding K/V lands in whichever request used this buffer last.
+        g["bt"][0].fill_(self._scratch)
+        g["bt"][0, :len(bt)].copy_(torch.tensor(bt, device=dev))
         g["ids"].zero_()
         g["ids"][0, :S].copy_(torch.tensor(prompt_ids[matched:], device=dev))
         g["pos"][0].copy_(torch.arange(matched, matched + bucket, device=dev))
@@ -1280,7 +1320,7 @@ class CustomTorchBackend(InferenceBackend):
         g["logits_index"].fill_(S - 1)                                          # lm_head on that row only
         g["graph"].replay()
         first = int(sample(g["out"][:, 0, :], GREEDY).item())
-        self.prefix_cache.store(prompt_ids, cache.block_tables)
+        self.prefix_cache.store(prompt_ids, cache.blocks)
         return cache, first, matched + S
 
     def splice_into_batched(self, batched_kv, new_kv, new_kv_len):
@@ -1298,10 +1338,15 @@ class CustomTorchBackend(InferenceBackend):
 
     def remove_row_from_cache(self, batched_kv, row_idx):
         """Drop one row and release its blocks back to the pool."""
+        return self.remove_rows_from_cache(batched_kv, [row_idx])
+
+    def remove_rows_from_cache(self, batched_kv, row_idxs):
+        """Drop rows and release their blocks: on CUDA one compaction of the batched state, no stream sync."""
         if self.device.type == "cuda":
-            batched_kv.remove_row(row_idx)
+            batched_kv.remove_rows(row_idxs)
         else:
-            batched_kv.pop(row_idx).free_all()
+            for idx in sorted(row_idxs, reverse=True):
+                batched_kv.pop(idx).free_all()
         return batched_kv
 
     def kv_length(self, kv):

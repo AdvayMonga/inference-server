@@ -239,3 +239,16 @@ async def test_concurrent_requests_no_cross_contamination(client):
     assert results[1].status_code == 200
     assert len(results[0].json()["text"]) > 0
     assert len(results[1].json()["text"]) > 0
+
+
+def test_raise_fd_limit_lifts_the_soft_limit_to_the_hard_limit():
+    import resource
+    from inference_server.server import raise_fd_limit
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    try:
+        got = raise_fd_limit()
+        now = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+        assert got == now and got >= soft
+        assert hard == resource.RLIM_INFINITY or got == hard
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))

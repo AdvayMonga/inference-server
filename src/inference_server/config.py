@@ -38,7 +38,7 @@ class Settings:
     # Batching
     # Rows decoded together; the KV pools are sized from free memory. 256: H200 2026-10-19 with fp8 experts, saturated
     # 4.6 req/s at 128 (clients beyond 128 wait in the queue and miss TTFT), 6.3 at 256, 6.2 at 512.
-    max_batch_size: int = 256
+    max_batch_size: int = 1024      # 256 -> 1024 (2026-10-21): long answers 10.6 -> 22.5 req/s, saturated 8.3 -> 10.4
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
@@ -64,6 +64,8 @@ class Settings:
     # Decode step n launched with step n-1's tokens still on the device; n-1's tokens processed while n runs
     # (H200, 2026-10-16: single_stream TPOT p99 9.5 → 9.24 ms, decode step at batch 128 33.9 → 27.8 ms).
     async_decode: bool = True
+    # The backend and scheduler in a child process (engine_process.py), HTTP and streams in this one: no shared GIL.
+    engine_process: bool = True      # on since 2026-10-21: long_prompt 43 -> 50 req/s alone; off = one process, one GIL
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0
@@ -148,6 +150,7 @@ def load_settings() -> Settings:
         wave_window_mult=int(os.environ.get("WAVE_WINDOW_MULT", Settings.wave_window_mult)),
         max_queue_wait_s=float(os.environ.get("MAX_QUEUE_WAIT_S", Settings.max_queue_wait_s)),
         async_decode=os.environ.get("ASYNC_DECODE", str(Settings.async_decode)).lower() in ("1", "true"),
+        engine_process=os.environ.get("ENGINE_PROCESS", str(Settings.engine_process)).lower() in ("1", "true"),
         prefix_cache_impl=os.environ.get("PREFIX_CACHE_IMPL", Settings.prefix_cache_impl),
         prefix_cache_max_entries=int(os.environ.get(
             "PREFIX_CACHE_MAX_ENTRIES", Settings.prefix_cache_max_entries)),

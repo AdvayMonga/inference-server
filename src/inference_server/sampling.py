@@ -69,6 +69,7 @@ def sample_batched(logits: torch.Tensor, params_per_row: list[SamplingParams]) -
         groups.setdefault(p, []).append(i)
     out = torch.empty(len(params_per_row), dtype=torch.long, device=logits.device)
     for p, idx in groups.items():
-        rows = torch.tensor(idx, device=logits.device)
+        from inference_server.models.paged_kv_cache import to_device
+        rows = to_device(idx, logits.device)                 # pinned: no wait on the decode step in flight
         out[rows] = sample(logits.index_select(0, rows), p)
     return out

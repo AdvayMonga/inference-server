@@ -36,12 +36,17 @@ GROUP_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_GROUP_TOKENS", "65
 _GQA_MASKED = [False]                             # set once a masked SDPA with enable_gqa raised on this build
 
 
+def _widen(t: torch.Tensor) -> torch.Tensor:
+    """fp8 KV (KV_CACHE_DTYPE=fp8) as bf16 for the attention products; other types as they are."""
+    return t.to(torch.bfloat16) if t.dtype == torch.float8_e4m3fn else t
+
+
 def _gather_prefix(pool, ids: torch.Tensor, length: int, Hkv: int, D: int):
     bs = pool.k.shape[2]
     nb = (length + bs - 1) // bs
     ids = ids[:nb].long()
-    k = pool.k.index_select(0, ids).permute(1, 0, 2, 3).reshape(1, Hkv, nb * bs, D)[:, :, :length]
-    v = pool.v.index_select(0, ids).permute(1, 0, 2, 3).reshape(1, Hkv, nb * bs, D)[:, :, :length]
+    k = _widen(pool.k.index_select(0, ids).permute(1, 0, 2, 3).reshape(1, Hkv, nb * bs, D)[:, :, :length])
+    v = _widen(pool.v.index_select(0, ids).permute(1, 0, 2, 3).reshape(1, Hkv, nb * bs, D)[:, :, :length])
     return k, v
 
 
@@ -126,8 +131,8 @@ def _wave(q, k, v, ctx, layer_idx, scale, lo, hi, bt_all):
     if p_max:
         nb = (p_max + bs - 1) // bs
         bt = bt_all[lo:hi, :nb].long()                                            # a row's prefix blocks come first
-        kp = pool.k[bt].permute(0, 2, 1, 3, 4).reshape(B, Hkv, nb * bs, D)[:, :, :p_max]
-        vp = pool.v[bt].permute(0, 2, 1, 3, 4).reshape(B, Hkv, nb * bs, D)[:, :, :p_max]
+        kp = _widen(pool.k[bt].permute(0, 2, 1, 3, 4).reshape(B, Hkv, nb * bs, D)[:, :, :p_max])
+        vp = _widen(pool.v[bt].permute(0, 2, 1, 3, 4).reshape(B, Hkv, nb * bs, D)[:, :, :p_max])
         k, v = torch.cat([kp, k], dim=2), torch.cat([vp, v], dim=2)
     mask = wave_mask(ctx.prefix_lens[lo:hi].long(), ctx.suffix_lens[lo:hi].long(), p_max, S)
     if Hq != Hkv and not _GQA_MASKED[0]:         # expanding K/V 8x costs memory and time; try the native GQA first

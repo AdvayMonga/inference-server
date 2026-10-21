@@ -124,13 +124,28 @@ async def _first_token(req: ScheduledRequest) -> int | None:
     return tok
 
 
-async def _tokens(req: ScheduledRequest, first: int | None):
-    """Every generated token id, from `first`. Ends normally on completion; on a failure after the
-    first token it ends too, leaving `req.future` holding the error."""
-    tok = first
-    while tok is not None:
-        yield tok
+async def _token_batches(req: ScheduledRequest, first: int | None):
+    """The generated token ids from `first`, as lists of every id already queued (one chunk each: the scheduler hands a
+    step's tokens over at once, and a stream that fell behind catches up in one write). Ends normally on completion; on
+    a failure after the first token it ends too, leaving `req.future` holding the error."""
+    if first is None:
+        return
+    batch = [first]
+    while True:
+        ended = False
+        while not req.token_queue.empty():
+            tok = req.token_queue.get_nowait()
+            if tok is None:
+                ended = True
+                break
+            batch.append(tok)
+        yield batch
+        if ended:
+            return
         tok = await req.token_queue.get()
+        if tok is None:
+            return
+        batch = [tok]
 
 
 def _failed_midway(req: ScheduledRequest, n: int) -> bool:
@@ -147,12 +162,15 @@ async def _stream(req: ScheduledRequest, first: int | None, tokenizer, cid: str,
     """Stream one OpenAI chunk per generated token, then finish_reason + usage + [DONE]."""
     n = 0
     ended = False
+    detok = tokenizer.incremental()
     try:
-        async for tok_id in _tokens(req, first):
-            text = tokenizer.decode_token(tok_id)
-            n += 1
+        async for ids in _token_batches(req, first):
+            text = detok.add(ids)
+            n += len(ids)
             if text:
                 yield _chunk(cid, created, model, text, None)
+        if text := detok.flush():
+            yield _chunk(cid, created, model, text, None)
         ended = True
     finally:
         req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
@@ -240,6 +258,9 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:             # with ENGINE_PROCESS the engine's verdict arrives here
+            raise HTTPException(status_code=400, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _stream(req, first, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
@@ -284,13 +305,16 @@ async def _chat_stream(req: ScheduledRequest, first: int | None, tokenizer, cid:
     """Role delta first (clients key off it), then one content delta per token, then usage."""
     n = 0
     ended = False
+    detok = tokenizer.incremental()
     try:
         yield _chat_chunk(cid, created, model, {"role": "assistant", "content": ""}, None)
-        async for tok_id in _tokens(req, first):
-            text = tokenizer.decode_token(tok_id)
-            n += 1
+        async for ids in _token_batches(req, first):
+            text = detok.add(ids)
+            n += len(ids)
             if text:
                 yield _chat_chunk(cid, created, model, {"content": text}, None)
+        if text := detok.flush():
+            yield _chat_chunk(cid, created, model, {"content": text}, None)
         ended = True
     finally:
         req.cancelled = not ended      # client went away mid-stream: the scheduler stops the row
@@ -350,6 +374,9 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
             first = await _first_token(req)
         except QueueFullError as e:
             raise HTTPException(status_code=429, detail=str(e),
+                                headers={"X-Trace-Id": req.trace_id})
+        except RequestTooLargeError as e:             # with ENGINE_PROCESS the engine's verdict arrives here
+            raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
             _chat_stream(req, first, tokenizer, cid, created, body.model, len(token_ids), max_tokens),

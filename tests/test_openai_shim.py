@@ -31,6 +31,10 @@ class FakeTokenizer:
     def decode_token(self, tid):
         return chr(tid)
 
+    def incremental(self):
+        from inference_server.tokenizer import IncrementalDetokenizer
+        return IncrementalDetokenizer(self.decode)
+
 
 class FakeScheduler:
     """Returns a fixed 3-token completion; streams it through the request's token_queue."""
@@ -99,12 +103,12 @@ def test_streaming_completion():
         assert r.status_code == 200
         chunks = [ln[6:] for ln in r.iter_lines() if ln.startswith("data: ")]
     assert chunks[-1] == "[DONE]"
-    tokens = [json.loads(c)["choices"][0]["text"] for c in chunks[:3]]
-    assert tokens == ["a", "b", "c"]                         # one chunk per token
-    finish = json.loads(chunks[3])["choices"][0]["finish_reason"]
-    assert finish == "stop"
-    usage = json.loads(chunks[4])["usage"]                   # penultimate = usage chunk
-    assert usage["completion_tokens"] == 3
+    parsed = [json.loads(c) for c in chunks[:-1]]
+    body, finish, usage = parsed[:-2], parsed[-2], parsed[-1]
+    # the tokens that arrived together go out as one chunk; the text and the count are what matter
+    assert "".join(p["choices"][0]["text"] for p in body) == "abc" and all(p["choices"][0]["text"] for p in body)
+    assert finish["choices"][0]["finish_reason"] == "stop"
+    assert usage["usage"]["completion_tokens"] == 3
 
 
 def test_queue_full_429():
@@ -166,9 +170,9 @@ def test_streaming_chat_completion():
     parsed = [json.loads(c) for c in chunks[:-1]]
     assert all(p["object"] == "chat.completion.chunk" for p in parsed)
     assert parsed[0]["choices"][0]["delta"]["role"] == "assistant"   # role chunk first
-    assert [p["choices"][0]["delta"]["content"] for p in parsed[1:4]] == ["a", "b", "c"]
-    assert parsed[4]["choices"][0]["finish_reason"] == "stop"
-    assert parsed[5]["usage"]["completion_tokens"] == 3
+    assert "".join(p["choices"][0]["delta"]["content"] for p in parsed[1:-2]) == "abc"   # tokens together, one chunk
+    assert parsed[-2]["choices"][0]["finish_reason"] == "stop"
+    assert parsed[-1]["usage"]["completion_tokens"] == 3
 
 
 def test_chat_route_renders_a_plain_user_turn_and_no_thinking_block():
@@ -406,3 +410,14 @@ async def test_a_failure_after_tokens_ends_the_stream_without_a_finish_or_done()
         out = [c async for c in gen(req, ord("a"), FakeTokenizer(), "id", 0, "m", 1, 5)]
         assert out and "[DONE]" not in "".join(out) and '"finish_reason": "stop"' not in "".join(out)
         assert not req.cancelled
+
+
+def test_incremental_detokenizer_holds_a_split_character_and_streams_the_rest():
+    """Byte-level ids, decoded as UTF-8: a character split over ids comes out whole, once it is complete."""
+    from inference_server.tokenizer import IncrementalDetokenizer
+    d = IncrementalDetokenizer(lambda ids: bytes(ids).decode("utf-8", errors="replace"))
+    emoji = list("🙂".encode())                                 # four bytes
+    assert d.add(list(b"hi ")) == "hi "
+    assert d.add(emoji[:2]) == ""                               # incomplete: held back
+    assert d.add(emoji[2:] + list(b"!")) == "🙂!"
+    assert d.add(emoji[:1]) == "" and d.flush() == "\ufffd"     # an answer cut mid-character still ends

@@ -26,10 +26,10 @@ def _arange(n: int, device: torch.device, scale: int = 1) -> torch.Tensor:
 
 
 @triton.jit
-def _moe_gemm_kernel(A, TOK, W, SCALE, C, SORTED, EXPERT_IDS, M, N, K,
+def _moe_gemm_kernel(A, TOK, W, SCALE, A_SCALE, C, SORTED, EXPERT_IDS, M, N, K,
                      stride_am, stride_wn, stride_wk, stride_cm,
                      E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                     ROWS_FROM_TOKENS: tl.constexpr, SPLIT_K: tl.constexpr, W_FP8: tl.constexpr):
+                     ROWS_FROM_TOKENS: tl.constexpr, SPLIT_K: tl.constexpr, W_FP8: tl.constexpr, A_FP8: tl.constexpr):
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
     e = tl.load(EXPERT_IDS + pid_m)
@@ -47,17 +47,30 @@ def _moe_gemm_kernel(A, TOK, W, SCALE, C, SORTED, EXPERT_IDS, M, N, K,
     offs_k = tl.arange(0, BLOCK_K)
     k_lo = tl.program_id(2) * (K // SPLIT_K)              # this program's K slice (K divides evenly by SPLIT_K)
     a_ptrs = A + src[:, None] * stride_am + k_lo + offs_k[None, :]
-    w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + (k_lo + offs_k[None, :]) * stride_wk
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k0 in range(0, K // SPLIT_K, BLOCK_K):
-        k_ok = (k0 + offs_k) < K // SPLIT_K
-        a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
-        w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
-        if W_FP8:
-            w = w.to(tl.bfloat16)
-        acc += tl.dot(a, tl.trans(w))
-        a_ptrs += BLOCK_K
-        w_ptrs += BLOCK_K * stride_wk
+    if A_FP8:
+        # W8A8: both operands fp8 e4m3 on the tensor cores (the weight tile loaded [K, N], as the MMA wants it), the
+        # per-channel weight scale and the per-row activation scale applied once in the epilogue.
+        w_ptrs = W + e.to(tl.int64) * N * stride_wn + (k_lo + offs_k[:, None]) * stride_wk + offs_n[None, :] * stride_wn
+        for k0 in range(0, K // SPLIT_K, BLOCK_K):
+            k_ok = (k0 + offs_k) < K // SPLIT_K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=k_ok[:, None] & n_ok[None, :], other=0.0)
+            acc = tl.dot(a, w, acc, max_num_imprecise_acc=0)     # fp32 accumulation, as torch's grouped GEMM
+            a_ptrs += BLOCK_K
+            w_ptrs += BLOCK_K * stride_wk
+        acc = acc * tl.load(A_SCALE + src, mask=valid, other=0.0)[:, None]
+    else:
+        w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + (k_lo + offs_k[None, :]) * stride_wk
+        for k0 in range(0, K // SPLIT_K, BLOCK_K):
+            k_ok = (k0 + offs_k) < K // SPLIT_K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
+            if W_FP8:
+                w = w.to(tl.bfloat16)
+            acc += tl.dot(a, tl.trans(w))
+            a_ptrs += BLOCK_K
+            w_ptrs += BLOCK_K * stride_wk
     if W_FP8:
         acc = acc * tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)[None, :]
     c_ptrs = C + rows[:, None] * stride_cm + offs_n[None, :]
@@ -144,10 +157,10 @@ def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torc
 
 
 @triton.jit
-def _moe_gemm_scatter_kernel(A, W, SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
+def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
                              stride_am, stride_wn, stride_wk, stride_om,
                              E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                             SPLIT_K: tl.constexpr, W_FP8: tl.constexpr):
+                             SPLIT_K: tl.constexpr, W_FP8: tl.constexpr, A_FP8: tl.constexpr):
     """The down projection with its epilogue: each pair's row, times its routing weight, added into its token's
     fp32 output row (the multiply, the zero-fill-and-index_add and the cast were four launches). Split over K like
     moe_gemm: the atomics make the slices free."""
@@ -164,17 +177,28 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, 
     offs_k = tl.arange(0, BLOCK_K)
     k_lo = tl.program_id(2) * (K // SPLIT_K)
     a_ptrs = A + rows[:, None] * stride_am + k_lo + offs_k[None, :]
-    w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + (k_lo + offs_k[None, :]) * stride_wk
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-    for k0 in range(0, K // SPLIT_K, BLOCK_K):
-        k_ok = (k0 + offs_k) < K // SPLIT_K
-        a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
-        w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
-        if W_FP8:
-            w = w.to(tl.bfloat16)
-        acc += tl.dot(a, tl.trans(w))
-        a_ptrs += BLOCK_K
-        w_ptrs += BLOCK_K * stride_wk
+    if A_FP8:                                             # W8A8, as in _moe_gemm_kernel; the row scale is per pair
+        w_ptrs = W + e.to(tl.int64) * N * stride_wn + (k_lo + offs_k[:, None]) * stride_wk + offs_n[None, :] * stride_wn
+        for k0 in range(0, K // SPLIT_K, BLOCK_K):
+            k_ok = (k0 + offs_k) < K // SPLIT_K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=k_ok[:, None] & n_ok[None, :], other=0.0)
+            acc = tl.dot(a, w, acc, max_num_imprecise_acc=0)     # fp32 accumulation, as torch's grouped GEMM
+            a_ptrs += BLOCK_K
+            w_ptrs += BLOCK_K * stride_wk
+        acc = acc * tl.load(A_SCALE + rows, mask=valid, other=0.0)[:, None]
+    else:
+        w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + (k_lo + offs_k[None, :]) * stride_wk
+        for k0 in range(0, K // SPLIT_K, BLOCK_K):
+            k_ok = (k0 + offs_k) < K // SPLIT_K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
+            if W_FP8:
+                w = w.to(tl.bfloat16)
+            acc += tl.dot(a, tl.trans(w))
+            a_ptrs += BLOCK_K
+            w_ptrs += BLOCK_K * stride_wk
     if W_FP8:
         acc = acc * tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)[None, :]
     acc = acc * tl.load(PAIR_W + rows, mask=valid, other=0.0)[:, None]
@@ -182,19 +206,28 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, 
     tl.atomic_add(OUT + t[:, None] * stride_om + offs_n[None, :], acc, mask=valid[:, None] & n_ok[None, :])
 
 
+def _a8(a: torch.Tensor, a_scale, fp8_w: bool) -> bool:
+    a8 = a.dtype == torch.float8_e4m3fn
+    assert a8 == (a_scale is not None), "fp8 activations come with their per-row scale"
+    assert not a8 or fp8_w, "fp8 activations need fp8 weights (one tensor-core dtype)"
+    return a8
+
+
 def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor, expert_ids: torch.Tensor, M: int,
                      tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor, block_m: int = 16,
-                     w_scale: torch.Tensor | None = None) -> None:
+                     w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None, tile=None) -> None:
     """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) over the sorted pairs; `out` [T, N] fp32, zeroed.
-    `w` bf16, or fp8 e4m3 with `w_scale` [E, N] fp32."""
+    `w` bf16, or fp8 e4m3 with `w_scale` [E, N] fp32; `a` bf16, or fp8 e4m3 with `a_scale` [M] fp32 (W8A8)."""
     E, N, K = w.shape
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
-    grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
-    _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, out, sorted_ids, expert_ids, tok, pair_w, M, N, K,
-                                         a.stride(0), w.stride(1), w.stride(2), out.stride(0),
-                                         E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                         SPLIT_K=1, W_FP8=fp8, num_warps=4, num_stages=NUM_STAGES)
+    a8 = _a8(a, a_scale, fp8)
+    bn, bk, stages, warps = _tile(block_m, tile)
+    grid = (expert_ids.numel(), triton.cdiv(N, bn))
+    _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
+                                         tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+                                         E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
+                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, num_warps=warps, num_stages=stages)
 
 
 # Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
@@ -203,27 +236,41 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
 BLOCK_N, BLOCK_K, NUM_STAGES = 64, 128, 4
 
 
+def _warps(block_m: int) -> int:
+    """4 warps for the decode tiles (16 and 32 rows), 8 for 64-row tiles (a 64 x 64 fp32 accumulator per program)."""
+    return 8 if block_m >= 64 else 4
+
+
+def _tile(block_m: int, tile) -> tuple[int, int, int, int]:
+    """(BLOCK_N, BLOCK_K, num_stages, num_warps): the decode-tuned constants, or `tile` as given (a sweep at prefill
+    sizes, where every path measured 10-13% of fp8 peak on 2026-10-21, picks its own)."""
+    return tuple(tile) if tile is not None else (BLOCK_N, BLOCK_K, NUM_STAGES, _warps(block_m))
+
+
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
              expert_ids: torch.Tensor, M: int, block_m: int = 16, split_k: int | None = None,
-             w_scale: torch.Tensor | None = None) -> torch.Tensor:
+             w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None, tile=None) -> torch.Tensor:
     """C [M, N] = per pair i: a[tok[i]] @ w[expert(i)].T, pairs in sorted order. `a` [T, K] (or [M, K] with tok None),
-    `w` [E, N, K] contiguous: bf16, or fp8 e4m3 with `w_scale` [E, N] fp32. Output bf16, or fp32 when the GEMM is split
-    over K (small grids; `split_k` None = auto)."""
+    `w` [E, N, K] contiguous: bf16, or fp8 e4m3 with `w_scale` [E, N] fp32; `a` bf16, or fp8 e4m3 with `a_scale` [T]
+    fp32 per row (W8A8: the prefill path's quantization, on the tensor cores). Output bf16, or fp32 when the GEMM is
+    split over K (small grids; `split_k` None = auto)."""
     E, N, K = w.shape
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
-    grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
+    a8 = _a8(a, a_scale, fp8)
+    bn, bk, stages, warps = _tile(block_m, tile)
+    grid = (expert_ids.numel(), triton.cdiv(N, bn))
     if split_k is None:
         split_k = 1
     if split_k > 1:
         C = torch.zeros(M, N, dtype=torch.float32, device=a.device)
     else:
-        C = torch.empty(M, N, dtype=a.dtype, device=a.device)
-    _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, w_scale if fp8 else a, C, sorted_ids,
-                                       expert_ids, M, N, K, a.stride(0), w.stride(1), w.stride(2), C.stride(0),
-                                       E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, W_FP8=fp8, num_warps=4,
-                                       num_stages=NUM_STAGES)
+        C = torch.empty(M, N, dtype=torch.bfloat16 if a8 else a.dtype, device=a.device)   # never the fp8 of W8A8 rows
+    _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, w_scale if fp8 else a, a_scale if a8 else a,
+                                       C, sorted_ids, expert_ids, M, N, K, a.stride(0), w.stride(1), w.stride(2),
+                                       C.stride(0), E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
+                                       ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, W_FP8=fp8, A_FP8=a8,
+                                       num_warps=warps, num_stages=stages)
     return C
 
 
@@ -328,6 +375,95 @@ def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool
     _route_kernel[(1,)](logits, sorted_ids, expert_ids, tok, pair_w, scratch, logits.stride(0), T, n_blocks,
                         triton.cdiv(M, block_m), E=E, E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=block_t,
                         BLOCK_M=block_m, BLOCK=block, num_warps=min(16, max(4, block // 64)))
+    return sorted_ids, expert_ids, tok, pair_w
+
+
+@triton.jit
+def _route_topk_kernel(LOGITS, E_IDS, TOK, PAIR_W, COUNTS, stride_l, T, E: tl.constexpr, E_PAD: tl.constexpr,
+                       K: tl.constexpr, RENORM: tl.constexpr, BLOCK_T: tl.constexpr):
+    """route_multi, step 1 (a program per BLOCK_T tokens): softmax and top-K, each pair's expert / token / weight, and
+    the pairs per expert counted with atomics."""
+    t = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    cols = tl.arange(0, E_PAD)
+    tm = t < T
+    m2 = tm[:, None] & (cols < E)[None, :]
+    x = tl.load(LOGITS + t[:, None] * stride_l + cols[None, :], mask=m2, other=float("-inf")).to(tl.float32)
+    p = tl.exp(x - tl.max(x, axis=1)[:, None])
+    p = p / tl.sum(p, axis=1)[:, None]
+    p = tl.where(m2, p, -1.0)
+    total = tl.zeros((BLOCK_T,), tl.float32)
+    for j in tl.static_range(K):                                # the same picks and tie order as _route_kernel
+        v = tl.max(p, axis=1)
+        idx = tl.minimum(tl.min(tl.where(p == v[:, None], cols[None, :], E_PAD), axis=1), E - 1)
+        total += v
+        tl.store(E_IDS + t * K + j, idx.to(tl.int32), mask=tm)
+        tl.store(PAIR_W + t * K + j, v, mask=tm)
+        tl.store(TOK + t * K + j, t.to(tl.int32), mask=tm)
+        tl.atomic_add(COUNTS + idx, tl.full((BLOCK_T,), 1, tl.int32), mask=tm)
+        p = tl.where(cols[None, :] == idx[:, None], -1.0, p)
+    if RENORM:
+        tl.debug_barrier()                                      # the stores above, by whichever threads made them
+        for j in tl.static_range(K):
+            w = tl.load(PAIR_W + t * K + j, mask=tm, other=0.0)
+            tl.store(PAIR_W + t * K + j, w / total, mask=tm)
+
+
+@triton.jit
+def _route_offsets_kernel(COUNTS, PSTART, SORTED_IDS, EXPERT_IDS, M, n_blocks, max_blocks, E: tl.constexpr,
+                          E_PAD: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr):
+    """route_multi, step 2 (one program): each expert's padded first row, padding everywhere, block experts."""
+    bins = tl.arange(0, E_PAD)
+    counts = tl.load(COUNTS + bins, mask=bins < E, other=0)
+    padded = (counts + BLOCK_M - 1) // BLOCK_M * BLOCK_M
+    pstart = tl.cumsum(padded, 0) - padded
+    tl.store(PSTART + bins, pstart)
+    offs = tl.arange(0, BLOCK)
+    for s in range(0, n_blocks * BLOCK_M, BLOCK):              # padding rows read M, blocks past the end E
+        tl.store(SORTED_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + M, mask=(s + offs) < n_blocks * BLOCK_M)
+    for s in range(0, n_blocks, BLOCK):
+        tl.store(EXPERT_IDS + s + offs, tl.zeros((BLOCK,), tl.int32) + E, mask=(s + offs) < n_blocks)
+    tl.debug_barrier()
+    nb = padded // BLOCK_M
+    first = pstart // BLOCK_M
+    for j in range(0, max_blocks):
+        tl.store(EXPERT_IDS + first + j, bins, mask=(j < nb) & (bins < E))
+
+
+@triton.jit
+def _route_place_kernel(E_IDS, PSTART, CURSOR, SORTED_IDS, M, BLOCK: tl.constexpr):
+    """route_multi, step 3 (a program per BLOCK pairs): each pair takes the next row of its expert's run."""
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = i < M
+    e = tl.load(E_IDS + i, mask=m, other=0)
+    rank = tl.atomic_add(CURSOR + e, tl.full((BLOCK,), 1, tl.int32), mask=m)
+    tl.store(SORTED_IDS + tl.load(PSTART + e, mask=m, other=0) + rank, i.to(tl.int32), mask=m)
+
+
+def route_multi(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool,
+                block_m: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """route_fused's outputs for any number of tokens, without a sort (topk_softmax + torch.sort + align_fused took
+    radixSortKVInPlace alone to 5.4% of a 256-row decode step, H200 2026-10-19): a counting sort over three launches
+    and one zero-fill. Pairs within an expert's run land in an arbitrary order; each row's GEMM output does not
+    depend on its position."""
+    T, E = logits.shape
+    M = T * top_k
+    dev = logits.device
+    n_blocks = (M + E * (block_m - 1)) // block_m
+    sorted_ids = torch.empty(n_blocks * block_m, dtype=torch.int32, device=dev)
+    expert_ids = torch.empty(n_blocks, dtype=torch.int32, device=dev)
+    tok = torch.empty(M, dtype=torch.int32, device=dev)
+    pair_w = torch.empty(M, dtype=torch.float32, device=dev)
+    e_ids = torch.empty(M, dtype=torch.int32, device=dev)
+    e_pad = triton.next_power_of_2(E + 1)
+    counters = torch.zeros(3 * e_pad, dtype=torch.int32, device=dev)          # counts, cursors, padded starts
+    counts, cursor, pstart = counters[:e_pad], counters[e_pad:2 * e_pad], counters[2 * e_pad:]
+    BLOCK_T = 16
+    _route_topk_kernel[(triton.cdiv(T, BLOCK_T),)](logits, e_ids, tok, pair_w, counts, logits.stride(0), T, E=E,
+                                                   E_PAD=e_pad, K=top_k, RENORM=renorm, BLOCK_T=BLOCK_T, num_warps=4)
+    _route_offsets_kernel[(1,)](counts, pstart, sorted_ids, expert_ids, M, n_blocks, triton.cdiv(M, block_m), E=E,
+                                E_PAD=e_pad, BLOCK_M=block_m, BLOCK=1024, num_warps=4)
+    BLOCK = 1024
+    _route_place_kernel[(triton.cdiv(M, BLOCK),)](e_ids, pstart, cursor, sorted_ids, M, BLOCK=BLOCK, num_warps=4)
     return sorted_ids, expert_ids, tok, pair_w
 
 

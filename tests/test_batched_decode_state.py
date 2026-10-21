@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import torch
 
-from inference_server.models.paged_kv_cache import BatchedDecodeState, BlockPool, PagedKVCache
+from inference_server.models.paged_kv_cache import BatchedDecodeState, PagedKVCache, pool_group
 
 DEV = torch.device("cpu")
 BS, D = 4, 2  # block_size, head_dim
 
 
 def _pools():
-    return [BlockPool(256, BS, 1, D, torch.float32, DEV) for _ in range(2)]
+    return pool_group(2, 256, BS, 1, D, torch.float32, DEV)
 
 
 def _val(pos):  # deterministic per-position K/V value

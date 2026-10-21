@@ -125,6 +125,6 @@ def _kv_store_kernel(KN, VN, PK, PV, BT, LB, SLOT, stride_kr, stride_kh, stride_
     m = offs < H * D
     h, d = offs // D, offs % D
     dst = b * stride_pb + h * stride_ph + s * stride_ps + d
-    tl.store(PK + dst, tl.load(KN + r * stride_kr + h * stride_kh + d, mask=m, other=0.0), mask=m)
-    tl.store(PV + dst, tl.load(VN + r * stride_vr + h * stride_vh + d, mask=m, other=0.0), mask=m)
+    tl.store(PK + dst, tl.load(KN + r * stride_kr + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
+    tl.store(PV + dst, tl.load(VN + r * stride_vr + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
 

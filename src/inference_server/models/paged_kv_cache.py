@@ -29,6 +29,51 @@ import torch.nn.functional as F
 from inference_server.models import fused
 
 
+class _PinnedRing:
+    """Pinned staging buffers for host -> device copies, reused in rotation: pinning a fresh buffer per copy
+    (cudaHostAlloc) was 40% of the scheduler thread at 1,000 decode rows (py-spy, H200 2026-10-20). A slot is reused
+    only once the copy that last read it has completed (its event)."""
+
+    SLOTS, ELEMS = 16, 1 << 20                                  # 16 x 8 MB
+
+    def __init__(self):
+        self.bufs = [torch.empty(self.ELEMS, dtype=torch.int64, pin_memory=True) for _ in range(self.SLOTS)]
+        self.events: list = [None] * self.SLOTS
+        self.i = 0
+
+    def copy(self, t: torch.Tensor, device: torch.device) -> torch.Tensor:
+        i = self.i
+        self.i = (i + 1) % self.SLOTS
+        if self.events[i] is not None:
+            self.events[i].synchronize()
+        n = t.numel()
+        src = self.bufs[i].view(t.dtype)[:n]
+        src.copy_(t.reshape(-1))
+        out = src.to(device, non_blocking=True).view(t.shape)
+        ev = torch.cuda.Event()
+        ev.record()
+        self.events[i] = ev
+        return out
+
+
+_ring: _PinnedRing | None = None
+
+
+def to_device(values, device: torch.device, dtype=torch.long) -> torch.Tensor:
+    """A host list as a device tensor. On CUDA through pinned memory with a non-blocking copy: a pageable copy waits for
+    every kernel queued on the stream, i.e. for the decode step running asynchronously (2026-10-19: such copies in row
+    removal made each evict phase wait ~12 ms under long prompts). The pinned memory is a ring of reused buffers."""
+    global _ring
+    t = torch.tensor(values, dtype=dtype)
+    if device.type != "cuda":
+        return t.to(device)
+    if t.numel() * t.element_size() > _PinnedRing.ELEMS * 8 or t.numel() == 0:
+        return t.pin_memory().to(device, non_blocking=True)
+    if _ring is None:
+        _ring = _PinnedRing()
+    return _ring.copy(t, device)
+
+
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
                 k_new: torch.Tensor, v_new: torch.Tensor) -> None:
     """One decode token per row into the pool: pool.k[bt[r, lb[r]], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
@@ -36,8 +81,8 @@ def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, sl
         fused.kv_store(pool.k, pool.v, bt, lb, slot, k_new, v_new)
         return
     bid = bt[rows, lb]
-    pool.k[bid, :, slot, :] = k_new[:, :, 0, :]
-    pool.v[bid, :, slot, :] = v_new[:, :, 0, :]
+    pool.k[bid, :, slot, :] = k_new[:, :, 0, :].to(pool.k.dtype)
+    pool.v[bid, :, slot, :] = v_new[:, :, 0, :].to(pool.v.dtype)
 
 
 class KVCacheExhausted(RuntimeError):
@@ -48,19 +93,13 @@ class KVCacheExhausted(RuntimeError):
     """
 
 
-class BlockPool:
-    """Physical block pool for one layer's K/V. Shared across sessions, ref-counted."""
+class BlockAllocator:
+    """Block ids, refcounts and the free list, shared by every layer's pool. A request's block id is the same in all
+    of its layers' pools, so one list of ids and one refcount per block serve every layer. (One list per layer, with
+    48x the acquire, release and allocation calls, was ~2.4 ms of host time per 4k-token request, 2026-10-20.)"""
 
-    def __init__(
-        self, num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int,
-        dtype: torch.dtype, device: torch.device,
-    ):
+    def __init__(self, num_blocks: int):
         self.num_blocks = num_blocks
-        self.block_size = block_size
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.k = torch.zeros(num_blocks, num_kv_heads, block_size, head_dim, dtype=dtype, device=device)
-        self.v = torch.zeros_like(self.k)
         self._refcounts: list[int] = [0] * num_blocks
         self._free: list[int] = list(reversed(range(num_blocks)))
         # Called when the free list is empty, to reclaim blocks held only by a cache.
@@ -81,10 +120,27 @@ class BlockPool:
         self._refcounts[bid] = 1
         return bid
 
+    def alloc_many(self, n: int) -> list[int]:
+        """`n` blocks, all or none (a pool that runs dry leaves nothing half-taken)."""
+        got: list[int] = []
+        try:
+            for _ in range(n):
+                got.append(self.alloc())
+        except KVCacheExhausted:
+            self.release_all(got)
+            raise
+        return got
+
     def acquire(self, block_idx: int) -> None:
         """Add a reference to a block already owned by something else (cache / other session)."""
         assert self._refcounts[block_idx] > 0, "acquiring a freed block"
         self._refcounts[block_idx] += 1
+
+    def acquire_all(self, bids) -> None:
+        rc = self._refcounts
+        for bid in bids:
+            assert rc[bid] > 0, "acquiring a freed block"
+            rc[bid] += 1
 
     def release(self, block_idx: int) -> bool:
         """Drop a reference; return to free list when the last reference drops.
@@ -95,31 +151,89 @@ class BlockPool:
             return True
         return False
 
+    def release_all(self, bids) -> int:
+        """Drop one reference on each; returns how many blocks actually became free."""
+        rc, free, freed = self._refcounts, self._free, 0
+        for bid in bids:
+            rc[bid] -= 1
+            if rc[bid] == 0:
+                free.append(bid)
+                freed += 1
+        return freed
+
     @property
     def free_count(self) -> int:
         return len(self._free)
 
 
+class BlockPool:
+    """One layer's K/V storage. The block ids come from the group's shared `BlockAllocator` (block `b` of this pool
+    and of every other layer's pool hold the same request's tokens); the allocation calls here delegate to it."""
+
+    def __init__(
+        self, num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int,
+        dtype: torch.dtype, device: torch.device, allocator: BlockAllocator | None = None,
+    ):
+        self.num_blocks = num_blocks
+        self.block_size = block_size
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = head_dim
+        self.k = torch.zeros(num_blocks, num_kv_heads, block_size, head_dim, dtype=dtype, device=device)
+        self.v = torch.zeros_like(self.k)
+        self.allocator = allocator if allocator is not None else BlockAllocator(num_blocks)
+        assert self.allocator.num_blocks == num_blocks, "every pool of a group has the allocator's block count"
+
+    def set_reclaimer(self, fn) -> None:
+        self.allocator.set_reclaimer(fn)
+
+    def alloc(self) -> int:
+        return self.allocator.alloc()
+
+    def acquire(self, block_idx: int) -> None:
+        self.allocator.acquire(block_idx)
+
+    def release(self, block_idx: int) -> bool:
+        return self.allocator.release(block_idx)
+
+    @property
+    def free_count(self) -> int:
+        return self.allocator.free_count
+
+    @property
+    def _free(self) -> list[int]:
+        return self.allocator._free
+
+    @property
+    def _refcounts(self) -> list[int]:
+        return self.allocator._refcounts
+
+
+def pool_group(n_layers: int, num_blocks: int, block_size: int, num_kv_heads: int, head_dim: int,
+               dtype: torch.dtype, device: torch.device) -> list[BlockPool]:
+    """`n_layers` pools over one shared allocator (what `make_pools` builds for a model)."""
+    alloc = BlockAllocator(num_blocks)
+    return [BlockPool(num_blocks, block_size, num_kv_heads, head_dim, dtype, device, alloc) for _ in range(n_layers)]
+
+
+def _allocator(pools) -> BlockAllocator:
+    """The allocator every live pool shares (a request's blocks are one list for all of its layers)."""
+    live = [p for p in pools if p is not None]
+    alloc = live[0].allocator
+    assert all(p.allocator is alloc for p in live), "the live pools must share one BlockAllocator (pool_group / make_pools)"
+    return alloc
+
+
 def _tightest_pool(pools) -> tuple[int, int]:
-    """(free, total) of the most-consumed pool — the one that will block admission first.
-
-    Both must come from the SAME pool. They used to be two independent min() calls, so with a
-    mixed layout (full-attention pools of N blocks, sliding pools of N/2) the numerator and
-    denominator described different pools and the ratio described neither. It read a constant
-    0.5002 across a 16x load range while kv_admit_blocked climbed 0 -> 1176.
-
-    Max rather than mean: admission blocks when ANY pool cannot fit, so one exhausted pool is the
-    whole story and averaging would hide it behind its idle neighbours.
-    """
+    """(free, total) blocks of the pools' shared allocator (every layer fills at the same rate)."""
     live = [p for p in pools if p is not None and p.num_blocks]
     if not live:
         return 0, 0
-    tightest = max(live, key=lambda p: 1 - p.free_count / p.num_blocks)
-    return tightest.free_count, tightest.num_blocks
+    alloc = _allocator(live)
+    return alloc.free_count, alloc.num_blocks
 
 
 class PrefixCache:
-    """Maps aligned token-prefixes → per-layer block ids. Shares blocks across sessions
+    """Maps aligned token-prefixes → block ids (one list, shared by every layer). Shares blocks across sessions
     via refcount: storing acquires; eviction releases. Sharing happens only on full-block
     boundaries (partial blocks aren't safe to share — slots after seq_len aren't written).
     """
@@ -128,10 +242,10 @@ class PrefixCache:
                  max_block_fraction: float = 0.5):
         self.pools = pools
         self.block_size = next(p.block_size for p in pools if p is not None)
-        # key = tuple of leading tokens aligned to block boundary
-        # value = dict[layer_idx] -> list of block ids (one per full block)
+        self.alloc = _allocator(pools)
+        # key = tuple of leading tokens aligned to block boundary; value = block ids (one per full block)
         # OrderedDict = LRU order: least-recently-used first, hits move to the end.
-        self.entries: "OrderedDict[tuple[int, ...], dict[int, list[int]]]" = OrderedDict()
+        self.entries: "OrderedDict[tuple[int, ...], list[int]]" = OrderedDict()
         self.max_entries = max_entries
         # Block counts present in the cache, so we only build lookup keys for lengths that
         # actually exist (building every aligned prefix tuple is O(prompt^2) per lookup).
@@ -139,18 +253,15 @@ class PrefixCache:
         # Cap the cache's share of the pool. Reclaim-on-demand alone is a safety net, not a
         # policy: without this the cache grows to 100% of the pool and every single alloc has
         # to evict first, leaving zero headroom for a burst of live requests.
-        live = [p.num_blocks for p in pools if p is not None]
-        self.max_blocks = int(max_block_fraction * min(live)) if live else 0
-        self._blocks_held = 0          # per-pool block count held across all entries
+        self.max_blocks = int(max_block_fraction * self.alloc.num_blocks)
+        self._blocks_held = 0          # blocks held across all entries
         self.hits = 0
         self.lookups = 0
         self.evictions = 0
-        for pool in pools:
-            if pool is not None:
-                pool.set_reclaimer(self.reclaim)
+        self.alloc.set_reclaimer(self.reclaim)
 
-    def lookup(self, token_ids: list[int]) -> tuple[int, dict[int, list[int]]]:
-        """Return (matched_tokens, per_layer_block_ids). Acquires blocks for the caller."""
+    def lookup(self, token_ids: list[int]) -> tuple[int, list[int]]:
+        """Return (matched_tokens, block_ids). Acquires the blocks for the caller."""
         self.lookups += 1
         n_full_blocks = len(token_ids) // self.block_size
         # Walk back from the longest aligned prefix, skipping block counts the cache has never
@@ -163,15 +274,12 @@ class PrefixCache:
             if key in self.entries:
                 self.hits += 1
                 self.entries.move_to_end(key)          # LRU: this entry is now the newest
-                layer_blocks = self.entries[key]
-                # The caller becomes an additional owner.
-                for layer_idx, bids in layer_blocks.items():
-                    for bid in bids:
-                        self.pools[layer_idx].acquire(bid)
-                return n * self.block_size, {k: list(v) for k, v in layer_blocks.items()}
-        return 0, {}
+                bids = self.entries[key]
+                self.alloc.acquire_all(bids)           # the caller becomes an additional owner
+                return n * self.block_size, list(bids)
+        return 0, []
 
-    def store(self, token_ids: list[int], block_tables: list[list[int]]) -> None:
+    def store(self, token_ids: list[int], blocks: list[int]) -> None:
         """Store the session's fully-written blocks under its aligned prefix."""
         n_full_blocks = len(token_ids) // self.block_size
         if n_full_blocks == 0:
@@ -184,17 +292,9 @@ class PrefixCache:
                or self._blocks_held + n_full_blocks > self.max_blocks):
             if self._evict_one() == 0:
                 break
-        entry: dict[int, list[int]] = {}
-        for layer_idx, bids in enumerate(block_tables):
-            if self.pools[layer_idx] is None:
-                continue
-            # Only first n_full_blocks of this layer's table are guaranteed full
-            full_bids = bids[:n_full_blocks]
-            entry[layer_idx] = list(full_bids)
-            # Cache acquires its own ref so blocks survive after the session ends.
-            for bid in full_bids:
-                self.pools[layer_idx].acquire(bid)
-        self.entries[key] = entry
+        full_bids = list(blocks[:n_full_blocks])        # only the first n_full_blocks are guaranteed full
+        self.alloc.acquire_all(full_bids)                # the cache's own ref: the blocks survive the session
+        self.entries[key] = full_bids
         self._blocks_held += n_full_blocks
         self._lengths[n_full_blocks] = self._lengths.get(n_full_blocks, 0) + 1
 
@@ -213,11 +313,7 @@ class PrefixCache:
         # block that a live request is also holding frees nothing when the cache drops its ref;
         # counting the call made reclaim() report success having freed zero, so the caller
         # stopped evicting and alloc() raised anyway.
-        released = 0
-        for layer_idx, bids in entry.items():
-            for bid in bids:
-                if self.pools[layer_idx].release(bid):
-                    released += 1
+        released = self.alloc.release_all(entry)
         self.evictions += 1
         return released
 
@@ -249,13 +345,13 @@ class PrefixCache:
 class _RadixNode:
     """One block-sized chunk of a cached prefix. Path from root = the aligned prefix."""
 
-    __slots__ = ("chunk", "children", "blocks", "parent", "last_used")
+    __slots__ = ("chunk", "children", "block", "parent", "last_used")
 
-    def __init__(self, chunk=(), parent=None):
+    def __init__(self, chunk=(), parent=None, block: int = -1):
         self.chunk = chunk
         self.parent = parent
         self.children: dict[tuple, "_RadixNode"] = {}
-        self.blocks: dict[int, int] = {}      # layer_idx -> block id for THIS chunk
+        self.block = block                    # this chunk's block id (the same in every layer's pool)
         self.last_used = 0
 
 
@@ -267,8 +363,8 @@ class RadixPrefixCache:
     differing after it matched nothing unless that exact boundary happened to be a stored key, and
     storing "A B C" then "A B D" duplicated the refs for A and B.
 
-    A trie shares at EVERY block boundary: each node owns one block per layer, so any common
-    leading blocks are reused automatically and stored once. Lookup is one dict probe per block
+    A trie shares at EVERY block boundary: each node owns one block (the same id in every layer's pool), so any
+    common leading blocks are reused automatically and stored once. Lookup is one dict probe per block
     instead of building an O(prompt^2) pile of prefix tuples.
     """
 
@@ -277,14 +373,14 @@ class RadixPrefixCache:
         self.pools = pools
         self.block_size = next(p.block_size for p in pools if p is not None)
         self._live = [i for i, p in enumerate(pools) if p is not None]
+        self.alloc = _allocator(pools)
         self.root = _RadixNode()
-        live = [pools[i].num_blocks for i in self._live]
-        # One node holds one block per layer, so for the trie the block watermark IS the node
+        # One node holds one block, so for the trie the block watermark IS the node
         # cap and `max_entries` is redundant. They must NOT be combined: `max_entries` counts
         # whole PROMPTS for the dict implementation but single BLOCKS here, so taking the min
         # shrank the trie to 1024 blocks of a 4096 allowance and made it thrash (22589 evictions
         # for a 0.0015 hit rate under load).
-        self.max_blocks = int(max_block_fraction * min(live)) if live else 0
+        self.max_blocks = int(max_block_fraction * self.alloc.num_blocks)
         self.max_entries = max_entries      # kept for API parity; not a binding cap here
         self._nodes = 0
         self._clock = 0
@@ -296,9 +392,7 @@ class RadixPrefixCache:
         self.hits = 0
         self.lookups = 0
         self.evictions = 0
-        for pool in pools:
-            if pool is not None:
-                pool.set_reclaimer(self.reclaim)
+        self.alloc.set_reclaimer(self.reclaim)
 
     # ---- internals ----
 
@@ -337,10 +431,7 @@ class RadixPrefixCache:
                 break
         if best is None:
             return 0
-        freed = 0
-        for layer_idx, bid in best.blocks.items():
-            if self.pools[layer_idx].release(bid):
-                freed += 1
+        freed = 1 if self.alloc.release(best.block) else 0
         parent = best.parent
         parent.children.pop(best.chunk, None)
         best.parent = None
@@ -351,36 +442,34 @@ class RadixPrefixCache:
 
     # ---- public API (same shape as PrefixCache) ----
 
-    def lookup(self, token_ids: list[int]) -> tuple[int, dict[int, list[int]]]:
+    def lookup(self, token_ids: list[int]) -> tuple[int, list[int]]:
+        """(matched tokens, their block ids); the blocks are acquired for the caller."""
         self.lookups += 1
-        node, matched = self.root, 0
-        per_layer: dict[int, list[int]] = {i: [] for i in self._live}
+        node, blocks = self.root, []
         bs = self.block_size
+        tick = self._tick()
         for i in range(len(token_ids) // bs):
             child = node.children.get(tuple(token_ids[i * bs:(i + 1) * bs]))
             if child is None:
                 break
             node = child
-            node.last_used = self._tick()
-            self._push_leaf(node)
-            for layer_idx, bid in node.blocks.items():
-                per_layer[layer_idx].append(bid)
-            matched += bs
-        if matched == 0:
-            return 0, {}
+            node.last_used = tick
+            blocks.append(node.block)
+        if not blocks:
+            return 0, []
+        self._push_leaf(node)                        # only the deepest node can be a leaf
         self.hits += 1
-        for layer_idx, bids in per_layer.items():
-            for bid in bids:
-                self.pools[layer_idx].acquire(bid)
-        return matched, per_layer
+        self.alloc.acquire_all(blocks)
+        return len(blocks) * bs, blocks
 
-    def store(self, token_ids: list[int], block_tables: list[list[int]]) -> None:
+    def store(self, token_ids: list[int], blocks: list[int]) -> None:
         bs = self.block_size
         n_chunks = len(token_ids) // bs
         if n_chunks == 0:
             return
 
         node = self.root
+        tick = self._tick()
         for i in range(n_chunks):
             key = tuple(token_ids[i * bs:(i + 1) * bs])
             child = node.children.get(key)
@@ -389,17 +478,15 @@ class RadixPrefixCache:
                     if self._evict_lru_leaf() == 0:
                         break
                 if self._nodes >= self._capacity():
-                    return                       # cannot make room; stop growing the trie
-                child = _RadixNode(chunk=key, parent=node)
-                for layer_idx in self._live:
-                    bid = block_tables[layer_idx][i]
-                    child.blocks[layer_idx] = bid
-                    self.pools[layer_idx].acquire(bid)
+                    self._push_leaf(node)        # cannot make room; stop growing the trie (the path's end stays evictable)
+                    return
+                child = _RadixNode(chunk=key, parent=node, block=blocks[i])
+                self.alloc.acquire(blocks[i])
                 node.children[key] = child
                 self._nodes += 1
             node = child
-            node.last_used = self._tick()
-            self._push_leaf(node)
+            node.last_used = tick
+        self._push_leaf(node)
 
     def reclaim(self, min_blocks: int = 1) -> int:
         freed = 0
@@ -424,27 +511,48 @@ class RadixPrefixCache:
         }
 
 
-class PagedKVCache:
-    """Per-session, per-layer block tables. Shares pools with other sessions.
+class _LayerTables:
+    """`PagedKVCache.block_tables`: the one block list seen per layer (None for a layer without K/V)."""
 
-    Construct with `shared_prefix={layer_idx: [bid, ...]}` and `shared_prefix_tokens`
-    to seed the cache from a `PrefixCache.lookup()` hit. The caller is responsible for
-    skipping forward computation on the prefix-matched portion of the prompt.
+    __slots__ = ("_c",)
+
+    def __init__(self, cache: "PagedKVCache"):
+        self._c = cache
+
+    def __getitem__(self, layer_idx: int):
+        return self._c.blocks if self._c.pools[layer_idx] is not None else None
+
+    def __len__(self) -> int:
+        return self._c.num_layers
+
+    def __iter__(self):
+        return (self[L] for L in range(self._c.num_layers))
+
+
+class PagedKVCache:
+    """Per-session block table: one list of block ids, the same for every layer's pool (every layer stores a
+    token's K/V in the same block id). Shares pools with other sessions.
+
+    Construct with `shared_prefix=[bid, ...]` and `shared_prefix_tokens` to seed the cache from a prefix-cache hit.
+    The caller is responsible for skipping forward computation on the prefix-matched portion of the prompt.
     """
 
     def __init__(
         self, pools: list[BlockPool | None],
-        shared_prefix: dict[int, list[int]] | None = None,
+        shared_prefix: list[int] | None = None,
         shared_prefix_tokens: int = 0,
     ):
         self.pools = pools
         self.num_layers = len(pools)
-        self.block_tables: list[list[int]] = [[] for _ in range(self.num_layers)]
-        self.seq_lens: list[int] = [0] * self.num_layers
-        if shared_prefix:
-            for layer_idx, bids in shared_prefix.items():
-                self.block_tables[layer_idx] = list(bids)
-                self.seq_lens[layer_idx] = shared_prefix_tokens
+        self.alloc = _allocator(pools)
+        self.blocks: list[int] = list(shared_prefix) if shared_prefix else []
+        # Per-layer lengths: mid-forward, the layers already appended to are one token ahead of the rest.
+        self.seq_lens: list[int] = [shared_prefix_tokens if shared_prefix and p is not None else 0 for p in pools]
+
+    @property
+    def block_tables(self) -> _LayerTables:
+        """Per-layer view of the one block list (reads and appends go through)."""
+        return _LayerTables(self)
 
     @property
     def seq_len(self) -> int:
@@ -460,9 +568,8 @@ class PagedKVCache:
         if seq_len == 0:
             return None
         pool = self.pools[layer_idx]
-        bt = self.block_tables[layer_idx]
         # Gather all blocks → [N_blocks, H, block_size, D].
-        idx = torch.tensor(bt, device=pool.k.device, dtype=torch.long)
+        idx = torch.tensor(self.blocks, device=pool.k.device, dtype=torch.long)
         k_gathered = pool.k.index_select(0, idx)
         v_gathered = pool.v.index_select(0, idx)
         # Flatten block dim into S → [H, N_blocks * block_size, D]
@@ -478,12 +585,12 @@ class PagedKVCache:
         block_size = pool.block_size
         seq_len = self.seq_lens[layer_idx]
         S_new = k_new.shape[2]
-        bt = self.block_tables[layer_idx]
+        bt = self.blocks
 
-        # Make sure we have enough blocks for (seq_len + S_new) tokens.
+        # Enough blocks for (seq_len + S_new) tokens: the first layer to reach a new block allocates it for all.
         total_blocks_needed = (seq_len + S_new + block_size - 1) // block_size
         while len(bt) < total_blocks_needed:
-            bt.append(pool.alloc())
+            bt.append(self.alloc.alloc())
 
         # Vectorized scatter (was a per-token Python loop — O(S_new) tiny GPU writes, brutal when
         # distributing a batched prefill). k_new [1, H, S_new, D] → [S_new, H, D]; positions
@@ -493,21 +600,16 @@ class PagedKVCache:
         pos = seq_len + torch.arange(S_new, device=k_new.device)
         bids = torch.tensor(bt, device=k_new.device)[pos // block_size]
         slots = pos % block_size
-        pool.k[bids, :, slots, :] = k_per_tok
-        pool.v[bids, :, slots, :] = v_per_tok
+        pool.k[bids, :, slots, :] = k_per_tok.to(pool.k.dtype)
+        pool.v[bids, :, slots, :] = v_per_tok.to(pool.v.dtype)
 
         self.seq_lens[layer_idx] = seq_len + S_new
 
     def free_all(self) -> None:
-        """Release this session's references; blocks return to pool when refcount hits 0."""
-        for layer_idx in range(self.num_layers):
-            pool = self.pools[layer_idx]
-            if pool is None:
-                continue
-            for bid in self.block_tables[layer_idx]:
-                pool.release(bid)
-            self.block_tables[layer_idx] = []
-            self.seq_lens[layer_idx] = 0
+        """Release this session's references; blocks return to the pool when their refcount hits 0."""
+        self.alloc.release_all(self.blocks)
+        self.blocks = []
+        self.seq_lens = [0] * self.num_layers
 
 
 class BatchedPagedKVCache:
@@ -551,9 +653,9 @@ class BatchedPagedKVCache:
         block_ids, slots = [], []
         for row in self.rows:
             L = row.seq_lens[layer_idx]
-            bt = row.block_tables[layer_idx]
-            if L // bs >= len(bt):          # crossed into a new block this step
-                bt.append(pool.alloc())
+            bt = row.blocks
+            if L // bs >= len(bt):          # crossed into a new block this step (the first layer allocates for all)
+                bt.append(row.alloc.alloc())
             block_ids.append(bt[L // bs])
             slots.append(L % bs)
             row.seq_lens[layer_idx] = L + 1
@@ -570,7 +672,7 @@ class BatchedPagedKVCache:
         """Per-row block table [N, max_blocks] (int32, 0-padded) + seq_lens [N] for the kernel.
         Built with one host→device copy each (one padded list) instead of per-row tensors."""
         device = self.pools_for(layer_idx).k.device
-        bts = [r.block_tables[layer_idx] for r in self.rows]
+        bts = [r.blocks for r in self.rows]
         seq_lens = [r.seq_lens[layer_idx] for r in self.rows]
         max_blocks = max((len(b) for b in bts), default=1) or 1
         padded = [b + [0] * (max_blocks - len(b)) for b in bts]
@@ -596,11 +698,12 @@ class BatchedDecodeState:
         self.pools = pools
         self.device = device
         self.bs = next(p.block_size for p in pools if p is not None)
+        self.alloc = _allocator(pools)
         self.seq_lens = torch.zeros(0, dtype=torch.long, device=device)   # [R] logical len (pre-step)
         self.n_alloc = torch.zeros(0, dtype=torch.long, device=device)    # [R] logical blocks alloc'd
-        # One table for every layer that owns K/V: [layers, R, cols]. Per-layer tensors cost a
-        # launch or a sync per layer on every join, leave and block allocation (48 layers: ~400 syncs a step at
-        # batch 128); stacked, each of those is one or two ops. `block_tables` stays as per-layer views.
+        # One table [R, cols] for every layer that owns K/V: a block id is the same in every layer's pool. (A table
+        # per layer cost a launch or a sync per layer on every join, leave and allocation; stacked [layers, R, cols]
+        # they were one op each but 48x the bytes to build, grow, compact and copy into the graphs' buffers.)
         self._live = [L for L, p in enumerate(pools) if p is not None]
         self._li = {L: i for i, L in enumerate(self._live)}
         self.bt: torch.Tensor | None = None
@@ -608,16 +711,12 @@ class BatchedDecodeState:
         # step overlaps host work with the running forward; a .item() here would serialize them again).
         self._host_len: list[int] = []                   # per row: logical length (pre-step)
         self._host_alloc: list[int] = []                 # per row: logical blocks allocated
-        self._host_blocks: list[list[list[int]]] = []    # per row, per live layer: block ids
+        self._host_blocks: list[list[int]] = []          # per row: block ids
 
     @property
     def block_tables(self) -> list:
-        """Per-layer views [R, cols] of the stacked table (None for layers without K/V); writes go through."""
-        out: list = [None] * len(self.pools)
-        if self.bt is not None:
-            for L, i in self._li.items():
-                out[L] = self.bt[i]
-        return out
+        """Per-layer view: the one table [R, cols] for every layer with K/V (None otherwise); writes go through."""
+        return [self.bt if p is not None else None for p in self.pools]
 
     @property
     def n_rows(self) -> int:
@@ -632,32 +731,34 @@ class BatchedDecodeState:
 
     def add_row(self, pkv: "PagedKVCache") -> None:
         """Adopt a prefilled PagedKVCache's blocks as a new batch row (no per-step cost)."""
-        self.seq_lens = torch.cat([self.seq_lens, torch.tensor([pkv.seq_len], device=self.device)])
-        tables = [pkv.block_tables[L] for L in self._live]
-        n0 = max((len(t) for t in tables), default=0)
-        self.n_alloc = torch.cat([self.n_alloc, torch.tensor([n0], device=self.device)])
+        self.seq_lens = torch.cat([self.seq_lens, to_device([pkv.seq_len], self.device)])
+        blocks = list(pkv.blocks)
+        n0 = len(blocks)
+        self.n_alloc = torch.cat([self.n_alloc, to_device([n0], self.device)])
         self._host_len.append(pkv.seq_len)
         self._host_alloc.append(n0)
-        self._host_blocks.append([list(t) for t in tables])
-        cols = max(n0, self.bt.shape[2] if self.bt is not None else 0)
-        row = torch.tensor([t + [0] * (cols - len(t)) for t in tables], dtype=torch.long, device=self.device)
-        if self.bt is None:
-            self.bt = row[:, None, :]
-        else:
-            self.bt = torch.cat([self._grow_cols(self.bt, cols), row[:, None, :]], dim=1)
+        self._host_blocks.append(blocks)
+        cols = max(n0, self.bt.shape[1] if self.bt is not None else 0)
+        row = to_device([blocks + [0] * (cols - n0)], self.device)                   # [1, cols]
+        self.bt = row if self.bt is None else torch.cat([self._grow_cols(self.bt, cols), row], dim=0)
 
     def remove_row(self, idx: int) -> None:
         """Free row `idx`'s blocks and drop it from the batch."""
-        keep = [i for i in range(self.n_rows) if i != idx]
-        keep_t = torch.tensor(keep, dtype=torch.long, device=self.device)
-        blocks = self._host_blocks.pop(idx)                             # host mirror: no D2H
-        self._host_len.pop(idx)
-        self._host_alloc.pop(idx)
-        for i, L in enumerate(self._live):
-            pool = self.pools[L]
-            for bid in blocks[i]:
-                pool.release(bid)
-        self.bt = self.bt[:, keep_t] if keep else None
+        self.remove_rows([idx])
+
+    def remove_rows(self, idxs) -> None:
+        """Free these rows' blocks and drop them from the batch: one compaction for all of them, no stream sync."""
+        drop = set(idxs)
+        keep = [i for i in range(self.n_rows) if i not in drop]
+        for idx in sorted(drop, reverse=True):
+            self.alloc.release_all(self._host_blocks.pop(idx))          # host mirror: no D2H
+            self._host_len.pop(idx)
+            self._host_alloc.pop(idx)
+        if not keep:
+            self.bt, self.seq_lens, self.n_alloc = None, self.seq_lens[:0], self.n_alloc[:0]
+            return
+        keep_t = to_device(keep, self.device)
+        self.bt = self.bt[keep_t]
         self.seq_lens = self.seq_lens[keep_t]
         self.n_alloc = self.n_alloc[keep_t]
 
@@ -671,18 +772,12 @@ class BatchedDecodeState:
             return
         lbs = [self._host_len[r] // bs for r in crossing]
         self.bt = self._grow_cols(self.bt, max(lbs) + 1)
-        ids = [[self.pools[L].alloc() for _ in crossing] for L in self._live]
-        for i, _L in enumerate(self._live):
-            for j, r in enumerate(crossing):
-                self._host_blocks[r][i].append(ids[i][j])
-        for r in crossing:
+        ids = self.alloc.alloc_many(len(crossing))                # all or nothing (KVCacheExhausted leaves no block taken)
+        for r, bid in zip(crossing, ids):
+            self._host_blocks[r].append(bid)
             self._host_alloc[r] += 1
-        # pinned, non-blocking copies: a pageable copy would first sync the stream, i.e. wait for the running step
-        cuda = self.device.type == "cuda"
-        new, rows_t, lbs_t = ((torch.tensor(v, dtype=torch.long).pin_memory().to(self.device, non_blocking=True) if cuda
-                               else torch.tensor(v, dtype=torch.long, device=self.device))
-                              for v in (ids, crossing, lbs))                                      # new: [layers, crossing]
-        self.bt[:, rows_t, lbs_t] = new
+        new, rows_t, lbs_t = (to_device(v, self.device) for v in (ids, crossing, lbs))
+        self.bt[rows_t, lbs_t] = new
         self.n_alloc[rows_t] += 1
 
     def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
@@ -690,7 +785,7 @@ class BatchedDecodeState:
         block id + slot computed from seq_lens (prepare_step already alloc'd any new block)."""
         if layer_idx == self._live[0]:
             self._begin_step()
-        write_token(self.pools[layer_idx], self.bt[self._li[layer_idx]], self._rows, self._lb, self._slot, k_new, v_new)
+        write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def _begin_step(self) -> None:
         """What every layer's append and block_table_tensor share, built once at the first layer of a step (as
@@ -704,7 +799,7 @@ class BatchedDecodeState:
     def block_table_tensor(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Kernel inputs: persistent block table (int32) + effective seq_lens (incl. the
         new token just written), both from this step's cache."""
-        return self._bt32[self._li[layer_idx]], self._sl32
+        return self._bt32, self._sl32
 
     def advance(self) -> None:
         """Bump seq_lens by the new token (GPU tensor and host mirror; no sync)."""
@@ -713,19 +808,23 @@ class BatchedDecodeState:
             self._host_len[r] += 1
 
 
-def blocks_for_budget(model, budget_bytes: int, block_size: int) -> int:
-    """Blocks per pool that fit `budget_bytes` across every layer owning K/V (K and V, the model's dtype)."""
-    elem = torch.empty((), dtype=next(model.parameters()).dtype).element_size()
+def blocks_for_budget(model, budget_bytes: int, block_size: int, kv_dtype: torch.dtype | None = None) -> int:
+    """Blocks per pool that fit `budget_bytes` across every layer owning K/V (K and V, in `kv_dtype`: default the
+    model's)."""
+    elem = torch.empty((), dtype=kv_dtype or next(model.parameters()).dtype).element_size()
     per_block = sum(2 * layer.self_attn.num_kv_heads * block_size * layer.self_attn.head_dim * elem
                     for layer in model.model.layers if not layer.self_attn.is_kv_shared)
     return max(1, budget_bytes // per_block)
 
 
-def make_pools(model, num_blocks_per_pool: int = 1024, block_size: int = 16) -> list[BlockPool | None]:
+def make_pools(model, num_blocks_per_pool: int = 1024, block_size: int = 16,
+               kv_dtype: torch.dtype | None = None) -> list[BlockPool | None]:
     """Build the BlockPool list matching a Qwen3MoeForCausalLM's layers: one pool of
-    `num_blocks_per_pool` per layer that owns K/V, None for a layer that does not."""
+    `num_blocks_per_pool` per layer that owns K/V, None for a layer that does not. `kv_dtype`: the
+    pools' element type (default the model's; float8_e4m3fn halves the bytes per token, unit scale)."""
     device = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
+    dtype = kv_dtype or next(model.parameters()).dtype
+    alloc = BlockAllocator(num_blocks_per_pool)             # one id space for every layer (a request = one block list)
     pools: list[BlockPool | None] = []
     for layer in model.model.layers:
         attn = layer.self_attn
@@ -739,5 +838,6 @@ def make_pools(model, num_blocks_per_pool: int = 1024, block_size: int = 16) -> 
                 head_dim=attn.head_dim,
                 dtype=dtype,
                 device=device,
+                allocator=alloc,
             ))
     return pools
