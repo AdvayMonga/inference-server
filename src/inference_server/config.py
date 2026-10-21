@@ -38,7 +38,7 @@ class Settings:
     # Batching
     # Rows decoded together; the KV pools are sized from free memory. 256: H200 2026-10-19 with fp8 experts, saturated
     # 4.6 req/s at 128 (clients beyond 128 wait in the queue and miss TTFT), 6.3 at 256, 6.2 at 512.
-    max_batch_size: int = 256
+    max_batch_size: int = 1024      # 256 -> 1024 (2026-10-21): long answers 10.6 -> 22.5 req/s, saturated 8.3 -> 10.4
     batch_timeout_ms: float = 50.0
     max_queue_size: int = 1000
     # Active-KV budget — cap on (prompt_len + max_tokens) summed across in-flight rows.
@@ -65,7 +65,7 @@ class Settings:
     # (H200, 2026-10-16: single_stream TPOT p99 9.5 → 9.24 ms, decode step at batch 128 33.9 → 27.8 ms).
     async_decode: bool = True
     # The backend and scheduler in a child process (engine_process.py), HTTP and streams in this one: no shared GIL.
-    engine_process: bool = False
+    engine_process: bool = True      # on since 2026-10-21: long_prompt 43 -> 50 req/s alone; off = one process, one GIL
     # Chunked prefill — split admitting request's uncached suffix into chunks of this size.
     # 0 = disabled (monolithic prefill on admit). Typical: 256–512.
     prefill_chunk_size: int = 0

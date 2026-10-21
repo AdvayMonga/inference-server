@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 ENABLED = os.environ.get("MEGAKERNEL", "1") == "1"      # on where it builds (CUDA + nvcc); MEGAKERNEL=0 for the graphs
 FP8 = os.environ.get("MEGAKERNEL_FP8", "0") == "1"      # measured 2026-10-18: no gain at batch 1 (the phases are latency-bound)
-TMA = os.environ.get("MEGAKERNEL_TMA", "0") == "1"      # weights streamed through a shared-memory ring (batch <= 2)
+TMA = os.environ.get("MEGAKERNEL_TMA", "1") == "1"      # weights through a shared-memory ring (batch <= 2): 4.48 -> 3.71 ms a step
 BPS = int(os.environ.get("MEGAKERNEL_BPS", "1"))        # blocks per SM where the shared memory allows (never with TMA)
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
