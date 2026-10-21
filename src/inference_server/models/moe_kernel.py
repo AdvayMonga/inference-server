@@ -215,18 +215,19 @@ def _a8(a: torch.Tensor, a_scale, fp8_w: bool) -> bool:
 
 def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor, expert_ids: torch.Tensor, M: int,
                      tok: torch.Tensor, pair_w: torch.Tensor, out: torch.Tensor, block_m: int = 16,
-                     w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None) -> None:
+                     w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None, tile=None) -> None:
     """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) over the sorted pairs; `out` [T, N] fp32, zeroed.
     `w` bf16, or fp8 e4m3 with `w_scale` [E, N] fp32; `a` bf16, or fp8 e4m3 with `a_scale` [M] fp32 (W8A8)."""
     E, N, K = w.shape
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
     a8 = _a8(a, a_scale, fp8)
-    grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
+    bn, bk, stages, warps = _tile(block_m, tile)
+    grid = (expert_ids.numel(), triton.cdiv(N, bn))
     _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
                                          tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
-                                         E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
-                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, num_warps=_warps(block_m), num_stages=NUM_STAGES)
+                                         E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
+                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, num_warps=warps, num_stages=stages)
 
 
 # Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
@@ -240,9 +241,15 @@ def _warps(block_m: int) -> int:
     return 8 if block_m >= 64 else 4
 
 
+def _tile(block_m: int, tile) -> tuple[int, int, int, int]:
+    """(BLOCK_N, BLOCK_K, num_stages, num_warps): the decode-tuned constants, or `tile` as given (a sweep at prefill
+    sizes, where every path measured 10-13% of fp8 peak on 2026-10-21, picks its own)."""
+    return tuple(tile) if tile is not None else (BLOCK_N, BLOCK_K, NUM_STAGES, _warps(block_m))
+
+
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
              expert_ids: torch.Tensor, M: int, block_m: int = 16, split_k: int | None = None,
-             w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None) -> torch.Tensor:
+             w_scale: torch.Tensor | None = None, a_scale: torch.Tensor | None = None, tile=None) -> torch.Tensor:
     """C [M, N] = per pair i: a[tok[i]] @ w[expert(i)].T, pairs in sorted order. `a` [T, K] (or [M, K] with tok None),
     `w` [E, N, K] contiguous: bf16, or fp8 e4m3 with `w_scale` [E, N] fp32; `a` bf16, or fp8 e4m3 with `a_scale` [T]
     fp32 per row (W8A8: the prefill path's quantization, on the tensor cores). Output bf16, or fp32 when the GEMM is
@@ -251,7 +258,8 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
     a8 = _a8(a, a_scale, fp8)
-    grid = (expert_ids.numel(), triton.cdiv(N, BLOCK_N))
+    bn, bk, stages, warps = _tile(block_m, tile)
+    grid = (expert_ids.numel(), triton.cdiv(N, bn))
     if split_k is None:
         split_k = 1
     if split_k > 1:
@@ -260,9 +268,9 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
         C = torch.empty(M, N, dtype=torch.bfloat16 if a8 else a.dtype, device=a.device)   # never the fp8 of W8A8 rows
     _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, w_scale if fp8 else a, a_scale if a8 else a,
                                        C, sorted_ids, expert_ids, M, N, K, a.stride(0), w.stride(1), w.stride(2),
-                                       C.stride(0), E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
+                                       C.stride(0), E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
                                        ROWS_FROM_TOKENS=tok is not None, SPLIT_K=split_k, W_FP8=fp8, A_FP8=a8,
-                                       num_warps=_warps(block_m), num_stages=NUM_STAGES)
+                                       num_warps=warps, num_stages=stages)
     return C
 
 

@@ -130,7 +130,8 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
     """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [B, cols] int64
     block table (one for every layer), as the batched state keeps it. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
-    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug."""
+    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug; given
+    [blocks, 16] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew."""
     assert mdl.table is not None, "bind_pools() first"
     global _NO_TIMES
     if times is None:

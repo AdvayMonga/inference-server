@@ -1051,7 +1051,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _launched(self, next_tokens: torch.Tensor, batch: list) -> None:
         """A step is in flight: start its tokens' copy home, finish the previous step's, remember this one."""
         if next_tokens.is_cuda:
-            host = torch.empty(len(batch), dtype=next_tokens.dtype, pin_memory=True)
+            host = self._pinned_out(len(batch), next_tokens.dtype)
             host.copy_(next_tokens, non_blocking=True)
             event = torch.cuda.Event()
             event.record()
@@ -1063,6 +1063,17 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row in batch:                          # first tokens read now: this step is already queued behind them
             if isinstance(row.current_token, DeviceToken):
                 row.current_token = row.current_token.value()
+
+    def _pinned_out(self, n: int, dtype) -> torch.Tensor:
+        """A pinned host buffer for this step's tokens, from a ring of four (pinning a fresh one each step is a
+        cudaHostAlloc on the step loop); a slot is reused two steps later, after _finish_pending has read it."""
+        ring = getattr(self, "_out_ring", None)
+        if ring is None or ring[0][0].numel() < n or ring[0][0].dtype != dtype:
+            cap = max(n, 2048)
+            ring = ([torch.empty(cap, dtype=dtype, pin_memory=True) for _ in range(4)], 0)
+        bufs, i = ring
+        self._out_ring = (bufs, (i + 1) % len(bufs))
+        return bufs[i][:n]
 
     def _finish_pending(self) -> None:
         """Read the previous step's tokens and hand them to the rows that still exist (`_evict_finished` streams

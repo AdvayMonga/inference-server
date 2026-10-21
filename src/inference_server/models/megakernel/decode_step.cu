@@ -72,6 +72,7 @@ struct Args {
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
     int stamp_layer;                                                                       // the layer `times` stamps
+    int times_blocks;                                                                      // times is [blocks, 16]
     int kv8;                                                                               // the pools hold fp8 e4m3
     int tma;                                                                               // MEGAKERNEL_TMA (batch <= 2)
 };
@@ -356,8 +357,9 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
 }
 
 __device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
-#define STAMP(i) do { if (a.times && L == a.stamp_layer && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
-#define STAMP_ALWAYS(i) do { if (a.times && blockIdx.x == 0 && threadIdx.x == 0) a.times[i] = gtimer(); } while (0)
+// Stamps: block 0's, or every block's ([blocks, 16], a.times_blocks) to see each phase's skew across the grid.
+#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 16 : 0) + (i)] = gtimer(); } while (0)
+#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 16 : 0) + (i)] = gtimer(); } while (0)
 
 template <int BT, bool FP8>
 __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
@@ -1084,6 +1086,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, 0);
     const int bps = (MEGA_BPS > 1 && (int)(MEGA_BPS * (smem + 1024)) <= smem_per_sm) ? MEGA_BPS : 1;   // 1 KB a block is the driver's
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
+    a.times_blocks = times.numel() >= 16 * num_sms() * MEGA_BPS ? 1 : 0;
     a.stamp_layer = (int)stamp_layer;
     TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
     a.kv8 = kv8 ? 1 : 0;
