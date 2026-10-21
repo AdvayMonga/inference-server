@@ -1075,6 +1075,50 @@ class CustomTorchBackend(InferenceBackend):
             next_tokens = sample_batched(last, sampling_per_row)
         return next_tokens, batched_kv
 
+    # --- speculative decoding: one forward over [current] + drafts as rows at consecutive positions ---
+
+    @torch.no_grad()
+    def verify_step(self, batched_kv, r: int, tokens: list[int]) -> list[int]:
+        """Row r of the batch fed `tokens` at positions len..len+n-1 in one forward (each token a decode row sharing
+        the row's block table, K/V written before attention: causal), returning the greedy next token at each
+        position. The row's length does not move: `commit_verify` advances it by what the caller accepted; the K/V of
+        rejected positions are overwritten by later steps."""
+        from types import SimpleNamespace
+        from inference_server.models import megakernel as mk
+        n = len(tokens)
+        if self.device.type != "cuda":                     # CPU/MPS: the row's PagedKVCache through the model
+            cache = batched_kv[r]
+            p0 = cache.seq_len
+            logits = self.model(torch.tensor([tokens], device=self.device), kv_cache=cache)
+            out = logits[0].float().argmax(-1).tolist()
+            cache.seq_lens = [p0 if L == 0 else L for L in cache.seq_lens]    # back to p0: commit_verify sets the length
+            cache._verify_p0 = p0
+            return out
+        state = batched_kv
+        state.reserve(r, n)
+        p0 = state._host_len[r]
+        pos = torch.arange(p0, p0 + n, device=self.device)
+        bt = state.bt[r:r + 1].expand(n, -1).contiguous()
+        tok_t = to_device(tokens, self.device)
+        if self._mega_on and n <= self._mega_max_rows:
+            _, greedy = mk.decode_step(self._mega, tok_t, pos, bt)
+        else:
+            if self._graph_on and not self._graphs:
+                self._capture_all_graphs()
+            logits = self._replay_decode(tok_t.unsqueeze(1), pos.unsqueeze(1),
+                                         SimpleNamespace(n_rows=n, seq_lens=pos, bt=bt), self._decode_bucket(n))
+            greedy = logits[:, -1].argmax(-1)
+        return greedy.tolist()
+
+    def commit_verify(self, batched_kv, r: int, accepted: int) -> None:
+        """Row r's length moves on by the `accepted` tokens of its last verify_step."""
+        if self.device.type != "cuda":
+            cache = batched_kv[r]
+            p0 = getattr(cache, "_verify_p0", cache.seq_len)
+            cache.seq_lens = [p0 + accepted if p is not None else 0 for p in cache.pools]
+            return
+        batched_kv.advance_row(r, accepted)
+
     # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
 
     def _decode_megakernel(self, current_tokens, state):

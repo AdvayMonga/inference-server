@@ -58,6 +58,11 @@
   the p90 of recent output lengths and preempts/requeues a row that outgrows it; `KV_CACHE_DTYPE=fp8` pools are
   opt-in (2x the pool, ~25% slower large-batch steps until the attention kernel reads fp8 natively). The server
   raises its open-files limit; the scheduler runs its own GC (young every 200 steps, full every 50k).
+- Speculative decoding by prompt lookup (`SPEC_DECODE_K` drafts a step, off by default; `SPEC_DECODE_ROWS` running
+  rows at most, greedy rows only): `scheduler.NgramDrafter` proposes the tokens that followed the context's last
+  3-gram, `backend.verify_step` runs [current] + drafts as rows at consecutive positions in one forward (the
+  prefill-as-decode mechanism, K/V written causally), the longest agreeing prefix is kept; `stats()` reports
+  spec_steps / spec_drafted / spec_tokens. Output-identical to plain greedy decode (tests/test_spec_decode.py).
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in

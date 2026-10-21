@@ -34,8 +34,48 @@ OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 # every GC_YOUNG_STEPS steps, a full one, with the survivors frozen after it, every GC_FREEZE_STEPS. A full collection
 # walks every unfrozen live object and took 0.2-1.3 s each 5,000 steps under long answers (H200, 2026-10-20), a stall
 # in every 60 s window; young collections free the step loop's garbage in a few ms.
+# Speculative decoding by prompt lookup (SPEC_DECODE_K drafts a step, 0 = off; up to SPEC_DECODE_ROWS running rows,
+# greedy rows only, so the output is the plain decode's): the drafts are the tokens that followed the last occurrence
+# of the context's last 3 (else 2) tokens, verified in one forward of 1 + K rows; the longest matching prefix is kept.
+SPEC_K = int(os.environ.get("SPEC_DECODE_K", "0"))
+SPEC_ROWS = int(os.environ.get("SPEC_DECODE_ROWS", "1"))
 GC_YOUNG_STEPS = int(os.environ.get("GC_YOUNG_STEPS", "200"))
 GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "50000"))
+
+
+class NgramDrafter:
+    """Prompt lookup: the tokens that followed the context's last 3-gram (else 2-gram) where it last occurred."""
+
+    def __init__(self, ids: list[int]):
+        self.ids: list[int] = []
+        self._next: dict[tuple, int] = {}
+        self.observe(ids)
+
+    def observe(self, tokens: list[int]) -> None:
+        """Each n-gram maps to the index after its latest occurrence and the one before (the latest is the context's
+        own tail once it is registered, so the earlier one is what a lookup wants)."""
+        ids, nxt = self.ids, self._next
+        for t in tokens:
+            ids.append(t)
+            n = len(ids)
+            for g in (3, 2):
+                if n >= g:
+                    key = tuple(ids[-g:])
+                    old = nxt.get(key)
+                    nxt[key] = (n, old[0] if old else None)
+
+    def propose(self, k: int) -> list[int]:
+        ids = self.ids
+        for g in (3, 2):
+            if len(ids) < g:
+                continue
+            hit = self._next.get(tuple(ids[-g:]))
+            if hit is None:
+                continue
+            j = hit[0] if hit[0] < len(ids) else hit[1]
+            if j is not None:
+                return ids[j:j + k]
+        return []
 
 
 def _deliver(items: list) -> None:
@@ -87,6 +127,7 @@ class ScheduledRequest:
     decode_width_steps: int = 0
     decode_width_max: int = 0
     cancelled: bool = False     # set by the HTTP side when the client goes away
+    drafter: object | None = None   # NgramDrafter once speculative decoding has run for this request
     kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
     admit_seq: int = 0          # admission order (the latest admitted is preempted first)
@@ -266,6 +307,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._out_hist: collections.deque[int] = collections.deque(maxlen=OUT_HISTORY)   # finished outputs' lengths
         self._prefill_chunks_processed = 0
         self._total_iteration_errors = 0
+        self._spec_steps = self._spec_drafted = self._spec_tokens = 0     # speculative decoding (SPEC_DECODE_K)
         self._total_preempted = 0
         self._total_expired = 0
         # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
@@ -402,6 +444,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "max_queue_wait_s": self.max_queue_wait_s,
             "async_decode": self.async_decode,
             "total_iteration_errors": self._total_iteration_errors,
+            "spec_steps": self._spec_steps, "spec_drafted": self._spec_drafted, "spec_tokens": self._spec_tokens,
             "telemetry": (self._telemetry.stats() if self._telemetry is not None
                           else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
             "timeline": self._timeline.stats(),
@@ -454,7 +497,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._active_high_water = len(self._active)
                         try:
                             with self._timeline.phase("decode", batch=len(self._active)):
-                                if self.async_decode:
+                                if self._spec_ready():
+                                    self._decode_step_spec(device)
+                                elif self.async_decode:
                                     self._decode_step_async(device)
                                 else:
                                     self._decode_step(device)
@@ -1005,6 +1050,67 @@ class ContinuousBatchScheduler(SchedulerInterface):
             if batch_size > req.decode_width_max:
                 req.decode_width_max = batch_size
             self.policy.on_tokens_processed(req, 1)
+
+    # --- speculative decoding (prompt lookup) ---
+
+    def _spec_ready(self) -> bool:
+        """This step can verify drafts: few greedy rows, a backend that verifies, and the previous async step's
+        tokens already read and streamed (else one iteration finishes them first)."""
+        if SPEC_K <= 0 or len(self._active) > SPEC_ROWS or not hasattr(self.backend, "verify_step"):
+            return False
+        if any(r.request.sampling.temperature > 0.0 or isinstance(r.current_token, DeviceToken) or r.fresh
+               for r in self._active):
+            return False
+        if self._pending is not None:
+            self._finish_pending()                 # their tokens: _evict_finished streams them next iteration
+            self._pending = None
+            return False
+        return True
+
+    def _decode_step_spec(self, device: str) -> None:
+        """One verify forward per row: [current] + drafts at consecutive positions; keep the longest prefix of
+        drafts the model agrees with (plus the token after it), stream them, finish on EOS or max_tokens."""
+        for i, row in enumerate(list(self._active)):
+            req = row.request
+            if req.drafter is None:
+                req.drafter = NgramDrafter(req.prefill_ids + [row.current_token])
+            drafts = req.drafter.propose(SPEC_K)
+            tokens = [row.current_token] + drafts
+            out = self.backend.verify_step(self._batched_kv, i, tokens)
+            kept: list[int] = []
+            for j, t in enumerate(out):
+                kept.append(t)
+                if j >= len(drafts) or t != drafts[j]:
+                    break
+            self._spec_steps += 1
+            self._spec_drafted += len(drafts)
+            self._spec_tokens += len(kept)
+            # the row's input tokens were [current] + accepted drafts: their K/V stay; then the new tokens
+            used, finished = 0, None
+            for t in kept:
+                used += 1
+                row.real_kv_len += 1
+                if self.backend.is_eos(t):
+                    finished = "ok"
+                    break
+                req.generated.append(t)
+                self._stream_token(req, t)
+                if len(req.generated) >= req.max_tokens:
+                    finished = "ok"
+                    break
+            self.backend.commit_verify(self._batched_kv, i, used)
+            req.drafter.observe(kept[:used])
+            req.decode_width_sum += len(self._active) * used
+            req.decode_width_steps += 1
+            self.policy.on_tokens_processed(req, used)
+            if finished is not None:
+                self.policy.on_request_finished(req)
+                self._evict_rows([(i, finished)])
+                self._flush_outbox()
+                return                             # row indices shifted: the rest go next iteration
+            row.current_token = kept[-1]
+            row.fresh = False                      # streamed here; nothing for _evict_finished to do
+        self._flush_outbox()
 
     def _decode_step_async(self, device: str) -> None:
         """Launch this step, then process the previous one. Inputs: continuing rows take their latest token from the
