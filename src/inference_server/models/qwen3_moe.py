@@ -159,15 +159,18 @@ if PREFILL_ATTN == "flashinfer":
     if not _fi.available():
         PREFILL_ATTN = "sdpa"
 
-# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernel (moe_kernel.py); 0 = never. Was 2048
-# (256 rows x 8): a 1,024-row decode step fell to the torch path below (a radix sort and two grouped GEMMs over bf16
-# activations) and took 44 ms (H200, 2026-10-20).
-MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "16384"))
+# Up to this many (token, slot) pairs the MoE GEMMs run in the Triton kernels (moe_kernel.py); 0 = never. Measured per
+# layer call on the H200 (2026-10-20, ms: torch grouped GEMMs / Triton bf16 activations / Triton W8A8): 256 rows
+# 0.38 / 0.34 / 0.29, 512 rows 0.39 / 0.44 / 0.30, 1,024 rows 0.47 / 0.70 / 0.50, 2,048 rows 0.61 / 1.17 / 0.83, 8,192
+# rows 2.95 / 4.00 / 2.86: the Triton paths win up to ~1,024 rows (8,192 pairs), W8A8 from 256 rows; beyond, torch's.
+# All three sit at 10-13% of fp8 peak at prefill sizes.
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "8192"))
 
 
 # From this many pairs the Triton GEMMs take fp8 activations too (W8A8 on the tensor cores, per-token scales: the same
-# quantization as the torch prefill path); below it the activations stay bf16 (decode is bound by the weight stream).
-MOE_A8_MIN_PAIRS = int(os.environ.get("CUSTOM_BACKEND_MOE_A8_PAIRS", "4096"))
+# quantization as the torch prefill path); below it the activations stay bf16 (decode at small batch is bound by the
+# weight stream, and bf16 rows are the cheaper tile there: see the table above).
+MOE_A8_MIN_PAIRS = int(os.environ.get("CUSTOM_BACKEND_MOE_A8_PAIRS", "2048"))
 
 
 def moe_block_m(pairs: int) -> int:
