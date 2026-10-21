@@ -44,13 +44,20 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
-- Serving on the H200 (short tier, measured 2026-10-18, BlameGraph `RUNS.md` has every run): single_stream
-  TPOT p99 6.0 ms (was 21 on 2026-10-15), saturated 3.8 req/s (was 0.097), long_prompt 12-14 req/s (was invalid);
-  vLLM 4.1 ms / 5.8 / 68. Defaults: mixed prefill (`PREFILL_MODE`, 8192-token steps capped at `MAX_PREFILL_TOKENS`
-  rows x longest), async decode, FlashInfer paged prefill attention (`CUSTOM_BACKEND_PREFILL_ATTN`, fa3), decode
-  CUDA graphs per row bucket, Triton MoE path for decode-sized batches (`models/moe_kernel.py`: one-launch router,
-  grouped GEMMs, scatter epilogue) and CUTLASS grouped GEMM with a gather epilogue above it. The batch-1 decode step
-  is ~20 launches a layer and kernel-time-bound. `CUSTOM_BACKEND_QUANT=fp8` experts: correct, ~4% at wide batch.
+- Serving on the H200 (short tier, measured 2026-10-21, BlameGraph ledger runs `manual-20261020/21`): single_stream
+  TPOT p99 4.47 ms, saturated 10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1 at 2,048 rows), bursty
+  256x at TPOT p99 26 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at 22 ms. Defaults: the
+  backend and scheduler in a child process (`ENGINE_PROCESS`, `engine_process.py`), 1,024 rows (`MAX_BATCH_SIZE`),
+  mixed prefill (`PREFILL_MODE`, 8192-token steps; chunks of <= 128 tokens run as decode rows through the decode
+  graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
+  (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
+  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`; the KV dtype, the ring and
+  blocks per SM are build-time flags of the extension), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
+  and fp8 activations from 2,048 pairs (`models/moe_kernel.py`, table in `qwen3_moe.py`), CUTLASS grouped GEMMs
+  above. One block table per request, shared by every layer (`paged_kv_cache.BlockAllocator`); KV admission reserves
+  the p90 of recent output lengths and preempts/requeues a row that outgrows it; `KV_CACHE_DTYPE=fp8` pools are
+  opt-in (2x the pool, ~25% slower large-batch steps until the attention kernel reads fp8 natively). The server
+  raises its open-files limit; the scheduler runs its own GC (young every 200 steps, full every 50k).
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
