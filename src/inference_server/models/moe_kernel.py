@@ -257,7 +257,7 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     if split_k > 1:
         C = torch.zeros(M, N, dtype=torch.float32, device=a.device)
     else:
-        C = torch.empty(M, N, dtype=a.dtype, device=a.device)
+        C = torch.empty(M, N, dtype=torch.bfloat16 if a8 else a.dtype, device=a.device)   # never the fp8 of W8A8 rows
     _moe_gemm_kernel[(*grid, split_k)](a, tok if tok is not None else a, w, w_scale if fp8 else a, a_scale if a8 else a,
                                        C, sorted_ids, expert_ids, M, N, K, a.stride(0), w.stride(1), w.stride(2),
                                        C.stride(0), E=E, BLOCK_M=block_m, BLOCK_N=BLOCK_N, BLOCK_K=BLOCK_K,
