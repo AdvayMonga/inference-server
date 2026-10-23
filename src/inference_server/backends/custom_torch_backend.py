@@ -359,7 +359,6 @@ class CustomTorchBackend(InferenceBackend):
         self.tokenizer = None
         self._eos_ids: set[int] = set()
         self._lock = threading.Lock()
-        self.cache_adapter = None
         self.last_cache_hit_tokens = 0
 
     def load_model(self, model_name: str) -> None:
@@ -509,12 +508,6 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graphs: dict = {}
         if self._graph_on:
             self._capture_all_graphs()       # at load: on the first decode it was a 3.5 s step for the first requests
-
-    def set_cache_adapter(self, adapter) -> None:
-        # Custom backend caches internally (self.prefix_cache + paged pools), not via the
-        # HF-format CacheManager. Leave cache_adapter=None so the scheduler skips its
-        # KV-pressure gate + release for this backend instead of driving the wrong cache.
-        pass
 
     # ---- Required interface ----
 

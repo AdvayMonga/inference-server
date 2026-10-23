@@ -3,10 +3,7 @@
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generator
-
-if TYPE_CHECKING:
-    from inference_server.kv_cache.cache_manager import CacheManager
+from typing import Generator
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +62,8 @@ def stop_token_ids(model_name: str, tokenizer) -> set[int]:
 class InferenceBackend(ABC):
     """Interface for model backends. Server code only talks through this."""
 
-    cache_adapter: "CacheManager | None" = None
     last_cache_hit_tokens: int = 0  # tokens served from cache on the most recent request
     last_batch_cache_hit_tokens: list[int] | None = None  # per row of the last prefill_batch
-
-    def set_cache_adapter(self, adapter: "CacheManager") -> None:
-        """Attach a CacheManager for prefix caching. Optional."""
-        self.cache_adapter = adapter
 
     @abstractmethod
     def load_model(self, model_name: str) -> None:

@@ -54,7 +54,6 @@ async def test_ok_row_has_conditions_spans_and_outcome(tmp_path):
     # conditions: first request into an idle scheduler
     assert row["pending_depth"] == 0 and row["active_size"] == 0 and row["max_batch_size"] == 4
     assert row["concurrent_sessions"] == 0 and row["prompt_tokens"] == 4
-    assert row["kv_free_blocks"] is None and row["kv_free_frac"] is None
     assert 0 <= row["replica_age_s"] < 5
     # spans and outcome
     assert row["tokens_out"] == len(out) == 3
@@ -371,8 +370,7 @@ async def test_stop_aborts_what_is_still_queued(tmp_path):
 
 def _record(**kw) -> RequestRecord:
     base = dict(trace_id="t", session_id="s", turn_index=0, arrival_ts=1.0, pending_depth=0,
-                active_size=0, max_batch_size=1, kv_free_blocks=None, kv_free_frac=None,
-                concurrent_sessions=0, prompt_tokens=1, replica_age_s=0.0)
+                active_size=0, max_batch_size=1, concurrent_sessions=0, prompt_tokens=1, replica_age_s=0.0)
     return RequestRecord(**{**base, **kw})
 
 
@@ -381,7 +379,7 @@ def test_one_sqlite_file_per_run_and_rows_round_trip(tmp_path):
     assert a.run_id != b.run_id and a.path != b.path
     assert a.path.name == f"{a.run_id}.sqlite"
 
-    rec = _record(trace_id="x", kv_free_blocks=7, kv_free_frac=0.5, config_id="cfg-1")
+    rec = _record(trace_id="x", config_id="cfg-1")
     rec.finish("ok", enqueue_ts=10.0, admit_ts=10.5, first_token_ts=11.0, end_ts=13.0,
                tokens_out=5, cache_hit_tokens=2)
     a.put(rec)

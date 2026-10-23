@@ -25,7 +25,7 @@ class _Backend:
                 return [{t: -1.0} for t in token_ids[:k]]
 
         b = B()
-        return b, ContinuousBatchScheduler(b, max_batch_size=8, prefill_mode="mixed", async_decode=True), None
+        return b, ContinuousBatchScheduler(b, max_batch_size=8, prefill_mode="mixed", async_decode=True)
 
 
 def make():

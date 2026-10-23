@@ -185,7 +185,7 @@ def test_a_table_entry_changes_only_its_own_key(kernels, monkeypatch):
 def test_backend_loads_the_table_before_any_graph_is_captured():
     """Read at load, not first call: a captured graph freezes whatever launch was active."""
     src = (REPO / "src/inference_server/backends/custom_torch_backend.py").read_text()
-    body = src[src.index("    def load_model("):src.index("    def set_cache_adapter(")]
+    body = src[src.index("    def load_model("):src.index("    # ---- Required interface ----")]
     assert "launch_table.load(" in body and "CUSTOM_BACKEND_LAUNCH_TABLE" in body
 
 

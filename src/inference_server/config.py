@@ -88,22 +88,15 @@ class Settings:
     # Model
     model_name: str = "Qwen/Qwen3-30B-A3B"
     device: str = "auto"  # "auto", "cuda", "mps", or "cpu"
-    backend_name: str = ""  # explicit backend override (e.g. "custom-cuda"); empty = derive from device
+    backend_name: str = ""  # custom-cuda | custom-mps | custom-cpu; empty = custom-<device>
     max_tokens: int = 512
     context_window: int = 8192
 
     # KV Cache
     kv_cache_memory_fraction: float = 0.9
-    kv_cache_block_size: int = 16
-    kv_cache_num_blocks: int = 256
-    eviction_policy: str = "lru"  # "lru", "attention_sink_lru", "h2o"
 
     # Streaming
     stream_by_default: bool = False
-
-    # Single-user optimization
-    keep_model_warm: bool = True  # never unload model between requests
-    compile_model: bool = False  # torch.compile the generation loop
 
     # Observability
     log_level: str = "INFO"
@@ -114,9 +107,6 @@ class Settings:
     # Engine event timeline (JSONL, one file per run). Empty = off.
     timeline_dir: str = ""
 
-    # Reserved for multi-user extension (ignored for now)
-    max_concurrent_sessions: int = 1
-    per_session_memory_limit_mb: int = 0  # 0 = unlimited
     scheduling_policy: str = "fair"  # "fair" (VTC: least-served session first) or "fcfs"
 
     @property
@@ -128,8 +118,8 @@ class Settings:
 
     @property
     def backend(self) -> str:
-        """Backend name for create_backend(). Explicit BACKEND override wins; else device."""
-        return self.backend_name or self.resolved_device
+        """Backend name for create_backend(). Explicit BACKEND override wins; else custom-<device>."""
+        return self.backend_name or f"custom-{self.resolved_device}"
 
 
 def load_settings() -> Settings:
@@ -162,19 +152,12 @@ def load_settings() -> Settings:
         max_tokens=int(os.environ.get("MAX_TOKENS", Settings.max_tokens)),
         context_window=int(os.environ.get("CONTEXT_WINDOW", Settings.context_window)),
         kv_cache_memory_fraction=float(os.environ.get("KV_CACHE_MEMORY_FRACTION", Settings.kv_cache_memory_fraction)),
-        kv_cache_block_size=int(os.environ.get("KV_CACHE_BLOCK_SIZE", Settings.kv_cache_block_size)),
-        kv_cache_num_blocks=int(os.environ.get("KV_CACHE_NUM_BLOCKS", Settings.kv_cache_num_blocks)),
-        eviction_policy=os.environ.get("EVICTION_POLICY", Settings.eviction_policy),
         stream_by_default=os.environ.get("STREAM_BY_DEFAULT", str(Settings.stream_by_default)).lower() == "true",
-        keep_model_warm=os.environ.get("KEEP_MODEL_WARM", str(Settings.keep_model_warm)).lower() == "true",
-        compile_model=os.environ.get("COMPILE_MODEL", str(Settings.compile_model)).lower() == "true",
         log_level=os.environ.get("LOG_LEVEL", Settings.log_level),
         log_format=os.environ.get("LOG_FORMAT", Settings.log_format),
         metrics_port=int(os.environ.get("METRICS_PORT", Settings.metrics_port)),
         telemetry_dir=os.environ.get("TELEMETRY_DIR", Settings.telemetry_dir),
         timeline_dir=os.environ.get("TIMELINE_DIR", Settings.timeline_dir),
-        max_concurrent_sessions=int(os.environ.get("MAX_CONCURRENT_SESSIONS", Settings.max_concurrent_sessions)),
-        per_session_memory_limit_mb=int(os.environ.get("PER_SESSION_MEMORY_LIMIT_MB", Settings.per_session_memory_limit_mb)),
         scheduling_policy=os.environ.get("SCHEDULING_POLICY", Settings.scheduling_policy),
     )
 
@@ -204,8 +187,6 @@ def print_hardware_summary(settings: Settings) -> None:
         print("  CPU only — no GPU acceleration")
 
     print(f"  KV Cache:  {settings.kv_cache_memory_fraction * 100:.0f}% of free memory")
-    print(f"  Eviction:  {settings.eviction_policy}")
-    print(f"  Compile:   {settings.compile_model}")
     print("=" * 50)
 
 

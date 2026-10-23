@@ -363,9 +363,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def stats(self) -> dict:
         with self._pending_lock:
             pending_depth = self._pending_count
-        cache = self.backend.cache_adapter
-        kv_pressure = cache.pressure if cache is not None else 0.0
-        kv_free_blocks = cache.free_blocks if cache is not None else 0
         return {
             "active_size": len(self._active),
             "prefilling_depth": len(self._prefilling),
@@ -383,8 +380,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "active_mean": (round(self._active_sum / self._active_samples, 2)
                             if self._active_samples else 0.0),
             "decode_steps": self._active_samples,
-            "kv_pressure": kv_pressure,
-            "kv_free_blocks": kv_free_blocks,
             "kv_admit_blocked": self._kv_admit_blocked,
             "active_kv_reserved": self._active_kv_reserved,
             "held_for_kv": len(self._held),
@@ -502,12 +497,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
     def _step_event(self, t0: float) -> None:
         if not self._timeline.enabled:
             return
-        cache = self.backend.cache_adapter
         with self._pending_lock:
             pending = self._pending_count
         self._timeline.event("step", dur_s=time.perf_counter() - t0, active=len(self._active),
                              prefilling=len(self._prefilling), pending=pending,
-                             kv_free_blocks=cache.free_blocks if cache is not None else None,
                              active_kv_reserved=self._active_kv_reserved)
 
     # --- Phase 1: process tokens, evict finished rows ---
@@ -635,7 +628,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 for req in held:
                     self.policy.on_request_arrived(req)
                 self._pending_count += len(held)
-        cache = self.backend.cache_adapter
         to_admit: list[ScheduledRequest] = []  # 'batched' mode: reserved reqs awaiting one prefill_batch
         plan: list[ScheduledRequest] = []
         if self.prefill_mode == "batched" and self.wave_window_mult > 0:
@@ -696,27 +688,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._kv_admit_blocked += 1
                     self._timeline.event("admit_blocked", reason="active_kv", trace_id=peeked.trace_id)
                     break
-
-                # Cache-pool gate: avoids forced eviction churn.
-                if cache is not None:
-                    needed = cache.blocks_needed(reservation)
-                    if needed > cache.free_blocks:
-                        if needed > cache.total_blocks:
-                            self._consume(peeked, plan)
-                            self._pending_count -= 1
-                            self._total_rejected += 1
-                            err = QueueFullError(
-                                f"request needs {needed} KV blocks, exceeds cache capacity "
-                                f"({cache.total_blocks})"
-                            )
-                            self.policy.on_request_finished(peeked)
-                            self._reject(peeked, err)
-                            continue
-                        self._kv_admit_blocked += 1
-                        self._timeline.event("admit_blocked", reason="cache_pool",
-                                             trace_id=peeked.trace_id, needed=needed,
-                                             free=cache.free_blocks)
-                        break
 
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
@@ -1129,10 +1100,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             n = len(result)
             tpot = (total - ttft) / (n - 1) if n > 1 else 0.0
             self._metrics.record(ttft, tpot, total, n)
-        # Release cached blocks tied to this prompt
-        if self.backend.cache_adapter is not None:
-            self.backend.cache_adapter.release(request.token_ids, session_id=request.session_id)
-
         def _set():
             if not request.future.done():
                 request.future.set_result(result)
@@ -1158,8 +1125,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
 
     def _arrival_record(self, request: ScheduledRequest) -> RequestRecord:
         """Conditions at arrival, read under the pending lock before any work happens."""
-        cache = self.backend.cache_adapter
-        free = cache.free_blocks if cache is not None else None
         return RequestRecord(
             trace_id=request.trace_id, session_id=request.session_id,
             turn_index=request.turn_index,
@@ -1168,9 +1133,6 @@ class ContinuousBatchScheduler(SchedulerInterface):
             pending_depth=self._pending_count,
             active_size=len(self._active) + len(self._prefilling),
             max_batch_size=self.max_batch_size,
-            kv_free_blocks=free,
-            kv_free_frac=(free / cache.total_blocks if free is not None and cache.total_blocks
-                          else None),
             # Sessions with a request in flight; the arriving request is not counted yet, so a
             # session's first turn sees only OTHER sessions.
             concurrent_sessions=len(self._session_load),

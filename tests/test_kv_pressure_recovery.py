@@ -127,7 +127,6 @@ class _FlakyBackend(InferenceBackend):
 
     def __init__(self, fail_steps=1, fail_exc=None):
         self._lock = threading.Lock()
-        self.cache_adapter = None
         self.last_cache_hit_tokens = 0
         self.fail_steps = fail_steps
         self.fail_exc = fail_exc or RuntimeError("BlockPool exhausted (test)")

@@ -19,7 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1   # bump on any column change; also stored in the file's `meta` table
+SCHEMA_VERSION = 1   # BlameGraph trace contract version (lab/TRACE.md); also stored in the file's `meta` table
 TERMINAL_STATES = ("ok", "rejected_429", "rejected_400", "expired", "preempted", "error",
                    "cancelled", "aborted")   # cancelled = client went away; aborted = engine shut down
 
@@ -35,8 +35,6 @@ class RequestRecord:
     pending_depth: int
     active_size: int                # rows holding a batch slot (decoding or mid-prefill)
     max_batch_size: int
-    kv_free_blocks: int | None      # None when the backend has no cache adapter
-    kv_free_frac: float | None
     concurrent_sessions: int        # distinct sessions in pending + active, excluding this one
     prompt_tokens: int
     replica_age_s: float            # seconds since scheduler start: cold start is a regime
