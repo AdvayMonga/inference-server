@@ -34,7 +34,7 @@
 - When we design the harness, flag anything that drifts from referee into strategy.
 
 ## This repo is the engine; the environment is BlameGraph
-- This repo holds only the engine and its stack: `src/inference_server/`, its tests, `monitoring/`,
+- This repo holds only the engine and its stack: `src/inference_server/`, its tests,
   and engine tools in `scripts/` (Triton launch tuning, CUDA parity checks, smoke). The agent's workspace is
   exported from here; it may write `src/inference_server/` and add `tests/test_*.py`, nothing else.
 - Everything that runs, measures or judges the engine lives in github.com/AdvayMonga/BlameGraph (split
