@@ -34,7 +34,6 @@ HTTP_DURATION = Histogram("inference_http_request_duration_seconds", "HTTP reque
 ACTIVE_BATCH = Gauge("inference_active_batch_size", "Rows currently decoding")
 PENDING_DEPTH = Gauge("inference_pending_queue_depth", "Requests waiting in the pending queue")
 PREFILLING_DEPTH = Gauge("inference_prefilling_depth", "Requests mid-prefill (chunked mode)")
-KV_PRESSURE = Gauge("inference_kv_pressure_ratio", "KV cache pressure (0..1)")
 ACTIVE_KV_RESERVED = Gauge("inference_active_kv_reserved_tokens", "Reserved KV tokens across in-flight rows")
 
 
@@ -60,7 +59,6 @@ def set_scheduler_gauges(stats: dict) -> None:
     ACTIVE_BATCH.set(stats.get("active_size", 0))
     PENDING_DEPTH.set(stats.get("pending_depth", 0))
     PREFILLING_DEPTH.set(stats.get("prefilling_depth", 0))
-    KV_PRESSURE.set(stats.get("kv_pressure", 0.0))
     ACTIVE_KV_RESERVED.set(stats.get("active_kv_reserved", 0))
 
 

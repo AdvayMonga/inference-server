@@ -61,7 +61,6 @@ class _FakeBackend(InferenceBackend):
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.cache_adapter = None
         self.last_cache_hit_tokens = 0
         self.seen_masks = []
 

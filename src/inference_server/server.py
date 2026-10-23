@@ -17,7 +17,6 @@ from inference_server.backends import create_backend
 from inference_server.backends.base import InferenceBackend
 from inference_server.config import Settings, settings, print_hardware_summary
 from inference_server.logging_config import setup_logging
-from inference_server.kv_cache.cache_manager import CacheManager
 from inference_server.sampling import SamplingParams
 from inference_server.scheduler import (
     ContinuousBatchScheduler,
@@ -76,21 +75,11 @@ def _gc_watch(phase: str, info: dict) -> None:
 gc.callbacks.append(_gc_watch)
 
 
-def build_backend(settings: Settings) -> tuple[InferenceBackend, CacheManager]:
-    """Backend with weights loaded and the prefix cache attached. The lab uses this too, so a profile measures what is served."""
+def build_backend(settings: Settings) -> InferenceBackend:
+    """Backend with weights loaded. The lab uses this too, so a profile measures what is served."""
     backend = create_backend(settings.backend)
     backend.load_model(settings.model_name)
-    layer_shapes = backend.kv_shape_per_layer() if hasattr(backend, "kv_shape_per_layer") else None
-    cache_manager = CacheManager(
-        num_blocks=settings.kv_cache_num_blocks,
-        block_size=settings.kv_cache_block_size,
-        eviction_policy=settings.eviction_policy,
-        layer_shapes=layer_shapes,
-        device=str(getattr(backend, "device", "cpu")),
-        dtype=getattr(backend, "kv_dtype", None),
-    )
-    backend.set_cache_adapter(cache_manager)
-    return backend, cache_manager
+    return backend
 
 
 def build_scheduler(backend: InferenceBackend, settings: Settings, *,
@@ -156,9 +145,9 @@ async def lifespan(app):
         scheduler = EngineClient()
         await loop.run_in_executor(None, scheduler.launch)
         scheduler.start()
-        backend, cache_manager = scheduler.backend, scheduler.cache_adapter
+        backend = scheduler.backend
     else:
-        backend, cache_manager = await loop.run_in_executor(None, build_backend, settings)
+        backend = await loop.run_in_executor(None, build_backend, settings)
         scheduler = build_scheduler(backend, settings)
         scheduler.start()
 
@@ -166,7 +155,6 @@ async def lifespan(app):
     app.state.tokenizer = tokenizer
     app.state.model_name = settings.model_name
     app.state.scheduler = scheduler
-    app.state.cache_adapter = cache_manager
     app.state.ready = True
 
     yield
@@ -304,14 +292,9 @@ async def generate(request: GenerateRequest):
 
 @app.get("/cache/stats")
 async def cache_stats():
-    """KV cache statistics. The custom backend caches through its own PrefixCache + block
-    pools rather than the HF-format CacheManager, so report that when it is the one serving —
-    otherwise the endpoint silently describes a cache the engine is not using."""
-    backend = getattr(app.state, "backend", None)
-    prefix_cache = getattr(backend, "prefix_cache", None)
-    if prefix_cache is not None:
-        return {"backend": type(backend).__name__, "prefix_cache": prefix_cache.stats()}
-    return app.state.cache_adapter.hit_rate_info
+    """Prefix cache statistics."""
+    prefix_cache = getattr(getattr(app.state, "backend", None), "prefix_cache", None)
+    return {"prefix_cache": prefix_cache.stats() if prefix_cache is not None else None}
 
 
 @app.get("/scheduler/stats")

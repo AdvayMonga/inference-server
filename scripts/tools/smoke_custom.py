@@ -1,7 +1,7 @@
 """Local smoke: real server startup path with the custom backend, over HTTP.
 
 Drives the actual lifespan (create_backend(settings.backend) → CustomTorchBackend,
-CacheManager, ContinuousBatchScheduler) and a /generate round-trip. MPS exercises
+ContinuousBatchScheduler) and a /generate round-trip. MPS exercises
 device placement the CPU unit tests can't. Set BACKEND before running, e.g.:
 
     BACKEND=custom-mps venv/bin/python scripts/tools/smoke_custom.py

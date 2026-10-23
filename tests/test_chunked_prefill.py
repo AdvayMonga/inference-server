@@ -28,7 +28,6 @@ class FakeChunkBackend(InferenceBackend):
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.cache_adapter = None
         self.last_cache_hit_tokens = 0
         self.chunk_input_tokens_total = 0  # cumulative input tokens through prefill_chunk
         self.store_calls: list[tuple[int, int]] = []  # (len(token_ids), matched)
@@ -234,7 +233,7 @@ def test_batched_mode_requires_prefill_batch():
     import pytest as _pytest
 
     class Bare:  # no prefill_batch attribute
-        cache_adapter = None
+        pass
 
     with _pytest.raises(ValueError):
         ContinuousBatchScheduler(Bare(), prefill_mode="batched")

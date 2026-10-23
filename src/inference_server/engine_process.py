@@ -7,11 +7,11 @@ same way.
 Engine side: the real ContinuousBatchScheduler, with stand-ins for its event loop, token queues and futures that
 write into an outbox; each evict pass (the scheduler hands a step's tokens over at once) becomes one message.
 API side: `EngineClient`, with the scheduler calls the HTTP routes use (enqueue, submit, stats, stop) and a
-`backend` / `cache_adapter` that forward logprob scoring and cache stats.
+`backend` that forwards logprob scoring and prefix cache stats.
 
 Messages API -> engine: ("submit", rid, fields), ("cancel", rid), ("score", qid, token_ids, k), ("stop",).
 Engine -> API: ("ready",), ("tokens", [(rid, item)]) with item a token id, ("meta", cache_hit_tokens),
-("error", kind, text) or None (end of stream), ("stats", stats, cache_info), ("score", qid, result)."""
+("error", kind, text) or None (end of stream), ("stats", stats, prefix_cache_stats), ("score", qid, result)."""
 
 from __future__ import annotations
 
@@ -84,8 +84,8 @@ class _Future:
 def _default_factory():
     from inference_server.config import settings
     from inference_server.server import build_backend, build_scheduler
-    backend, cache = build_backend(settings)
-    return backend, build_scheduler(backend, settings), cache
+    backend = build_backend(settings)
+    return backend, build_scheduler(backend, settings)
 
 
 def _engine_main(conn, factory: str | None) -> None:
@@ -94,9 +94,10 @@ def _engine_main(conn, factory: str | None) -> None:
     from inference_server.scheduler import QueueFullError, RequestTooLargeError, ScheduledRequest
     if factory:
         mod, fn = factory.split(":")
-        backend, sched, cache = getattr(importlib.import_module(mod), fn)()
+        backend, sched = getattr(importlib.import_module(mod), fn)()
     else:
-        backend, sched, cache = _default_factory()
+        backend, sched = _default_factory()
+    prefix_cache = getattr(backend, "prefix_cache", None)
     lock = threading.Lock()
     outbox = _Outbox(conn, lock)
     live: dict[int, ScheduledRequest] = {}
@@ -108,7 +109,7 @@ def _engine_main(conn, factory: str | None) -> None:
 
     def push_stats():
         while not stop.wait(STATS_EVERY_S):
-            info = getattr(cache, "hit_rate_info", None) if cache is not None else None
+            info = prefix_cache.stats() if prefix_cache is not None else None
             with lock:
                 conn.send(("stats", sched.stats(), info))
 
@@ -159,10 +160,11 @@ def _engine_main(conn, factory: str | None) -> None:
 
 # ---------------------------------------------------------------------------------------- API side
 class _BackendProxy:
-    """What the HTTP routes need from the backend: logprob scoring (called from an executor thread)."""
+    """What the HTTP routes need from the backend: logprob scoring (called from an executor thread), prefix cache stats."""
 
     def __init__(self, client: "EngineClient"):
         self.client = client
+        self.prefix_cache = _PrefixCacheProxy(client)
 
     def score_logprobs(self, token_ids, k):
         qid = next(self.client._ids)
@@ -176,18 +178,17 @@ class _BackendProxy:
         return result
 
 
-class _CacheProxy:
+class _PrefixCacheProxy:
     def __init__(self, client: "EngineClient"):
         self.client = client
 
-    @property
-    def hit_rate_info(self):
+    def stats(self):
         return self.client._cache_info
 
 
 class EngineClient:
     """Stands in for the scheduler on the HTTP side; the engine runs in a child process (`factory`: "module:fn"
-    returning (backend, scheduler, cache adapter) there, default the served configuration)."""
+    returning (backend, scheduler) there, default the served configuration)."""
 
     def __init__(self, factory: str | None = None):
         self.factory = factory
@@ -198,7 +199,6 @@ class EngineClient:
         self._cache_info = None
         self._send_lock = threading.Lock()
         self.backend = _BackendProxy(self)
-        self.cache_adapter = _CacheProxy(self)
         self._proc = None
 
     # lifecycle

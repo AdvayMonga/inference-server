@@ -24,7 +24,6 @@ class FakeBackend(InferenceBackend):
 
     def __init__(self):
         self._lock = threading.Lock()
-        self.cache_adapter = None
         self.last_cache_hit_tokens = 0
 
     def load_model(self, model_name: str) -> None:
@@ -83,15 +82,9 @@ class FakeBackend(InferenceBackend):
 
 @pytest.fixture(autouse=True)
 async def inject_fake_backend():
-    from inference_server.kv_cache.cache_manager import CacheManager
     from inference_server.tokenizer import Tokenizer
 
     backend = FakeBackend()
-    # 256 blocks × 4 = 1024 tokens — must fit a default-max_tokens (512) request, else the
-    # admission gate hard-rejects it (429) before it ever runs. test_generate_success omits
-    # max_tokens on purpose to exercise that default path; don't shrink this below ~130 blocks.
-    cache_adapter = CacheManager(num_blocks=256, block_size=4)
-    backend.set_cache_adapter(cache_adapter)
 
     scheduler = ContinuousBatchScheduler(backend, max_batch_size=8)
     scheduler.start()
@@ -99,7 +92,6 @@ async def inject_fake_backend():
     app.state.backend = backend
     app.state.tokenizer = Tokenizer("gpt2", 1024)   # prompt + default max_tokens (512) must fit
     app.state.scheduler = scheduler
-    app.state.cache_adapter = cache_adapter
 
     yield
 
@@ -107,7 +99,6 @@ async def inject_fake_backend():
     del app.state.backend
     del app.state.tokenizer
     del app.state.scheduler
-    del app.state.cache_adapter
 
 
 @pytest.fixture
