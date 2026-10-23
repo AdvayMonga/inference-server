@@ -1,6 +1,6 @@
-# Prometheus + Grafana for the inference server (Phase 10).
+# Prometheus + Grafana for the inference server.
 #
-# The server is NOT in this stack. It runs on the host, or on Modal, and this
+# The server is NOT in this stack. It runs on the host, and this
 # stack only scrapes it — keeping the load path and the observability path in
 # separate processes.
 #

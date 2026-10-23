@@ -18,7 +18,7 @@ measured and the thing doing the measuring stay in different processes.
 | file | role |
 |---|---|
 | `docker-compose.yml` | Prometheus + Grafana. Scrapes the host, does not run the server. |
-| `prometheus.yml` | Scrape config. Target is `host.docker.internal:8000`; use `localhost:8000` when running Prometheus straight on the host, or the Modal hostname plus `scheme: https` when deployed. |
+| `prometheus.yml` | Scrape config. Target is `host.docker.internal:8000`; use `localhost:8000` when running Prometheus straight on the host, or the server's hostname plus `scheme: https` when remote. |
 | `grafana_dashboard.json` | TTFT/TPOT percentiles, throughput, request rate by outcome, batch/queue depth, KV pressure. |
 | `grafana/provisioning/` | Wires the Prometheus datasource and auto-loads the dashboard, so there is nothing to import by hand. |
 
