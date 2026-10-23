@@ -19,7 +19,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 2   # bump on any column change; also stored in the file's `meta` table
+SCHEMA_VERSION = 1   # BlameGraph trace contract version (lab/TRACE.md); also stored in the file's `meta` table
 TERMINAL_STATES = ("ok", "rejected_429", "rejected_400", "expired", "preempted", "error",
                    "cancelled", "aborted")   # cancelled = client went away; aborted = engine shut down
 
