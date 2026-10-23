@@ -1,6 +1,6 @@
 # inference-server
 
-A single-GPU LLM inference engine written from scratch on PyTorch, Triton and CUDA. It serves
+A single-GPU LLM inference system on PyTorch, Triton and CUDA. It serves
 Qwen3-30B-A3B behind an OpenAI-compatible API. It is measured and tuned in
 [BlameGraph](https://github.com/AdvayMonga/BlameGraph).
 
