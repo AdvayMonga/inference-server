@@ -11,5 +11,5 @@ scrape_configs:
     static_configs:
       # The server runs outside this stack. host.docker.internal reaches the host from
       # inside the Prometheus container; use localhost:8000 when running Prometheus
-      # directly on the host, or the Modal hostname (plus `scheme: https`) when deployed.
+      # directly on the host, or the server's hostname (plus `scheme: https`) when remote.
       - targets: ["host.docker.internal:8000"]

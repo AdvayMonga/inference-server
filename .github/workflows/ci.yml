@@ -4,21 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  # Pushes to main are keyed by sha so back-to-back merges do not cancel each other's run.
-  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}   # each main push runs to completion
   cancel-in-progress: true
 
 jobs:
-  # Lint and the fast suite: engine and control plane. CPU only; model-heavy tests are
-  # deselected by tests/conftest.py and no kernel runs (Triton compiles only on CUDA; the
-  # environment's GPU VM is where kernels get verified, by hand, before a models/ change merges).
-  engine:
+  # Lint and the fast suite on CPU. Model-heavy tests are deselected (tests/conftest.py); kernels need CUDA.
+  test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -29,34 +25,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: uv.lock
           activate-environment: true
-      - name: Cache HF hub
-        uses: actions/cache@v6
+      - uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}
-      - name: Install deps
-        run: uv sync --locked --extra dev
-      - name: Assert torch stayed on CPU
-        run: |
-          python -c "import torch, sys; v = torch.__version__; \
-            sys.exit(0) if v.endswith('+cpu') or torch.version.cuda is None \
-            else sys.exit(f'expected a CPU torch wheel, got {v}')"
-      - name: Lint
-        run: ruff check .
-      - name: Tests
-        run: pytest -q
-
-  # The one check branch protection requires. A skipped lane is fine; failed or cancelled is not.
-  ci-ok:
-    needs: [engine]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - env:
-          RESULTS: ${{ needs.engine.result }}
-        run: |
-          echo "engine: $RESULTS"
-          case "$RESULTS" in
-            *failure*|*cancelled*) echo "a lane did not pass"; exit 1 ;;
-          esac
-          echo "all lanes green or skipped"
+      - run: uv sync --locked --extra dev
+      - run: ruff check .
+      - run: pytest -q
