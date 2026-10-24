@@ -165,6 +165,10 @@ if PREFILL_ATTN == "flashinfer":
 # rows 2.95 / 4.00 / 2.86: the Triton paths win up to ~1,024 rows (8,192 pairs), W8A8 from 256 rows; beyond, torch's.
 # All three sit at 10-13% of fp8 peak at prefill sizes.
 MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "8192"))
+# ...and again from this many pairs: the 2026-10-24 tile sweep (W8A8, 64x64x128 tiles, the best of 47 configs at every
+# size) measured 4,096 tokens 1.19 ms vs torch 1.66 and 8,192 tokens 2.31 vs 2.82, while 2,048 tokens stays torch's
+# (0.65 vs 0.46). Both paths sit at 13-17% of fp8 peak: a proper fp8 grouped GEMM is kernel-loop work.
+MOE_KERNEL_LARGE_PAIRS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_LARGE_PAIRS", "32768"))
 
 
 # From this many pairs the Triton GEMMs take fp8 activations too (W8A8 on the tensor cores, per-token scales: the same
@@ -278,7 +282,7 @@ class Qwen3SparseMoE(nn.Module):
         E = self.experts.num_experts
         T = flat.shape[0]
         M = T * self.top_k
-        if on and M <= MOE_KERNEL_MAX_ROWS:
+        if on and (M <= MOE_KERNEL_MAX_ROWS or (MOE_KERNEL_LARGE_PAIRS and M >= MOE_KERNEL_LARGE_PAIRS)):
             # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py), bf16 or
             # fp8 with a per-channel scale; the routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the
             # down GEMM scatters weighted rows into an fp32 output.
