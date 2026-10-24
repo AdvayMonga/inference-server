@@ -733,6 +733,10 @@ class BatchedDecodeState:
     def n_rows(self) -> int:
         return self.seq_lens.shape[0]
 
+    def max_len(self) -> int:
+        """The longest row's length before this step, from the host mirror (no sync)."""
+        return max(self._host_len, default=0)
+
     @staticmethod
     def _grow_cols(t: torch.Tensor, cols: int) -> torch.Tensor:
         if t.shape[-1] >= cols:

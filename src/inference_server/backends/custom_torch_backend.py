@@ -407,6 +407,10 @@ class CustomTorchBackend(InferenceBackend):
         from inference_server.models import megakernel as mk
         self._mega_on = self.device.type == "cuda" and mk.ENABLED and mk.available()
         self._mega_max_rows = int(os.environ.get("MEGAKERNEL_MAX_ROWS", "2"))
+        # A measured table of which path wins per row count and context (models/megakernel/routing.py); the rule above
+        # where it has no entry.
+        from inference_server.models.megakernel import routing
+        self._mega_routing = routing.load(os.environ.get("MEGAKERNEL_ROUTING", routing.DEFAULT), mk.BMAX)
         self._mega = mk.Model(self.model, self.device) if self._mega_on else None
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
@@ -1047,7 +1051,7 @@ class CustomTorchBackend(InferenceBackend):
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
-            if self._mega_on and n <= self._mega_max_rows:
+            if self._mega_on and self._use_megakernel(state):
                 logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
             elif self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
@@ -1131,6 +1135,12 @@ class CustomTorchBackend(InferenceBackend):
         batched_kv.advance_row(r, accepted)
 
     # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
+
+    def _use_megakernel(self, state) -> bool:
+        """The routing table's path for this step's rows and longest context, else n <= MEGAKERNEL_MAX_ROWS."""
+        n, table = state.n_rows, self._mega_routing
+        path = table.path(n, state.max_len()) if table is not None and n in table.rows else None
+        return path == "megakernel" if path is not None else n <= self._mega_max_rows
 
     def _decode_megakernel(self, current_tokens, state):
         """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head, greedy
