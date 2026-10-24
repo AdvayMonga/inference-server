@@ -1,7 +1,10 @@
 """The decode stations (models/stations.py) on CPU, the Triton kernels replaced by torch versions of the same math:
-the station list's reads and writes chain, the stations compute the layer's decode forward, and override resolution
-(a no-op override changes nothing; bad ones are refused). Bit-identity with the real kernels is a GPU check."""
+the station list's reads and writes chain, the stations compute the layer's decode forward, override resolution (a
+no-op override changes nothing; bad ones are refused), and CAPTURE_REGION (models/region_capture.py): each sample, with
+the layer's weights, replays through its stretch's functional stations to exactly its writes. Bit-identity with the
+real kernels is a GPU check."""
 
+import json
 import sys
 import types
 
@@ -9,7 +12,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from inference_server.models import fused, stations
+from inference_server.models import fused, region_capture, stations
 from inference_server.models.common import apply_rotary
 from inference_server.models.paged_kv_cache import step_inputs
 from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM
@@ -170,8 +173,8 @@ def test_noop_override_changes_nothing(model, torch_kernels, monkeypatch, stretc
 def test_resolve_replaces_the_stretch():
     fn = _compose("router", "down")
     steps = stations.resolve(stations.DECODE, {("router", "down"): fn})
-    assert len(steps) == len(stations.DECODE) - 4
-    assert steps[:7] == tuple(s.fn for s in stations.DECODE[:7]) and steps[8:] == (stations.DECODE[-1].fn,)
+    own = [(s.name, s.name, s.fn) for s in stations.DECODE]
+    assert steps[:7] == tuple(own[:7]) and steps[7][:2] == ("router", "down") and steps[8:] == (own[-1],)
 
 
 @pytest.mark.parametrize("overrides", [
@@ -189,7 +192,7 @@ def test_override_contract_is_checked():
     writes, and writes the K/V pool in place."""
     def run(key, fn, c):
         i = [s.name for s in stations.DECODE].index(key[0])
-        return stations.resolve(stations.DECODE, {key: fn})[i](c)
+        return stations.resolve(stations.DECODE, {key: fn})[i][2](c)
     c = {"n": torch.ones(2, 1, 4), "w.router": torch.ones(3, 4), "h": torch.ones(1), "k_cache": torch.ones(1)}
     assert set(run(("router", "router"), lambda c: {"logits": c["n"]}, c)) == {"logits"}
     with pytest.raises(KeyError):
@@ -205,7 +208,7 @@ def test_override_contract_is_checked():
 
 
 def test_no_overrides_shipped():
-    assert stations.overrides() == {} and stations.plan() == tuple(s.fn for s in stations.DECODE)
+    assert stations.overrides() == {} and stations.plan() == tuple((s.name, s.name, s.fn) for s in stations.DECODE)
 
 
 def test_functional_stations_do_not_mutate(model, torch_kernels):
@@ -217,3 +220,68 @@ def test_functional_stations_do_not_mutate(model, torch_kernels):
          "k": torch.ones(2, 2, 1, 16, dtype=torch.bfloat16), "v": torch.ones(2, 1, 32, dtype=torch.bfloat16)}
     out = s.fn(c)
     assert torch.equal(k_cache, before) and not torch.equal(out["k_cache"], before)
+
+
+@pytest.fixture
+def capture(monkeypatch, tmp_path):
+    def start(spec, layers=None):
+        monkeypatch.setenv("CAPTURE_REGION", spec)
+        monkeypatch.setenv("CAPTURE_REGION_DIR", str(tmp_path))
+        if layers is not None:
+            monkeypatch.setenv("CAPTURE_REGION_LAYERS", layers)
+        region_capture.active.cache_clear()
+        return tmp_path
+    yield start
+    region_capture.active.cache_clear()
+
+
+@pytest.mark.parametrize("spec", ["router:down", "kv_append:attention", "input_norm:residual", "silu_mul"])
+def test_samples_replay_to_their_writes(model, torch_kernels, capture, spec):
+    out = capture(spec)
+    h, cos, sin, ctx, _, _ = _decode_case(model)
+    with torch.no_grad():
+        want = stations.forward(model.model, h, cos, sin, ctx)
+    region_capture.active()._log.flush()
+    calls = [json.loads(x) for x in (out / "calls.jsonl").read_text().splitlines()]
+    first, _, last = spec.partition(":")
+    assert [c["layer"] for c in calls] == [0, 1] and all(c["fn"] == f"region:{first}:{last or first}" for c in calls)
+    names = [s.name for s in stations.DECODE]
+    stretch = stations.functional()[names.index(first):names.index(last or first) + 1]
+    for call in calls:
+        assert set(call["reads"]) == set(stations.interface(stations.DECODE, first, last or first)[0])
+        sample = torch.load(out / "samples" / call["sample"], weights_only=False)
+        assert not any(n.startswith("w.") for n in sample["reads"])
+        c = {**sample["reads"], **stations.layer_weights(model, call["layer"])}
+        if "cfg" in c:
+            c["cfg"] = stations.LayerConfig(**c["cfg"]) if isinstance(c["cfg"], dict) else c["cfg"]
+        with torch.no_grad():
+            for s in stretch:
+                c.update(s.fn(c))
+        assert set(sample["writes"]) == set(call["writes"])
+        for n, t in sample["writes"].items():
+            assert torch.equal(c[n], t), n
+    assert not torch.isnan(want).any()
+
+
+def test_layers_filter(model, torch_kernels, capture):
+    out = capture("router:down", layers="1")
+    h, cos, sin, ctx, _, _ = _decode_case(model)
+    with torch.no_grad():
+        stations.forward(model.model, h, cos, sin, ctx)
+    region_capture.active()._log.flush()
+    assert [json.loads(x)["layer"] for x in (out / "calls.jsonl").read_text().splitlines()] == [1]
+
+
+def test_stretch_inside_an_override_is_refused(model, torch_kernels, capture, monkeypatch):
+    capture("route:gate_up")
+    over = stations.resolve(stations.DECODE, {("router", "down"): lambda c: {}})
+    monkeypatch.setattr(stations, "plan", lambda: over)
+    h, cos, sin, ctx, _, _ = _decode_case(model)
+    with pytest.raises(ValueError, match="does not start and end"):
+        stations.forward(model.model, h, cos, sin, ctx)
+
+
+def test_off_by_default(monkeypatch):
+    monkeypatch.delenv("CAPTURE_REGION", raising=False)
+    region_capture.active.cache_clear()
+    assert region_capture.active() is None
