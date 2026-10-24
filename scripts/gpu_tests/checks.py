@@ -158,11 +158,147 @@ def _prefill_parity_at(D: int) -> tuple[bool, str]:
                             f"(N={N}, prefix={prefix_lens}, suffix={suffix_lens})")
 
 
+def _stations_model(fp8: bool):
+    """Two layers at Qwen3-30B-A3B's shapes, random weights, QKV fused, experts fp8 or bf16 (as the backend loads)."""
+    import torch
+    from transformers import Qwen3MoeConfig
+
+    from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM
+
+    cfg = Qwen3MoeConfig(vocab_size=1024, hidden_size=2048, num_hidden_layers=2, num_attention_heads=32,
+                         num_key_value_heads=4, head_dim=128, num_experts=128, num_experts_per_tok=8,
+                         moe_intermediate_size=768, norm_topk_prob=True, tie_word_embeddings=False,
+                         rope_parameters={"rope_type": "default", "rope_theta": 1e6})
+    torch.manual_seed(0)
+    with torch.device("cuda"):
+        model = Qwen3MoeForCausalLM.from_config(cfg)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            p.copy_(1 + 0.1 * torch.randn_like(p) if name.endswith("norm.weight") else 0.02 * torch.randn_like(p))
+    for layer in model.model.layers:
+        layer.self_attn.fuse_qkv()
+        if fp8:
+            layer.mlp.experts.quantize_fp8()
+    return model.eval()
+
+
+def _noop_override(first: str, last: str):
+    """An override that runs its stretch's own stations in order."""
+    from inference_server.models import stations
+    names = [s.name for s in stations.DECODE]
+    stretch = stations.DECODE[names.index(first):names.index(last) + 1]
+
+    def fn(c):
+        c, out = dict(c), {}
+        for s in stretch:
+            w = s.fn(c)
+            c.update(w)
+            out.update(w)
+        return out
+    return fn
+
+
+def decode_stations_identical() -> tuple[bool, str]:
+    """The decode stations (models/stations.py) against the layer forward they replaced, and a no-op override of two
+    stretches, at batch 1-1,024, short and long contexts, fp8 and bf16 experts, eager and as a captured CUDA graph (as
+    the backend captures it): logits and K/V pools bit-identical wherever the layer forward repeats itself bit for bit,
+    and otherwise no further from it than its own repeats (the MoE down GEMM adds each token's expert rows with fp32
+    atomics, in no fixed order); each variant's graph replay time beside."""
+    import types
+
+    import torch
+
+    from inference_server.backends.custom_torch_backend import _GraphCtx
+    from inference_server.models import stations
+
+    bs, failures, rows = 16, [], []
+    old = (lambda *a: False, stations.plan)
+    variants = {
+        "layers": old, "layers#2": old, "layers#3": old,
+        "stations": (stations.applies, stations.plan),
+        "override": (stations.applies, lambda: stations.resolve(stations.DECODE, {
+            ("input_norm", "attention"): _noop_override("input_norm", "attention"),
+            ("router", "down"): _noop_override("router", "down")})),
+    }
+
+    def maxdiff(a, b) -> float:
+        ts = [(a[0], b[0]), *zip(a[1], b[1]), (a[2], b[2]), *zip(a[3], b[3])]
+        return max((x.float() - y.float()).abs().max().item() for x, y in ts)
+    for fp8 in (True, False):
+        model = _stations_model(fp8)
+        attn = model.model.layers[0].self_attn
+        for B, ctx_len in [(1, 32), (1, 8192), (2, 32), (4, 4096), (8, 32), (16, 2048), (64, 32), (64, 2048),
+                           (256, 32), (256, 1024), (512, 32), (1024, 32)]:
+            g = torch.Generator(device="cuda").manual_seed(B * 7919 + ctx_len)
+            cols = (ctx_len + 1 + bs - 1) // bs
+            seq_lens = torch.randint(1, ctx_len + 1, (B,), device="cuda", generator=g)
+            bt = torch.randperm(B * cols, device="cuda", generator=g).view(B, cols)
+            tokens = torch.randint(0, 1024, (B, 1), device="cuda", generator=g)
+            kv0 = [torch.randn(B * cols, attn.num_kv_heads, bs, attn.head_dim, device="cuda", dtype=torch.bfloat16,
+                               generator=g) for _ in range(4)]
+            pools = [types.SimpleNamespace(k=kv0[0].clone(), v=kv0[1].clone()),
+                     types.SimpleNamespace(k=kv0[2].clone(), v=kv0[3].clone())]
+            ctx = _GraphCtx(pools, seq_lens, bt, bs)
+            pos = seq_lens.view(B, 1)
+
+            def reset():
+                for p, k, v in zip(pools, kv0[0::2], kv0[1::2]):
+                    p.k.copy_(k)
+                    p.v.copy_(v)
+
+            got = {}
+            for name, (applies, plan) in variants.items():
+                stations.applies, stations.plan = applies, plan
+                try:
+                    with torch.no_grad():
+                        reset()
+                        eager = model(tokens, position_ids=pos, paged_ctx=ctx)
+                        eager_kv = [t.clone() for p in pools for t in (p.k, p.v)]
+                        s = torch.cuda.Stream()
+                        s.wait_stream(torch.cuda.current_stream())
+                        with torch.cuda.stream(s):
+                            for _ in range(2):
+                                model(tokens, position_ids=pos, paged_ctx=ctx)
+                        torch.cuda.current_stream().wait_stream(s)
+                        graph = torch.cuda.CUDAGraph()
+                        with torch.cuda.graph(graph):
+                            out = model(tokens, position_ids=pos, paged_ctx=ctx)
+                        reset()
+                        graph.replay()
+                        graphed, graphed_kv = out.clone(), [t.clone() for p in pools for t in (p.k, p.v)]
+                        times = []
+                        for _ in range(30):
+                            a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                            a.record()
+                            graph.replay()
+                            b.record()
+                            b.synchronize()
+                            times.append(a.elapsed_time(b))
+                        del graph
+                finally:
+                    stations.applies, stations.plan = variants["stations"]
+                got[name] = (eager, eager_kv, graphed, graphed_kv, sorted(times)[len(times) // 2])
+            ref = got["layers"]
+            spread = max(maxdiff(got["layers#2"], ref), maxdiff(got["layers#3"], ref))
+            diffs = {n: maxdiff(got[n], ref) for n in ("stations", "override")}
+            for n, d in diffs.items():
+                if d > spread:
+                    failures.append(f"{n} fp8={fp8} B={B} ctx={ctx_len}: {d:.3g} vs repeats {spread:.3g}")
+            rows.append(f"fp8={fp8} B={B} ctx={ctx_len}: max|diff| repeats {spread:.3g}, " +
+                        ", ".join(f"{n} {d:.3g}" for n, d in diffs.items()) + "; ms per replay " +
+                        " / ".join(f"{n} {got[n][4]:.3f}" for n in ("layers", "stations", "override")))
+        del model
+        torch.cuda.empty_cache()
+    print("\n".join(rows))
+    return not failures, "within the layer forward's own repeats everywhere" if not failures else "; ".join(failures)
+
+
 # Name → check. The gate runs all of them; each modal script runs its own subset.
 CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_parity": paged_decode_parity,
     "paged_decode_no_recompile": paged_decode_no_recompile,
     "paged_prefill_parity": paged_prefill_parity,
+    "decode_stations_identical": decode_stations_identical,
 }
 
 

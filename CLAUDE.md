@@ -62,5 +62,9 @@
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
   its own launch and gates that config with its own equiv. Ships empty: one config for everything.
+- Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
+  layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
+  define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before
+  graph capture). Prefill, CPU and the torch MoE path keep the layer forward.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.

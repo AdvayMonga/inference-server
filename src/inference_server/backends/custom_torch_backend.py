@@ -24,7 +24,7 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
-from inference_server.models.paged_kv_cache import to_device, write_token
+from inference_server.models.paged_kv_cache import step_inputs, to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -133,15 +133,16 @@ class _GraphCtx:
 
     def append(self, layer_idx, k_new, v_new):
         if layer_idx == self._live[0]:   # per-step values once per forward, not per layer (captured as such)
-            self._rows = torch.arange(self.seq_lens.shape[0], device=self.seq_lens.device)
-            self._lb = self.seq_lens // self.bs
-            self._slot = self.seq_lens % self.bs
-            self._sl32 = (self.seq_lens + 1).to(torch.int32)
-            self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
+            s = self.step_inputs()
+            self._rows, self._lb, self._slot = s["kv_rows"], s["kv_block"], s["kv_slot"]
+            self._bt32, self._sl32 = s["attn_block_tables"], s["attn_seq_lens"]
         write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
         return self._bt32, self._sl32
+
+    def step_inputs(self) -> dict:
+        return step_inputs(self.bt, self.seq_lens, self.bs)
 
 
 class _PrefillCtx:
