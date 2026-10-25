@@ -526,7 +526,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 }
             }
             __syncthreads();
-            if (tma && MEGA_MMA) {                                     // 8 padded rows a stage, on the tensor cores
+            if constexpr (tma && MEGA_MMA) {                                     // 8 padded rows a stage, on the tensor cores
                 constexpr int SLOT = H * 2 + 16, RPS = STAGE / SLOT < 8 ? STAGE / SLOT : 8;
                 float* part = reinterpret_cast<float*>(smem + 16384);
                 float* res = part + WARPS * BT * 8;
@@ -829,7 +829,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 reinterpret_cast<uint4*>(xs)[i] = (i < B * NQ * D / 8) ? reinterpret_cast<const uint4*>(a.sc.attn)[i] : make_uint4(0, 0, 0, 0);
             __syncthreads();
             float out[R4][BT];
-            if (tma && MEGA_MMA) {                                     // padded rows a stage, on the tensor cores
+            if constexpr (tma && MEGA_MMA) {                                     // padded rows a stage, on the tensor cores
                 float* part = reinterpret_cast<float*>(smem + 16384);   // past xs (16 KB at batch 2)
                 float* res = part + WARPS * BT * 8;
                 if (!primed4) block_slice(H, lo4, hi4);
@@ -1134,7 +1134,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         unsigned long long best[BT];                                   // packed (ordered bf16 value, ~index): max = argmax, lowest index on ties
 #pragma unroll
         for (int b = 0; b < BT; ++b) best[b] = 0ull;
-        if (tma && MEGA_MMA) {
+        if constexpr (tma && MEGA_MMA) {
             constexpr int SLOT = H * 2 + 16, RPS = STAGE / SLOT < 8 ? STAGE / SLOT : 8;
             float* part = reinterpret_cast<float*>(smem + 16384);
             float* res = part + WARPS * BT * 8;
