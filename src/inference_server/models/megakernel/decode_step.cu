@@ -50,10 +50,17 @@ constexpr int H = 2048, NQ = 32, NKV = 4, D = 128, QKV = NQ * D + 2 * NKV * D, I
 #ifndef MEGA_CHUNK
 #define MEGA_CHUNK 256
 #endif
-constexpr int BS = 16, BMAX = 16, THREADS = 256, WARPS = THREADS / 32, CHUNK = MEGA_CHUNK, MAXSPLIT = 32768 / CHUNK;
+// Threads per block (MEGA_THREADS): the GEMV phases' stage consumption is issue-bound (8 warps dequantizing and
+// FMA-ing 16 fp8 rows of 2048 per 32 KB stage took ~3 us, 2026-10-24), so 16 warps double it.
+#ifndef MEGA_THREADS
+#define MEGA_THREADS 256
+#endif
+constexpr int BS = 16, BMAX = 16, THREADS = MEGA_THREADS, WARPS = THREADS / 32, CHUNK = MEGA_CHUNK, MAXSPLIT = 32768 / CHUNK;
+constexpr int HDR = 256;                                             // smem header: red[WARPS] floats, then the mbarriers at 128
+static_assert(THREADS == 256 || THREADS == 512, "8 or 16 warps");
 static_assert(CHUNK >= 32 && CHUNK <= 256 && THREADS % CHUNK == 0 && 32768 % CHUNK == 0, "chunk: 32..256, a divisor of 32768");
 constexpr int GQA = NQ / NKV;                                        // q heads per kv head
-static_assert(GQA == WARPS, "the attention phase preps one q head per warp");
+static_assert(WARPS >= GQA, "the attention phase preps one q head per warp (the first GQA warps)");
 constexpr float EPS = 1e-6f;
 
 using bf16 = __nv_bfloat16;
@@ -238,10 +245,18 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 // ring of NST shared-memory stages with cp.async.bulk (completion counted on an mbarrier per stage, ~96 KB in flight
 // per SM) and its warps compute from shared memory. The ring is the top 96 KB of the 128 KB the kernel reserves,
 // which no other phase touches at batch <= 2.
+// MEGA_PRIME: a GEMV phase's first ring stages are issued before the grid barrier it waits at (its rows do not depend
+// on the barrier), so the phase starts computing as soon as the barrier opens: o_proj's after attention (when the
+// attention smem leaves the ring free, chunk <= 64), down's after gate_up, the next layer's qkv after down.
+#ifndef MEGA_PRIME
+#define MEGA_PRIME 0
+#endif
 #ifndef MEGA_NST                                                    // stages in flight and their size: NST x STAGE = 96 KB
 #define MEGA_NST 3
 #endif
 constexpr int NST = MEGA_NST, STAGE = 98304 / NST, RING_OFF = 32768;
+constexpr size_t ATTN_SMEM = HDR + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + 128 * 8 * 4;
+constexpr bool PRIME_P4 = MEGA_PRIME && ATTN_SMEM <= RING_OFF;      // the attention phase leaves the ring untouched
 static_assert(98304 % NST == 0 && STAGE % 8192 == 0, "the ring is 96 KB of whole 8 KB rows");
 
 __device__ __forceinline__ uint32_t s2u(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
@@ -263,15 +278,20 @@ __device__ __forceinline__ void mbar_wait(unsigned long long* b, uint32_t parity
 // nst stages through the ring: issue(s, dst, bar) (thread 0) arms `bar` with the stage's byte count and starts its
 // bulk copies into `dst`; consume(s, src) runs on the whole block once they have landed. `ph` holds each slot's phase
 // parity and persists across calls (every thread runs every call, so all agree).
-template <typename Issue, typename Consume>
-__device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsigned char* ring, uint32_t& ph,
-                                         Issue issue, Consume consume) {
+template <typename Issue>
+__device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue) {
     if (threadIdx.x == 0) {
         // the ring's bytes were last written by ordinary stores (the attention phase stages V there): order those
         // before the async proxy's copies
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         for (int s = 0; s < min(nst, NST); ++s) issue(s, ring + s * STAGE, bars + s);
     }
+}
+
+template <typename Issue, typename Consume>
+__device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsigned char* ring, uint32_t& ph,
+                                         Issue issue, Consume consume, bool primed = false) {
+    if (!primed) ring_prime(nst, bars, ring, issue);
     for (int s = 0; s < nst; ++s) {
         const int k = s % NST;
         mbar_wait(bars + k, (ph >> k) & 1u);
@@ -378,7 +398,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
     const int B = a.B, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
     const int gwarp = blockIdx.x * WARPS + warp, nwarps = gridDim.x * WARPS;
     float* red = reinterpret_cast<float*>(smem_raw);                  // [WARPS] reduction scratch
-    unsigned char* smem = smem_raw + 64;
+    unsigned char* smem = smem_raw + HDR;
     int maxlen = 0;
     for (int b = 0; b < B; ++b) maxlen = max(maxlen, (int)a.pos[b] + 1);
     const int nsplit = (maxlen + CHUNK - 1) / CHUNK;                 // the same in every block
@@ -387,7 +407,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
     constexpr int R4 = (BT <= 2) ? 2 : 1;                            // o_proj
     using DN = Down<FP8>;
     constexpr bool tma = MEGA_TMA && (BT <= 2);                      // weights streamed through the shared-memory ring
-    unsigned long long* bars = reinterpret_cast<unsigned long long*>(smem_raw + 32);   // [NST], after red[8]
+    unsigned long long* bars = reinterpret_cast<unsigned long long*>(smem_raw + 128);  // [NST], after red[WARPS]
     unsigned char* ring = smem_raw + RING_OFF;
     uint32_t ph = 0;
     if constexpr (tma) {
@@ -397,6 +417,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         }
         __syncthreads();
     }
+    bool primed1 = false;                                            // the layer's qkv stages issued by the previous layer (MEGA_PRIME)
     uint4 wvA[RA][H / 256];                                          // the next H-long GEMV's first rows, loaded before the barrier
     if (!tma) {
         const bf16* rows[RA];
@@ -446,7 +467,8 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                             smem_dot<H, BT>(reinterpret_cast<const bf16*>(src) + warp * H, xn, H, o);
                             if (lane == 0) for (int b = 0; b < B; ++b) a.sc.qkv[b * QKV + r] = f2bf(o[b]);
                         }
-                    });
+                    }, primed1);
+                primed1 = false;
             } else {
             float out[RA][BT];
             for (int n0 = gwarp * RA; n0 < QKV; n0 += nwarps * RA) {
@@ -483,7 +505,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
                 if (t0 >= kv_len) continue;
                 const int tn = min(CHUNK, kv_len - t0);
-                {
+                if (warp < GQA) {                                    // warp w preps q head g*8+w
                     float cs[2], sn[2];
 #pragma unroll
                     for (int u = 0; u < 2; ++u) { const float f = pos * a.inv_freq[lane + 32 * u]; cs[u] = rbf(cosf(f)); sn[u] = rbf(sinf(f)); }
@@ -614,11 +636,12 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     l[j] = ss;
                 }
                 {   // PV: item = (head j, 8-wide d group), two threads per item over interleaved positions
-                    const int it = tid & 127, half = tid >> 7, j = it / (D / 8), d0 = (it % (D / 8)) * 8;
+                    const int it = tid & 127, half = (tid >> 7) & 1, j = it / (D / 8), d0 = (it % (D / 8)) * 8;
+                    const bool pv_on = tid < 256;                     // 256 threads cover the items; the rest idle here
                     float acc[8];
 #pragma unroll
                     for (int u = 0; u < 8; ++u) acc[u] = 0.f;
-                    for (int t = half; t < tn; t += 2) {
+                    if (pv_on) for (int t = half; t < tn; t += 2) {
                         const float p = p_s[j * CHUNK + t];
                         const uint4 vv = *reinterpret_cast<const uint4*>(v_s + t * D + d0);
                         float vf[8];
@@ -626,12 +649,12 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
 #pragma unroll
                         for (int u = 0; u < 8; ++u) acc[u] += p * vf[u];
                     }
-                    if (half == 1) {
+                    if (pv_on && half == 1) {
 #pragma unroll
                         for (int u = 0; u < 8; ++u) pv_s[it * 8 + u] = acc[u];
                     }
                     __syncthreads();
-                    if (half == 0) {
+                    if (pv_on && half == 0) {
                         const int hq = g * GQA + j;
                         if (nsplit == 1) {
                             bf16* dst = a.sc.attn + b * (NQ * D) + hq * D + d0;
@@ -652,6 +675,22 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 }
                 __syncthreads();
             }
+        }
+        // o_proj's first stages, issued now when the attention phase left the ring untouched (MEGA_PRIME, chunk <= 64)
+        int lo4 = 0, hi4 = 0;
+        bool primed4 = false;
+        auto issue4 = [&](int st, unsigned char* dst, unsigned long long* bar) {
+            constexpr int RPS = STAGE / (NQ * D * 2);
+            const int r0 = lo4 + st * RPS, n = min(RPS, hi4 - r0);
+            mbar_expect(bar, n * NQ * D * 2);
+            bulk_load(dst, lw.wo + (size_t)r0 * (NQ * D), n * NQ * D * 2, bar);
+        };
+        if constexpr (tma && PRIME_P4) {
+            constexpr int RPS = STAGE / (NQ * D * 2);
+            block_slice(H, lo4, hi4);
+            __syncthreads();                                          // every warp is past its attention item's smem use
+            ring_prime((hi4 - lo4 + RPS - 1) / RPS, bars, ring, issue4);
+            primed4 = true;
         }
         STAMP(2);
 
@@ -695,26 +734,21 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             if (tma) {                                                 // 4 rows of 8 KB a stage, two warps a row
                 constexpr int RPS = STAGE / (NQ * D * 2);
                 float* part = reinterpret_cast<float*>(smem + 16384);   // [WARPS][BT], past xs (16 KB at batch 2)
-                int lo, hi;
-                block_slice(H, lo, hi);
-                ring_run((hi - lo + RPS - 1) / RPS, bars, ring, ph,
-                    [&](int st, unsigned char* dst, unsigned long long* bar) {
-                        const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
-                        mbar_expect(bar, n * NQ * D * 2);
-                        bulk_load(dst, lw.wo + (size_t)r0 * (NQ * D), n * NQ * D * 2, bar);
-                    },
+                if (!primed4) block_slice(H, lo4, hi4);
+                const int lo = lo4, hi = hi4;
+                ring_run((hi - lo + RPS - 1) / RPS, bars, ring, ph, issue4,
                     [&](int st, unsigned char* src) {
                         const int j = warp >> 1, half = warp & 1, r = lo + st * RPS + j;
                         float o[BT];
-                        if (r < hi) {
+                        if (j < RPS && r < hi) {                      // 16 warps: the rest idle (RPS rows a stage)
                             smem_dot<NQ * D / 2, BT>(reinterpret_cast<const bf16*>(src) + j * (NQ * D) + half * (NQ * D / 2),
                                                      xs + half * (NQ * D / 2), NQ * D, o);
                             if (lane == 0) for (int b = 0; b < BT; ++b) part[warp * BT + b] = o[b];
                         }
                         __syncthreads();
-                        if (r < hi && half == 0 && lane == 0)
+                        if (j < RPS && r < hi && half == 0 && lane == 0)
                             for (int b = 0; b < B; ++b) a.sc.o[b * H + r] = f2bf(part[warp * BT + b] + part[(warp + 1) * BT + b]);
-                    });
+                    }, primed4);
             } else
             for (int n0 = gwarp * R4; n0 < H; n0 += nwarps * R4) {
                 if (n0 != gwarp * R4) {
@@ -869,22 +903,31 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         STAMP(6);
         typename DN::V wv7[DN::RD][DN::NV];                           // the down GEMV's first rows (ids known in this block)
         if (!tma) load_down<FP8>(lw.down, ids_s, gwarp * DN::RD, pairs * H, wv7);
+        // the down GEMV's stages are planned here (its experts are known) and, with MEGA_PRIME, the first ones issued
+        constexpr int RB7 = I * (FP8 ? 1 : 2), C7 = (STAGE / RB7 < (FP8 ? 32 : 16)) ? STAGE / RB7 : (FP8 ? 32 : 16);   // rows a stage, within its bytes
+        int* seg7 = reinterpret_cast<int*>(smem + 16384);
+        int n7 = 0;
+        auto issue7 = [&](int st, unsigned char* dst, unsigned long long* bar) {
+            const int f = seg7[st], cnt = seg7[st + 1] - f, pp = f / H, n0 = f % H;
+            mbar_expect(bar, cnt * RB7);
+            bulk_load(dst, reinterpret_cast<const char*>(lw.down) + ((size_t)ids_s[pp] * H + n0) * RB7, cnt * RB7, bar);
+        };
+        if (tma) {
+            int lo, hi;
+            block_slice(pairs * H, lo, hi);
+            __syncthreads();                                          // gate_up's last stage consumed by every warp
+            if (tid == 0) seg7[1023] = plan_stages(lo, hi, C7, H, seg7, 1000);
+            __syncthreads();
+            n7 = seg7[1023];
+            if (MEGA_PRIME) ring_prime(n7, bars, ring, issue7);
+        }
         grid.sync();
 
         // ---- P7: down GEMV per (pair, n): out2[b][n] += w[pair] * dot(act[pair], down[e][n])
         if (tma) {                                                     // C rows of one pair a stage
-            constexpr int RB = I * (FP8 ? 1 : 2), C = (FP8 ? 32 : 16);
-            int* seg_s = reinterpret_cast<int*>(smem + 16384);
-            int lo, hi;
-            block_slice(pairs * H, lo, hi);
-            if (tid == 0) seg_s[1023] = plan_stages(lo, hi, C, H, seg_s, 1000);
-            __syncthreads();
-            ring_run(seg_s[1023], bars, ring, ph,
-                [&](int st, unsigned char* dst, unsigned long long* bar) {
-                    const int f = seg_s[st], cnt = seg_s[st + 1] - f, pp = f / H, n0 = f % H;
-                    mbar_expect(bar, cnt * RB);
-                    bulk_load(dst, reinterpret_cast<const char*>(lw.down) + ((size_t)ids_s[pp] * H + n0) * RB, cnt * RB, bar);
-                },
+            constexpr int RB = RB7;
+            int* seg_s = seg7;
+            ring_run(n7, bars, ring, ph, issue7,
                 [&](int st, unsigned char* src) {
                     const int f = seg_s[st], cnt = seg_s[st + 1] - f, pp = f / H, n0 = f % H, e = ids_s[pp];
                     const bf16* x = a.sc.act + (size_t)pp * I;
@@ -897,7 +940,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                         }
                         if (lane == 0) atomicAdd(a.sc.out2 + (pp / K) * H + n0 + j, v * w_s[pp]);
                     }
-                });
+                }, MEGA_PRIME != 0);
         } else {
             for (int w0 = gwarp * DN::RD; w0 < pairs * H; w0 += nwarps * DN::RD) {
                 if (w0 != gwarp * DN::RD) load_down<FP8>(lw.down, a.sc.ids, w0, pairs * H, wv7);
@@ -939,6 +982,19 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
 #pragma unroll
             for (int r = 0; r < RA; ++r) rows[r] = base + (size_t)min(gwarp * RA + r, nrows - 1) * H;
             if (!tma) load_rows<H, RA>(rows, wvA);
+            if (tma && MEGA_PRIME && !last) {                         // the next layer's qkv stages: its rows need no barrier
+                constexpr int RPS = STAGE / (H * 2);
+                int lo, hi;
+                block_slice(QKV, lo, hi);
+                const bf16* wq = a.layers[L + 1].wqkv;
+                __syncthreads();                                      // down's last stage consumed by every warp
+                ring_prime((hi - lo + RPS - 1) / RPS, bars, ring, [&](int st, unsigned char* dst, unsigned long long* bar) {
+                    const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
+                    mbar_expect(bar, n * H * 2);
+                    bulk_load(dst, wq + (size_t)r0 * H, n * H * 2, bar);
+                });
+                primed1 = true;
+            }
         }
         grid.sync();
     }
@@ -1023,11 +1079,10 @@ static int num_sms() {
     return n;
 }
 
-constexpr size_t SMEM_BYTES = 64 + (size_t)BMAX * NQ * D * 2;   // the largest phase at BMAX: attn rows for o_proj (128 KB)
-constexpr size_t ATTN_SMEM = 64 + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + (THREADS / 2) * 8 * 4;
+constexpr size_t SMEM_BYTES = HDR + (size_t)BMAX * NQ * D * 2;   // the largest phase at BMAX: attn rows for o_proj (128 KB)
 template <int BT> constexpr size_t smem_bytes() {           // what the BT-row instantiation touches (the ring included when built)
     size_t m = ATTN_SMEM;
-    for (size_t v : {(size_t)64 + 2 * BT * H * 2, (size_t)64 + BT * H * 2 + BT * K * 8, (size_t)64 + (size_t)BT * NQ * D * 2,
+    for (size_t v : {(size_t)HDR + 2 * BT * H * 2, (size_t)HDR + BT * H * 2 + BT * K * 8, (size_t)HDR + (size_t)BT * NQ * D * 2,
                      (MEGA_TMA && BT <= 2) ? (size_t)RING_OFF + NST * STAGE : (size_t)0})
         m = v > m ? v : m;
     return m;
@@ -1035,10 +1090,11 @@ template <int BT> constexpr size_t smem_bytes() {           // what the BT-row i
 static size_t smem_for(int B) {
     return B <= 1 ? smem_bytes<1>() : B <= 2 ? smem_bytes<2>() : B <= 4 ? smem_bytes<4>() : B <= 8 ? smem_bytes<8>() : smem_bytes<16>();
 }
-static_assert(64 + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + (THREADS / 2) * 8 * 4 <= SMEM_BYTES, "attention smem");
-static_assert(64 + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
-static_assert(RING_OFF + NST * STAGE <= SMEM_BYTES && 64 + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases");
-static_assert(64 + BMAX * H * 2 + BMAX * K * 8 <= SMEM_BYTES, "P6 smem");
+static_assert(ATTN_SMEM <= SMEM_BYTES, "attention smem");
+static_assert(HDR + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
+static_assert(RING_OFF + NST * STAGE <= SMEM_BYTES && HDR + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases");
+static_assert(HDR + BMAX * H * 2 + BMAX * K * 8 <= SMEM_BYTES, "P6 smem");
+static_assert(128 + NST * 8 <= HDR && WARPS * 4 <= 128, "smem header holds red[WARPS] and the mbarriers");
 
 template <bool FP8> static void* pick(int B) {
     return B <= 1 ? (void*)decode_step_kernel<1, FP8> : B <= 2 ? (void*)decode_step_kernel<2, FP8> : B <= 4 ? (void*)decode_step_kernel<4, FP8>
