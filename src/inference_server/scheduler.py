@@ -1090,6 +1090,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._spec_steps += 1
             self._spec_drafted += len(drafts)
             self._spec_tokens += len(kept)
+            if self._spec_steps % 500 == 0:
+                logger.info("speculative decoding: %d verify steps, %d drafted, %d tokens kept", self._spec_steps,
+                            self._spec_drafted, self._spec_tokens)
             # the row's input tokens were [current] + accepted drafts: their K/V stay; then the new tokens
             used, finished = 0, None
             for t in kept:
