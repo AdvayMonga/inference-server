@@ -20,6 +20,8 @@ ENABLED = os.environ.get("MEGAKERNEL", "1") == "1"      # on where it builds (CU
 FP8 = os.environ.get("MEGAKERNEL_FP8", "0") == "1"      # measured 2026-10-18: no gain at batch 1 (the phases are latency-bound)
 TMA = os.environ.get("MEGAKERNEL_TMA", "1") == "1"      # weights through a shared-memory ring (batch <= 2): 4.48 -> 3.71 ms a step
 BPS = int(os.environ.get("MEGAKERNEL_BPS", "1"))        # blocks per SM where the shared memory allows (never with TMA)
+NST = int(os.environ.get("MEGAKERNEL_NST", "3"))        # ring stages (3 x 32 KB, 4 x 24 KB, 6 x 16 KB, 12 x 8 KB)
+CHUNK = int(os.environ.get("MEGAKERNEL_CHUNK", "256"))  # attention positions per item
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
@@ -33,11 +35,12 @@ def _ext(kv8: bool = False, tma: bool = False):
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_step.cu")
     bps = 1 if tma else BPS
-    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}", sources=[str(src)],
+    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
-                                   f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}"],
+                                   f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}",
+                                   f"-DMEGA_NST={NST}", f"-DMEGA_CHUNK={CHUNK}"],
                 verbose=False)
 
 

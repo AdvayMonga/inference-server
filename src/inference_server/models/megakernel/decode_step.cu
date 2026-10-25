@@ -45,7 +45,13 @@
 namespace cg = cooperative_groups;
 
 constexpr int H = 2048, NQ = 32, NKV = 4, D = 128, QKV = NQ * D + 2 * NKV * D, I = 768, E = 128, K = 8;
-constexpr int BS = 16, BMAX = 16, THREADS = 256, WARPS = THREADS / 32, CHUNK = 256, MAXSPLIT = 128;
+// Attention positions per item (MEGA_CHUNK): items = rows x kv groups x ceil(context / CHUNK), so a smaller chunk spreads
+// a context over more blocks (at 256, a 2k context ran on 32 of 132 blocks: 20 us a layer, 2026-10-24).
+#ifndef MEGA_CHUNK
+#define MEGA_CHUNK 256
+#endif
+constexpr int BS = 16, BMAX = 16, THREADS = 256, WARPS = THREADS / 32, CHUNK = MEGA_CHUNK, MAXSPLIT = 32768 / CHUNK;
+static_assert(CHUNK >= 32 && CHUNK <= 256 && THREADS % CHUNK == 0 && 32768 % CHUNK == 0, "chunk: 32..256, a divisor of 32768");
 constexpr int GQA = NQ / NKV;                                        // q heads per kv head
 static_assert(GQA == WARPS, "the attention phase preps one q head per warp");
 constexpr float EPS = 1e-6f;
@@ -232,7 +238,11 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 // ring of NST shared-memory stages with cp.async.bulk (completion counted on an mbarrier per stage, ~96 KB in flight
 // per SM) and its warps compute from shared memory. The ring is the top 96 KB of the 128 KB the kernel reserves,
 // which no other phase touches at batch <= 2.
-constexpr int NST = 3, STAGE = 32768, RING_OFF = 32768;
+#ifndef MEGA_NST                                                    // stages in flight and their size: NST x STAGE = 96 KB
+#define MEGA_NST 3
+#endif
+constexpr int NST = MEGA_NST, STAGE = 98304 / NST, RING_OFF = 32768;
+static_assert(98304 % NST == 0 && STAGE % 8192 == 0, "the ring is 96 KB of whole 8 KB rows");
 
 __device__ __forceinline__ uint32_t s2u(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
 __device__ __forceinline__ void mbar_init(unsigned long long* b) {
@@ -591,7 +601,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
 #pragma unroll
                 for (int j = 0; j < GQA; ++j) {
                     const float pv = (tid < tn) ? __expf(s[j] - m[j]) : 0.f;
-                    p_s[j * CHUNK + tid] = pv;
+                    if (tid < CHUNK) p_s[j * CHUNK + tid] = pv;       // threads past the chunk hold no position
                     const float ws = warp_sum(pv);
                     if (lane == 0) red2[j * WARPS + warp] = ws;
                 }
