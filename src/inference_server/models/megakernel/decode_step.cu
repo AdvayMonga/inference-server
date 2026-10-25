@@ -264,13 +264,14 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #define MEGA_NOMATH 0
 #endif
 // MEGA_MMA: the bf16 GEMV phases (qkv, o_proj, lm_head) dot their staged rows on the tensor cores (mma.sync m16n8k16:
-// the B rows as M, 8 weight rows as N, the block's 16 warps splitting K), the rows staged one bulk copy each into slots
-// padded by 16 bytes so the 8 rows a fragment reads fall in different banks. The math was 16-20% of a step at 1-2 rows
-// (MEGA_NOMATH, 2026-10-25) and its per-row cost made qkv and o_proj 4x slower at 8 rows than at 1.
+// the tokens as M, 8 weight rows as N, the block's warps splitting K, results summed into the block's rows with
+// shared-memory atomics). The math was 16-20% of a step at 1-2 rows (MEGA_NOMATH, 2026-10-25) and its per-row cost made
+// qkv and o_proj 4x slower at 8 rows than at 1. (Staging rows one copy each into bank-padded slots, with two block
+// syncs a stage, cost what the tensor cores saved: qkv stayed 8.5 us at B=1, 2026-10-25.)
 #ifndef MEGA_MMA
 #define MEGA_MMA 0
 #endif
-constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST + (MEGA_MMA ? 256 : 0), RING_OFF = 32768;
+constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
 constexpr size_t ATTN_SMEM = HDR + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + 128 * 8 * 4;
 constexpr bool PRIME_P4 = MEGA_PRIME && ATTN_SMEM <= RING_OFF;      // the attention phase leaves the ring untouched
 static_assert((MEGA_RING_KB * 1024) % NST == 0 && (MEGA_RING_KB * 1024 / NST) % 8192 == 0 && STAGE % 16 == 0,
@@ -326,49 +327,33 @@ __device__ __forceinline__ void mma_bf16(float* d, const uint32_t* a, const uint
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b[0]), "r"(b[1]));
 }
 
-// Thread 0: arm `bar` for n rows of `rowbytes` from src (row stride rowbytes) and copy each into dst at stride `slot`.
-__device__ __forceinline__ void bulk_rows(unsigned char* dst, const void* src, int n, int rowbytes, int slot,
-                                          unsigned long long* bar) {
-    mbar_expect(bar, n * rowbytes);
-    for (int r = 0; r < n; ++r)
-        bulk_load(dst + (size_t)r * slot, reinterpret_cast<const char*>(src) + (size_t)r * rowbytes, rowbytes, bar);
-}
-
-// The whole block: n (<= 8) staged bf16 rows of K (stride `slot` bytes) dotted with the BT token rows xs [BT][K]:
-// res[b * 8 + r] = rows[r] . xs[b] (fp32), in shared memory, with `part` [WARPS][BT][8] floats of scratch. The tokens
-// are the fragment's M (rows >= BT are zero), the weight rows its N, each warp a K/WARPS slice; then a sum over warps.
+// The whole block: n (<= 8) staged bf16 rows of K (contiguous) dotted with the BT token rows xs [BT][K], added into
+// acc[r * BT + b] (fp32, shared memory) with atomics. Each warp takes a K/WARPS slice; a lane reads 16 contiguous bytes
+// of its row (row = lane / 4) and of x per 32 k, two mma k-steps whose k order is permuted alike on both operands
+// (lane t's step A takes k = base + 8t + 0..3, step B + 4..7), which spreads the 8 rows' reads over half the banks
+// where the fragment's own order put them all on one.
 template <int K, int BT>
-__device__ __forceinline__ void mma_rows(const unsigned char* rows, int n, int slot, const bf16* xs, float* part,
-                                         float* res) {
-    static_assert(K % (16 * WARPS) == 0 && BT <= 8, "K splits into whole k16 steps per warp; at most 8 tokens");
+__device__ __forceinline__ void mma_acc(const bf16* rows, int n, const bf16* xs, float* acc) {
+    static_assert(K % (32 * WARPS) == 0 && BT <= 8, "K splits into whole 32-k pairs per warp; at most 8 tokens");
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     const bool tok = g < BT;
     const bf16* xr = xs + (size_t)(tok ? g : 0) * K;
-    const unsigned char* wr = rows + (size_t)min(g, n - 1) * slot;
+    const bf16* wr = rows + (size_t)min(g, n - 1) * K;
     float d[4] = {0.f, 0.f, 0.f, 0.f};
     constexpr int KW = K / WARPS;
 #pragma unroll 4
-    for (int k0 = warp * KW; k0 < warp * KW + KW; k0 += 16) {
-        uint32_t a[4], b[2];
-        a[0] = tok ? *reinterpret_cast<const uint32_t*>(xr + k0 + 2 * t) : 0u;
-        a[2] = tok ? *reinterpret_cast<const uint32_t*>(xr + k0 + 8 + 2 * t) : 0u;
-        a[1] = a[3] = 0u;
-        b[0] = *reinterpret_cast<const uint32_t*>(wr + (k0 + 2 * t) * 2);
-        b[1] = *reinterpret_cast<const uint32_t*>(wr + (k0 + 8 + 2 * t) * 2);
-        mma_bf16(d, a, b);
+    for (int kb = warp * KW; kb < warp * KW + KW; kb += 32) {
+        const uint4 w = *reinterpret_cast<const uint4*>(wr + kb + 8 * t);
+        const uint4 x = tok ? *reinterpret_cast<const uint4*>(xr + kb + 8 * t) : make_uint4(0, 0, 0, 0);
+        uint32_t aa[4] = {x.x, 0u, x.y, 0u}, bb[2] = {w.x, w.y};
+        mma_bf16(d, aa, bb);
+        uint32_t ab[4] = {x.z, 0u, x.w, 0u}, bc[2] = {w.z, w.w};
+        mma_bf16(d, ab, bc);
     }
     if (tok) {                                                       // d[0], d[1] = D[token g][rows 2t, 2t+1]
-        part[(warp * BT + g) * 8 + 2 * t] = d[0];
-        part[(warp * BT + g) * 8 + 2 * t + 1] = d[1];
+        if (2 * t < n) atomicAdd(acc + (2 * t) * BT + g, d[0]);
+        if (2 * t + 1 < n) atomicAdd(acc + (2 * t + 1) * BT + g, d[1]);
     }
-    __syncthreads();
-    if (threadIdx.x < BT * 8) {
-        float acc = 0.f;
-#pragma unroll
-        for (int w = 0; w < WARPS; ++w) acc += part[w * BT * 8 + threadIdx.x];
-        res[threadIdx.x] = acc;
-    }
-    __syncthreads();
 }
 
 // One warp: a bf16 row of N elements in shared memory dotted with BT bf16 rows (stride xs_stride) in shared memory.
@@ -526,23 +511,28 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 }
             }
             __syncthreads();
-            if constexpr (tma && MEGA_MMA) {                                     // 8 padded rows a stage, on the tensor cores
-                constexpr int SLOT = H * 2 + 16, RPS = STAGE / SLOT < 8 ? STAGE / SLOT : 8;
-                float* part = reinterpret_cast<float*>(smem + 16384);
-                float* res = part + WARPS * BT * 8;
+            if constexpr (tma && MEGA_MMA) {                           // 8 rows a stage, on the tensor cores
+                constexpr int RPS = STAGE / (H * 2);
+                float* acc = reinterpret_cast<float*>(smem + 16384);    // the block's rows x BT
                 int lo, hi;
                 block_slice(QKV, lo, hi);
+                for (int i = tid; i < (hi - lo) * BT; i += THREADS) acc[i] = 0.f;
+                __syncthreads();
                 ring_run((hi - lo + RPS - 1) / RPS, bars, ring, ph,
                     [&](int st, unsigned char* dst, unsigned long long* bar) {
-                        const int r0 = lo + st * RPS;
-                        bulk_rows(dst, lw.wqkv + (size_t)r0 * H, min(RPS, hi - r0), H * 2, SLOT, bar);
+                        const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
+                        mbar_expect(bar, n * H * 2);
+                        bulk_load(dst, lw.wqkv + (size_t)r0 * H, n * H * 2, bar);
                     },
                     [&](int st, unsigned char* src) {
-                        const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
-                        mma_rows<H, BT>(src, n, SLOT, xn, part, res);
-                        if (tid < n * B) { const int b = tid / n, r = tid % n; a.sc.qkv[b * QKV + r0 + r] = f2bf(res[b * 8 + r]); }
+                        mma_acc<H, BT>(reinterpret_cast<const bf16*>(src), min(RPS, hi - lo - st * RPS), xn,
+                                       acc + st * RPS * BT);
                     }, primed1);
                 primed1 = false;
+                for (int i = tid; i < (hi - lo) * B; i += THREADS) {
+                    const int r = i / B, b = i % B;
+                    a.sc.qkv[b * QKV + lo + r] = f2bf(acc[r * BT + b]);
+                }
             } else if (tma) {                                          // 8 rows a stage, one per warp
                 constexpr int RPS = STAGE / (H * 2);
                 int lo, hi;
@@ -772,16 +762,11 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         // o_proj's first stages, issued now when the attention phase left the ring untouched (MEGA_PRIME, chunk <= 64)
         int lo4 = 0, hi4 = 0;
         bool primed4 = false;
-        constexpr int SLOT4 = MEGA_MMA ? NQ * D * 2 + 16 : NQ * D * 2;
-        constexpr int RPS4 = STAGE / SLOT4 < 8 ? STAGE / SLOT4 : 8;
+        constexpr int RPS4 = STAGE / (NQ * D * 2) < 8 ? STAGE / (NQ * D * 2) : 8;
         auto issue4 = [&](int st, unsigned char* dst, unsigned long long* bar) {
             const int r0 = lo4 + st * RPS4, n = min(RPS4, hi4 - r0);
-            if constexpr (MEGA_MMA) {
-                bulk_rows(dst, lw.wo + (size_t)r0 * (NQ * D), n, NQ * D * 2, SLOT4, bar);
-            } else {
-                mbar_expect(bar, n * NQ * D * 2);
-                bulk_load(dst, lw.wo + (size_t)r0 * (NQ * D), n * NQ * D * 2, bar);
-            }
+            mbar_expect(bar, n * NQ * D * 2);
+            bulk_load(dst, lw.wo + (size_t)r0 * (NQ * D), n * NQ * D * 2, bar);
         };
         if constexpr (tma && PRIME_P4) {
             constexpr int RPS = RPS4;
@@ -829,17 +814,21 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 reinterpret_cast<uint4*>(xs)[i] = (i < B * NQ * D / 8) ? reinterpret_cast<const uint4*>(a.sc.attn)[i] : make_uint4(0, 0, 0, 0);
             __syncthreads();
             float out[R4][BT];
-            if constexpr (tma && MEGA_MMA) {                                     // padded rows a stage, on the tensor cores
-                float* part = reinterpret_cast<float*>(smem + 16384);   // past xs (16 KB at batch 2)
-                float* res = part + WARPS * BT * 8;
+            if constexpr (tma && MEGA_MMA) {                           // on the tensor cores
+                float* acc = reinterpret_cast<float*>(smem + 16384);    // past xs (16 KB at batch 2): rows x BT
                 if (!primed4) block_slice(H, lo4, hi4);
                 const int lo = lo4, hi = hi4;
+                for (int i = tid; i < (hi - lo) * BT; i += THREADS) acc[i] = 0.f;
+                __syncthreads();
                 ring_run((hi - lo + RPS4 - 1) / RPS4, bars, ring, ph, issue4,
                     [&](int st, unsigned char* src) {
-                        const int r0 = lo + st * RPS4, n = min(RPS4, hi - r0);
-                        mma_rows<NQ * D, BT>(src, n, SLOT4, xs, part, res);
-                        if (tid < n * B) { const int b = tid / n, r = tid % n; a.sc.o[b * H + r0 + r] = f2bf(res[b * 8 + r]); }
+                        mma_acc<NQ * D, BT>(reinterpret_cast<const bf16*>(src), min(RPS4, hi - lo - st * RPS4), xs,
+                                            acc + st * RPS4 * BT);
                     }, primed4);
+                for (int i = tid; i < (hi - lo) * B; i += THREADS) {
+                    const int r = i / B, b = i % B;
+                    a.sc.o[b * H + lo + r] = f2bf(acc[r * BT + b]);
+                }
             } else if (tma) {                                          // 4 rows of 8 KB a stage, two warps a row
                 constexpr int RPS = RPS4;
                 float* part = reinterpret_cast<float*>(smem + 16384);   // [WARPS][BT], past xs (16 KB at batch 2)
@@ -1096,20 +1085,12 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 block_slice(QKV, lo, hi);
                 const bf16* wq = a.layers[L + 1].wqkv;
                 __syncthreads();                                      // down's last stage consumed by every warp
-                if constexpr (MEGA_MMA) {                             // the same padded slots P1's consume reads
-                    constexpr int SLOT = H * 2 + 16, RPS = STAGE / SLOT < 8 ? STAGE / SLOT : 8;
-                    ring_prime((hi - lo + RPS - 1) / RPS, bars, ring, [&](int st, unsigned char* dst, unsigned long long* bar) {
-                        const int r0 = lo + st * RPS;
-                        bulk_rows(dst, wq + (size_t)r0 * H, min(RPS, hi - r0), H * 2, SLOT, bar);
-                    });
-                } else {
-                    constexpr int RPS = STAGE / (H * 2);
-                    ring_prime((hi - lo + RPS - 1) / RPS, bars, ring, [&](int st, unsigned char* dst, unsigned long long* bar) {
-                        const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
-                        mbar_expect(bar, n * H * 2);
-                        bulk_load(dst, wq + (size_t)r0 * H, n * H * 2, bar);
-                    });
-                }
+                constexpr int RPS = STAGE / (H * 2);
+                ring_prime((hi - lo + RPS - 1) / RPS, bars, ring, [&](int st, unsigned char* dst, unsigned long long* bar) {
+                    const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
+                    mbar_expect(bar, n * H * 2);
+                    bulk_load(dst, wq + (size_t)r0 * H, n * H * 2, bar);
+                });
                 primed1 = true;
             }
         }
@@ -1135,28 +1116,29 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
 #pragma unroll
         for (int b = 0; b < BT; ++b) best[b] = 0ull;
         if constexpr (tma && MEGA_MMA) {
-            constexpr int SLOT = H * 2 + 16, RPS = STAGE / SLOT < 8 ? STAGE / SLOT : 8;
-            float* part = reinterpret_cast<float*>(smem + 16384);
-            float* res = part + WARPS * BT * 8;
+            constexpr int RPS = STAGE / (H * 2);
+            float* acc = reinterpret_cast<float*>(smem + 16384);        // the block's rows x BT (<= 1151 x 2 at 132 SMs)
             int lo, hi;
             block_slice(a.V, lo, hi);
+            for (int i = tid; i < (hi - lo) * BT; i += THREADS) acc[i] = 0.f;
+            __syncthreads();
             ring_run((hi - lo + RPS - 1) / RPS, bars, ring, ph,
                 [&](int st, unsigned char* dst, unsigned long long* bar) {
-                    const int r0 = lo + st * RPS;
-                    bulk_rows(dst, a.lm_head + (size_t)r0 * H, min(RPS, hi - r0), H * 2, SLOT, bar);
+                    const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
+                    mbar_expect(bar, n * H * 2);
+                    bulk_load(dst, a.lm_head + (size_t)r0 * H, n * H * 2, bar);
                 },
                 [&](int st, unsigned char* src) {
-                    const int r0 = lo + st * RPS, n = min(RPS, hi - r0);
-                    mma_rows<H, BT>(src, n, SLOT, xn, part, res);
-                    if (tid < n * B) {
-                        const int b = tid / n, r = r0 + tid % n;
-                        const bf16 v = f2bf(res[b * 8 + tid % n]);
-                        a.logits[(size_t)b * a.V + r] = v;
-                        const unsigned short bits = __bfloat16_as_ushort(v);
-                        const unsigned int ordered = (bits & 0x8000u) ? (~bits & 0xFFFFu) : (bits | 0x8000u);
-                        best[b] = max(best[b], ((unsigned long long)ordered << 32) | (0xFFFFFFFFu - (unsigned)r));
-                    }
+                    mma_acc<H, BT>(reinterpret_cast<const bf16*>(src), min(RPS, hi - lo - st * RPS), xn, acc + st * RPS * BT);
                 });
+            for (int i = tid; i < (hi - lo) * B; i += THREADS) {
+                const int r = lo + i / B, b = i % B;
+                const bf16 v = f2bf(acc[i / B * BT + b]);
+                a.logits[(size_t)b * a.V + r] = v;
+                const unsigned short bits = __bfloat16_as_ushort(v);
+                const unsigned int ordered = (bits & 0x8000u) ? (~bits & 0xFFFFu) : (bits | 0x8000u);
+                best[b] = max(best[b], ((unsigned long long)ordered << 32) | (0xFFFFFFFFu - (unsigned)r));
+            }
         } else if (tma) {
             constexpr int RPS = STAGE / (H * 2);
             int lo, hi;
