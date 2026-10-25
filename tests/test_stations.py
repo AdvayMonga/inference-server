@@ -1,8 +1,9 @@
-"""The decode stations (models/stations.py) on CPU, the Triton kernels replaced by torch versions of the same math:
-the station list's reads and writes chain, the stations compute the layer's decode forward, override resolution (a
-no-op override changes nothing; bad ones are refused), and CAPTURE_REGION (models/region_capture.py): each sample, with
-the layer's weights, replays through its stretch's functional stations to exactly its writes. Bit-identity with the
-real kernels is a GPU check."""
+"""The decode stations (models/stations.py) on CPU, the Triton kernels replaced by the package's torch versions of the
+same math: the station list's reads and writes chain, the stations compute the layer's decode forward, override
+resolution (a no-op override changes nothing; bad ones are refused), `reference()` (pure, the real routing layout,
+close to the stations in fp32), and CAPTURE_REGION (models/region_capture.py): each sample, with the layer's weights,
+replays through its stretch's functional stations to exactly its writes. Bit-identity with the real kernels is a GPU
+check."""
 
 import json
 import sys
@@ -10,70 +11,24 @@ import types
 
 import pytest
 import torch
-import torch.nn.functional as F
 
 from inference_server.models import fused, region_capture, stations
-from inference_server.models.common import apply_rotary
 from inference_server.models.paged_kv_cache import step_inputs
 from inference_server.models.qwen3_moe import Qwen3MoeForCausalLM
 
 BS = 4
 
 
-def _rmsnorm(x, w, eps):
-    x32 = x.float()
-    return w * (x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps)).to(x.dtype)
-
-
-def _route(logits, E, k, renorm, block_m):
-    w, e = torch.topk(F.softmax(logits, dim=-1, dtype=torch.float), k, dim=-1)
-    if renorm:
-        w = w / w.sum(dim=-1, keepdim=True)
-    sorted_e, order = torch.sort(e.view(-1), stable=True)
-    M = e.numel()
-    return order.int(), sorted_e.int(), (torch.arange(M) // k).int(), w.view(-1)
-
-
-def _moe_gemm(a, tok, w, sorted_ids, expert_ids, M, block_m, w_scale=None, a_scale=None):
-    rows = a[tok[sorted_ids].long()].float()
-    c = torch.empty(M, w.shape[1], dtype=torch.bfloat16)
-    c[sorted_ids.long()] = torch.einsum("mk,mnk->mn", rows, w[expert_ids.long()].float()).to(torch.bfloat16)
-    return c
-
-
-def _moe_gemm_scatter(a, w, sorted_ids, expert_ids, M, tok, pair_w, out, block_m, w_scale=None, a_scale=None):
-    s = sorted_ids.long()
-    y = torch.einsum("mk,mnk->mn", a[s].float(), w[expert_ids.long()].float())
-    out.index_add_(0, tok[s].long(), y * pair_w[s, None])
-
-
-def _paged_decode_attention(q, k_pool, v_pool, bt, sl, scale):
-    out = []
-    for r in range(q.shape[0]):
-        L = int(sl[r])
-        blocks = bt[r, :(L + BS - 1) // BS].long()
-        k = k_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L]          # [Hkv, L, D]
-        v = v_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L]
-        rep = q.shape[1] // k.shape[0]
-        out.append(F.scaled_dot_product_attention(q[r][:, None], k.repeat_interleave(rep, 0),
-                                                  v.repeat_interleave(rep, 0), scale=scale)[:, 0])
-    return torch.stack(out)
-
-
 @pytest.fixture
 def torch_kernels(monkeypatch):
-    """The fused and Triton kernels the stations call, as torch."""
-    monkeypatch.setattr(fused, "rmsnorm", _rmsnorm)
-    monkeypatch.setattr(fused, "add_rmsnorm", lambda h, a, w, eps: (h + a, _rmsnorm(h + a, w, eps)))
-    monkeypatch.setattr(fused, "rmsnorm_rope",
-                        lambda x, w, cos, sin, eps: apply_rotary(_rmsnorm(x, w, eps), cos, sin, unsqueeze_dim=2))
-    monkeypatch.setattr(fused, "silu_mul", lambda x: F.silu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1])
-    monkeypatch.setattr(fused, "add_cast", lambda h, y: (h.float() + y.view(h.shape)).to(h.dtype))
-    mk = types.SimpleNamespace(route_fused=_route, route_multi=_route, moe_gemm=_moe_gemm,
-                               moe_gemm_scatter=_moe_gemm_scatter)
+    """The fused and Triton kernels the stations call, as the package's torch versions (stations._ref_*)."""
+    for name in ("rmsnorm", "add_rmsnorm", "rmsnorm_rope", "silu_mul", "add_cast"):
+        monkeypatch.setattr(fused, name, getattr(stations, f"_ref_{name}"))
+    mk = types.SimpleNamespace(route_fused=stations._ref_route, route_multi=stations._ref_route,
+                               moe_gemm=stations._ref_moe_gemm, moe_gemm_scatter=stations._ref_moe_gemm_scatter)
     monkeypatch.setitem(sys.modules, "inference_server.models.moe_kernel", mk)
     monkeypatch.setattr(sys.modules["inference_server.models"], "moe_kernel", mk, raising=False)
-    pak = types.SimpleNamespace(paged_decode_attention=_paged_decode_attention)
+    pak = types.SimpleNamespace(paged_decode_attention=stations._ref_paged_decode_attention)
     monkeypatch.setitem(sys.modules, "inference_server.models.paged_attention_kernel", pak)
 
 
@@ -285,3 +240,67 @@ def test_off_by_default(monkeypatch):
     monkeypatch.delenv("CAPTURE_REGION", raising=False)
     region_capture.active.cache_clear()
     assert region_capture.active() is None
+
+
+def _layer_ctx(model, h, cos, sin, ctx, i=0):
+    return {**ctx.step_inputs(), "cos": cos, "sin": sin, "cfg": stations.layer_config(model),
+            **stations.layer_weights(model, i), "h": h, "k_cache": ctx.pools[i].k, "v_cache": ctx.pools[i].v}
+
+
+def _run(stretch, c):
+    c = dict(c)
+    for s in stretch:
+        c.update(s.fn(c))
+    return c
+
+
+def test_reference_has_the_stations_names_reads_and_writes():
+    assert [(s.name, s.reads, s.writes) for s in stations.reference()] == \
+        [(s.name, s.reads, s.writes) for s in stations.DECODE]
+
+
+def test_reference_in_fp32_is_close_and_pure(model, torch_kernels):
+    """A layer's reference on fp32 copies of its inputs is close to the stations in bf16, and leaves its inputs as
+    they were (the K/V pool included)."""
+    h, cos, sin, ctx, _, _ = _decode_case(model)
+    c = _layer_ctx(model, h, cos, sin, ctx)
+    with torch.no_grad():
+        want = _run(stations.functional(), c)
+        up = {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in c.items()}
+        before = {k: v.clone() for k, v in up.items() if isinstance(v, torch.Tensor)}
+        got = _run(stations.reference(), up)
+    assert all(torch.equal(up[k], v) for k, v in before.items())
+    for n in stations.LIVE:
+        assert got[n].dtype == torch.float32
+        torch.testing.assert_close(got[n], want[n].float(), atol=3e-2, rtol=3e-2)
+
+
+def test_reference_route_layout():
+    """route_fused's layout: each block holds pairs of its expert or the padding M; every pair once; blocks past the
+    end carry expert E."""
+    torch.manual_seed(0)
+    T, E, k, bm = 5, 8, 2, 4
+    sorted_ids, expert_ids, tok, pair_w = stations._ref_route(torch.randn(T, E), E, k, True, bm)
+    M = T * k
+    assert sorted_ids.numel() == expert_ids.numel() * bm == (M + E * (bm - 1)) // bm * bm
+    real = sorted_ids[sorted_ids < M].long()
+    assert sorted(real.tolist()) == list(range(M))
+    for b, e in enumerate(expert_ids.tolist()):
+        rows = sorted_ids[b * bm:(b + 1) * bm]
+        assert e == E and (rows == M).all() or e < E
+    assert torch.equal(tok, (torch.arange(M) // k).int()) and torch.allclose(pair_w.view(T, k).sum(1), torch.ones(T))
+
+
+def test_reference_gemm_takes_fp8_weights():
+    """fp8 weights with their per-channel scales give the dequantized product."""
+    torch.manual_seed(0)
+    E, N, K, T, k = 4, 6, 8, 3, 2
+    w = torch.randn(E, N, K)
+    scale = w.abs().amax(-1) / 448
+    w8 = (w / scale[..., None]).to(torch.float8_e4m3fn)
+    a = torch.randn(T, K)
+    sorted_ids, expert_ids, tok, _ = stations._ref_route(torch.randn(T, E), E, k, True, 4)
+    got = stations._ref_moe_gemm(a, tok, w8, sorted_ids, expert_ids, T * k, w_scale=scale)
+    deq = w8.float() * scale[..., None]
+    plain = stations._ref_moe_gemm(a, tok, deq, sorted_ids, expert_ids, T * k)
+    assert torch.equal(got, plain)

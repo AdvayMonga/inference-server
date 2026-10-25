@@ -290,3 +290,161 @@ def functional(stations: tuple[Station, ...] = DECODE) -> tuple[Station, ...]:
             return s
         return replace(s, fn=lambda c: s.fn({**c, **{n: c[n].clone() for n in inplace}}))
     return tuple(pure(s) for s in stations)
+
+
+# --- the stations in torch, for the lab's reference (`reference`) and the CPU tests ---
+
+
+def _ref_rmsnorm(x, w, eps):
+    """Qwen3RMSNorm: normalised in fp32, cast back, then scaled."""
+    x32 = x.float()
+    return w * (x32 * torch.rsqrt(x32.pow(2).mean(-1, keepdim=True) + eps)).to(x.dtype)
+
+
+def _ref_rmsnorm_rope(x, w, cos, sin, eps):
+    from inference_server.models.common import apply_rotary
+    return apply_rotary(_ref_rmsnorm(x, w, eps), cos, sin, unsqueeze_dim=2)
+
+
+def _ref_add_rmsnorm(h, a, w, eps):
+    s = h + a
+    return s, _ref_rmsnorm(s, w, eps)
+
+
+def _ref_silu_mul(x):
+    gate, up = x.chunk(2, dim=-1)
+    return F.silu(gate) * up
+
+
+def _ref_add_cast(h, y):
+    return (h.float() + y.reshape(h.shape)).to(h.dtype)
+
+
+def _ref_paged_decode_attention(q, k_pool, v_pool, block_tables, seq_lens, scale):
+    """q [N, Hq, D] over each row's first seq_lens[r] cached positions -> [N, Hq, D]."""
+    bs, out = k_pool.shape[2], []
+    for r in range(q.shape[0]):
+        L = int(seq_lens[r])
+        blocks = block_tables[r, :(L + bs - 1) // bs].long()
+        k = k_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L].to(q.dtype)         # [Hkv, L, D]
+        v = v_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L].to(q.dtype)
+        rep = q.shape[1] // k.shape[0]
+        out.append(F.scaled_dot_product_attention(q[r][:, None], k.repeat_interleave(rep, 0),
+                                                  v.repeat_interleave(rep, 0), scale=scale)[:, 0])
+    return torch.stack(out)
+
+
+def _ref_route(logits, num_experts, top_k, renorm, block_m):
+    """moe_kernel.route_fused's outputs and layout: (sorted_ids: pair ids grouped by expert, each expert's run padded
+    to `block_m` with M; expert_ids: each block's expert, num_experts past the end; tok, pair_w by pair id)."""
+    w, e = torch.topk(F.softmax(logits, dim=-1, dtype=torch.float), top_k, dim=-1)
+    if renorm:
+        w = w / w.sum(dim=-1, keepdim=True)
+    M, dev = e.numel(), logits.device
+    sorted_e, order = torch.sort(e.view(-1), stable=True)
+    counts = torch.bincount(sorted_e, minlength=num_experts)
+    padded = (counts + block_m - 1) // block_m * block_m
+    pstart, starts = torch.cumsum(padded, 0) - padded, torch.cumsum(counts, 0) - counts
+    n_blocks = (M + num_experts * (block_m - 1)) // block_m
+    sorted_ids = torch.full((n_blocks * block_m,), M, dtype=torch.int32, device=dev)
+    sorted_ids[pstart[sorted_e] + torch.arange(M, device=dev) - starts[sorted_e]] = order.to(torch.int32)
+    block_starts = torch.arange(n_blocks, device=dev) * block_m
+    expert_ids = torch.searchsorted(pstart, block_starts, right=True) - 1
+    expert_ids = torch.where(block_starts < padded.sum(), expert_ids, num_experts).to(torch.int32)
+    return sorted_ids, expert_ids, (torch.arange(M, device=dev) // top_k).to(torch.int32), w.reshape(-1).float()
+
+
+def _ref_expert_rows(a, tok, w, sorted_ids, expert_ids, M, w_scale, a_scale):
+    """Per expert used: (its pair ids, their rows of `a` times the dequantized weights' transpose, in fp32 or a's
+    dtype if wider)."""
+    assert a_scale is None, "the reference takes activations unquantized"
+    bm = sorted_ids.numel() // expert_ids.numel()
+    e = expert_ids.long().repeat_interleave(bm)
+    p = sorted_ids.long()
+    keep = (p < M) & (e < w.shape[0])
+    p, e = p[keep], e[keep]
+    dt = torch.promote_types(a.dtype, torch.float32)
+    rows = (a[tok[p].long()] if tok is not None else a[p]).to(dt)
+    for x in e.unique().tolist():
+        m = e == x
+        wx = w[x].to(dt) if w_scale is None else w[x].to(dt) * w_scale[x].to(dt)[:, None]
+        yield p[m], rows[m] @ wx.T
+
+
+def _ref_moe_gemm(a, tok, w, sorted_ids, expert_ids, M, block_m=16, w_scale=None, a_scale=None):
+    """C [M, N]: each pair's row times its expert's weights, by pair id (moe_kernel.moe_gemm)."""
+    c = torch.zeros(M, w.shape[1], dtype=a.dtype, device=a.device)
+    for p, y in _ref_expert_rows(a, tok, w, sorted_ids, expert_ids, M, w_scale, a_scale):
+        c[p] = y.to(c.dtype)
+    return c
+
+
+def _ref_moe_gemm_scatter(a, w, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=16, w_scale=None,
+                          a_scale=None):
+    """out[tok[i]] += pair_w[i] * (a[i] @ w[expert(i)].T) (moe_kernel.moe_gemm_scatter)."""
+    for p, y in _ref_expert_rows(a, None, w, sorted_ids, expert_ids, M, w_scale, a_scale):
+        out.index_add_(0, tok[p].long(), (y * pair_w[p, None]).to(out.dtype))
+
+
+def _r_input_norm(c):
+    return {"x": _ref_rmsnorm(c["h"], c["w.input_norm"], c["cfg"].eps)}
+
+
+def _r_qk_norm_rope(c):
+    cfg, q, k = c["cfg"], c["q"], c["k"]
+    B, S = q.shape[:2]
+    q = _ref_rmsnorm_rope(q.view(B, S, cfg.num_q_heads, cfg.head_dim), c["w.q_norm"], c["cos"], c["sin"], cfg.eps)
+    k = _ref_rmsnorm_rope(k.view(B, S, cfg.num_kv_heads, cfg.head_dim), c["w.k_norm"], c["cos"], c["sin"], cfg.eps)
+    return {"q": q.transpose(1, 2), "k": k.transpose(1, 2)}
+
+
+def _r_attention(c):
+    return {"attn": _ref_paged_decode_attention(c["q"].squeeze(2), c["k_cache"], c["v_cache"],
+                                                c["attn_block_tables"], c["attn_seq_lens"], c["cfg"].scale)}
+
+
+def _r_add_norm(c):
+    h, n = _ref_add_rmsnorm(c["h"], c["a"], c["w.post_norm"], c["cfg"].eps)
+    return {"h": h, "n": n}
+
+
+def _r_route(c):
+    cfg, logits = c["cfg"], c["logits"]
+    sorted_ids, expert_ids, tok, pair_w = _ref_route(logits, cfg.num_experts, cfg.top_k, cfg.norm_topk_prob,
+                                                     qwen3_moe.moe_block_m(logits.shape[0] * cfg.top_k))
+    return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w}
+
+
+def _r_gate_up(c):
+    n = c["n"]
+    return {"hgu": _ref_moe_gemm(n.reshape(-1, n.shape[-1]), c["tok"], c["w.gate_up"], c["sorted_ids"],
+                                 c["expert_ids"], c["tok"].numel(), w_scale=c["w.gate_up_scale"])}
+
+
+def _r_silu_mul(c):
+    return {"act": _ref_silu_mul(c["hgu"])}
+
+
+def _r_down(c):
+    act, M = c["act"], c["tok"].numel()
+    out = torch.zeros(M // c["cfg"].top_k, c["w.down"].shape[1], dtype=torch.promote_types(act.dtype, torch.float32),
+                      device=act.device)
+    _ref_moe_gemm_scatter(act, c["w.down"], c["sorted_ids"], c["expert_ids"], M, c["tok"], c["pair_w"], out,
+                          w_scale=c["w.down_scale"])
+    return {"y": out}
+
+
+def _r_residual(c):
+    return {"h": _ref_add_cast(c["h"], c["y"])}
+
+
+_REFERENCE = {"input_norm": _r_input_norm, "qk_norm_rope": _r_qk_norm_rope, "attention": _r_attention,
+              "add_norm": _r_add_norm, "route": _r_route, "gate_up": _r_gate_up, "silu_mul": _r_silu_mul,
+              "down": _r_down, "residual": _r_residual}
+
+
+def reference() -> tuple[Station, ...]:
+    """DECODE in torch, for the lab's reference run: the same names, reads and writes, no fused or Triton kernel, in
+    the inputs' dtype (fp32 when the lab upcasts them), pure (the pool copied before its write). fp8 weights are
+    dequantized by their scales; activations are never quantized."""
+    return functional(tuple(replace(s, fn=_REFERENCE.get(s.name, s.fn)) for s in DECODE))

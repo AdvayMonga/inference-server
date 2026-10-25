@@ -293,12 +293,56 @@ def decode_stations_identical() -> tuple[bool, str]:
     return not failures, "within the layer forward's own repeats everywhere" if not failures else "; ".join(failures)
 
 
+def stations_reference_close() -> tuple[bool, str]:
+    """stations.reference() on fp32 copies against the stations on the real kernels (bf16), one layer at
+    Qwen3-30B-A3B's shapes, fp8 and bf16 experts, batch 1-1,024 (both routers, bf16 and fp8 activations): the relative
+    error of the residual out and the K/V pool, under 2%."""
+    import types
+
+    import torch
+
+    from inference_server.backends.custom_torch_backend import _GraphCtx
+    from inference_server.models import stations
+
+    bs, worst, rows = 16, 0.0, []
+    for fp8 in (True, False):
+        model = _stations_model(fp8)
+        attn = model.model.layers[0].self_attn
+        for B in (1, 8, 64, 256, 1024):
+            g = torch.Generator(device="cuda").manual_seed(B)
+            cols = (256 + 1 + bs - 1) // bs
+            seq_lens = torch.randint(1, 257, (B,), device="cuda", generator=g)
+            bt = torch.randperm(B * cols, device="cuda", generator=g).view(B, cols)
+            k, v = (torch.randn(B * cols, attn.num_kv_heads, bs, attn.head_dim, device="cuda", dtype=torch.bfloat16,
+                                generator=g) for _ in range(2))
+            ctx = _GraphCtx([types.SimpleNamespace(k=k, v=v)], seq_lens, bt, bs)
+            cos, sin = (t.to(torch.bfloat16) for t in model.model.rope(seq_lens.view(B, 1)))
+            h = torch.randn(B, 1, 2048, device="cuda", dtype=torch.bfloat16, generator=g)
+            c = {**ctx.step_inputs(), "cos": cos, "sin": sin, "cfg": stations.layer_config(model),
+                 **stations.layer_weights(model, 0), "h": h, "k_cache": k, "v_cache": v}
+            with torch.no_grad():
+                real, ref = dict(c), {n: x.float() if isinstance(x, torch.Tensor) and x.is_floating_point() else x
+                                      for n, x in c.items()}
+                for s in stations.functional():
+                    real.update(s.fn(real))
+                for s in stations.reference():
+                    ref.update(s.fn(ref))
+            errs = {n: ((ref[n] - real[n].float()).norm() / ref[n].norm()).item() for n in stations.LIVE}
+            worst = max(worst, *errs.values())
+            rows.append(f"fp8={fp8} B={B}: " + ", ".join(f"{n} {e:.2e}" for n, e in errs.items()))
+        del model
+        torch.cuda.empty_cache()
+    print("\n".join(rows))
+    return worst < 2e-2, f"worst relative error {worst:.2e}"
+
+
 # Name → check. The gate runs all of them; each modal script runs its own subset.
 CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_parity": paged_decode_parity,
     "paged_decode_no_recompile": paged_decode_no_recompile,
     "paged_prefill_parity": paged_prefill_parity,
     "decode_stations_identical": decode_stations_identical,
+    "stations_reference_close": stations_reference_close,
 }
 
 
