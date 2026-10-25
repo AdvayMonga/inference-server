@@ -21,9 +21,12 @@ FP8 = os.environ.get("MEGAKERNEL_FP8", "0") == "1"      # measured 2026-10-18: n
 TMA = os.environ.get("MEGAKERNEL_TMA", "1") == "1"      # weights through a shared-memory ring (batch <= 2): 4.48 -> 3.71 ms a step
 BPS = int(os.environ.get("MEGAKERNEL_BPS", "1"))        # blocks per SM where the shared memory allows (never with TMA)
 NST = int(os.environ.get("MEGAKERNEL_NST", "3"))        # ring stages (3 x 32 KB, 4 x 24 KB, 6 x 16 KB, 12 x 8 KB)
-CHUNK = int(os.environ.get("MEGAKERNEL_CHUNK", "256"))  # attention positions per item
-PRIME = os.environ.get("MEGAKERNEL_PRIME", "0") == "1"  # a phase's first ring stages issued before its barrier
-THREADS = int(os.environ.get("MEGAKERNEL_THREADS", "256"))   # 256 or 512 threads a block (8 or 16 warps)
+CHUNK = int(os.environ.get("MEGAKERNEL_CHUNK", "128"))  # attention positions per item (256 -> 128, 2026-10-25)
+PRIME = os.environ.get("MEGAKERNEL_PRIME", "1") == "1"  # a phase's first ring stages issued before its barrier
+# Defaults from the 2026-10-25 lab A/B (researcher-20261025-151422-487eb4 vs the control researcher-20261025-144137-53382d):
+# 16 warps, pre-issued stages and 128-position chunks cut the B=1 step 3.67 -> 3.58 ms (ctx 37), 4.22 -> 3.90 (ctx 2000)
+# and single_stream TPOT p50 4.33 -> 4.10 ms.
+THREADS = int(os.environ.get("MEGAKERNEL_THREADS", "512"))   # 256 or 512 threads a block (8 or 16 warps)
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
