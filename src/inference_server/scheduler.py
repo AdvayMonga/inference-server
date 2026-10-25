@@ -34,9 +34,10 @@ OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 # every GC_YOUNG_STEPS steps, a full one, with the survivors frozen after it, every GC_FREEZE_STEPS. A full collection
 # walks every unfrozen live object and took 0.2-1.3 s each 5,000 steps under long answers (H200, 2026-10-20), a stall
 # in every 60 s window; young collections free the step loop's garbage in a few ms.
-# Speculative decoding by prompt lookup (SPEC_DECODE_K drafts a step, 0 = off; up to SPEC_DECODE_ROWS running rows,
-# greedy rows only, so the output is the plain decode's): the drafts are the tokens that followed the last occurrence
-# of the context's last 3 (else 2) tokens, verified in one forward of 1 + K rows; the longest matching prefix is kept.
+# Speculative decoding (SPEC_DECODE_K drafts a step, 0 = off; up to SPEC_DECODE_ROWS running rows, greedy rows only,
+# so the output is the plain decode's): the drafts come from the backend's draft model when it has one
+# (SPEC_DRAFT_MODEL, drafter.py), else by prompt lookup (the tokens that followed the last occurrence of the context's
+# last 3, else 2, tokens); verified in one forward of 1 + K rows, the longest matching prefix is kept.
 SPEC_K = int(os.environ.get("SPEC_DECODE_K", "0"))
 SPEC_ROWS = int(os.environ.get("SPEC_DECODE_ROWS", "1"))
 GC_YOUNG_STEPS = int(os.environ.get("GC_YOUNG_STEPS", "200"))
@@ -1072,8 +1073,12 @@ class ContinuousBatchScheduler(SchedulerInterface):
         drafts the model agrees with (plus the token after it), stream them, finish on EOS or max_tokens."""
         for i, row in enumerate(list(self._active)):
             req = row.request
+            ctx = req.token_ids + req.generated               # current_token is generated[-1]: it has been streamed
             if req.drafter is None:
-                req.drafter = NgramDrafter(req.prefill_ids + [row.current_token])
+                make = getattr(self.backend, "new_drafter", None)
+                req.drafter = (make(ctx) if make else None) or NgramDrafter(ctx)
+            elif len(req.drafter.ids) < len(ctx) and req.drafter.ids == ctx[:len(req.drafter.ids)]:
+                req.drafter.observe(ctx[len(req.drafter.ids):])   # tokens decoded while speculation was off
             drafts = req.drafter.propose(SPEC_K)
             tokens = [row.current_token] + drafts
             out = self.backend.verify_step(self._batched_kv, i, tokens)

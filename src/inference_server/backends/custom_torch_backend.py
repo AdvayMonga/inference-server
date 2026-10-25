@@ -411,6 +411,16 @@ class CustomTorchBackend(InferenceBackend):
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
 
+        # A draft model for speculative decoding (SPEC_DRAFT_MODEL, drafter.py), loaded before the pools are sized: its
+        # weights and its static cache (max_len = the context window) come out of the KV budget.
+        draft_name = os.environ.get("SPEC_DRAFT_MODEL", "")
+        self._draft = None
+        if draft_name:
+            from inference_server.config import settings
+            from inference_server.drafter import DraftModel
+            self._draft = DraftModel.load(draft_name, self.device, settings.context_window)
+            logger.info("draft model %s loaded (static cache %d positions)", draft_name, settings.context_window)
+
         # The KV pools' element type: KV_CACHE_DTYPE=fp8 (CUDA) stores K/V as float8_e4m3fn with a unit scale, as
         # vLLM's uncalibrated fp8 cache does: twice the tokens per GB (96 KB a token in bf16 for this model) and half
         # the bytes each attention read streams; readers widen to bf16 before any product. Default bf16.
@@ -1109,6 +1119,13 @@ class CustomTorchBackend(InferenceBackend):
                                          SimpleNamespace(n_rows=n, seq_lens=pos, bt=bt), self._decode_bucket(n))
             greedy = logits[:, -1].argmax(-1)
         return greedy.tolist()
+
+    def new_drafter(self, ids):
+        """A drafter for a request with context `ids` from the draft model (SPEC_DRAFT_MODEL), or None."""
+        if getattr(self, "_draft", None) is None:
+            return None
+        from inference_server.drafter import ModelDrafter
+        return ModelDrafter(self._draft, ids)
 
     def commit_verify(self, batched_kv, r: int, accepted: int) -> None:
         """Row r's length moves on by the `accepted` tokens of its last verify_step."""
