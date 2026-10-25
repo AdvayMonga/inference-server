@@ -67,8 +67,12 @@ def _moe_gemm_kernel(A, TOK, W, SCALE, A_SCALE, C, SORTED, EXPERT_IDS, M, N, K,
             a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
             w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
             if W_FP8:
-                w = w.to(tl.bfloat16)
-            acc += tl.dot(a, tl.trans(w))
+                # fp8 -> fp16 is a cheaper widening than fp8 -> bf16; the A tile goes to fp16 too and the MMA is
+                # fp16 x fp16 with fp32 accumulation.
+                w = w.to(tl.float16)
+                acc += tl.dot(a.to(tl.float16), tl.trans(w))
+            else:
+                acc += tl.dot(a, tl.trans(w))
             a_ptrs += BLOCK_K
             w_ptrs += BLOCK_K * stride_wk
     if W_FP8:
