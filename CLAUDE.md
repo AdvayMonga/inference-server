@@ -44,6 +44,9 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
+- Both routes take vLLM's benchmark fields `ignore_eos` (the row runs past its stop token to `max_tokens`,
+  `ScheduledRequest.ignore_eos`) and `skip_special_tokens` (False keeps special tokens in the text), so a load
+  client can fix each answer's length and still re-count its tokens from the text.
 - Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-2026102[45]-*` lab
   A/Bs): single_stream TPOT p99 3.68 ms, saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
   at 2,048 rows), bursty 256x at TPOT p99 19.8 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at
