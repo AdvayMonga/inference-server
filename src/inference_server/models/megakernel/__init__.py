@@ -27,6 +27,8 @@ PRIME = os.environ.get("MEGAKERNEL_PRIME", "1") == "1"  # a phase's first ring s
 # 16 warps, pre-issued stages and 128-position chunks cut the B=1 step 3.67 -> 3.58 ms (ctx 37), 4.22 -> 3.90 (ctx 2000)
 # and single_stream TPOT p50 4.33 -> 4.10 ms.
 THREADS = int(os.environ.get("MEGAKERNEL_THREADS", "512"))   # 256 or 512 threads a block (8 or 16 warps)
+RING_KB = int(os.environ.get("MEGAKERNEL_RING_KB", "96"))      # the weight ring's size (up to 192 at batch <= 2)
+NOMATH = os.environ.get("MEGAKERNEL_NOMATH", "0") == "1"       # timing only: the ring phases skip their dot products
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
@@ -40,13 +42,13 @@ def _ext(kv8: bool = False, tma: bool = False):
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_step.cu")
     bps = 1 if tma else BPS
-    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}", sources=[str(src)],
+    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}_r{RING_KB}_nm{int(NOMATH)}", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
                                    f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}",
                                    f"-DMEGA_NST={NST}", f"-DMEGA_CHUNK={CHUNK}", f"-DMEGA_PRIME={int(PRIME)}",
-                                   f"-DMEGA_THREADS={THREADS}"],
+                                   f"-DMEGA_THREADS={THREADS}", f"-DMEGA_RING_KB={RING_KB}", f"-DMEGA_NOMATH={int(NOMATH)}"],
                 verbose=False)
 
 

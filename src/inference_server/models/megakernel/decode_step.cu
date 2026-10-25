@@ -254,10 +254,19 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #ifndef MEGA_NST                                                    // stages in flight and their size: NST x STAGE = 96 KB
 #define MEGA_NST 3
 #endif
-constexpr int NST = MEGA_NST, STAGE = 98304 / NST, RING_OFF = 32768;
+// MEGA_RING_KB: the ring's size (96 KB default; up to 192 at batch <= 2, the shared memory those phases leave free).
+// MEGA_NOMATH (timing only, wrong output): the ring phases' dot products read one element instead of the row, which
+// separates the weight stream's time from the math's.
+#ifndef MEGA_RING_KB
+#define MEGA_RING_KB 96
+#endif
+#ifndef MEGA_NOMATH
+#define MEGA_NOMATH 0
+#endif
+constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
 constexpr size_t ATTN_SMEM = HDR + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + 128 * 8 * 4;
 constexpr bool PRIME_P4 = MEGA_PRIME && ATTN_SMEM <= RING_OFF;      // the attention phase leaves the ring untouched
-static_assert(98304 % NST == 0 && STAGE % 8192 == 0, "the ring is 96 KB of whole 8 KB rows");
+static_assert((MEGA_RING_KB * 1024) % NST == 0 && STAGE % 8192 == 0, "the ring is whole 8 KB rows a stage");
 
 __device__ __forceinline__ uint32_t s2u(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
 __device__ __forceinline__ void mbar_init(unsigned long long* b) {
@@ -305,6 +314,11 @@ __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsi
 // One warp: a bf16 row of N elements in shared memory dotted with BT bf16 rows (stride xs_stride) in shared memory.
 template <int N, int BT>
 __device__ __forceinline__ void smem_dot(const bf16* __restrict__ w, const bf16* __restrict__ xs, int xs_stride, float* out) {
+    if constexpr (MEGA_NOMATH) {
+#pragma unroll
+        for (int b = 0; b < BT; ++b) out[b] = bf2f(w[threadIdx.x & 31]) * bf2f(xs[b * xs_stride]);
+        return;
+    }
     const int lane = threadIdx.x & 31;
     float acc[BT];
 #pragma unroll
@@ -332,6 +346,7 @@ __device__ __forceinline__ void smem_dot(const bf16* __restrict__ w, const bf16*
 template <int N>
 __device__ __forceinline__ float smem_dot_fp8(const unsigned char* __restrict__ w, const bf16* __restrict__ x) {
     const int lane = threadIdx.x & 31;
+    if constexpr (MEGA_NOMATH) return (float)w[lane] * bf2f(x[lane]);
     float acc = 0.f;
 #pragma unroll
     for (int i = 0; i < N / 512; ++i) {
@@ -352,6 +367,7 @@ __device__ __forceinline__ float smem_dot_fp8(const unsigned char* __restrict__ 
 template <int N>
 __device__ __forceinline__ float smem_dot_fp8_8(const unsigned char* __restrict__ w, const bf16* __restrict__ x) {
     const int lane = threadIdx.x & 31;
+    if constexpr (MEGA_NOMATH) return (float)w[lane] * bf2f(x[lane]);
     float acc = 0.f;
 #pragma unroll
     for (int i = 0; i < N / 256; ++i) {
@@ -1092,7 +1108,7 @@ static size_t smem_for(int B) {
 }
 static_assert(ATTN_SMEM <= SMEM_BYTES, "attention smem");
 static_assert(HDR + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
-static_assert(RING_OFF + NST * STAGE <= SMEM_BYTES && HDR + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases");
+static_assert(RING_OFF + NST * STAGE <= 232448 && HDR + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases and the 227 KB a block may have");
 static_assert(HDR + BMAX * H * 2 + BMAX * K * 8 <= SMEM_BYTES, "P6 smem");
 static_assert(128 + NST * 8 <= HDR && WARPS * 4 <= 128, "smem header holds red[WARPS] and the mbarriers");
 
