@@ -204,11 +204,11 @@ def test_samples_replay_to_their_writes(model, torch_kernels, capture, spec):
     stretch = stations.functional()[names.index(first):names.index(last or first) + 1]
     for call in calls:
         assert set(call["reads"]) == set(stations.interface(stations.DECODE, first, last or first)[0])
-        sample = torch.load(out / "samples" / call["sample"], weights_only=False)
+        sample = torch.load(out / "samples" / call["sample"], weights_only=True)
         assert not any(n.startswith("w.") for n in sample["reads"])
         c = {**sample["reads"], **stations.layer_weights(model, call["layer"])}
         if "cfg" in c:
-            c["cfg"] = stations.LayerConfig(**c["cfg"]) if isinstance(c["cfg"], dict) else c["cfg"]
+            c["cfg"] = stations.LayerConfig(**c["cfg"])
         with torch.no_grad():
             for s in stretch:
                 c.update(s.fn(c))

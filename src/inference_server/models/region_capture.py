@@ -117,6 +117,8 @@ class Capture:
                 v = v[self._blocks]
             elif n in TABLES and self._blocks is not None:
                 v = _renumber(v, self._blocks)
+            if dataclasses.is_dataclass(v):
+                v = dataclasses.asdict(v)              # fields, so a sample loads with torch.load(weights_only=True)
             out[n] = v.detach().cpu().clone() if isinstance(v, torch.Tensor) else v
         return out
 

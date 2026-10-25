@@ -198,32 +198,43 @@ def _noop_override(first: str, last: str):
     return fn
 
 
+def _deterministic_scatter(a, w, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=16, w_scale=None, a_scale=None,
+                           tile=None):
+    """moe_gemm_scatter without atomics: each pair's row from moe_gemm, each token's top_k rows summed in a fixed order
+    (pairs are numbered token * top_k + slot)."""
+    from inference_server.models import moe_kernel
+    y = moe_kernel.moe_gemm(a, None, w, sorted_ids, expert_ids, M, block_m=block_m, split_k=1, w_scale=w_scale,
+                            a_scale=a_scale)
+    out.add_((y.float() * pair_w[:, None]).view(out.shape[0], M // out.shape[0], -1).sum(1))
+
+
 def decode_stations_identical() -> tuple[bool, str]:
     """The decode stations (models/stations.py) against the layer forward they replaced, and a no-op override of two
     stretches, at batch 1-1,024, short and long contexts, fp8 and bf16 experts, eager and as a captured CUDA graph (as
-    the backend captures it): logits and K/V pools bit-identical wherever the layer forward repeats itself bit for bit,
-    and otherwise no further from it than its own repeats (the MoE down GEMM adds each token's expert rows with fp32
-    atomics, in no fixed order); each variant's graph replay time beside."""
+    the backend captures it). Identity: every variant on a deterministic MoE down scatter (the engine's adds each
+    token's expert rows with fp32 atomics, in no fixed order, so the layer forward differs from itself), where logits
+    and K/V pools must be bit-identical, the layer forward's own repeat included. Time: each variant's graph replay on
+    the engine's own kernels."""
     import types
 
     import torch
 
     from inference_server.backends.custom_torch_backend import _GraphCtx
-    from inference_server.models import stations
+    from inference_server.models import moe_kernel, stations
 
     bs, failures, rows = 16, [], []
     old = (lambda *a: False, stations.plan)
     variants = {
-        "layers": old, "layers#2": old, "layers#3": old,
+        "layers": old, "layers#2": old,
         "stations": (stations.applies, stations.plan),
         "override": (stations.applies, lambda: stations.resolve(stations.DECODE, {
             ("input_norm", "attention"): _noop_override("input_norm", "attention"),
             ("router", "down"): _noop_override("router", "down")})),
     }
+    scatter = moe_kernel.moe_gemm_scatter
 
-    def maxdiff(a, b) -> float:
-        ts = [(a[0], b[0]), *zip(a[1], b[1]), (a[2], b[2]), *zip(a[3], b[3])]
-        return max((x.float() - y.float()).abs().max().item() for x, y in ts)
+    def same(a, b) -> bool:
+        return all(torch.equal(x, y) for x, y in [(a[0], b[0]), *zip(a[1], b[1]), (a[2], b[2]), *zip(a[3], b[3])])
     for fp8 in (True, False):
         model = _stations_model(fp8)
         attn = model.model.layers[0].self_attn
@@ -246,51 +257,55 @@ def decode_stations_identical() -> tuple[bool, str]:
                     p.k.copy_(k)
                     p.v.copy_(v)
 
-            got = {}
-            for name, (applies, plan) in variants.items():
-                stations.applies, stations.plan = applies, plan
-                try:
-                    with torch.no_grad():
-                        reset()
-                        eager = model(tokens, position_ids=pos, paged_ctx=ctx)
-                        eager_kv = [t.clone() for p in pools for t in (p.k, p.v)]
-                        s = torch.cuda.Stream()
-                        s.wait_stream(torch.cuda.current_stream())
-                        with torch.cuda.stream(s):
-                            for _ in range(2):
-                                model(tokens, position_ids=pos, paged_ctx=ctx)
-                        torch.cuda.current_stream().wait_stream(s)
-                        graph = torch.cuda.CUDAGraph()
-                        with torch.cuda.graph(graph):
-                            out = model(tokens, position_ids=pos, paged_ctx=ctx)
-                        reset()
-                        graph.replay()
-                        graphed, graphed_kv = out.clone(), [t.clone() for p in pools for t in (p.k, p.v)]
-                        times = []
-                        for _ in range(30):
-                            a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-                            a.record()
+            got, ms = {}, {}
+            for deterministic in (True, False):
+                for name, (applies, plan) in variants.items():
+                    if not deterministic and name == "layers#2":
+                        continue
+                    stations.applies, stations.plan = applies, plan
+                    moe_kernel.moe_gemm_scatter = _deterministic_scatter if deterministic else scatter
+                    try:
+                        with torch.no_grad():
+                            reset()
+                            eager = model(tokens, position_ids=pos, paged_ctx=ctx)
+                            eager_kv = [t.clone() for p in pools for t in (p.k, p.v)]
+                            s = torch.cuda.Stream()
+                            s.wait_stream(torch.cuda.current_stream())
+                            with torch.cuda.stream(s):
+                                for _ in range(2):
+                                    model(tokens, position_ids=pos, paged_ctx=ctx)
+                            torch.cuda.current_stream().wait_stream(s)
+                            graph = torch.cuda.CUDAGraph()
+                            with torch.cuda.graph(graph):
+                                out = model(tokens, position_ids=pos, paged_ctx=ctx)
+                            reset()
                             graph.replay()
-                            b.record()
-                            b.synchronize()
-                            times.append(a.elapsed_time(b))
-                        del graph
-                finally:
-                    stations.applies, stations.plan = variants["stations"]
-                got[name] = (eager, eager_kv, graphed, graphed_kv, sorted(times)[len(times) // 2])
-            ref = got["layers"]
-            spread = max(maxdiff(got["layers#2"], ref), maxdiff(got["layers#3"], ref))
-            diffs = {n: maxdiff(got[n], ref) for n in ("stations", "override")}
-            for n, d in diffs.items():
-                if d > spread:
-                    failures.append(f"{n} fp8={fp8} B={B} ctx={ctx_len}: {d:.3g} vs repeats {spread:.3g}")
-            rows.append(f"fp8={fp8} B={B} ctx={ctx_len}: max|diff| repeats {spread:.3g}, " +
-                        ", ".join(f"{n} {d:.3g}" for n, d in diffs.items()) + "; ms per replay " +
-                        " / ".join(f"{n} {got[n][4]:.3f}" for n in ("layers", "stations", "override")))
+                            graphed, graphed_kv = out.clone(), [t.clone() for p in pools for t in (p.k, p.v)]
+                            times = []
+                            for _ in range(30):
+                                a, b = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                                a.record()
+                                graph.replay()
+                                b.record()
+                                b.synchronize()
+                                times.append(a.elapsed_time(b))
+                            del graph
+                    finally:
+                        stations.applies, stations.plan = variants["stations"]
+                        moe_kernel.moe_gemm_scatter = scatter
+                    if deterministic:
+                        got[name] = (eager, eager_kv, graphed, graphed_kv)
+                    else:
+                        ms[name] = sorted(times)[len(times) // 2]
+            verdict = {n: same(got[n], got["layers"]) for n in ("layers#2", "stations", "override")}
+            failures += [f"{n} fp8={fp8} B={B} ctx={ctx_len}" for n, ok in verdict.items() if not ok]
+            rows.append(f"fp8={fp8} B={B} ctx={ctx_len}: identical " +
+                        ", ".join(f"{n} {'yes' if ok else 'NO'}" for n, ok in verdict.items()) + "; ms per replay " +
+                        " / ".join(f"{n} {ms[n]:.3f}" for n in ("layers", "stations", "override")))
         del model
         torch.cuda.empty_cache()
     print("\n".join(rows))
-    return not failures, "within the layer forward's own repeats everywhere" if not failures else "; ".join(failures)
+    return not failures, "bit-identical everywhere" if not failures else "differ: " + "; ".join(failures)
 
 
 def stations_reference_close() -> tuple[bool, str]:
@@ -336,6 +351,81 @@ def stations_reference_close() -> tuple[bool, str]:
     return worst < 2e-2, f"worst relative error {worst:.2e}"
 
 
+def region_capture_replays() -> tuple[bool, str]:
+    """CAPTURE_REGION under the real kernels: each sample, with the layer's weights, replays through its stretch's
+    stations to its recorded writes (relative error < 1e-3: the MoE atomics add in no fixed order) and through
+    stations.reference() in fp32 to within 2%, on the kernels' routing; on its own fp32 routing (near-tied experts
+    chosen differently for a few tokens) its error is reported beside."""
+    import json
+    import os
+    import tempfile
+    import types
+    from pathlib import Path
+
+    import torch
+
+    from inference_server.backends.custom_torch_backend import _GraphCtx
+    from inference_server.models import region_capture, stations
+
+    model, bs, B, rows, worst_real, worst_ref = _stations_model(True), 16, 64, [], 0.0, 0.0
+    attn, names = model.model.layers[0].self_attn, [s.name for s in stations.DECODE]
+
+    def rel(a, b) -> float:
+        if not b.is_floating_point():
+            return float(not torch.equal(a, b))
+        a, b = a.float(), b.float()
+        return ((a - b).norm() / b.norm().clamp_min(1e-12)).item()
+    for spec in ("kv_append:attention", "router:down", "input_norm:residual"):
+        out = Path(tempfile.mkdtemp())
+        g = torch.Generator(device="cuda").manual_seed(0)
+        cols = (512 + 1 + bs - 1) // bs
+        seq_lens = torch.randint(1, 513, (B,), device="cuda", generator=g)
+        bt = torch.randperm(B * cols, device="cuda", generator=g).view(B, cols)
+        pools = [types.SimpleNamespace(k=torch.randn(B * cols, attn.num_kv_heads, bs, attn.head_dim, device="cuda",
+                                                     dtype=torch.bfloat16, generator=g)) for _ in range(2)]
+        for p in pools:
+            p.v = torch.randn_like(p.k)
+        os.environ.update(CAPTURE_REGION=spec, CAPTURE_REGION_DIR=str(out))
+        region_capture.active.cache_clear()
+        try:
+            with torch.no_grad():
+                model(torch.randint(0, 1024, (B, 1), device="cuda", generator=g), position_ids=seq_lens.view(B, 1),
+                      paged_ctx=_GraphCtx(pools, seq_lens, bt, bs))
+            region_capture.active()._log.flush()
+        finally:
+            del os.environ["CAPTURE_REGION"], os.environ["CAPTURE_REGION_DIR"]
+            region_capture.active.cache_clear()
+        first, _, last = spec.partition(":")
+        i, j = names.index(first), names.index(last) + 1
+        calls = [json.loads(x) for x in (out / "calls.jsonl").read_text().splitlines()]
+        for call in calls:
+            sample = torch.load(out / "samples" / call["sample"], weights_only=True)
+            c = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in sample["reads"].items()}
+            c.update(stations.layer_weights(model, call["layer"]), cfg=stations.LayerConfig(**c["cfg"]))
+            up = {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in c.items()}
+            routing = ("sorted_ids", "expert_ids", "tok", "pair_w")
+            with torch.no_grad():
+                real, ref, routed = dict(c), dict(up), dict(up)
+                for s in stations.functional()[i:j]:
+                    real.update(s.fn(real))
+                for s in stations.reference()[i:j]:
+                    ref.update(s.fn(ref))
+                    routed.update({k: v for k, v in s.fn(routed).items() if k not in routing}
+                                  if s.name == "route" else s.fn(routed))
+                    if s.name == "route":
+                        routed.update({k: real[k] for k in routing})
+            w = sample["writes"]
+            e_real = max(rel(real[n], w[n].cuda()) for n in w)
+            e_ref = max(rel(routed[n], w[n].cuda()) for n in w)
+            e_own = max(rel(ref[n], w[n].cuda()) for n in w)
+            worst_real, worst_ref = max(worst_real, e_real), max(worst_ref, e_ref)
+            rows.append(f"{spec} layer {call['layer']}: stations {e_real:.2e}, reference {e_ref:.2e} "
+                        f"(on its own fp32 routing {e_own:.2e})")
+    print("\n".join(rows))
+    ok = len(rows) == 6 and worst_real < 1e-3 and worst_ref < 2e-2
+    return ok, f"{len(rows)} samples; worst relative error: stations {worst_real:.2e}, reference {worst_ref:.2e}"
+
+
 # Name → check. The gate runs all of them; each modal script runs its own subset.
 CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_parity": paged_decode_parity,
@@ -343,6 +433,7 @@ CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_prefill_parity": paged_prefill_parity,
     "decode_stations_identical": decode_stations_identical,
     "stations_reference_close": stations_reference_close,
+    "region_capture_replays": region_capture_replays,
 }
 
 
