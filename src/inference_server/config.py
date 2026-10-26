@@ -53,7 +53,7 @@ class Settings:
     # Mixed mode: the most prefill tokens fed between two decode steps (all rows together; H200 2026-10-17 with
     # FlashInfer: 8192 gives long_prompt 9.0 vs 8.4 req/s at 2048, saturated unchanged), and the most rows one step
     # may carry (0 = no cap; a cap of 32 lost saturated 3.58 -> 2.35 req/s, TPOT p99 over the limit at 128 clients).
-    prefill_step_tokens: int = 8192
+    prefill_step_tokens: int = 2048    # 8192 -> 2048 (2026-10-26): bursty TPOT p99 26.7 -> 19.8 ms, long prompt and saturated unchanged
     prefill_step_rows: int = 0
     # Decode rows join the packed prefill forward (one step for chunks and tokens). Gate PASS 2026-10-18; its
     # throughput is not measured yet, so off until it is (PREFILL_JOINT=1).
