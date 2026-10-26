@@ -44,20 +44,28 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
-- Serving on the H200 (short tier, measured 2026-10-21, BlameGraph ledger runs `manual-20261020/21`): single_stream
-  TPOT p99 4.47 ms, saturated 10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1 at 2,048 rows), bursty
-  256x at TPOT p99 26 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at 22 ms. Defaults: the
+- Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-2026102[45]-*` lab
+  A/Bs): single_stream TPOT p99 3.68 ms, saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
+  at 2,048 rows), bursty 256x at TPOT p99 19.8 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at
+  22 ms. Defaults: the
   backend and scheduler in a child process (`ENGINE_PROCESS`, `engine_process.py`), 1,024 rows (`MAX_BATCH_SIZE`),
-  mixed prefill (`PREFILL_MODE`, 8192-token steps; chunks of <= 128 tokens run as decode rows through the decode
+  mixed prefill (`PREFILL_MODE`, 2048-token steps; chunks of <= 128 tokens run as decode rows through the decode
   graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
   (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
-  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`; the KV dtype, the ring and
-  blocks per SM are build-time flags of the extension), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
+  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
+  stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position (build-time flags of
+  the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB`; `MEGAKERNEL_NOMATH` is a timing-only build), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
   and fp8 activations from 2,048 pairs (`models/moe_kernel.py`, table in `qwen3_moe.py`), CUTLASS grouped GEMMs
   above. One block table per request, shared by every layer (`paged_kv_cache.BlockAllocator`); KV admission reserves
   the p90 of recent output lengths and preempts/requeues a row that outgrows it; `KV_CACHE_DTYPE=fp8` pools are
   opt-in (2x the pool, ~25% slower large-batch steps until the attention kernel reads fp8 natively). The server
   raises its open-files limit; the scheduler runs its own GC (young every 200 steps, full every 50k).
+- Speculative decoding (`SPEC_DECODE_K` drafts a step, off by default: neither drafter pays on this engine, measured
+  2026-10-25; `SPEC_DECODE_ROWS` running rows at most, greedy rows only), drafts from a draft model (`SPEC_DRAFT_MODEL`,
+  `drafter.py`; a transformers Qwen3-0.6B step costs 4.8-14.5 ms, more than the target's 3.2 ms step) or by prompt lookup: `scheduler.NgramDrafter` proposes the tokens that followed the context's last
+  3-gram, `backend.verify_step` runs [current] + drafts as rows at consecutive positions in one forward (the
+  prefill-as-decode mechanism, K/V written causally), the longest agreeing prefix is kept; `stats()` reports
+  spec_steps / spec_drafted / spec_tokens. Output-identical to plain greedy decode (tests/test_spec_decode.py).
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
