@@ -442,3 +442,7 @@ def test_ignore_eos_and_special_tokens_default_off_and_pass_through_on_both_rout
         chunks = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: {")]
     text = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if c["choices"])
     assert text == "a#b" and chunks[-1]["usage"]["completion_tokens"] == 3
+    with client.stream("POST", "/v1/completions", json={"prompt": "hi", "max_tokens": 3, **bench, "stream": True}) as r:
+        chunks = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: {")]
+    assert "".join(c["choices"][0]["text"] for c in chunks if c["choices"]) == "a#b"
+    assert chunks[-2]["choices"][0]["finish_reason"] == "length" and sched.seen[-1].ignore_eos is True
