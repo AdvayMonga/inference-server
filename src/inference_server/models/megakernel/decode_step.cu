@@ -268,6 +268,11 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #ifndef MEGA_GUMMA
 #define MEGA_GUMMA 1
 #endif
+// MEGA_STAMPS: the debug globaltimer stamps (`times`) are compiled in; off, the kernel carries none (the ring stages'
+// stamp checks alone cost ~0.1 ms a step at batch 1, 2026-10-26).
+#ifndef MEGA_STAMPS
+#define MEGA_STAMPS 0
+#endif
 constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
 // Attention layout: SPLIT threads per position, each a QW-wide slice of the head dimension (q slices padded by 4 floats,
 // V rows by 8 elements, so the slices a quarter-warp reads start in different banks); PVS threads per (head, 8-wide d
@@ -304,7 +309,7 @@ __device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; a
 template <typename Issue>
 __device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue,
                                            unsigned long long* ts = nullptr) {
-    if (ts && threadIdx.x == 0)
+    if (MEGA_STAMPS && ts && threadIdx.x == 0)
         for (int s = 0; s < min(nst, min(NST, 8)); ++s) ts[3 * s] = gtimer();   // debug: the stages' issue times
     if (threadIdx.x == 0) {
         // the ring's bytes were last written by ordinary stores (the attention phase stages V there): order those
@@ -323,13 +328,13 @@ __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsi
         const int k = s % NST;
         mbar_wait(bars + k, (ph >> k) & 1u);
         ph ^= 1u << k;
-        if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 1] = gtimer();   // debug: landed
-        if (ts && s == 1 && (threadIdx.x & 31) == 0) ts[48 + threadIdx.x / 32] = gtimer();   // debug: each warp's
+        if (MEGA_STAMPS && ts && threadIdx.x == 0 && s < 8) ts[3 * s + 1] = gtimer();   // debug: landed
+        if (MEGA_STAMPS && ts && s == 1 && (threadIdx.x & 31) == 0) ts[48 + threadIdx.x / 32] = gtimer();   // each warp's
         consume(s, ring + k * STAGE);
         __syncthreads();                                          // the slot is free again
-        if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 2] = gtimer();   // debug: consumed
+        if (MEGA_STAMPS && ts && threadIdx.x == 0 && s < 8) ts[3 * s + 2] = gtimer();   // debug: consumed
         if (threadIdx.x == 0 && s + NST < nst) {
-            if (ts && s + NST < 8) ts[3 * (s + NST)] = gtimer();
+            if (MEGA_STAMPS && ts && s + NST < 8) ts[3 * (s + NST)] = gtimer();
             issue(s + NST, ring + k * STAGE, bars + k);
         }
     }
@@ -434,9 +439,9 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
 // Stamps: block 0's, or every block's ([blocks, 128], a.times_blocks) to see each phase's skew across the grid; per
 // block, slots 0-15 are the phases', 16-39 gate_up's ring stages and 40-63 down's (issued, landed, consumed: 8 x 3),
 // 64-79 / 88-103 each warp leaving stage 1's barrier (gate_up / down).
-#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
-#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
-#define RING_TS(base) ((a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 128 + (base) : nullptr)
+#define STAMP(i) do { if (MEGA_STAMPS && a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
+#define STAMP_ALWAYS(i) do { if (MEGA_STAMPS && a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
+#define RING_TS(base) ((MEGA_STAMPS && a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 128 + (base) : nullptr)
 
 template <int BT, bool FP8>
 __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
@@ -1278,6 +1283,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     int smem_per_sm = 0;
     cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, 0);
     const int bps = (MEGA_BPS > 1 && (int)(MEGA_BPS * (smem + 1024)) <= smem_per_sm) ? MEGA_BPS : 1;   // 1 KB a block is the driver's
+    TORCH_CHECK(!times.numel() || MEGA_STAMPS, "stamps need the build with MEGAKERNEL_STAMPS=1");
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
     a.times_blocks = times.numel() >= 128 * num_sms() * MEGA_BPS ? 1 : 0;
     a.stamp_layer = (int)stamp_layer;
