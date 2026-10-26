@@ -1070,7 +1070,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             for t in kept:
                 used += 1
                 row.real_kv_len += 1
-                if self.backend.is_eos(t):
+                if self.backend.is_eos(t) and not req.ignore_eos:
                     finished = "ok"
                     break
                 req.generated.append(t)
