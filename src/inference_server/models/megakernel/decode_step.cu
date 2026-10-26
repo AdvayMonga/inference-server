@@ -264,7 +264,14 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #define MEGA_NOMATH 0
 #endif
 constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
-constexpr size_t ATTN_SMEM = HDR + GQA * D * 4 + CHUNK * D * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4 + 128 * 8 * 4;
+// Attention layout: SPLIT threads per position, each a QW-wide slice of the head dimension (q slices padded by 4 floats,
+// V rows by 8 elements, so the slices a quarter-warp reads start in different banks); PVS threads per (head, 8-wide d
+// group) item in PV. One thread per position spent 9-11 us of a layer's ~21 in the scores (2026-10-25, ctx 300-2000).
+constexpr int SPLIT = THREADS / CHUNK, QW = D / SPLIT, QSTR = SPLIT * (QW + 4), VSTR = D + 8, PVS = THREADS / (GQA * D / 8);
+static_assert(SPLIT >= 1 && SPLIT <= 8 && QW % 16 == 0 && PVS >= 1 && PVS <= 4 && (PVS & (PVS - 1)) == 0,
+              "positions split into 16-element slices; 1-4 threads per PV item");
+__device__ __forceinline__ int qi(int j, int d) { return j * QSTR + (d / QW) * (QW + 4) + d % QW; }   // q_s index
+constexpr size_t ATTN_SMEM = HDR + GQA * QSTR * 4 + CHUNK * VSTR * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4;
 constexpr bool PRIME_P4 = MEGA_PRIME && ATTN_SMEM <= RING_OFF;      // the attention phase leaves the ring untouched
 static_assert((MEGA_RING_KB * 1024) % NST == 0 && STAGE % 8192 == 0, "the ring is whole 8 KB rows a stage");
 
@@ -511,11 +518,10 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         //      with every load in flight), chunk softmax stats, and PV with each thread owning 8 consecutive d of one
         //      head over half the positions (16-byte smem loads, 8 FMAs per load).
         {
-            float* q_s = reinterpret_cast<float*>(smem);                                   // [GQA][D]
-            bf16* v_s = reinterpret_cast<bf16*>(smem + GQA * D * 4);                       // [CHUNK][D]
-            float* p_s = reinterpret_cast<float*>(smem + GQA * D * 4 + CHUNK * D * 2);     // [GQA][CHUNK]
+            float* q_s = reinterpret_cast<float*>(smem);                                   // [GQA][QSTR], qi()
+            bf16* v_s = reinterpret_cast<bf16*>(smem + GQA * QSTR * 4);                    // [CHUNK][VSTR]
+            float* p_s = reinterpret_cast<float*>(smem + GQA * QSTR * 4 + CHUNK * VSTR * 2);   // [GQA][CHUNK]
             float* red2 = p_s + GQA * CHUNK;                                               // [GQA][WARPS]
-            float* pv_s = red2 + GQA * WARPS;                                              // [THREADS/2][8]
             for (int item = blockIdx.x; item < B * NKV * nsplit; item += gridDim.x) {
                 const int c = item % nsplit, g = (item / nsplit) % NKV, b = item / (nsplit * NKV);
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
@@ -536,8 +542,8 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(lw.q_norm[lane + 32 * u]) * rbf(x[u] * r));
 #pragma unroll
                     for (int u = 0; u < 2; ++u) {
-                        q_s[warp * D + lane + 32 * u] = rbf(n[u] * cs[u] - n[u + 2] * sn[u]) * a.scale;
-                        q_s[warp * D + lane + 32 * u + D / 2] = rbf(n[u + 2] * cs[u] + n[u] * sn[u]) * a.scale;
+                        q_s[qi(warp, lane + 32 * u)] = rbf(n[u] * cs[u] - n[u + 2] * sn[u]) * a.scale;
+                        q_s[qi(warp, lane + 32 * u + D / 2)] = rbf(n[u + 2] * cs[u] + n[u] * sn[u]) * a.scale;
                     }
                     if (warp == 0 && c == pos / CHUNK) {                  // this chunk holds the new token: its k and v
                         const bf16* krow = a.sc.qkv + b * QKV + NQ * D + g * D;
@@ -574,32 +580,33 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 }
                 __syncthreads();
                 STAMP(9);                                             // q normed and roped, the new k/v written
+                // Scores: thread (position p, slice q4) dots its QW elements of K with the 8 heads' q, the SPLIT
+                // threads of a position (adjacent lanes) then add up; it also copies its slice of V into v_s.
+                const int p = tid / SPLIT, q4 = tid % SPLIT, d0q = q4 * QW;
                 float s[GQA];
 #pragma unroll
-                for (int j = 0; j < GQA; ++j) s[j] = -INFINITY;
-                if (tid < tn) {
-                    const int t = t0 + tid;
+                for (int j = 0; j < GQA; ++j) s[j] = 0.f;
+                if (p < tn) {
+                    const int t = t0 + p;
                     const int bid = (int)bt[b * a.bt_cols + t / BS], slot = t % BS;
-                    const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
-#pragma unroll
-                    for (int j = 0; j < GQA; ++j) s[j] = 0.f;
-                    if (MEGA_KV8) {                                            // fp8 rows: 128 B each, widened as they land
+                    const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D + d0q;
+                    if (MEGA_KV8) {                                            // fp8 rows: widened as they land
                         const uint4* krow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_k) + off);
                         const uint4* vrow = reinterpret_cast<const uint4*>(reinterpret_cast<const __nv_fp8_e4m3*>(lw.pool_v) + off);
-                        uint4 kv4[D / 16], vv4[D / 16];
+                        uint4 kv4[QW / 16], vv4[QW / 16];
 #pragma unroll
-                        for (int i = 0; i < D / 16; ++i) { kv4[i] = krow[i]; vv4[i] = vrow[i]; }
+                        for (int i = 0; i < QW / 16; ++i) { kv4[i] = krow[i]; vv4[i] = vrow[i]; }
 #pragma unroll
-                        for (int i = 0; i < D / 16; ++i) {
+                        for (int i = 0; i < QW / 16; ++i) {
                             float vf[16];
                             fp8_to_f32<16>(&vv4[i], vf);
 #pragma unroll
-                            for (int jj = 0; jj < 16; ++jj) v_s[tid * D + i * 16 + jj] = f2bf(vf[jj]);
+                            for (int jj = 0; jj < 16; ++jj) v_s[p * VSTR + d0q + i * 16 + jj] = f2bf(vf[jj]);
                             float kf[16];
                             fp8_to_f32<16>(&kv4[i], kf);
 #pragma unroll
                             for (int j = 0; j < GQA; ++j) {
-                                const float* q = q_s + j * D + i * 16;
+                                const float* q = q_s + j * QSTR + q4 * (QW + 4) + i * 16;
 #pragma unroll
                                 for (int jj = 0; jj < 16; ++jj) s[j] += q[jj] * kf[jj];
                             }
@@ -607,23 +614,30 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     } else {
                         const bf16* krow = reinterpret_cast<const bf16*>(lw.pool_k) + off;
                         const bf16* vrow = reinterpret_cast<const bf16*>(lw.pool_v) + off;
-                        uint4 kv4[D / 8];
+                        uint4 kv4[QW / 8];
 #pragma unroll
-                        for (int i = 0; i < D / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
+                        for (int i = 0; i < QW / 8; ++i) kv4[i] = *reinterpret_cast<const uint4*>(krow + i * 8);
 #pragma unroll
-                        for (int i = 0; i < D / 8; ++i) *reinterpret_cast<uint4*>(v_s + tid * D + i * 8) = *reinterpret_cast<const uint4*>(vrow + i * 8);
+                        for (int i = 0; i < QW / 8; ++i)
+                            *reinterpret_cast<uint4*>(v_s + p * VSTR + d0q + i * 8) = *reinterpret_cast<const uint4*>(vrow + i * 8);
 #pragma unroll
-                        for (int i = 0; i < D / 8; ++i) {
+                        for (int i = 0; i < QW / 8; ++i) {
                             float kf[8];
                             bf16_to_f32<8>(&kv4[i], kf);
 #pragma unroll
                             for (int j = 0; j < GQA; ++j) {
-                                const float* q = q_s + j * D + i * 8;
+                                const float* q = q_s + j * QSTR + q4 * (QW + 4) + i * 8;
 #pragma unroll
                                 for (int jj = 0; jj < 8; ++jj) s[j] += q[jj] * kf[jj];
                             }
                         }
                     }
+                }
+#pragma unroll
+                for (int j = 0; j < GQA; ++j) {                                // the position's slices add up
+#pragma unroll
+                    for (int o = 1; o < SPLIT; o <<= 1) s[j] += __shfl_xor_sync(0xffffffff, s[j], o);
+                    if (p >= tn) s[j] = -INFINITY;
                 }
                 __syncthreads();
                 STAMP(10);                                            // the chunk's scores
@@ -641,8 +655,8 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 __syncthreads();
 #pragma unroll
                 for (int j = 0; j < GQA; ++j) {
-                    const float pv = (tid < tn) ? __expf(s[j] - m[j]) : 0.f;
-                    if (tid < CHUNK) p_s[j * CHUNK + tid] = pv;       // threads past the chunk hold no position
+                    const float pv = (p < tn && q4 == 0) ? __expf(s[j] - m[j]) : 0.f;   // one thread a position
+                    if (q4 == 0 && p < CHUNK) p_s[j * CHUNK + p] = pv;
                     const float ws = warp_sum(pv);
                     if (lane == 0) red2[j * WARPS + warp] = ws;
                 }
@@ -654,36 +668,34 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     for (int w = 0; w < WARPS; ++w) ss += red2[j * WARPS + w];
                     l[j] = ss;
                 }
-                {   // PV: item = (head j, 8-wide d group), two threads per item over interleaved positions
-                    const int it = tid & 127, half = (tid >> 7) & 1, j = it / (D / 8), d0 = (it % (D / 8)) * 8;
-                    const bool pv_on = tid < 256;                     // 256 threads cover the items; the rest idle here
+                {   // PV: item = (head j, 8-wide d group), PVS adjacent lanes per item over interleaved positions
+                    const int it = tid / PVS, pq = tid % PVS, j = it / (D / 8), d0 = (it % (D / 8)) * 8;
                     float acc[8];
 #pragma unroll
                     for (int u = 0; u < 8; ++u) acc[u] = 0.f;
-                    if (pv_on) for (int t = half; t < tn; t += 2) {
-                        const float p = p_s[j * CHUNK + t];
-                        const uint4 vv = *reinterpret_cast<const uint4*>(v_s + t * D + d0);
+                    for (int t = pq; t < tn; t += PVS) {
+                        const float pr = p_s[j * CHUNK + t];
+                        const uint4 vv = *reinterpret_cast<const uint4*>(v_s + t * VSTR + d0);
                         float vf[8];
                         bf16_to_f32<8>(&vv, vf);
 #pragma unroll
-                        for (int u = 0; u < 8; ++u) acc[u] += p * vf[u];
+                        for (int u = 0; u < 8; ++u) acc[u] += pr * vf[u];
                     }
-                    if (pv_on && half == 1) {
 #pragma unroll
-                        for (int u = 0; u < 8; ++u) pv_s[it * 8 + u] = acc[u];
-                    }
-                    __syncthreads();
-                    if (pv_on && half == 0) {
+                    for (int u = 0; u < 8; ++u)
+#pragma unroll
+                        for (int o = 1; o < PVS; o <<= 1) acc[u] += __shfl_xor_sync(0xffffffff, acc[u], o);
+                    if (pq == 0) {
                         const int hq = g * GQA + j;
                         if (nsplit == 1) {
                             bf16* dst = a.sc.attn + b * (NQ * D) + hq * D + d0;
                             const float inv = 1.f / l[j];
 #pragma unroll
-                            for (int u = 0; u < 8; ++u) dst[u] = f2bf((acc[u] + pv_s[it * 8 + u]) * inv);
+                            for (int u = 0; u < 8; ++u) dst[u] = f2bf(acc[u] * inv);
                         } else {
                             float* dst = a.sc.part_o + (((size_t)b * NQ + hq) * MAXSPLIT + c) * D + d0;
 #pragma unroll
-                            for (int u = 0; u < 8; ++u) dst[u] = acc[u] + pv_s[it * 8 + u];
+                            for (int u = 0; u < 8; ++u) dst[u] = acc[u];
                         }
                     }
                 }
