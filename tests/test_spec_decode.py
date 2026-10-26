@@ -49,7 +49,7 @@ class PeriodicBackend(FakeMixedBackend):
         return t == 999
 
 
-async def _run(backend, max_tokens=40, temperature=0.0):
+async def _run(backend, max_tokens=40, temperature=0.0, ignore_eos=False):
     sched = ContinuousBatchScheduler(backend, max_batch_size=4, prefill_mode="mixed", prefill_step_tokens=256,
                                      async_decode=True)
     sched.start()
@@ -57,7 +57,7 @@ async def _run(backend, max_tokens=40, temperature=0.0):
         loop = asyncio.get_running_loop()
         req = ScheduledRequest(token_ids=list(range(1000, 1010)), max_tokens=max_tokens, session_id="s",
                                future=loop.create_future(), token_queue=asyncio.Queue(),
-                               sampling=SamplingParams(temperature=temperature))
+                               sampling=SamplingParams(temperature=temperature), ignore_eos=ignore_eos)
         sched.enqueue(req)
         streamed = []
         while (t := await asyncio.wait_for(req.token_queue.get(), 10)) is not None:
@@ -100,6 +100,8 @@ async def test_spec_stops_at_eos_and_max_tokens_exactly(monkeypatch):
     monkeypatch.setattr(S, "SPEC_K", 3)
     capped, _ = await _run(PeriodicBackend(), max_tokens=7)
     assert len(capped) == 7
+    kept, _ = await _run(PeriodicBackend(eos_at=27), max_tokens=100, ignore_eos=True)   # ignore_eos: past it to the cap
+    assert len(kept) == 100 and 999 in kept
 
 
 @pytest.mark.asyncio

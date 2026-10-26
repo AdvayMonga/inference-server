@@ -133,6 +133,7 @@ class ScheduledRequest:
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
     admit_seq: int = 0          # admission order (the latest admitted is preempted first)
     requeue_ts: float = 0.0     # when it was last requeued; its queue deadline counts from here (enqueue_ts stays)
+    ignore_eos: bool = False    # benchmarking (vLLM's ignore_eos): stop tokens are kept and it runs to max_tokens
 
     @property
     def prefill_ids(self) -> list[int]:
@@ -569,7 +570,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 tok = row.current_token = tok.value()
             row.fresh = False
 
-            if self.backend.is_eos(tok):
+            if self.backend.is_eos(tok) and not row.request.ignore_eos:
                 to_evict.append((i, "ok"))
                 continue
 
@@ -1069,7 +1070,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             for t in kept:
                 used += 1
                 row.real_kv_len += 1
-                if self.backend.is_eos(t):
+                if self.backend.is_eos(t) and not req.ignore_eos:
                     finished = "ok"
                     break
                 req.generated.append(t)
