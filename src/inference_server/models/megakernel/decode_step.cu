@@ -85,7 +85,7 @@ struct Args {
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
     int stamp_layer;                                                                       // the layer `times` stamps
-    int times_blocks;                                                                      // times is [blocks, 64]
+    int times_blocks;                                                                      // times is [blocks, 128]
     int kv8;                                                                               // the pools hold fp8 e4m3
     int tma;                                                                               // MEGAKERNEL_TMA (batch <= 2)
 };
@@ -263,6 +263,11 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #ifndef MEGA_NOMATH
 #define MEGA_NOMATH 0
 #endif
+// MEGA_GUMMA: the fp8 gate_up stage (16 rows) dotted on the tensor cores: one m16n8k16 tile per 16 columns, the
+// weights converted exactly to f16, x as f16, f32 sums; the warps split the columns, partials summed in shared memory.
+#ifndef MEGA_GUMMA
+#define MEGA_GUMMA 1
+#endif
 constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
 // Attention layout: SPLIT threads per position, each a QW-wide slice of the head dimension (q slices padded by 4 floats,
 // V rows by 8 elements, so the slices a quarter-warp reads start in different banks); PVS threads per (head, 8-wide d
@@ -319,6 +324,7 @@ __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsi
         mbar_wait(bars + k, (ph >> k) & 1u);
         ph ^= 1u << k;
         if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 1] = gtimer();   // debug: landed
+        if (ts && s == 1 && (threadIdx.x & 31) == 0) ts[48 + threadIdx.x / 32] = gtimer();   // debug: each warp's
         consume(s, ring + k * STAGE);
         __syncthreads();                                          // the slot is free again
         if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 2] = gtimer();   // debug: consumed
@@ -381,24 +387,29 @@ __device__ __forceinline__ float smem_dot_fp8(const unsigned char* __restrict__ 
     return warp_sum(acc);
 }
 
-// The same over 8-byte chunks (N a multiple of 256).
-template <int N>
-__device__ __forceinline__ float smem_dot_fp8_8(const unsigned char* __restrict__ w, const bf16* __restrict__ x) {
-    const int lane = threadIdx.x & 31;
-    if constexpr (MEGA_NOMATH) return (float)w[lane] * bf2f(x[lane]);
-    float acc = 0.f;
+__device__ __forceinline__ void mma_f16(float* d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ uint32_t e4m3x2_f16x2(uint32_t v) {     // the low 2 bytes of v: e4m3 -> f16, exact
+    const __half2_raw r = __nv_cvt_fp8x2_to_halfraw2((unsigned short)v, __NV_E4M3);
+    return (uint32_t)r.x | ((uint32_t)r.y << 16);
+}
+__device__ __forceinline__ uint32_t f16x2_of(const bf16 a, const bf16 b) {
+    const __half2 h = __floats2half2_rn(bf2f(a), bf2f(b));
+    return *reinterpret_cast<const uint32_t*>(&h);
+}
+
+// One lane's share: 8 e4m3 weights dotted with 8 bf16 values held in registers.
+__device__ __forceinline__ float dot8_fp8(const uint2& w, const uint4& x) {
+    if constexpr (MEGA_NOMATH) return (float)(w.x & 0xff) + (float)(x.x & 0xff);
+    float wf[8], xf[8];
+    fp8_to_f32<8>(&w, wf);
+    bf16_to_f32<8>(&x, xf);
+    float a0 = 0.f, a1 = 0.f;
 #pragma unroll
-    for (int i = 0; i < N / 256; ++i) {
-        const int k0 = i * 256 + lane * 8;
-        const uint2 wv = *reinterpret_cast<const uint2*>(w + k0);
-        float wf[8], xf[8];
-        fp8_to_f32<8>(&wv, wf);
-        const uint4 xv = *reinterpret_cast<const uint4*>(x + k0);
-        bf16_to_f32<8>(&xv, xf);
-#pragma unroll
-        for (int j = 0; j < 8; ++j) acc += wf[j] * xf[j];
-    }
-    return warp_sum(acc);
+    for (int j = 0; j < 8; j += 2) { a0 += wf[j] * xf[j]; a1 += wf[j + 1] * xf[j + 1]; }
+    return a0 + a1;
 }
 
 // Stage starts over [lo, hi) in steps of at most `c`, never crossing a multiple of `seg` (a pair's rows end there):
@@ -420,11 +431,12 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
     hi = min(n, lo + per);
 }
 
-// Stamps: block 0's, or every block's ([blocks, 64], a.times_blocks) to see each phase's skew across the grid; per
-// block, slots 0-15 are the phases', 16-39 gate_up's ring stages and 40-63 down's (issued, landed, consumed: 8 x 3).
-#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 64 : 0) + (i)] = gtimer(); } while (0)
-#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 64 : 0) + (i)] = gtimer(); } while (0)
-#define RING_TS(base) ((a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 64 + (base) : nullptr)
+// Stamps: block 0's, or every block's ([blocks, 128], a.times_blocks) to see each phase's skew across the grid; per
+// block, slots 0-15 are the phases', 16-39 gate_up's ring stages and 40-63 down's (issued, landed, consumed: 8 x 3),
+// 64-79 / 88-103 each warp leaving stage 1's barrier (gate_up / down).
+#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
+#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
+#define RING_TS(base) ((a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 128 + (base) : nullptr)
 
 template <int BT, bool FP8>
 __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
@@ -888,7 +900,11 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             if (tma) {                                                 // C (gate, up) row pairs a stage, within one pair
                 constexpr int RB = H * (FP8 ? 1 : 2), C = STAGE / (2 * RB);
                 int* seg_s = reinterpret_cast<int*>(smem + 16384);
-                float* gu_s = reinterpret_cast<float*>(smem + 20480);  // [2 * C]
+                float* gu_s = reinterpret_cast<float*>(smem + 20480);  // [2 * C]; with MEGA_GUMMA [WARPS][16]
+                constexpr int CPW = H / 64 / WARPS;                    // MEGA_GUMMA: 64-byte chunks of each row a warp takes
+                static_assert(!(FP8 && MEGA_GUMMA) || (2 * C == 16 && CPW * WARPS * 64 == H), "MEGA_GUMMA: one 16-row tile a stage");
+                uint32_t xh[CPW][4][2];                                // MEGA_GUMMA: this lane's x as f16 pairs (B fragments)
+                int xb = -1;
                 int lo, hi;
                 block_slice(pairs * I, lo, hi);
                 if (tid == 0) seg_s[1023] = plan_stages(lo, hi, C, I, seg_s, 1000);
@@ -903,6 +919,56 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     },
                     [&](int st, unsigned char* src) {
                         const int f = seg_s[st], cnt = seg_s[st + 1] - f, pp = f / I, n0 = f % I, b = pp / K, e = ids_s[pp];
+                        if constexpr (FP8 && MEGA_GUMMA) {
+                            // rows 0-7 gate, 8-15 up as M; lane (g, t) reads 16 bytes at 16t of each 64-byte chunk of
+                            // rows g and g + 8 and gives tile i its bytes 4i..4i+3 as k {2t, 2t+1, 2t+8, 2t+9}; x the same
+                            float sg = 0.f, su = 0.f;
+                            if (tid < cnt) {
+                                sg = lw.gu_scale[(size_t)e * (2 * I) + n0 + tid];
+                                su = lw.gu_scale[(size_t)e * (2 * I) + I + n0 + tid];
+                            }
+                            const int g = lane >> 2, t = lane & 3;
+                            if (b != xb) {
+#pragma unroll
+                                for (int c = 0; c < CPW; ++c)
+#pragma unroll
+                                    for (int i = 0; i < 4; ++i) {
+                                        const bf16* x = xs6 + b * H + (warp * CPW + c) * 64 + 16 * t + 4 * i;
+                                        xh[c][i][0] = f16x2_of(x[0], x[1]);
+                                        xh[c][i][1] = f16x2_of(x[2], x[3]);
+                                    }
+                                xb = b;
+                            }
+                            float d[CPW][4] = {};
+#pragma unroll
+                            for (int c = 0; c < CPW; ++c) {
+                                const int off = (warp * CPW + c) * 64 + 16 * t;
+                                const uint4 r0 = *reinterpret_cast<const uint4*>(src + g * RB + off);
+                                const uint4 r1 = *reinterpret_cast<const uint4*>(src + (g + 8) * RB + off);
+                                const uint32_t w0[4] = {r0.x, r0.y, r0.z, r0.w}, w1[4] = {r1.x, r1.y, r1.z, r1.w};
+#pragma unroll
+                                for (int i = 0; i < 4; ++i)
+                                    if constexpr (!MEGA_NOMATH)
+                                        mma_f16(d[c], e4m3x2_f16x2(w0[i]), e4m3x2_f16x2(w1[i]), e4m3x2_f16x2(w0[i] >> 16),
+                                                e4m3x2_f16x2(w1[i] >> 16), xh[c][i][0], xh[c][i][1]);
+                            }
+                            if (t == 0) {                              // column 0: rows g (d[0]) and g + 8 (d[2])
+                                float s0 = 0.f, s8 = 0.f;
+#pragma unroll
+                                for (int c = 0; c < CPW; ++c) { s0 += d[c][0]; s8 += d[c][2]; }
+                                gu_s[warp * 16 + g] = s0;
+                                gu_s[warp * 16 + g + 8] = s8;
+                            }
+                            __syncthreads();
+                            if (tid < cnt) {
+                                float gs = 0.f, us = 0.f;
+#pragma unroll
+                                for (int w = 0; w < WARPS; ++w) { gs += gu_s[w * 16 + tid]; us += gu_s[w * 16 + C + tid]; }
+                                const float gb = rbf(gs * sg), ub = rbf(us * su);
+                                a.sc.act[(size_t)pp * I + n0 + tid] = f2bf(gb / (1.f + __expf(-gb)) * ub);
+                            }
+                            return;
+                        }
                         for (int ri = warp; ri < 2 * C; ri += WARPS) {
                             const int j = ri % C, up = ri / C;
                             if (j >= cnt) continue;
@@ -950,20 +1016,23 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         // the down GEMV's stages are planned here (its experts are known) and, with MEGA_PRIME, the first ones issued
         constexpr int RB7 = I * (FP8 ? 1 : 2), C7 = (STAGE / RB7 < (FP8 ? 32 : 16)) ? STAGE / RB7 : (FP8 ? 32 : 16);   // rows a stage, within its bytes
         int* seg7 = reinterpret_cast<int*>(smem + 16384);
-        int n7 = 0;
+        int n7 = 0, lo7 = 0, hi7 = 0;
+        float* sc7 = reinterpret_cast<float*>(smem + 24576);          // [hi7 - lo7] the slice's down scales (fp8)
         auto issue7 = [&](int st, unsigned char* dst, unsigned long long* bar) {
             const int f = seg7[st], cnt = seg7[st + 1] - f, pp = f / H, n0 = f % H;
             mbar_expect(bar, cnt * RB7);
             bulk_load(dst, reinterpret_cast<const char*>(lw.down) + ((size_t)ids_s[pp] * H + n0) * RB7, cnt * RB7, bar);
         };
         if (tma) {
-            int lo, hi;
-            block_slice(pairs * H, lo, hi);
+            block_slice(pairs * H, lo7, hi7);
             __syncthreads();                                          // gate_up's last stage consumed by every warp
-            if (tid == 0) seg7[1023] = plan_stages(lo, hi, C7, H, seg7, 1000);
+            if (tid == 0) seg7[1023] = plan_stages(lo7, hi7, C7, H, seg7, 1000);
             __syncthreads();
             n7 = seg7[1023];
             if (MEGA_PRIME) ring_prime(n7, bars, ring, issue7, RING_TS(40));
+            if constexpr (FP8)                                        // read before the barrier, used after it
+                for (int i = tid; i < hi7 - lo7; i += THREADS)
+                    sc7[i] = lw.down_scale[(size_t)ids_s[(lo7 + i) / H] * H + (lo7 + i) % H];
         }
         grid.sync();
 
@@ -971,17 +1040,31 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         if (tma) {                                                     // C rows of one pair a stage
             constexpr int RB = RB7;
             int* seg_s = seg7;
+            uint4 xd[I / 256];                                        // fp8: this lane's share of the pair's act row
+            int xp7 = -1;
             ring_run(n7, bars, ring, ph, issue7,
                 [&](int st, unsigned char* src) {
-                    const int f = seg_s[st], cnt = seg_s[st + 1] - f, pp = f / H, n0 = f % H, e = ids_s[pp];
+                    const int f = seg_s[st], cnt = seg_s[st + 1] - f, pp = f / H, n0 = f % H;
                     const bf16* x = a.sc.act + (size_t)pp * I;
+                    if constexpr (FP8) {
+                        if (pp != xp7) {
+#pragma unroll
+                            for (int i = 0; i < I / 256; ++i) xd[i] = *reinterpret_cast<const uint4*>(x + i * 256 + lane * 8);
+                            xp7 = pp;
+                        }
+                        for (int j = warp; j < cnt; j += WARPS) {
+                            float acc = 0.f;
+#pragma unroll
+                            for (int i = 0; i < I / 256; ++i)
+                                acc += dot8_fp8(*reinterpret_cast<const uint2*>(src + j * RB + i * 256 + lane * 8), xd[i]);
+                            const float v = warp_sum(acc) * sc7[f - lo7 + j];
+                            if (lane == 0) atomicAdd(a.sc.out2 + (pp / K) * H + n0 + j, v * w_s[pp]);
+                        }
+                        return;
+                    }
                     for (int j = warp; j < cnt; j += WARPS) {
                         float v;
-                        if constexpr (FP8) {
-                            v = smem_dot_fp8_8<I>(src + j * RB, x) * lw.down_scale[(size_t)e * H + n0 + j];
-                        } else {
-                            smem_dot<I, 1>(reinterpret_cast<const bf16*>(src + j * RB), x, I, &v);
-                        }
+                        smem_dot<I, 1>(reinterpret_cast<const bf16*>(src + j * RB), x, I, &v);
                         if (lane == 0) atomicAdd(a.sc.out2 + (pp / K) * H + n0 + j, v * w_s[pp]);
                     }
                 }, MEGA_PRIME != 0, RING_TS(40));
@@ -1196,7 +1279,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, 0);
     const int bps = (MEGA_BPS > 1 && (int)(MEGA_BPS * (smem + 1024)) <= smem_per_sm) ? MEGA_BPS : 1;   // 1 KB a block is the driver's
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
-    a.times_blocks = times.numel() >= 64 * num_sms() * MEGA_BPS ? 1 : 0;
+    a.times_blocks = times.numel() >= 128 * num_sms() * MEGA_BPS ? 1 : 0;
     a.stamp_layer = (int)stamp_layer;
     TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
     a.kv8 = kv8 ? 1 : 0;
