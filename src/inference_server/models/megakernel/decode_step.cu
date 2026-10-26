@@ -85,7 +85,7 @@ struct Args {
     unsigned long long* keys; int64_t* tokens_out;      // greedy argmax: packed (ordered bf16, ~index) per row, the token ids
     int B; float scale; const float* inv_freq; Scratch sc; unsigned long long* times;      // times [16] ns, debug
     int stamp_layer;                                                                       // the layer `times` stamps
-    int times_blocks;                                                                      // times is [blocks, 16]
+    int times_blocks;                                                                      // times is [blocks, 64]
     int kv8;                                                                               // the pools hold fp8 e4m3
     int tma;                                                                               // MEGAKERNEL_TMA (batch <= 2)
 };
@@ -295,7 +295,10 @@ __device__ __forceinline__ void mbar_wait(unsigned long long* b, uint32_t parity
 // bulk copies into `dst`; consume(s, src) runs on the whole block once they have landed. `ph` holds each slot's phase
 // parity and persists across calls (every thread runs every call, so all agree).
 template <typename Issue>
-__device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue) {
+__device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue,
+                                           unsigned long long* ts = nullptr) {
+    if (ts && threadIdx.x == 0)
+        for (int s = 0; s < min(nst, min(NST, 8)); ++s) ts[3 * s] = gtimer();   // debug: the stages' issue times
     if (threadIdx.x == 0) {
         // the ring's bytes were last written by ordinary stores (the attention phase stages V there): order those
         // before the async proxy's copies
@@ -306,15 +309,21 @@ __device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, un
 
 template <typename Issue, typename Consume>
 __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsigned char* ring, uint32_t& ph,
-                                         Issue issue, Consume consume, bool primed = false) {
-    if (!primed) ring_prime(nst, bars, ring, issue);
+                                         Issue issue, Consume consume, bool primed = false,
+                                         unsigned long long* ts = nullptr) {
+    if (!primed) ring_prime(nst, bars, ring, issue, ts);
     for (int s = 0; s < nst; ++s) {
         const int k = s % NST;
         mbar_wait(bars + k, (ph >> k) & 1u);
         ph ^= 1u << k;
+        if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 1] = gtimer();   // debug: landed
         consume(s, ring + k * STAGE);
         __syncthreads();                                          // the slot is free again
-        if (threadIdx.x == 0 && s + NST < nst) issue(s + NST, ring + k * STAGE, bars + k);
+        if (ts && threadIdx.x == 0 && s < 8) ts[3 * s + 2] = gtimer();   // debug: consumed
+        if (threadIdx.x == 0 && s + NST < nst) {
+            if (ts && s + NST < 8) ts[3 * (s + NST)] = gtimer();
+            issue(s + NST, ring + k * STAGE, bars + k);
+        }
     }
 }
 
@@ -410,9 +419,11 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
 }
 
 __device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
-// Stamps: block 0's, or every block's ([blocks, 16], a.times_blocks) to see each phase's skew across the grid.
-#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 16 : 0) + (i)] = gtimer(); } while (0)
-#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 16 : 0) + (i)] = gtimer(); } while (0)
+// Stamps: block 0's, or every block's ([blocks, 64], a.times_blocks) to see each phase's skew across the grid; per
+// block, slots 0-15 are the phases', 16-39 gate_up's ring stages and 40-63 down's (issued, landed, consumed: 8 x 3).
+#define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 64 : 0) + (i)] = gtimer(); } while (0)
+#define STAMP_ALWAYS(i) do { if (a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 64 : 0) + (i)] = gtimer(); } while (0)
+#define RING_TS(base) ((a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 64 + (base) : nullptr)
 
 template <int BT, bool FP8>
 __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
@@ -908,7 +919,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                             const float gb = rbf(gu_s[tid]), ub = rbf(gu_s[C + tid]);
                             a.sc.act[(size_t)pp * I + n0 + tid] = f2bf(gb / (1.f + __expf(-gb)) * ub);
                         }
-                    });
+                    }, false, RING_TS(16));
             } else
             for (int w = gwarp; w < items; w += nwarps) {
                 const int p = w / (I / NPW), n = (w % (I / NPW)) * NPW, b = p / K, e = ids_s[p];
@@ -951,7 +962,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             if (tid == 0) seg7[1023] = plan_stages(lo, hi, C7, H, seg7, 1000);
             __syncthreads();
             n7 = seg7[1023];
-            if (MEGA_PRIME) ring_prime(n7, bars, ring, issue7);
+            if (MEGA_PRIME) ring_prime(n7, bars, ring, issue7, RING_TS(40));
         }
         grid.sync();
 
@@ -972,7 +983,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                         }
                         if (lane == 0) atomicAdd(a.sc.out2 + (pp / K) * H + n0 + j, v * w_s[pp]);
                     }
-                }, MEGA_PRIME != 0);
+                }, MEGA_PRIME != 0, RING_TS(40));
         } else {
             for (int w0 = gwarp * DN::RD; w0 < pairs * H; w0 += nwarps * DN::RD) {
                 if (w0 != gwarp * DN::RD) load_down<FP8>(lw.down, a.sc.ids, w0, pairs * H, wv7);
@@ -1184,7 +1195,7 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     cudaDeviceGetAttribute(&smem_per_sm, cudaDevAttrMaxSharedMemoryPerMultiprocessor, 0);
     const int bps = (MEGA_BPS > 1 && (int)(MEGA_BPS * (smem + 1024)) <= smem_per_sm) ? MEGA_BPS : 1;   // 1 KB a block is the driver's
     a.times = times.numel() ? reinterpret_cast<unsigned long long*>(times.data_ptr<int64_t>()) : nullptr;
-    a.times_blocks = times.numel() >= 16 * num_sms() * MEGA_BPS ? 1 : 0;
+    a.times_blocks = times.numel() >= 64 * num_sms() * MEGA_BPS ? 1 : 0;
     a.stamp_layer = (int)stamp_layer;
     TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
     a.kv8 = kv8 ? 1 : 0;
