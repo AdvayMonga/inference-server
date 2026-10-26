@@ -520,6 +520,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                 const int c = item % nsplit, g = (item / nsplit) % NKV, b = item / (nsplit * NKV);
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
                 if (t0 >= kv_len) continue;
+                STAMP(8);                                             // sub-steps (debug): an item's start
                 const int tn = min(CHUNK, kv_len - t0);
                 if (warp < GQA) {                                    // warp w preps q head g*8+w
                     float cs[2], sn[2];
@@ -572,6 +573,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     }
                 }
                 __syncthreads();
+                STAMP(9);                                             // q normed and roped, the new k/v written
                 float s[GQA];
 #pragma unroll
                 for (int j = 0; j < GQA; ++j) s[j] = -INFINITY;
@@ -624,6 +626,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     }
                 }
                 __syncthreads();
+                STAMP(10);                                            // the chunk's scores
                 float m[GQA], l[GQA];
 #pragma unroll
                 for (int j = 0; j < GQA; ++j) { const float wm = warp_max(s[j]); if (lane == 0) red2[j * WARPS + warp] = wm; }
@@ -854,6 +857,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             for (int i = tid; i < B * H / 8; i += THREADS)
                 reinterpret_cast<uint4*>(xs6)[i] = reinterpret_cast<const uint4*>(a.sc.n2)[i];
             __syncthreads();
+            STAMP(11);                                                // top-8 done and the rows in shared memory
             constexpr int NPW = FP8 ? 2 : 1;                           // n values per warp item (fp8 rows are half the bytes)
             constexpr int R6 = 2 * NPW;                                // gate and up rows per n
             const int items = pairs * (I / NPW);
