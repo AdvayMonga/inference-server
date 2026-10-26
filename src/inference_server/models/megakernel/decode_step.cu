@@ -294,6 +294,8 @@ __device__ __forceinline__ void mbar_wait(unsigned long long* b, uint32_t parity
 // nst stages through the ring: issue(s, dst, bar) (thread 0) arms `bar` with the stage's byte count and starts its
 // bulk copies into `dst`; consume(s, src) runs on the whole block once they have landed. `ph` holds each slot's phase
 // parity and persists across calls (every thread runs every call, so all agree).
+__device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
+
 template <typename Issue>
 __device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue,
                                            unsigned long long* ts = nullptr) {
@@ -418,7 +420,6 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
     hi = min(n, lo + per);
 }
 
-__device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
 // Stamps: block 0's, or every block's ([blocks, 64], a.times_blocks) to see each phase's skew across the grid; per
 // block, slots 0-15 are the phases', 16-39 gate_up's ring stages and 40-63 down's (issued, landed, consumed: 8 x 3).
 #define STAMP(i) do { if (a.times && L == a.stamp_layer && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 64 : 0) + (i)] = gtimer(); } while (0)
