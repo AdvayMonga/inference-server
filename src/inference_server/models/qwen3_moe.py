@@ -372,6 +372,10 @@ class Qwen3MoeModel(nn.Module):
             start = kv_cache.seq_len if kv_cache is not None else 0
             position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
         cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
+        if paged_ctx is not None:
+            from inference_server.models import stations
+            if stations.applies(self, h, paged_ctx):     # a CUDA decode step: the named stations (models/stations.py)
+                return self.norm(stations.forward(self, h, cos, sin, paged_ctx))
         for i, layer in enumerate(self.layers):
             if paged_ctx is not None:
                 h, _ = layer(h, cos, sin, paged_ctx=paged_ctx, kv_layer_idx=i)

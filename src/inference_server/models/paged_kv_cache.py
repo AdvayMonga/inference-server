@@ -74,6 +74,17 @@ def to_device(values, device: torch.device, dtype=torch.long) -> torch.Tensor:
     return _ring.copy(t, device)
 
 
+def step_inputs(bt: torch.Tensor, seq_lens: torch.Tensor, bs: int) -> dict:
+    """What every layer's K/V write and decode attention share in a step, built once per step (as per-layer ops they
+    were ~10 launches a layer): the stations' step inputs (models/stations.py)."""
+    return {"block_tables": bt,
+            "kv_rows": torch.arange(seq_lens.shape[0], device=seq_lens.device),
+            "kv_block": seq_lens // bs,
+            "kv_slot": seq_lens % bs,
+            "attn_block_tables": bt.to(torch.int32).clamp_min_(0),
+            "attn_seq_lens": (seq_lens + 1).to(torch.int32)}
+
+
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
                 k_new: torch.Tensor, v_new: torch.Tensor) -> None:
     """One decode token per row into the pool: pool.k[bt[r, lb[r]], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
@@ -788,13 +799,13 @@ class BatchedDecodeState:
         write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def _begin_step(self) -> None:
-        """What every layer's append and block_table_tensor share, built once at the first layer of a step (as
-        per-layer ops they were ~10 launches a layer, ~480 a step)."""
-        self._rows = torch.arange(self.n_rows, device=self.device)
-        self._lb = self.seq_lens // self.bs
-        self._slot = self.seq_lens % self.bs
-        self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
-        self._sl32 = (self.seq_lens + 1).to(torch.int32)
+        """What every layer's append and block_table_tensor share, built once at the first layer of a step."""
+        s = self.step_inputs()
+        self._rows, self._lb, self._slot = s["kv_rows"], s["kv_block"], s["kv_slot"]
+        self._bt32, self._sl32 = s["attn_block_tables"], s["attn_seq_lens"]
+
+    def step_inputs(self) -> dict:
+        return step_inputs(self.bt, self.seq_lens, self.bs)
 
     def block_table_tensor(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Kernel inputs: persistent block table (int32) + effective seq_lens (incl. the
