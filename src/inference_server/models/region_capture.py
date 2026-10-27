@@ -4,7 +4,8 @@ reads and writes, in the layout of BlameGraph's lab/capture.py: one JSON line pe
 {"reads": {name: tensor}, "writes": {name: tensor}} on the CPU. Weights are named and described, never saved. A
 sample's K/V pool is only the blocks the step touches, renumbered in the order of its `kv_blocks` (their ids in the
 real pool), its block tables renumbered to match. CAPTURE_REGION_LAYERS=0,23,47 limits the layers. Reads tensors
-back, so it is for a capture run; with CUDA graphs on (CUSTOM_BACKEND_CUDA_GRAPH) only the eager calls are seen."""
+back, so it is for a capture run; graph replays and megakernel steps run no stations, so a capture needs
+CUSTOM_BACKEND_CUDA_GRAPH=0 and MEGAKERNEL=0 to see every call."""
 
 from __future__ import annotations
 
