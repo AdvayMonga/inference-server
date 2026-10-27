@@ -55,7 +55,7 @@
   mixed prefill (`PREFILL_MODE`, 2048-token steps; chunks of <= 128 tokens run as decode rows through the decode
   graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
   (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
-  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
+  batch <= 2 (or as `models/megakernel/routing.json` says, when present) with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
   stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position (build-time flags of
   the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB`; `MEGAKERNEL_NOMATH` is a timing-only build), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
   and fp8 activations from 2,048 pairs (`models/moe_kernel.py`, table in `qwen3_moe.py`), CUTLASS grouped GEMMs
