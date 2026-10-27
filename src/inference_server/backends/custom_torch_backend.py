@@ -410,7 +410,8 @@ class CustomTorchBackend(InferenceBackend):
         # A measured table of which path wins per row count and context (models/megakernel/routing.py); the rule above
         # where it has no entry.
         from inference_server.models.megakernel import routing
-        self._mega_routing = routing.load(os.environ.get("MEGAKERNEL_ROUTING", routing.DEFAULT), mk.BMAX)
+        self._mega_routing = (routing.load(os.environ.get("MEGAKERNEL_ROUTING", routing.DEFAULT), mk.BMAX)
+                              if self._mega_on else None)
         self._mega = mk.Model(self.model, self.device) if self._mega_on else None
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
