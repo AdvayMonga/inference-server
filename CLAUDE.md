@@ -72,6 +72,18 @@
   3-gram, `backend.verify_step` runs [current] + drafts as rows at consecutive positions in one forward (the
   prefill-as-decode mechanism, K/V written causally), the longest agreeing prefix is kept; `stats()` reports
   spec_steps / spec_drafted / spec_tokens. Output-identical to plain greedy decode (tests/test_spec_decode.py).
+  Through the megakernel the verify rows pass `shared_kv` (each attention item writes the new K/V it reads; without it
+  a row read another row's K/V mid-write: logits off by up to 15%, 2026-10-27).
+- EAGLE-3 (`SPEC_EAGLE_MODEL`, e.g. Tengyunw/qwen3_30b_moe_eagle3; `models/eagle.py`): a one-layer draft head reading the
+  target's residual entering layers 2/24/45 (`SPEC_EAGLE_LAYERS`) and the next token's embedding; the prompt's aux comes
+  from the prefill (the model's `aux_layers` capture, prefix-cache hits excluded), the decode's from the megakernel's
+  `aux` rows. One row only, from its first token: each step is the verify of [current] + `SPEC_EAGLE_K` drafts and one
+  CUDA-graph replay (acceptance, the head's re-feed, the next drafts), launched before the previous step is read, so
+  the host never waits; a request averaging under `SPEC_EAGLE_MIN_TOKENS` (1.35) tokens over `SPEC_EAGLE_WINDOW` (32)
+  steps decodes plainly from there. Off by default. H200 2026-10-27, single stream in process (30 requests), K = 1:
+  1.67 tokens a step, step 4.08 ms (verify 3.83, head 0.23), TPOT p50 3.42 -> 2.72, mean 3.40 -> 2.85, p99 3.53 ->
+  3.50 (the slowest requests accept few drafts); K = 2 and 3 slower (the head's ~0.18 ms a draft, the verify's
+  experts). Teacher-forced argmax agreement equals plain decode's (97.8%).
 - Launch profiles (2026-10-14): `src/inference_server/profiles.toml` holds `[general]` plus optional tables named after
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
