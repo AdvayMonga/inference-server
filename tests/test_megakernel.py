@@ -106,11 +106,11 @@ def test_fp8_step_agrees_on_the_argmax(backend, fp8_model, lens):
     _kv_match(backend, sb, sa, len(lens))
 
 
-@pytest.mark.parametrize("lens", [(37,), (37, 300)])
+@pytest.mark.parametrize("lens", [(37,), (37, 300), (37, 16, 300, 1000), (37, 16, 300, 1000, 5, 64, 200, 129)])
 @pytest.mark.parametrize("which", ["bf16", "fp8"])
 def test_tma_streamed_weights_give_the_register_paths_tokens(backend, fp8_model, lens, which):
     """MEGAKERNEL_TMA: the same step with every GEMV phase's weights streamed through the shared-memory ring (batch
-    <= 2); only the summation order differs, so the picks agree to a near-tie and the logits are close."""
+    <= MEGAKERNEL_TMA_ROWS); only the summation order differs, so the picks agree to a near-tie and the logits are close."""
     from inference_server.models import megakernel as mk
     mdl = backend._mega if which == "bf16" else fp8_model
     prompts = [torch.randint(1000, 30000, (n,)).tolist() for n in lens]

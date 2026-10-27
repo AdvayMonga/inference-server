@@ -31,6 +31,9 @@ RING_KB = int(os.environ.get("MEGAKERNEL_RING_KB", "96"))      # the weight ring
 NOMATH = os.environ.get("MEGAKERNEL_NOMATH", "0") == "1"       # timing only: the ring phases skip their dot products
 GUMMA = os.environ.get("MEGAKERNEL_GUMMA", "1") == "1"         # fp8 gate_up stages dotted on the tensor cores
 STAMPS = os.environ.get("MEGAKERNEL_STAMPS", "0") == "1"       # debug: the build that writes `times` (off: none compiled in)
+# The widest batch the weight ring serves (1, 2, 4, 8). 2 -> 4 cut B=3 5.38 -> 4.72 ms and B=4 5.92 -> 5.39 (ctx 300;
+# ctx 2000: 6.42 -> 5.47, 6.97 -> 6.15); 8 rows stay slower than the graphs (8.71 vs 6.61), 2026-10-26.
+TMA_ROWS = int(os.environ.get("MEGAKERNEL_TMA_ROWS", "4"))
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 
@@ -44,14 +47,15 @@ def _ext(kv8: bool = False, tma: bool = False):
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
     src = Path(__file__).with_name("decode_step.cu")
     bps = 1 if tma else BPS
-    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}_r{RING_KB}_nm{int(NOMATH)}_g{int(GUMMA)}_s{int(STAMPS)}", sources=[str(src)],
+    return load(name=f"qwen3_decode_step_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}_r{RING_KB}_nm{int(NOMATH)}_g{int(GUMMA)}_s{int(STAMPS)}_tr{TMA_ROWS}", sources=[str(src)],
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
                                    f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}",
                                    f"-DMEGA_NST={NST}", f"-DMEGA_CHUNK={CHUNK}", f"-DMEGA_PRIME={int(PRIME)}",
                                    f"-DMEGA_THREADS={THREADS}", f"-DMEGA_RING_KB={RING_KB}", f"-DMEGA_NOMATH={int(NOMATH)}",
-                                   f"-DMEGA_GUMMA={int(GUMMA)}", f"-DMEGA_STAMPS={int(STAMPS)}"],
+                                   f"-DMEGA_GUMMA={int(GUMMA)}", f"-DMEGA_STAMPS={int(STAMPS)}",
+                                   f"-DMEGA_TMA_ROWS={TMA_ROWS}"],
                 verbose=False)
 
 

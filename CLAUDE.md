@@ -52,10 +52,11 @@
   mixed prefill (`PREFILL_MODE`, 2048-token steps; chunks of <= 128 tokens run as decode rows through the decode
   graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
   (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
-  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
+  batch <= 2 (`MEGAKERNEL_MAX_ROWS`) with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`; up to
+  4 rows, `MEGAKERNEL_TMA_ROWS`), 16 warps a block, ring
   stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position, fp8 gate_up stages
   on the tensor cores (`MEGAKERNEL_GUMMA`), down's act row in registers and its scales in shared memory (build-time
-  flags of the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB/GUMMA`; `MEGAKERNEL_NOMATH` is a timing-only
+  flags of the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB/GUMMA/TMA_ROWS`; `MEGAKERNEL_NOMATH` is a timing-only
   build, `MEGAKERNEL_STAMPS=1` the build that writes the debug `times` stamps, which cost ~0.1 ms a step compiled in), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
   and fp8 activations from 2,048 pairs (`models/moe_kernel.py`, table in `qwen3_moe.py`), CUTLASS grouped GEMMs
   above. One block table per request, shared by every layer (`paged_kv_cache.BlockAllocator`); KV admission reserves

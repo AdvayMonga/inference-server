@@ -87,7 +87,7 @@ struct Args {
     int stamp_layer;                                                                       // the layer `times` stamps
     int times_blocks;                                                                      // times is [blocks, 128]
     int kv8;                                                                               // the pools hold fp8 e4m3
-    int tma;                                                                               // MEGAKERNEL_TMA (batch <= 2)
+    int tma;                                                                               // MEGAKERNEL_TMA (batch <= MEGA_TMA_ROWS)
 };
 
 __device__ __forceinline__ float bf2f(bf16 x) { return __bfloat162float(x); }
@@ -240,7 +240,7 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
     }
 }
 
-// ---- TMA weight streaming (MEGAKERNEL_TMA=1, batch <= 2). A warp holding a few 16-byte loads per lane in flight
+// ---- TMA weight streaming (MEGAKERNEL_TMA=1, batch <= MEGA_TMA_ROWS). A warp holding a few 16-byte loads per lane in flight
 // streamed 2.1-2.8 TB/s in every GEMV phase (H200, 2026-10-19); here each block streams its own contiguous rows into a
 // ring of NST shared-memory stages with cp.async.bulk (completion counted on an mbarrier per stage, ~96 KB in flight
 // per SM) and its warps compute from shared memory. The ring is the top 96 KB of the 128 KB the kernel reserves,
@@ -273,7 +273,12 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #ifndef MEGA_STAMPS
 #define MEGA_STAMPS 0
 #endif
-constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
+// MEGA_TMA_ROWS: the widest batch whose weights stream through the ring (1, 2, 4 or 8); wider batches load rows directly.
+#ifndef MEGA_TMA_ROWS
+#define MEGA_TMA_ROWS 4
+#endif
+static_assert(MEGA_TMA_ROWS == 1 || MEGA_TMA_ROWS == 2 || MEGA_TMA_ROWS == 4 || MEGA_TMA_ROWS == 8, "ring rows: 1, 2, 4 or 8");
+constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST;
 // Attention layout: SPLIT threads per position, each a QW-wide slice of the head dimension (q slices padded by 4 floats,
 // V rows by 8 elements, so the slices a quarter-warp reads start in different banks); PVS threads per (head, 8-wide d
 // group) item in PV. One thread per position spent 9-11 us of a layer's ~21 in the scores (2026-10-25, ctx 300-2000).
@@ -282,7 +287,16 @@ static_assert(SPLIT >= 1 && SPLIT <= 8 && QW % 16 == 0 && PVS >= 1 && PVS <= 4 &
               "positions split into 16-element slices; 1-4 threads per PV item");
 __device__ __forceinline__ int qi(int j, int d) { return j * QSTR + (d / QW) * (QW + 4) + d % QW; }   // q_s index
 constexpr size_t ATTN_SMEM = HDR + GQA * QSTR * 4 + CHUNK * VSTR * 2 + GQA * CHUNK * 4 + GQA * WARPS * 4;
-constexpr bool PRIME_P4 = MEGA_PRIME && ATTN_SMEM <= RING_OFF;      // the attention phase leaves the ring untouched
+// Shared memory below the ring, per batch (offsets from `smem`, past the header): P6/P7's stage plans, gate_up partials
+// and down scales after the n2 rows and the top-8; o_proj's partials after its attn rows; the ring (from smem_raw) above
+// whatever a ring phase keeps live. Batch <= 2 keeps its 2026-10-26 layout.
+template <int BT> constexpr int x6_off() { return BT <= 2 ? 16384 : (BT * H * 2 + 2 * BT * K * 4 + 1023) / 1024 * 1024; }
+template <int BT> constexpr int part4_off() { return BT <= 2 ? 16384 : BT * NQ * D * 2; }
+template <int BT> constexpr int ring_off() {
+    constexpr int a = HDR + part4_off<BT>() + WARPS * BT * 4, b = HDR + x6_off<BT>() + 12288;
+    return BT <= 2 ? 32768 : ((a > b ? a : b) + 4095) / 4096 * 4096;
+}
+template <int BT> constexpr bool prime_p4() { return MEGA_PRIME && ATTN_SMEM <= ring_off<BT>(); }   // attention leaves the ring untouched
 static_assert((MEGA_RING_KB * 1024) % NST == 0 && STAGE % 8192 == 0, "the ring is whole 8 KB rows a stage");
 
 __device__ __forceinline__ uint32_t s2u(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
@@ -458,9 +472,9 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
     constexpr int RA = (BT <= 4) ? 2 : 1;                            // rows per warp item, the H-long GEMVs (qkv, lm_head)
     constexpr int R4 = (BT <= 2) ? 2 : 1;                            // o_proj
     using DN = Down<FP8>;
-    constexpr bool tma = MEGA_TMA && (BT <= 2);                      // weights streamed through the shared-memory ring
+    constexpr bool tma = MEGA_TMA && (BT <= MEGA_TMA_ROWS);          // weights streamed through the shared-memory ring
     unsigned long long* bars = reinterpret_cast<unsigned long long*>(smem_raw + 128);  // [NST], after red[WARPS]
-    unsigned char* ring = smem_raw + RING_OFF;
+    unsigned char* ring = smem_raw + ring_off<BT>();
     uint32_t ph = 0;
     if constexpr (tma) {
         if (tid == 0) {
@@ -745,7 +759,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             mbar_expect(bar, n * NQ * D * 2);
             bulk_load(dst, lw.wo + (size_t)r0 * (NQ * D), n * NQ * D * 2, bar);
         };
-        if constexpr (tma && PRIME_P4) {
+        if constexpr (tma && prime_p4<BT>()) {
             constexpr int RPS = STAGE / (NQ * D * 2);
             block_slice(H, lo4, hi4);
             __syncthreads();                                          // every warp is past its attention item's smem use
@@ -793,7 +807,7 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             float out[R4][BT];
             if (tma) {                                                 // 4 rows of 8 KB a stage, two warps a row
                 constexpr int RPS = STAGE / (NQ * D * 2);
-                float* part = reinterpret_cast<float*>(smem + 16384);   // [WARPS][BT], past xs (16 KB at batch 2)
+                float* part = reinterpret_cast<float*>(smem + part4_off<BT>());   // [WARPS][BT], past xs
                 if (!primed4) block_slice(H, lo4, hi4);
                 const int lo = lo4, hi = hi4;
                 ring_run((hi - lo + RPS - 1) / RPS, bars, ring, ph, issue4,
@@ -904,8 +918,8 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             const int items = pairs * (I / NPW);
             if (tma) {                                                 // C (gate, up) row pairs a stage, within one pair
                 constexpr int RB = H * (FP8 ? 1 : 2), C = STAGE / (2 * RB);
-                int* seg_s = reinterpret_cast<int*>(smem + 16384);
-                float* gu_s = reinterpret_cast<float*>(smem + 20480);  // [2 * C]; with MEGA_GUMMA [WARPS][16]
+                int* seg_s = reinterpret_cast<int*>(smem + x6_off<BT>());
+                float* gu_s = reinterpret_cast<float*>(smem + x6_off<BT>() + 4096);  // [2 * C]; with MEGA_GUMMA [WARPS][16]
                 constexpr int CPW = H / 64 / WARPS;                    // MEGA_GUMMA: 64-byte chunks of each row a warp takes
                 static_assert(!(FP8 && MEGA_GUMMA) || (2 * C == 16 && CPW * WARPS * 64 == H), "MEGA_GUMMA: one 16-row tile a stage");
                 uint32_t xh[CPW][4][2];                                // MEGA_GUMMA: this lane's x as f16 pairs (B fragments)
@@ -1020,9 +1034,9 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
         if (!tma) load_down<FP8>(lw.down, ids_s, gwarp * DN::RD, pairs * H, wv7);
         // the down GEMV's stages are planned here (its experts are known) and, with MEGA_PRIME, the first ones issued
         constexpr int RB7 = I * (FP8 ? 1 : 2), C7 = (STAGE / RB7 < (FP8 ? 32 : 16)) ? STAGE / RB7 : (FP8 ? 32 : 16);   // rows a stage, within its bytes
-        int* seg7 = reinterpret_cast<int*>(smem + 16384);
+        int* seg7 = reinterpret_cast<int*>(smem + x6_off<BT>());
         int n7 = 0, lo7 = 0, hi7 = 0;
-        float* sc7 = reinterpret_cast<float*>(smem + 24576);          // [hi7 - lo7] the slice's down scales (fp8)
+        float* sc7 = reinterpret_cast<float*>(smem + x6_off<BT>() + 8192);   // [hi7 - lo7 <= 1024] the slice's down scales (fp8)
         auto issue7 = [&](int st, unsigned char* dst, unsigned long long* bar) {
             const int f = seg7[st], cnt = seg7[st + 1] - f, pp = f / H, n0 = f % H;
             mbar_expect(bar, cnt * RB7);
@@ -1215,7 +1229,7 @@ constexpr size_t SMEM_BYTES = HDR + (size_t)BMAX * NQ * D * 2;   // the largest 
 template <int BT> constexpr size_t smem_bytes() {           // what the BT-row instantiation touches (the ring included when built)
     size_t m = ATTN_SMEM;
     for (size_t v : {(size_t)HDR + 2 * BT * H * 2, (size_t)HDR + BT * H * 2 + BT * K * 8, (size_t)HDR + (size_t)BT * NQ * D * 2,
-                     (MEGA_TMA && BT <= 2) ? (size_t)RING_OFF + NST * STAGE : (size_t)0})
+                     (MEGA_TMA && BT <= MEGA_TMA_ROWS) ? (size_t)ring_off<BT>() + NST * STAGE : (size_t)0})
         m = v > m ? v : m;
     return m;
 }
@@ -1224,7 +1238,7 @@ static size_t smem_for(int B) {
 }
 static_assert(ATTN_SMEM <= SMEM_BYTES, "attention smem");
 static_assert(HDR + 2 * BMAX * H * 2 <= SMEM_BYTES, "P5 smem");
-static_assert(RING_OFF + NST * STAGE <= 232448 && HDR + 2 * 4096 * 2 + 4096 <= RING_OFF, "TMA ring vs the batch-2 phases and the 227 KB a block may have");
+static_assert(ring_off<MEGA_TMA_ROWS>() + NST * STAGE <= 232448 && HDR + 2 * 4096 * 2 + 4096 <= ring_off<2>(), "TMA ring vs the batch-2 phases and the 227 KB a block may have");
 static_assert(HDR + BMAX * H * 2 + BMAX * K * 8 <= SMEM_BYTES, "P6 smem");
 static_assert(128 + NST * 8 <= HDR && WARPS * 4 <= 128, "smem header holds red[WARPS] and the mbarriers");
 
