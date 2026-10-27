@@ -365,14 +365,19 @@ class Qwen3MoeModel(nn.Module):
             top_k=top_k, norm_topk_prob=norm_topk_prob, eps=eps, dtype=dtype,
         ) for _ in range(num_layers))
         self.norm = Qwen3RMSNorm(hidden_size, eps=eps, dtype=dtype)
+        self.aux_layers: tuple = ()     # EAGLE-3: the residual entering these layers, kept as aux_out [B, S, 3H]
+        self.aux_out: torch.Tensor | None = None
 
     def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None):
         h = self.embed_tokens(input_ids)
+        aux = []
         if position_ids is None:
             start = kv_cache.seq_len if kv_cache is not None else 0
             position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
         cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
         for i, layer in enumerate(self.layers):
+            if i in self.aux_layers:
+                aux.append(h)
             if paged_ctx is not None:
                 h, _ = layer(h, cos, sin, paged_ctx=paged_ctx, kv_layer_idx=i)
                 continue
@@ -380,6 +385,7 @@ class Qwen3MoeModel(nn.Module):
             h, kv_new = layer(h, cos, sin, past_kv=past, attn_mask=attn_mask)
             if kv_cache is not None:
                 kv_cache.append(i, kv_new[0], kv_new[1])
+        self.aux_out = torch.cat(aux, dim=-1) if aux else None
         return self.norm(h)
 
 

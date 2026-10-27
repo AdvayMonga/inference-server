@@ -88,6 +88,9 @@ struct Args {
     int times_blocks;                                                                      // times is [blocks, 128]
     int kv8;                                                                               // the pools hold fp8 e4m3
     int tma;                                                                               // MEGAKERNEL_TMA (batch <= MEGA_TMA_ROWS)
+    bf16* aux; int aux_l0, aux_l1, aux_l2;   // aux [B, 3, H]: the residual entering layers aux_l0..2 per row (EAGLE-3), or null
+    int shared_kv;                           // rows are consecutive positions of one sequence: every row's new K/V is
+                                             // written (and the grid synced) before any row's attention reads it
 };
 
 __device__ __forceinline__ float bf2f(bf16 x) { return __bfloat162float(x); }
@@ -457,6 +460,45 @@ __device__ __forceinline__ void block_slice(int n, int& lo, int& hi) {
 #define STAMP_ALWAYS(i) do { if (MEGA_STAMPS && a.times && threadIdx.x == 0 && (a.times_blocks || blockIdx.x == 0)) a.times[(a.times_blocks ? blockIdx.x * 128 : 0) + (i)] = gtimer(); } while (0)
 #define RING_TS(base) ((MEGA_STAMPS && a.times && a.times_blocks && L == a.stamp_layer) ? a.times + blockIdx.x * 128 + (base) : nullptr)
 
+// One warp: row b's new token's k (normed, roped) and v for kv group g into layer lw's paged pools.
+__device__ __forceinline__ void write_new_kv(const Args& a, const Layer& lw, int b, int g) {
+    const int lane = threadIdx.x & 31, pos = (int)a.pos[b];
+    float cs[2], sn[2];
+#pragma unroll
+    for (int u = 0; u < 2; ++u) { const float f = pos * a.inv_freq[lane + 32 * u]; cs[u] = rbf(cosf(f)); sn[u] = rbf(sinf(f)); }
+    const bf16* krow = a.sc.qkv + b * QKV + NQ * D + g * D;
+    const bf16* vrow = a.sc.qkv + b * QKV + NQ * D + NKV * D + g * D;
+    float x[4], n[4];
+#pragma unroll
+    for (int u = 0; u < 4; ++u) x[u] = bf2f(krow[lane + 32 * u]);
+    const float rk = rsqrtf(warp_sum(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]) / D + EPS);
+#pragma unroll
+    for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(lw.k_norm[lane + 32 * u]) * rbf(x[u] * rk));
+    const int bid = (int)a.bt[b * a.bt_cols + pos / BS], slot = pos % BS;
+    const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
+    bf16 kb[4];
+#pragma unroll
+    for (int u = 0; u < 2; ++u) {
+        kb[u] = f2bf(n[u] * cs[u] - n[u + 2] * sn[u]);
+        kb[u + 2] = f2bf(n[u + 2] * cs[u] + n[u] * sn[u]);
+    }
+    if (MEGA_KV8) {                                        // KV_CACHE_DTYPE=fp8
+        __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
+        __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
+#pragma unroll
+        for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(kb[u])); kdst[lane + 32 * u + D / 2] = __nv_fp8_e4m3(bf2f(kb[u + 2])); }
+#pragma unroll
+        for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(vrow[lane + 32 * u]));
+    } else {
+        bf16* kdst = reinterpret_cast<bf16*>(lw.pool_k) + off;
+        bf16* vdst = reinterpret_cast<bf16*>(lw.pool_v) + off;
+#pragma unroll
+        for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
+#pragma unroll
+        for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
+    }
+}
+
 template <int BT, bool FP8>
 __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
@@ -508,7 +550,11 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     } else {
                         for (int k = tid; k < H; k += THREADS) xn[b * H + k] = f2bf(bf2f(a.sc.h1[b * H + k]) + a.sc.out2[b * H + k]);
                     }
-                    if (blockIdx.x == b) for (int k = tid; k < H; k += THREADS) a.sc.h[b * H + k] = xn[b * H + k];
+                    if (blockIdx.x == b) {
+                        for (int k = tid; k < H; k += THREADS) a.sc.h[b * H + k] = xn[b * H + k];
+                        const int slot = !a.aux ? -1 : L == a.aux_l0 ? 0 : L == a.aux_l1 ? 1 : L == a.aux_l2 ? 2 : -1;
+                        if (slot >= 0) for (int k = tid; k < H; k += THREADS) a.aux[(b * 3 + slot) * H + k] = xn[b * H + k];
+                    }
                     __syncthreads();
                     rmsnorm_row(xn + b * H, lw.in_norm, xn + b * H, H, red);
                 } else {
@@ -565,6 +611,11 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             bf16* v_s = reinterpret_cast<bf16*>(smem + GQA * QSTR * 4);                    // [CHUNK][VSTR]
             float* p_s = reinterpret_cast<float*>(smem + GQA * QSTR * 4 + CHUNK * VSTR * 2);   // [GQA][CHUNK]
             float* red2 = p_s + GQA * CHUNK;                                               // [GQA][WARPS]
+            if (a.shared_kv) {                            // a row reads positions other rows write: all of them first
+                if (warp == 0)
+                    for (int item = blockIdx.x; item < B * NKV; item += gridDim.x) write_new_kv(a, lw, item / NKV, item % NKV);
+                grid.sync();
+            }
             for (int item = blockIdx.x; item < B * NKV * nsplit; item += gridDim.x) {
                 const int c = item % nsplit, g = (item / nsplit) % NKV, b = item / (nsplit * NKV);
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
@@ -588,38 +639,8 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                         q_s[qi(warp, lane + 32 * u)] = rbf(n[u] * cs[u] - n[u + 2] * sn[u]) * a.scale;
                         q_s[qi(warp, lane + 32 * u + D / 2)] = rbf(n[u + 2] * cs[u] + n[u] * sn[u]) * a.scale;
                     }
-                    if (warp == 0 && c == pos / CHUNK) {                  // this chunk holds the new token: its k and v
-                        const bf16* krow = a.sc.qkv + b * QKV + NQ * D + g * D;
-                        const bf16* vrow = a.sc.qkv + b * QKV + NQ * D + NKV * D + g * D;
-#pragma unroll
-                        for (int u = 0; u < 4; ++u) x[u] = bf2f(krow[lane + 32 * u]);
-                        const float rk = rsqrtf(warp_sum(x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3]) / D + EPS);
-#pragma unroll
-                        for (int u = 0; u < 4; ++u) n[u] = rbf(bf2f(lw.k_norm[lane + 32 * u]) * rbf(x[u] * rk));
-                        const int bid = (int)bt[b * a.bt_cols + pos / BS], slot = pos % BS;
-                        const size_t off = (((size_t)bid * NKV + g) * BS + slot) * D;
-                        bf16 kb[4];
-#pragma unroll
-                        for (int u = 0; u < 2; ++u) {
-                            kb[u] = f2bf(n[u] * cs[u] - n[u + 2] * sn[u]);
-                            kb[u + 2] = f2bf(n[u + 2] * cs[u] + n[u] * sn[u]);
-                        }
-                        if (MEGA_KV8) {                                        // KV_CACHE_DTYPE=fp8
-                            __nv_fp8_e4m3* kdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_k) + off;
-                            __nv_fp8_e4m3* vdst = reinterpret_cast<__nv_fp8_e4m3*>(lw.pool_v) + off;
-#pragma unroll
-                            for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(kb[u])); kdst[lane + 32 * u + D / 2] = __nv_fp8_e4m3(bf2f(kb[u + 2])); }
-#pragma unroll
-                            for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = __nv_fp8_e4m3(bf2f(vrow[lane + 32 * u]));
-                        } else {
-                            bf16* kdst = reinterpret_cast<bf16*>(lw.pool_k) + off;
-                            bf16* vdst = reinterpret_cast<bf16*>(lw.pool_v) + off;
-#pragma unroll
-                            for (int u = 0; u < 2; ++u) { kdst[lane + 32 * u] = kb[u]; kdst[lane + 32 * u + D / 2] = kb[u + 2]; }
-#pragma unroll
-                            for (int u = 0; u < 4; ++u) vdst[lane + 32 * u] = vrow[lane + 32 * u];
-                        }
-                    }
+                    if (warp == 0 && c == pos / CHUNK && !a.shared_kv)    // this chunk holds the new token: its k and v
+                        write_new_kv(a, lw, b, g);
                 }
                 __syncthreads();
                 STAMP(9);                                             // q normed and roped, the new k/v written
@@ -1250,7 +1271,7 @@ template <bool FP8> static void* pick(int B) {
 std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch::Tensor pos, torch::Tensor bt, torch::Tensor layers, torch::Tensor embed,
                           torch::Tensor final_norm, torch::Tensor lm_head, torch::Tensor inv_freq, torch::Tensor scratch_f32,
                           torch::Tensor scratch_bf16, torch::Tensor scratch_i32, double scale, bool fp8, torch::Tensor times,
-                          int64_t stamp_layer, bool kv8, bool tma) {
+                          int64_t stamp_layer, bool kv8, bool tma, torch::Tensor aux, std::vector<int64_t> aux_layers, bool shared_kv) {
     TORCH_CHECK(tokens.is_cuda() && tokens.dtype() == torch::kInt64 && tokens.dim() == 1 && tokens.is_contiguous(), "tokens [B] int64");
     const int B = tokens.size(0);
     TORCH_CHECK(B >= 1 && B <= BMAX, "batch 1..16");
@@ -1304,6 +1325,12 @@ std::tuple<torch::Tensor, torch::Tensor> decode_step(torch::Tensor tokens, torch
     TORCH_CHECK(kv8 == (MEGA_KV8 != 0) && tma == (MEGA_TMA != 0), "this build of the kernel is for kv8=", MEGA_KV8, " tma=", MEGA_TMA);
     a.kv8 = kv8 ? 1 : 0;
     a.tma = tma ? 1 : 0;
+    TORCH_CHECK(!aux.numel() || (aux.dtype() == torch::kBFloat16 && aux.is_contiguous() && aux.numel() == (int64_t)B * 3 * H
+                                 && aux_layers.size() == 3), "aux [B, 3, H] bf16 with 3 layers");
+    a.aux = aux.numel() ? reinterpret_cast<bf16*>(aux.data_ptr()) : nullptr;
+    a.aux_l0 = aux.numel() ? (int)aux_layers[0] : -1; a.aux_l1 = aux.numel() ? (int)aux_layers[1] : -1; a.aux_l2 = aux.numel() ? (int)aux_layers[2] : -1;
+    TORCH_CHECK(!shared_kv || B <= num_sms(), "shared_kv: one block per row at least");
+    a.shared_kv = shared_kv ? 1 : 0;
     void* args[] = {&a};
     auto stream = at::cuda::getCurrentCUDAStream();
     cudaError_t err = cudaLaunchCooperativeKernel(fp8 ? pick<true>(B) : pick<false>(B), dim3(num_sms() * bps), dim3(THREADS), args, smem, stream);
