@@ -196,6 +196,13 @@ class Runner:
             g = self._capture(L)
         g.replay()
 
+    def warm(self) -> None:
+        """Capture every length bucket's step now (a capture mid-request would stall it)."""
+        if self._use_graphs:
+            for L in sorted({self.bucket(b) for b in _BUCKETS}):
+                if L not in self._graphs:
+                    self._capture(L)
+
     def _capture(self, L: int) -> torch.cuda.CUDAGraph:
         """Capture `_post` at length L on copies of the state, so the warmup runs leave the live state untouched."""
         live = [t.clone() for t in (self.kc, self.vc, self.cur, self.vpos, self.greedy, self.aux, self.pos0, self.acc, self.out)]

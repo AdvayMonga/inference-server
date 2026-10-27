@@ -125,3 +125,36 @@ def test_tma_streamed_weights_give_the_register_paths_tokens(backend, fp8_model,
     ok, deficit = picks_agree(outs[1], outs[0])
     assert ok, deficit
     assert (outs[0] - outs[1]).abs().mean() < 0.1 * outs[0].abs().mean()
+
+
+def test_verify_rows_of_one_sequence_match_the_torch_forward(backend):
+    """A verify step: rows = consecutive positions of one sequence (one block table). Each row reads the K/V the rows
+    before it write in the same launch (`shared_kv`), and `aux` holds each row's residual entering the 3 layers."""
+    from inference_server.models import megakernel as mk
+    from inference_server.sampling import GREEDY
+    torch.manual_seed(7)
+    n, S, layers = 300, 4, (2, 24, 45)
+    prompt = torch.randint(1000, 30000, (n,)).tolist()
+    toks = torch.randint(1000, 30000, (S,), device="cuda")
+    m = backend.model.model
+    kv_ref = backend.prefill_chunk_batch([(None, prompt, True, GREEDY)])[0][0]
+    m.aux_layers = layers
+    try:
+        ref = backend.model(toks.view(1, -1), kv_cache=kv_ref)[0]
+        aux_ref = m.aux_out[0].view(S, 3, -1).float()
+    finally:
+        m.aux_layers = ()
+    kv_ref.free_all()
+    st = _state(backend, [prompt])
+    st.reserve(0, S)
+    bt = st.bt[0:1].expand(S, -1).contiguous()
+    aux = torch.empty(S, 3, 2048, dtype=torch.bfloat16, device="cuda")
+    got, _ = mk.decode_step(backend._mega, toks, torch.arange(n, n + S, device="cuda"), bt, aux=aux, aux_layers=layers,
+                            shared_kv=True)
+    torch.cuda.synchronize()
+    ok, deficit = picks_agree(got, ref)
+    assert ok, deficit
+    d, mag = (got.float() - ref.float()).abs(), ref.float().abs().mean()
+    assert d.mean() < 0.1 * mag, (d.mean(), d.max(), mag)
+    err = (aux.float() - aux_ref).norm(dim=-1) / aux_ref.norm(dim=-1)
+    assert err[:, 0].max() < 0.05 and err.max() < 0.35, err.tolist()

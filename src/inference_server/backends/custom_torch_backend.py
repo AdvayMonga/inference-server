@@ -410,6 +410,19 @@ class CustomTorchBackend(InferenceBackend):
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
 
+        # EAGLE-3 speculative decoding (SPEC_EAGLE_MODEL, models/eagle.py): the draft head (the target's embedding), the
+        # target's residual kept at its three layers in every forward, SPEC_EAGLE_K drafts a step; before the pools.
+        self._eagle = self._eagle_run = None
+        eagle_name = os.environ.get("SPEC_EAGLE_MODEL", "")
+        if eagle_name and self.device.type == "cuda" and self._mega_on:
+            from inference_server.models import eagle as eg
+            self._eagle = eg.Eagle3Head.load(eagle_name, self.model.model.embed_tokens, self.device)
+            lay = os.environ.get("SPEC_EAGLE_LAYERS", "")          # e.g. "3,24,46"; default the head's training layers
+            self._eagle_layers = tuple(int(x) for x in lay.split(",")) if lay else eg.aux_layers(len(self.model.model.layers))
+            self.model.model.aux_layers = self._eagle_layers
+            self._eagle_k = int(os.environ.get("SPEC_EAGLE_K", "2"))
+            logger.info("EAGLE-3 head %s loaded: %d drafts a step, target layers %s", eagle_name, self._eagle_k, self._eagle_layers)
+
         # A draft model for speculative decoding (SPEC_DRAFT_MODEL, drafter.py), loaded before the pools are sized: its
         # weights and its static cache (max_len = the context window) come out of the KV budget.
         draft_name = os.environ.get("SPEC_DRAFT_MODEL", "")
@@ -486,6 +499,7 @@ class CustomTorchBackend(InferenceBackend):
             os.environ.get("CUSTOM_BACKEND_COMPILE", "0") == "1"      # MoE included since 2026-10-17 (an A/B)
         self._graph_buckets = _decode_buckets(self._graph_max_rows, coarse=self._compile_on)
         self._graphs: dict[int, dict] = {}   # bucket -> captured graph + its static buffers
+        self._last_aux = None                # the last decode-graph replay's aux rows (EAGLE)
         self._scratch = None                 # the padding block id, shared by every bucket (every pool)
 
         # torch.compile the DECODE forward only (Inductor fuses the ~50% element-wise/norm/RoPE
@@ -933,6 +947,11 @@ class CustomTorchBackend(InferenceBackend):
                 c.free_all()
             raise
         t1 = time.perf_counter()
+        if self._eagle is not None:
+            aux, off = self.model.model.aux_out, 0
+            for k in range(K):
+                self._keep_aux(caches[k], prefix[k], aux[0, off:off + lens[k]] if self.packed_prefill else aux[k, :lens[k]])
+                off += lens[k]
         finals = [k for k, it in enumerate(items) if it[2]]
         rows = (logits[0] if self.packed_prefill else logits[:, 0])[to_device(finals, dev)] if finals else None
         toks = dict(zip(finals, first_tokens(rows, [items[k][3] for k in finals], defer_tokens)))
@@ -1002,6 +1021,11 @@ class CustomTorchBackend(InferenceBackend):
             for c in caches:
                 c.free_all()
             raise
+        if self._eagle is not None and self._last_aux is not None:
+            off = nd
+            for c, ch in zip(caches, chunks):
+                self._keep_aux(c, c.seq_len, self._last_aux[off:off + len(ch), 0])
+                off += len(ch)
         commit_rows(caches, chunks, self.pools)
         t1 = time.perf_counter()
         next_tokens = None
@@ -1104,7 +1128,7 @@ class CustomTorchBackend(InferenceBackend):
         bt = state.bt[r:r + 1].expand(n, -1).contiguous()
         tok_t = to_device(tokens, self.device)
         if self._mega_on and n <= self._mega_max_rows:
-            _, greedy = mk.decode_step(self._mega, tok_t, pos, bt)
+            _, greedy = mk.decode_step(self._mega, tok_t, pos, bt, shared_kv=n > 1)
         else:
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()
@@ -1112,6 +1136,75 @@ class CustomTorchBackend(InferenceBackend):
                                          SimpleNamespace(n_rows=n, seq_lens=pos, bt=bt), self._decode_bucket(n))
             greedy = logits[:, -1].argmax(-1)
         return greedy.tolist()
+
+    # --- EAGLE-3 (SPEC_EAGLE_MODEL): one request's steps stay on the device; the host reads each one a step late ---
+
+    def _keep_aux(self, cache, p0: int, rows: torch.Tensor) -> None:
+        """A prefill chunk's aux rows [n, 3H] (positions p0..) kept on its cache for the draft head's prompt feed."""
+        if not hasattr(cache, "eagle_aux"):
+            cache.eagle_aux = []
+        cache.eagle_aux.append((p0, rows.reshape(rows.shape[0], -1).clone()))
+
+    def eagle_on(self) -> bool:
+        return self._eagle is not None
+
+    @torch.no_grad()
+    def eagle_begin(self, state, r: int, prompt: list[int], first: int, aux_chunks) -> bool:
+        """Start EAGLE on row r (its prompt prefilled, `first` its first token, not yet fed): the head reads the prompt's
+        aux. False when the aux does not cover every prompt position (a prefix-cache hit) or the context is too long."""
+        from inference_server.config import settings
+        from inference_server.models import eagle as eg
+        n, K = len(prompt), self._eagle_k
+        chunks = sorted(aux_chunks or [], key=lambda c: c[0])
+        at = 0
+        for p0, rows in chunks:
+            if p0 != at:
+                return False
+            at += rows.shape[0]
+        if at != n or state._host_len[r] != n or n + 4 * (K + 1) > settings.context_window:
+            return False
+        if self._eagle_run is None:
+            self._eagle_run = eg.Runner(self._eagle, K, settings.context_window, self.device)
+            self._eagle_bt = torch.zeros(K + 1, settings.context_window // self._block_size, dtype=torch.long, device=self.device)
+            self._eagle_run.warm()
+        run = self._eagle_run
+        run.begin(prompt, first, torch.cat([c for _, c in chunks]))
+        self._eagle_bt.zero_()
+        self._eagle_bt[:, :state.bt.shape[1]] = state.bt[r].clamp_min(0)
+        return True
+
+    @torch.no_grad()
+    def eagle_launch(self, state, r: int, pos0: int):
+        """Queue one step for row r: the verify of [current, drafts] at pos0.. (megakernel, K/V of every row written
+        before attention), then acceptance, the head's update and the next drafts (one graph replay), then the step's
+        tokens and count on their way to pinned host memory. `pos0` is the host's view (at most one step behind).
+        Returns (host buffer [K+2]: greedy tokens then the count, event)."""
+        from inference_server.models import megakernel as mk
+        run, K = self._eagle_run, self._eagle_k
+        lb0 = state._host_alloc[r]
+        state.reserve(r, pos0 + 2 * (K + 1) - state._host_len[r])     # every position this step and the one in flight write
+        if state._host_alloc[r] > lb0:
+            self._eagle_bt[:, lb0:state._host_alloc[r]] = to_device(state._host_blocks[r][lb0:], self.device)
+        _, greedy = mk.decode_step(self._mega, run.cur, run.vpos, self._eagle_bt, aux=run.aux,
+                                   aux_layers=self._eagle_layers, shared_kv=True)
+        run.greedy.copy_(greedy)
+        run.post(pos0 + 3 * (K + 1))
+        ring = getattr(self, "_eagle_host", None)
+        if ring is None:
+            ring = self._eagle_host = ([torch.empty(K + 2, dtype=torch.long, pin_memory=True) for _ in range(3)], 0)
+        bufs, i = ring
+        self._eagle_host = (bufs, (i + 1) % len(bufs))
+        host = bufs[i]
+        host[:K + 1].copy_(run.out, non_blocking=True)
+        host[K + 1:].copy_(run.acc, non_blocking=True)
+        ev = torch.cuda.Event()
+        ev.record()
+        return host, ev
+
+    def eagle_end(self, state, r: int, pos0: int) -> None:
+        """Row r leaves EAGLE (every launched step read): its length is pos0 again on the device and the host."""
+        state.seq_lens[r:r + 1].copy_(self._eagle_run.pos0)
+        state._host_len[r] = pos0
 
     def new_drafter(self, ids):
         """A drafter for a request with context `ids` from the draft model (SPEC_DRAFT_MODEL), or None."""
@@ -1185,7 +1278,7 @@ class CustomTorchBackend(InferenceBackend):
             with torch.cuda.graph(graph):   # private pool per bucket — see docstring
                 out = self._decode_fwd(g_tokens, position_ids=g_pos, paged_ctx=ctx)
             self._graphs[bucket] = {"graph": graph, "tokens": g_tokens, "pos": g_pos, "seqlens": g_seqlens,
-                                    "bt": g_bt, "out": out}
+                                    "bt": g_bt, "out": out, "aux": self.model.model.aux_out}   # aux: EAGLE's rows
             print(f"[graphs]   bucket {bucket} captured in {time.perf_counter() - t_b:.1f}s",
                   flush=True)
         except Exception:
@@ -1253,6 +1346,7 @@ class CustomTorchBackend(InferenceBackend):
         g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
         g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
         g["graph"].replay()
+        self._last_aux = g["aux"]
         return g["out"][:n]
 
     def _capture_prefill_graph(self, bucket: int, tiled: bool | None = None) -> None:

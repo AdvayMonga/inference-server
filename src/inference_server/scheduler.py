@@ -129,6 +129,8 @@ class ScheduledRequest:
     decode_width_max: int = 0
     cancelled: bool = False     # set by the HTTP side when the client goes away
     drafter: object | None = None   # NgramDrafter once speculative decoding has run for this request
+    eagle: bool | None = None       # EAGLE-3 (backend.eagle_on): None not tried yet, True running, False off for good
+    eagle_aux: list | None = None   # its prompt's aux rows from the prefill, until EAGLE starts
     kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
     admit_seq: int = 0          # admission order (the latest admitted is preempted first)
@@ -310,6 +312,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._prefill_chunks_processed = 0
         self._total_iteration_errors = 0
         self._spec_steps = self._spec_drafted = self._spec_tokens = 0     # speculative decoding (SPEC_DECODE_K)
+        self._eagle: dict | None = None     # the EAGLE row: {"row", "pos0" (host view), "prev" (the step in flight)}
         self._total_preempted = 0
         self._total_expired = 0
         # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
@@ -477,6 +480,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     # processes those first_tokens this same iter → decode advances active.
                     with self._timeline.phase("admit"):
                         self._admit_pending(device)
+                    if self._eagle is not None and (self._prefilling or len(self._active) > 1):
+                        self._eagle_drain()             # the batch changes: the EAGLE row back to plain decode
                     self._decoded_this_iter = False
                     with self._timeline.phase("prefill_chunk"):
                         if self.prefill_mode == "mixed":
@@ -494,7 +499,11 @@ class ContinuousBatchScheduler(SchedulerInterface):
                             self._active_high_water = len(self._active)
                         try:
                             with self._timeline.phase("decode", batch=len(self._active)):
-                                if self._spec_ready():
+                                if self._eagle_ready():
+                                    self._decode_step_eagle(device)
+                                elif not self._active:
+                                    pass                        # _eagle_ready streamed a first token that ended it
+                                elif self._spec_ready():
                                     self._decode_step_spec(device)
                                 elif self.async_decode:
                                     self._decode_step_async(device)
@@ -826,6 +835,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if not request.first_token_ts:             # a resumed (preempted) request keeps its real first-token time
             request.first_token_ts = time.perf_counter()
         self._splice_in(kv, kv_len, device)
+        request.eagle_aux = getattr(kv, "eagle_aux", None)
         self._active.append(_ActiveRow(request=request, current_token=first_token, real_kv_len=kv_len))
         self._timeline.event("first_token", trace_id=request.trace_id, kv_len=kv_len,
                              cache_hit_tokens=request.cache_hit_tokens, active=len(self._active))
@@ -1091,6 +1101,109 @@ class ContinuousBatchScheduler(SchedulerInterface):
             row.current_token = kept[-1]
             row.fresh = False                      # streamed here; nothing for _evict_finished to do
         self._flush_outbox()
+
+    # --- EAGLE-3 speculative decoding (backend.eagle_on): one row; a step is launched before the previous is read ---
+
+    def _eagle_ready(self) -> bool:
+        """The one active greedy row decodes by EAGLE: it is running, or it has just its first token (streamed here if
+        still pending) and its prompt's aux."""
+        st = self._eagle
+        if st is not None and not any(r is st["row"] for r in self._active):
+            self._eagle = st = None                # the row left (cancelled): its step in flight is dropped
+        on = getattr(self.backend, "eagle_on", None)
+        if on is None or not on() or len(self._active) != 1 or self._prefilling:
+            return False
+        row = self._active[0]
+        req = row.request
+        if st is not None:
+            return st["row"] is row
+        if req.eagle is False or req.sampling.temperature > 0.0:
+            return False
+        if self._pending is not None:
+            self._finish_pending()
+            self._pending = None
+        if isinstance(row.current_token, DeviceToken):
+            row.current_token = row.current_token.value()
+        if row.fresh:
+            self._evict_finished()                 # the first token streamed (or the row finished on it)
+            if not self._active or self._active[0] is not row:
+                return False
+        if len(req.generated) != 1 or not req.eagle_aux:
+            req.eagle = False                      # EAGLE starts from the first token only, with the whole prompt's aux
+            return False
+        return True
+
+    def _decode_step_eagle(self, device: str) -> None:
+        row = self._active[0]
+        req = row.request
+        if self._eagle is None:
+            ok = self.backend.eagle_begin(self._batched_kv, 0, req.token_ids, row.current_token, req.eagle_aux)
+            req.eagle_aux = None
+            if not ok:
+                req.eagle = False
+                (self._decode_step_async if self.async_decode else self._decode_step)(device)
+                return
+            req.eagle = True
+            self._eagle = {"row": row, "pos0": row.real_kv_len, "prev": None}
+        st = self._eagle
+        handle = self.backend.eagle_launch(self._batched_kv, 0, st["pos0"])
+        prev, st["prev"] = st["prev"], handle
+        if prev is not None:
+            self._eagle_read(prev)                 # while this step runs
+
+    def _eagle_read(self, handle) -> None:
+        """A launched step's tokens (greedy[0..a], a + 1 of them): streamed up to EOS or max_tokens; a finished row is
+        evicted (its step in flight, if any, is dropped: what it writes is the row's own blocks, freed after it)."""
+        host, event = handle
+        event.synchronize()
+        st = self._eagle
+        row = st["row"]
+        req = row.request
+        vals = host.tolist()
+        n = vals[-1]
+        toks = vals[:n]
+        used, finished = 0, None
+        for t in toks:
+            used += 1
+            if self.backend.is_eos(t) and not req.ignore_eos:
+                finished = "ok"
+                break
+            req.generated.append(t)
+            self._stream_token(req, t)
+            if len(req.generated) >= req.max_tokens:
+                finished = "ok"
+                break
+        st["pos0"] += n
+        row.real_kv_len += n
+        row.current_token = toks[-1]
+        self._spec_steps += 1
+        self._spec_drafted += len(vals) - 2
+        self._spec_tokens += n
+        req.decode_width_sum += used
+        req.decode_width_steps += 1
+        self.policy.on_tokens_processed(req, used)
+        if finished is not None:
+            self._eagle = None
+            self.policy.on_request_finished(req)
+            self._evict_rows([(self._row_index(row), finished)])
+        self._flush_outbox()
+
+    def _eagle_drain(self) -> None:
+        """Read the step in flight and hand the row back to plain decode (EAGLE stays off for it: the tokens decoded
+        from here on carry no aux for the head)."""
+        st = self._eagle
+        if st["prev"] is not None:
+            prev, st["prev"] = st["prev"], None
+            self._eagle_read(prev)
+        if self._eagle is None:
+            return                                 # it finished
+        row = st["row"]
+        self.backend.eagle_end(self._batched_kv, self._row_index(row), st["pos0"])
+        row.request.eagle = False
+        self._eagle = None
+
+    def _row_index(self, row) -> int:
+        return next(i for i, r in enumerate(self._active) if r is row)
 
     def _decode_step_async(self, device: str) -> None:
         """Launch this step, then process the previous one. Inputs: continuing rows take their latest token from the
@@ -1365,6 +1478,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             self._reject(prow.request, exc, state=state)
         self._active.clear()
         self._prefilling.clear()
+        self._eagle = None
         self._active_kv_reserved = 0
         self._batched_kv = None
         self._attention_mask = None
