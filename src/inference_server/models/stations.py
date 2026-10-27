@@ -18,7 +18,7 @@ from typing import Callable
 import torch
 import torch.nn.functional as F
 
-from inference_server.models import fused, qwen3_moe
+from inference_server.models import fused, qwen3_moe, region_capture
 from inference_server.models.paged_kv_cache import write_token
 
 
@@ -200,10 +200,11 @@ def forward(model, h: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, paged_
     """Every layer of `model` (a Qwen3MoeModel) through the resolved plan; the residual stream out."""
     step = {"cos": cos, "sin": sin, "cfg": layer_config(model), **paged_ctx.step_inputs()}
     steps = plan()
+    cap = region_capture.active()
     for i, layer in enumerate(model.layers):
         pool = paged_ctx.pools[i]
         c = {**step, **_weights(layer), "h": h, "k_cache": pool.k, "v_cache": pool.v}
-        for run in steps:
+        for _, _, run in (cap.steps(steps, i) if cap is not None and cap.wants(i) else steps):
             c.update(run(c))
         h = c["h"]
     return h
@@ -240,8 +241,9 @@ def _guarded(key: tuple[str, str], fn: Callable, inputs, writes, outputs) -> Cal
     return run
 
 
-def resolve(stations: tuple[Station, ...], overrides: dict) -> tuple[Callable[[dict], dict], ...]:
-    """The functions one layer runs, in order: each station's, or an override's in place of its stretch."""
+def resolve(stations: tuple[Station, ...], overrides: dict) -> tuple[tuple[str, str, Callable[[dict], dict]], ...]:
+    """What one layer runs, in order, as (first station, last station, function): each station's own, or an
+    override's in place of its stretch."""
     names = [s.name for s in stations]
     spans = []
     for key, fn in overrides.items():
@@ -252,11 +254,12 @@ def resolve(stations: tuple[Station, ...], overrides: dict) -> tuple[Callable[[d
     for a, b in zip(spans, spans[1:]):
         if b[0] <= a[1]:
             raise ValueError(f"overrides {a[3]} and {b[3]} overlap")
+    own = [(s.name, s.name, s.fn) for s in stations]
     out, i = [], 0
-    for start, end, run, _ in spans:
-        out += [s.fn for s in stations[i:start]] + [run]
+    for start, end, run, key in spans:
+        out += own[i:start] + [(*key, run)]
         i = end + 1
-    return tuple(out + [s.fn for s in stations[i:]])
+    return tuple(out + own[i:])
 
 
 def overrides(package: str = "inference_server.models.regions") -> dict:
@@ -273,7 +276,7 @@ def overrides(package: str = "inference_server.models.regions") -> dict:
 
 
 @functools.lru_cache(maxsize=None)
-def plan() -> tuple[Callable[[dict], dict], ...]:
+def plan() -> tuple[tuple[str, str, Callable[[dict], dict]], ...]:
     """DECODE with the overrides of models/regions/, resolved at the first decode forward (the warmup before CUDA
     graphs are captured, so graphs bake it in) and never again."""
     return resolve(DECODE, overrides())

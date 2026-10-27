@@ -351,6 +351,81 @@ def stations_reference_close() -> tuple[bool, str]:
     return worst < 2e-2, f"worst relative error {worst:.2e}"
 
 
+def region_capture_replays() -> tuple[bool, str]:
+    """CAPTURE_REGION under the real kernels: each sample, with the layer's weights, replays through its stretch's
+    stations to its recorded writes (relative error < 1e-3: the MoE atomics add in no fixed order) and through
+    stations.reference() in fp32 to within 2%, on the kernels' routing; on its own fp32 routing (near-tied experts
+    chosen differently for a few tokens) its error is reported beside."""
+    import json
+    import os
+    import tempfile
+    import types
+    from pathlib import Path
+
+    import torch
+
+    from inference_server.backends.custom_torch_backend import _GraphCtx
+    from inference_server.models import region_capture, stations
+
+    model, bs, B, rows, worst_real, worst_ref = _stations_model(True), 16, 64, [], 0.0, 0.0
+    attn, names = model.model.layers[0].self_attn, [s.name for s in stations.DECODE]
+
+    def rel(a, b) -> float:
+        if not b.is_floating_point():
+            return float(not torch.equal(a, b))
+        a, b = a.float(), b.float()
+        return ((a - b).norm() / b.norm().clamp_min(1e-12)).item()
+    for spec in ("kv_append:attention", "router:down", "input_norm:residual"):
+        out = Path(tempfile.mkdtemp())
+        g = torch.Generator(device="cuda").manual_seed(0)
+        cols = (512 + 1 + bs - 1) // bs
+        seq_lens = torch.randint(1, 513, (B,), device="cuda", generator=g)
+        bt = torch.randperm(B * cols, device="cuda", generator=g).view(B, cols)
+        pools = [types.SimpleNamespace(k=torch.randn(B * cols, attn.num_kv_heads, bs, attn.head_dim, device="cuda",
+                                                     dtype=torch.bfloat16, generator=g)) for _ in range(2)]
+        for p in pools:
+            p.v = torch.randn_like(p.k)
+        os.environ.update(CAPTURE_REGION=spec, CAPTURE_REGION_DIR=str(out))
+        region_capture.active.cache_clear()
+        try:
+            with torch.no_grad():
+                model(torch.randint(0, 1024, (B, 1), device="cuda", generator=g), position_ids=seq_lens.view(B, 1),
+                      paged_ctx=_GraphCtx(pools, seq_lens, bt, bs))
+            region_capture.active()._log.flush()
+        finally:
+            del os.environ["CAPTURE_REGION"], os.environ["CAPTURE_REGION_DIR"]
+            region_capture.active.cache_clear()
+        first, _, last = spec.partition(":")
+        i, j = names.index(first), names.index(last) + 1
+        calls = [json.loads(x) for x in (out / "calls.jsonl").read_text().splitlines()]
+        for call in calls:
+            sample = torch.load(out / "samples" / call["sample"], weights_only=True)
+            c = {k: v.cuda() if isinstance(v, torch.Tensor) else v for k, v in sample["reads"].items()}
+            c.update(stations.layer_weights(model, call["layer"]), cfg=stations.LayerConfig(**c["cfg"]))
+            up = {k: v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v for k, v in c.items()}
+            routing = ("sorted_ids", "expert_ids", "tok", "pair_w")
+            with torch.no_grad():
+                real, ref, routed = dict(c), dict(up), dict(up)
+                for s in stations.functional()[i:j]:
+                    real.update(s.fn(real))
+                for s in stations.reference()[i:j]:
+                    ref.update(s.fn(ref))
+                    routed.update({k: v for k, v in s.fn(routed).items() if k not in routing}
+                                  if s.name == "route" else s.fn(routed))
+                    if s.name == "route":
+                        routed.update({k: real[k] for k in routing})
+            w = sample["writes"]
+            e_real = max(rel(real[n], w[n].cuda()) for n in w)
+            e_ref = max(rel(routed[n], w[n].cuda()) for n in w)
+            e_own = max(rel(ref[n], w[n].cuda()) for n in w)
+            worst_real, worst_ref = max(worst_real, e_real), max(worst_ref, e_ref)
+            rows.append(f"{spec} layer {call['layer']}: stations {e_real:.2e}, reference {e_ref:.2e} "
+                        f"(on its own fp32 routing {e_own:.2e})")
+    print("\n".join(rows))
+    ok = len(rows) == 6 and worst_real < 1e-3 and worst_ref < 2e-2
+    return ok, f"{len(rows)} samples; worst relative error: stations {worst_real:.2e}, reference {worst_ref:.2e}"
+
+
 # Name → check. The gate runs all of them; each modal script runs its own subset.
 CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_decode_parity": paged_decode_parity,
@@ -358,6 +433,7 @@ CHECKS: dict[str, Callable[[], tuple[bool, str]]] = {
     "paged_prefill_parity": paged_prefill_parity,
     "decode_stations_identical": decode_stations_identical,
     "stations_reference_close": stations_reference_close,
+    "region_capture_replays": region_capture_replays,
 }
 
 

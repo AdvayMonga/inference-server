@@ -76,6 +76,8 @@
 - Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
   layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
   define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before
-  graph capture). Prefill, CPU and the torch MoE path keep the layer forward.
+  graph capture). Prefill, CPU and the torch MoE path keep the layer forward. `CAPTURE_REGION=first:last` (+
+  `CAPTURE_REGION_DIR`, optional `CAPTURE_REGION_LAYERS`) records a stretch's real reads and writes per layer call
+  (`models/region_capture.py`, BlameGraph's `lab/capture.py` layout; graphs and the megakernel off, `CUSTOM_BACKEND_CUDA_GRAPH=0 MEGAKERNEL=0`, to see every call).
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.
