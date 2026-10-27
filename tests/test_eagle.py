@@ -131,3 +131,20 @@ def _state(head):
             m + "mlp.down_proj.weight": head.wd, m + "input_layernorm.weight": head.n_in, m + "hidden_norm.weight": head.n_hid,
             m + "post_attention_layernorm.weight": head.n_post, "norm.weight": head.n_final, "lm_head.weight": head.lm_head,
             "d2t": head.d2t}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA, bf16 fused kernels")
+def test_fused_forward_agrees_with_the_reference(head):
+    dev = "cuda"
+    hd = Eagle3Head({"hidden_size": H, "num_attention_heads": NQ, "num_key_value_heads": NKV, "head_dim": HD,
+                     "rms_norm_eps": 1e-6, "rope_theta": 1e4}, nn.Embedding(V, H).to(dev, torch.bfloat16),
+                    {k: v for k, v in _state(head).items()}, dev, dtype=torch.bfloat16)
+    hd.embed.weight.data.copy_(head.embed.weight.data)
+    torch.manual_seed(5)
+    S = 6
+    toks, hid, pos = torch.randint(0, V, (S,), device=dev), torch.randn(S, 3 * H, device=dev, dtype=torch.bfloat16), torch.arange(10, 10 + S, device=dev)
+    kc = torch.zeros(256, NKV, HD, device=dev, dtype=torch.bfloat16)
+    a = hd._forward_ref(toks, hid, pos, kc.clone(), kc.clone(), 64)
+    b = hd._forward_fused(toks, hid, pos, kc.clone(), kc.clone(), 64)
+    assert (a[0] == b[0]).float().mean() >= 0.8
+    assert ((a[1].float() - b[1].float()).norm() / a[1].float().norm()) < 0.03

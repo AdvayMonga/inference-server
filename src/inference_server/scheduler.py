@@ -40,6 +40,10 @@ OUT_HISTORY, OUT_MIN_SEEN, OUT_QUANTILE = 512, 32, 0.9
 # last 3, else 2, tokens); verified in one forward of 1 + K rows, the longest matching prefix is kept.
 SPEC_K = int(os.environ.get("SPEC_DECODE_K", "0"))
 SPEC_ROWS = int(os.environ.get("SPEC_DECODE_ROWS", "1"))
+# EAGLE (backend.eagle_on): a request whose last SPEC_EAGLE_WINDOW steps averaged fewer than SPEC_EAGLE_MIN_TOKENS
+# tokens a step decodes plainly from there on (a step costs ~1.35 plain steps at one draft: below that it loses).
+EAGLE_MIN_TOKENS = float(os.environ.get("SPEC_EAGLE_MIN_TOKENS", "1.35"))
+EAGLE_WINDOW = int(os.environ.get("SPEC_EAGLE_WINDOW", "32"))
 GC_YOUNG_STEPS = int(os.environ.get("GC_YOUNG_STEPS", "200"))
 GC_FREEZE_STEPS = int(os.environ.get("GC_FREEZE_STEPS", "50000"))
 
@@ -312,7 +316,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         self._prefill_chunks_processed = 0
         self._total_iteration_errors = 0
         self._spec_steps = self._spec_drafted = self._spec_tokens = 0     # speculative decoding (SPEC_DECODE_K)
-        self._eagle: dict | None = None     # the EAGLE row: {"row", "pos0" (host view), "prev" (the step in flight)}
+        self._eagle: dict | None = None     # the EAGLE row: {"row", "pos0" (host view), "prev" (the step in flight), "hist"}
+        self._eagle_fallbacks = 0           # requests that left EAGLE for too few accepted drafts
         self._total_preempted = 0
         self._total_expired = 0
         # Histogram of batched-prefill wave sizes. Padding waste only exists when waves are
@@ -445,6 +450,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             "async_decode": self.async_decode,
             "total_iteration_errors": self._total_iteration_errors,
             "spec_steps": self._spec_steps, "spec_drafted": self._spec_drafted, "spec_tokens": self._spec_tokens,
+            "eagle_fallbacks": self._eagle_fallbacks,
             "telemetry": (self._telemetry.stats() if self._telemetry is not None
                           else {"enabled": False, "rows_written": 0, "rows_dropped": 0}),
             "timeline": self._timeline.stats(),
@@ -1144,8 +1150,15 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 (self._decode_step_async if self.async_decode else self._decode_step)(device)
                 return
             req.eagle = True
-            self._eagle = {"row": row, "pos0": row.real_kv_len, "prev": None}
+            self._eagle = {"row": row, "pos0": row.real_kv_len, "prev": None, "hist": collections.deque(maxlen=EAGLE_WINDOW)}
         st = self._eagle
+        h = st["hist"]
+        if len(h) == h.maxlen and sum(h) < EAGLE_MIN_TOKENS * len(h):
+            self._eagle_fallbacks += 1
+            self._eagle_drain()                    # too few drafts accepted for this request: plain decode from here
+            if self._active and self._active[0] is row:
+                (self._decode_step_async if self.async_decode else self._decode_step)(device)
+            return
         handle = self.backend.eagle_launch(self._batched_kv, 0, st["pos0"])
         prev, st["prev"] = st["prev"], handle
         if prev is not None:
@@ -1174,6 +1187,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 finished = "ok"
                 break
         st["pos0"] += n
+        st["hist"].append(n)
         row.real_kv_len += n
         row.current_token = toks[-1]
         self._spec_steps += 1

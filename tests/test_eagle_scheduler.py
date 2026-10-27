@@ -93,3 +93,18 @@ async def test_no_aux_or_sampling_decodes_plainly():
     b = EagleBackend()
     out, st = await _run(b, temperature=0.7)
     assert b.launches == 0 and len(out) == 40
+
+
+class WrongDrafts(EagleBackend):
+    def _drafts(self, p0):
+        return [0] * K                                      # never right: one token a step
+
+
+@pytest.mark.asyncio
+async def test_a_request_accepting_too_few_drafts_falls_back_to_plain_decode():
+    from inference_server import scheduler as S
+    plain, _ = await _run(PeriodicBackend(), max_tokens=80)
+    b = WrongDrafts()
+    out, st = await _run(b, max_tokens=80)
+    assert out == plain
+    assert st["eagle_fallbacks"] == 1 and b.launches == S.EAGLE_WINDOW + 1   # the window, then the step in flight

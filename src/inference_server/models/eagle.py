@@ -62,6 +62,7 @@ class Eagle3Head(nn.Module):
         self.d2t = w["d2t"].to(torch.long)
         self.inter = self.wd.shape[1]
         self.inv_freq = 1.0 / (cfg.get("rope_theta", 1e6) ** (torch.arange(0, self.hd, 2, device=device, dtype=torch.float32) / self.hd))
+        self._rope: torch.Tensor | None = None              # [max_len, 2, hd] cos, sin (the fast path's table)
         assert self.fc.shape == (self.H, 3 * self.H) and self.wqkv.shape[1] == 2 * self.H
 
     @classmethod
@@ -83,6 +84,44 @@ class Eagle3Head(nn.Module):
 
     def forward(self, tokens: torch.Tensor, hidden: torch.Tensor, pos: torch.Tensor,
                 kc: torch.Tensor, vc: torch.Tensor, L: int) -> tuple[torch.Tensor, torch.Tensor]:
+        from inference_server.models import fused
+        if fused._on(hidden, kc):
+            return self._forward_fused(tokens, hidden, pos, kc, vc, L)
+        return self._forward_ref(tokens, hidden, pos, kc, vc, L)
+
+    def _forward_fused(self, tokens, hidden, pos, kc, vc, L):
+        """The same computation in fewer launches (CUDA, bf16): fused norms and SiLU, one rope over q and k together
+        from a cos/sin table, attention as two batched GEMMs around a softmax (8 q heads share a kv head)."""
+        from inference_server.models import fused
+        S, H, nq, nkv, hd = tokens.shape[0], self.H, self.nq, self.nkv, self.hd
+        if self._rope is None or self._rope.shape[0] < kc.shape[0]:
+            f = torch.arange(kc.shape[0], device=kc.device, dtype=torch.float32)[:, None] * self.inv_freq[None, :]
+            emb = torch.cat([f, f], dim=-1)
+            self._rope = torch.stack([emb.cos(), emb.sin()], dim=1).to(kc.dtype)
+        if hidden.shape[-1] != H:
+            hidden = hidden @ self.fc.T
+        x = torch.cat([fused.rmsnorm(self.embed(tokens), self.n_in, self.eps), fused.rmsnorm(hidden, self.n_hid, self.eps)], dim=-1)
+        qkv = x @ self.wqkv.T
+        qk = qkv[:, :(nq + nkv) * hd].view(S, nq + nkv, hd)
+        cs = self._rope[pos]                                                     # [S, 2, hd]
+        qk = qk * cs[:, 0:1] + _rotate(qk) * cs[:, 1:2]
+        q, k = qk[:, :nq], qk[:, nq:]
+        v = qkv[:, (nq + nkv) * hd:].view(S, nkv, hd)
+        kc.index_copy_(0, pos, k)
+        vc.index_copy_(0, pos, v)
+        g = nq // nkv
+        qg = q.reshape(S, nkv, g, hd).permute(1, 0, 2, 3).reshape(nkv, S * g, hd)
+        sc = torch.bmm(qg, kc[:L].permute(1, 2, 0)).float() * (hd ** -0.5)      # [nkv, S*g, L]
+        keys = torch.arange(L, device=kc.device)
+        sc = sc.masked_fill((keys[None, :] > pos[:, None]).repeat_interleave(g, dim=0)[None], float("-inf"))
+        o = torch.bmm(sc.softmax(-1).to(kc.dtype), vc[:L].permute(1, 0, 2))      # [nkv, S*g, hd]
+        o = o.view(nkv, S, g, hd).permute(1, 0, 2, 3).reshape(S, nq * hd) @ self.wo.T
+        r1, n1 = fused.add_rmsnorm(hidden, o, self.n_post, self.eps)
+        r2, n2 = fused.add_rmsnorm(r1, fused.silu_mul(n1 @ self.wgu.T) @ self.wd.T, self.n_final, self.eps)
+        d = (n2 @ self.lm_head.T).argmax(-1)
+        return d + self.d2t[d], r2
+
+    def _forward_ref(self, tokens, hidden, pos, kc, vc, L):
         """Rows (tokens [S], hidden [S, 3H] target aux or [S, H] the head's own, pos [S]): each row's K/V into the
         caches kc/vc [max_len, nkv, hd] at its position, attention over positions <= its own among the first L ->
         (greedy next token in the target's ids [S], the row's output residual [S, H])."""

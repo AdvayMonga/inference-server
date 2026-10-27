@@ -89,8 +89,8 @@ struct Args {
     int kv8;                                                                               // the pools hold fp8 e4m3
     int tma;                                                                               // MEGAKERNEL_TMA (batch <= MEGA_TMA_ROWS)
     bf16* aux; int aux_l0, aux_l1, aux_l2;   // aux [B, 3, H]: the residual entering layers aux_l0..2 per row (EAGLE-3), or null
-    int shared_kv;                           // rows are consecutive positions of one sequence: every row's new K/V is
-                                             // written (and the grid synced) before any row's attention reads it
+    int shared_kv;                           // rows are positions of one sequence: each attention item writes every
+                                             // new K/V it reads itself (the same bytes the item owning it writes)
 };
 
 __device__ __forceinline__ float bf2f(bf16 x) { return __bfloat162float(x); }
@@ -611,11 +611,6 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
             bf16* v_s = reinterpret_cast<bf16*>(smem + GQA * QSTR * 4);                    // [CHUNK][VSTR]
             float* p_s = reinterpret_cast<float*>(smem + GQA * QSTR * 4 + CHUNK * VSTR * 2);   // [GQA][CHUNK]
             float* red2 = p_s + GQA * CHUNK;                                               // [GQA][WARPS]
-            if (a.shared_kv) {                            // a row reads positions other rows write: all of them first
-                if (warp == 0)
-                    for (int item = blockIdx.x; item < B * NKV; item += gridDim.x) write_new_kv(a, lw, item / NKV, item % NKV);
-                grid.sync();
-            }
             for (int item = blockIdx.x; item < B * NKV * nsplit; item += gridDim.x) {
                 const int c = item % nsplit, g = (item / nsplit) % NKV, b = item / (nsplit * NKV);
                 const int pos = (int)a.pos[b], kv_len = pos + 1, t0 = c * CHUNK;
@@ -642,6 +637,11 @@ __global__ void __launch_bounds__(THREADS, MEGA_BPS) decode_step_kernel(Args a) 
                     if (warp == 0 && c == pos / CHUNK && !a.shared_kv)    // this chunk holds the new token: its k and v
                         write_new_kv(a, lw, b, g);
                 }
+                if (a.shared_kv)        // the rows of one sequence: every new token this item reads, written by this block
+                    for (int rb = warp; rb < B; rb += WARPS) {                // (the same bytes the other blocks write)
+                        const int pb = (int)a.pos[rb];
+                        if (pb >= t0 && pb < t0 + tn) write_new_kv(a, lw, rb, g);
+                    }
                 __syncthreads();
                 STAMP(9);                                             // q normed and roped, the new k/v written
                 // Scores: thread (position p, slice q4) dots its QW elements of K with the 8 heads' q, the SPLIT
