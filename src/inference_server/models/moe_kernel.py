@@ -164,7 +164,8 @@ def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torc
 def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
                              stride_am, stride_wn, stride_wk, stride_om,
                              E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
-                             SPLIT_K: tl.constexpr, W_FP8: tl.constexpr, A_FP8: tl.constexpr):
+                             SPLIT_K: tl.constexpr, W_FP8: tl.constexpr, A_FP8: tl.constexpr,
+                             EVEN_N: tl.constexpr = False):
     """The down projection with its epilogue: each pair's row, times its routing weight, added into its token's
     fp32 output row (the multiply, the zero-fill-and-index_add and the cast were four launches). Split over K like
     moe_gemm: the atomics make the slices free."""
@@ -207,7 +208,12 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK,
         acc = acc * tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)[None, :]
     acc = acc * tl.load(PAIR_W + rows, mask=valid, other=0.0)[:, None]
     t = tl.load(TOK + rows, mask=valid, other=0).to(tl.int64)
-    tl.atomic_add(OUT + t[:, None] * stride_om + offs_n[None, :], acc, mask=valid[:, None] & n_ok[None, :])
+    offs_nv = tl.max_contiguous(tl.multiple_of(offs_n, 8), 8)
+    if EVEN_N:
+        tl.atomic_add(OUT + t[:, None] * stride_om + offs_nv[None, :], acc, mask=valid[:, None], sem="relaxed")
+    else:
+        tl.atomic_add(OUT + t[:, None] * stride_om + offs_nv[None, :], acc, mask=valid[:, None] & n_ok[None, :],
+                      sem="relaxed")
 
 
 def _a8(a: torch.Tensor, a_scale, fp8_w: bool) -> bool:
@@ -231,13 +237,16 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
     _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
                                          tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
                                          E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
-                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, num_warps=warps, num_stages=stages)
+                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, EVEN_N=(N % bn == 0),
+                                         num_warps=warps, num_stages=stages)
 
 
 # Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
 # took gate_up 29 -> 18 us and down 29 -> 17 us at batch 1 (the ncu diagnosis had been occupancy: splitting K bought
 # nothing at any tile; stages and the tile shape did). The same config won at M = 64 (85 -> 76, 50 -> 44 us).
-BLOCK_N, BLOCK_K, NUM_STAGES = 64, 128, 4
+CONFIG = {"BLOCK_N": 64, "BLOCK_K": 128, "NUM_STAGES": 4}
+TUNABLES = {"BLOCK_N": [32, 64, 128], "BLOCK_K": [64, 128, 256], "NUM_STAGES": [2, 3, 4, 5]}
+BLOCK_N, BLOCK_K, NUM_STAGES = CONFIG["BLOCK_N"], CONFIG["BLOCK_K"], CONFIG["NUM_STAGES"]
 
 
 def _warps(block_m: int) -> int:
