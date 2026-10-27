@@ -134,7 +134,8 @@ def _engine_main(conn, factory: str | None) -> None:
             req = ScheduledRequest(token_ids=f["token_ids"], max_tokens=f["max_tokens"], session_id=f["session_id"],
                                    future=_Future(rid, outbox), token_queue=q,
                                    sampling=SamplingParams(**f["sampling"]), trace_id=f["trace_id"],
-                                   turn_index=f["turn_index"], arrival_ts=f["arrival_ts"], priority=f["priority"])
+                                   turn_index=f["turn_index"], arrival_ts=f["arrival_ts"], priority=f["priority"],
+                                   ignore_eos=f["ignore_eos"])
             q.req = req
             live[rid] = req
             try:
@@ -235,6 +236,7 @@ class EngineClient:
             "token_ids": list(req.token_ids), "max_tokens": req.max_tokens, "session_id": req.session_id,
             "sampling": {"temperature": s.temperature, "top_p": s.top_p, "top_k": s.top_k},
             "trace_id": req.trace_id, "turn_index": req.turn_index, "arrival_ts": req.arrival_ts,
+            "ignore_eos": req.ignore_eos,
             "priority": req.priority}))
 
     async def submit(self, req) -> list[int]:

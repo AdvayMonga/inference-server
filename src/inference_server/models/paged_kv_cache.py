@@ -812,6 +812,26 @@ class BatchedDecodeState:
         new token just written), both from this step's cache."""
         return self._bt32, self._sl32
 
+    def reserve(self, r: int, n: int) -> None:
+        """Blocks for row r's next `n` positions (a multi-token verify step), once per step like prepare_step."""
+        bs = self.bs
+        need = (self._host_len[r] + n + bs - 1) // bs
+        add = need - self._host_alloc[r]
+        if add <= 0:
+            return
+        ids = self.alloc.alloc_many(add)
+        lb0 = self._host_alloc[r]
+        self._host_blocks[r].extend(ids)
+        self._host_alloc[r] += add
+        self.bt = self._grow_cols(self.bt, need)
+        self.bt[r, lb0:lb0 + add] = to_device(ids, self.device)
+        self.n_alloc[r] += add
+
+    def advance_row(self, r: int, n: int) -> None:
+        """Row r's length moves on by `n` accepted tokens (GPU tensor and host mirror; no sync)."""
+        self.seq_lens[r] += n
+        self._host_len[r] += n
+
     def advance(self) -> None:
         """Bump seq_lens by the new token (GPU tensor and host mirror; no sync)."""
         self.seq_lens = self.seq_lens + 1
