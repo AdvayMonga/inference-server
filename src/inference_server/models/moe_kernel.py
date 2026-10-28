@@ -241,10 +241,71 @@ def _warps(block_m: int) -> int:
     return 8 if block_m >= 64 else 4
 
 
-def _tile(block_m: int, tile) -> tuple[int, int, int, int]:
-    """(BLOCK_N, BLOCK_K, num_stages, num_warps): the decode-tuned constants, or `tile` as given (a sweep at prefill
-    sizes, where every path measured 10-13% of fp8 peak on 2026-10-21, picks its own)."""
-    return tuple(tile) if tile is not None else (BLOCK_N, BLOCK_K, NUM_STAGES, _warps(block_m))
+def _tile(block_m: int, tile, fp8: bool = False) -> tuple[int, int, int, int]:
+    """(BLOCK_N, BLOCK_K, num_stages, num_warps): the decode-tuned constants, or `tile` as given."""
+    if tile is not None:
+        return tuple(tile)
+    if fp8 and block_m <= 32:
+        return (64, 256, 3, 4)
+    return (BLOCK_N, BLOCK_K, NUM_STAGES, _warps(block_m))
+
+
+@triton.jit
+def _moe_w8_kernel(A, TOK, W, SCALE, C, SORTED, EXPERT_IDS, M, N, K,
+                   stride_am, stride_wn, stride_wk, stride_cm,
+                   E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+                   ROWS_FROM_TOKENS: tl.constexpr, EVEN_K: tl.constexpr, EVEN_N: tl.constexpr,
+                   SWAP: tl.constexpr = False):
+    if SWAP:
+        pid_m = tl.program_id(1)
+        pid_n = tl.program_id(0)
+    else:
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+    e = tl.load(EXPERT_IDS + pid_m)
+    if e >= E:
+        return
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    rows = tl.load(SORTED + offs_m)
+    valid = rows < M
+    if ROWS_FROM_TOKENS:
+        src = tl.load(TOK + rows, mask=valid, other=0)
+    else:
+        src = rows
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    n_ok = offs_n < N
+    offs_k = tl.arange(0, BLOCK_K)
+    a_ptrs = A + src[:, None].to(tl.int64) * stride_am + offs_k[None, :]
+    w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + offs_k[None, :] * stride_wk
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for k0 in range(0, K, BLOCK_K):
+        if EVEN_K:
+            a = tl.load(a_ptrs, mask=valid[:, None], other=0.0)
+            if EVEN_N:
+                w = tl.load(w_ptrs, eviction_policy="evict_first")
+            else:
+                w = tl.load(w_ptrs, mask=n_ok[:, None], other=0.0, eviction_policy="evict_first")
+        else:
+            k_ok = (k0 + offs_k) < K
+            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
+            w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0, eviction_policy="evict_first")
+        acc += tl.dot(a.to(tl.float16), tl.trans(w.to(tl.float16)))
+        a_ptrs += BLOCK_K
+        w_ptrs += BLOCK_K * stride_wk
+    acc = acc * tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)[None, :]
+    c_ptrs = C + rows[:, None] * stride_cm + offs_n[None, :]
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=valid[:, None] & n_ok[None, :])
+
+
+_W8_BASE = [
+    (64, 128, 4, 4), (64, 128, 5, 4), (64, 128, 6, 4), (128, 128, 4, 4), (128, 128, 4, 8),
+    (64, 256, 4, 4), (32, 256, 4, 4), (128, 256, 3, 4), (128, 256, 3, 8), (256, 128, 3, 8),
+    (64, 256, 5, 4), (64, 256, 4, 8), (32, 512, 3, 4), (32, 256, 6, 4), (64, 128, 4, 2),
+]
+_W8_CONFIGS = [triton.Config({"BLOCK_N": bn, "BLOCK_K": bk, "SWAP": sw}, num_stages=st, num_warps=wp)
+               for (bn, bk, st, wp) in _W8_BASE for sw in (False, True)]
+
+_moe_w8_tuned = triton.autotune(configs=_W8_CONFIGS, key=["N", "K", "BLOCK_M", "ROWS_FROM_TOKENS"])(_moe_w8_kernel)
 
 
 def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_ids: torch.Tensor,
@@ -258,7 +319,17 @@ def moe_gemm(a: torch.Tensor, tok: torch.Tensor | None, w: torch.Tensor, sorted_
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
     a8 = _a8(a, a_scale, fp8)
-    bn, bk, stages, warps = _tile(block_m, tile)
+    if fp8 and not a8 and tile is None and (split_k is None or split_k == 1) and a.dtype == torch.bfloat16 \
+            and a.stride(1) == 1:
+        C = torch.empty(M, N, dtype=torch.bfloat16, device=a.device)
+        nb = expert_ids.numel()
+        grid = lambda meta: ((triton.cdiv(N, meta["BLOCK_N"]), nb) if meta["SWAP"]
+                             else (nb, triton.cdiv(N, meta["BLOCK_N"])))
+        _moe_w8_tuned[grid](a, tok if tok is not None else a, w, w_scale, C, sorted_ids, expert_ids, M, N, K,
+                            a.stride(0), w.stride(1), w.stride(2), C.stride(0), E=E, BLOCK_M=block_m,
+                            ROWS_FROM_TOKENS=tok is not None, EVEN_K=(K % 512 == 0), EVEN_N=(N % 256 == 0))
+        return C
+    bn, bk, stages, warps = _tile(block_m, tile, fp8 and (K // (split_k or 1)) % 256 == 0)
     grid = (expert_ids.numel(), triton.cdiv(N, bn))
     if split_k is None:
         split_k = 1
