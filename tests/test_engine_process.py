@@ -95,3 +95,26 @@ async def test_ignore_eos_crosses_into_the_child():
         assert await asyncio.wait_for(client.submit(req("runs", ignore_eos=True)), 20) == [200, 201, 202, 203, 204]
     finally:
         await client.stop()
+
+
+def make_lock_probe():
+    """The same engine; its stats say whether the pipe lock was held while they were read."""
+    backend, sched = _Backend.make()
+    stats = sched.stats
+    sched.stats = lambda: {**stats(), "pipe_lock_held": sched._loop.outbox.lock.locked()}
+    return backend, sched
+
+
+@pytest.mark.asyncio
+async def test_stats_are_read_outside_the_pipe_lock():
+    """The scheduler sends (taking the pipe lock) while holding its own lock, so reading its stats under the pipe lock
+    deadlocks both: seen under overload on an H200, 2026-10-28."""
+    client = EngineClient(factory="tests.test_engine_process:make_lock_probe")
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, client.launch, 120)
+    client.start()
+    try:
+        await asyncio.sleep(1.2)
+        assert client.stats().get("pipe_lock_held") is False
+    finally:
+        await client.stop()
