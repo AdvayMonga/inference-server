@@ -73,6 +73,14 @@
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
   its own launch and gates that config with its own equiv. Ships empty: one config for everything.
+- The decode megakernel as an instruction interpreter (`models/megakernel/framework.py` + `interp.cu`): one persistent
+  kernel whose blocks each run a queue of instructions ordered by dependency counters (no grid barriers inside the
+  step), same inputs and outputs as `megakernel.decode_step`. A program = a schedule (Python, built at load for batch
+  1..16) + its instructions' device code (a header interp.cu includes); `models/megakernel/program/` is the default,
+  today's phases with the same arithmetic (`common.cuh` holds the helpers both kernels share), its router (TOPK, in
+  every block) writing the experts into the block's GATEUP/DOWN instructions on the GPU. A search passes its own
+  program to `Framework`. Taken only where the routing table names the path `"framework"`; not yet compiled or
+  measured on a GPU (`tests/test_megakernel_framework.py`, MEGAKERNEL_TEST=1; schedules: `test_megakernel_schedule.py`).
 - Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
   layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
   define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before

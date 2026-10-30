@@ -19,7 +19,7 @@ def _write(tmp_path, table):
 def _route(table, cutoff, n, context):
     backend = types.SimpleNamespace(_mega_routing=table, _mega_max_rows=cutoff)
     state = types.SimpleNamespace(n_rows=n, max_len=lambda: context)
-    return CustomTorchBackend._use_megakernel(backend, state)
+    return CustomTorchBackend._mega_path(backend, state)
 
 
 def test_lookup(tmp_path):
@@ -31,7 +31,7 @@ def test_lookup(tmp_path):
 
 def test_no_file_is_the_rule(tmp_path):
     assert routing.load(tmp_path / "missing.json", 16) is None
-    assert [_route(None, 2, n, 100) for n in (1, 2, 3, 16)] == [True, True, False, False]
+    assert [_route(None, 2, n, 100) for n in (1, 2, 3, 16)] == ["megakernel", "megakernel", "kernels", "kernels"]
 
 
 def test_table_equal_to_the_cutoff_changes_nothing(tmp_path):
@@ -45,7 +45,14 @@ def test_table_equal_to_the_cutoff_changes_nothing(tmp_path):
 
 def test_outside_the_table_takes_the_rule(tmp_path):
     t = routing.load(_write(tmp_path, {"context_buckets": [1024], "rows": {"4": ["megakernel"]}}), 16)
-    assert _route(t, 2, 4, 100) is True and _route(t, 2, 4, 5000) is False and _route(t, 2, 2, 100) is True
+    assert _route(t, 2, 4, 100) == "megakernel" and _route(t, 2, 4, 5000) == "kernels" and _route(t, 2, 2, 100) == "megakernel"
+
+
+def test_framework_only_where_the_table_names_it(tmp_path):
+    t = routing.load(_write(tmp_path, {"context_buckets": [1024], "rows": {"1": ["framework"], "2": ["megakernel"]}}), 16)
+    assert t.uses("framework") and _route(t, 2, 1, 100) == "framework" and _route(t, 2, 2, 100) == "megakernel"
+    assert _route(t, 2, 1, 5000) == "megakernel"
+    assert not routing.load(_write(tmp_path, {"context_buckets": [1024], "rows": {"1": ["megakernel"]}}), 16).uses("framework")
 
 
 @pytest.mark.parametrize("table", [
@@ -54,6 +61,7 @@ def test_outside_the_table_takes_the_rule(tmp_path):
     {"context_buckets": [1024], "rows": {"1": ["kernels", "kernels"]}},
     {"context_buckets": [1024], "rows": {"1": ["graphs"]}},
     {"context_buckets": [1024], "rows": {"17": ["megakernel"]}},
+    {"context_buckets": [1024], "rows": {"17": ["framework"]}},
 ])
 def test_bad_tables_are_refused(tmp_path, table):
     with pytest.raises(ValueError):

@@ -423,6 +423,12 @@ class CustomTorchBackend(InferenceBackend):
         self._mega = mk.Model(self.model, self.device) if self._mega_on else None
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
+        # The same step through the instruction interpreter (megakernel/framework.py), only where the table names it.
+        self._mega_fw = None
+        if self._mega_routing is not None and self._mega_routing.uses("framework"):
+            from inference_server.models.megakernel import framework
+            self._mega_fw = framework.Framework(self._mega)
+            logger.info("decode-step instruction interpreter on where the routing table names it")
 
         # A draft model for speculative decoding (SPEC_DRAFT_MODEL, drafter.py), loaded before the pools are sized: its
         # weights and its static cache (max_len = the context window) come out of the KV budget.
@@ -1060,8 +1066,9 @@ class CustomTorchBackend(InferenceBackend):
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
-            if self._mega_on and self._use_megakernel(state):
-                logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
+            path = self._mega_path(state) if self._mega_on else "kernels"
+            if path != "kernels":
+                logits, greedy_tokens = self._decode_megakernel(current_tokens, state, path)
             elif self._graph_on and fits:
                 logits = self._replay_decode(current_tokens, position_ids, state,
                                              self._decode_bucket(n))
@@ -1145,18 +1152,24 @@ class CustomTorchBackend(InferenceBackend):
 
     # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
 
-    def _use_megakernel(self, state) -> bool:
-        """The routing table's path for this step's rows and longest context, else n <= MEGAKERNEL_MAX_ROWS."""
+    def _mega_path(self, state) -> str:
+        """The routing table's path for this step's rows and longest context, else the megakernel for
+        n <= MEGAKERNEL_MAX_ROWS and the kernels above."""
         n, table = state.n_rows, self._mega_routing
         path = table.path(n, state.max_len()) if table is not None and n in table.rows else None
-        return path == "megakernel" if path is not None else n <= self._mega_max_rows
+        return path if path is not None else "megakernel" if n <= self._mega_max_rows else "kernels"
 
-    def _decode_megakernel(self, current_tokens, state):
+    def _decode_megakernel(self, current_tokens, state, path="megakernel"):
         """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head, greedy
-        argmax -> (logits [B, 1, V], tokens [B]). Nothing else is launched around it: a cooperative kernel overlaps no
-        other kernel, so each small launch beside it cost ~70 us of idle GPU (measured 2026-10-18)."""
+        argmax -> (logits [B, 1, V], tokens [B]); `path` "framework" runs it through the instruction interpreter.
+        Nothing else is launched around it: a cooperative kernel overlaps no other kernel, so each small launch beside
+        it cost ~70 us of idle GPU (measured 2026-10-18)."""
         from inference_server.models import megakernel as mk
-        logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
+        if path == "framework":
+            from inference_server.models.megakernel import framework
+            logits, tokens = framework.decode_step(self._mega_fw, current_tokens.view(-1), state.seq_lens, state.bt)
+        else:
+            logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
         return logits.unsqueeze(1), tokens
 
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
