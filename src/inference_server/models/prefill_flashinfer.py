@@ -92,7 +92,7 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     if layer_idx != planned and not _same_blocks(ctx, layer_idx, planned):
         planned = layer_idx                          # a layer with its own block ids: its own plan
     if planned == layer_idx:
-        ctx.block_table_tensor(layer_idx)            # every row's blocks allocated
+        getattr(ctx, "_ensure_blocks", lambda: ctx.block_table_tensor(layer_idx))()     # every row's blocks allocated
         w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)

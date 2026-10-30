@@ -170,8 +170,9 @@ class _PrefillCtx:
         self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
         self._scratch = scratch                    # the padding block id (padding writes land here), every pool
-        self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
-        self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
+        if not self.packed:                        # the padded wave's grid (a packed wave has none)
+            self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
+            self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
         # Built on the host from the lengths: nonzero() on the device waits for every kernel queued before it.
@@ -265,6 +266,9 @@ class _PackedCtx(_PrefillCtx):
     def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         super().__init__(caches, pools, prefix_lens, suffix_lens, device, scratch)
         self.tokens = None                                  # nothing is padded: the MoE sees every token
+        self._fused = fused.ENABLED and torch.device(device).type == "cuda"
+        if self._fused:                                     # token -> (block, slot) in one launch at the first append
+            return
         lens = self.suffix_lens.long()
         total = sum(suffix_lens)
         rows = torch.repeat_interleave(torch.arange(len(suffix_lens), device=device), lens, output_size=total)
@@ -276,9 +280,19 @@ class _PackedCtx(_PrefillCtx):
         """k/v_new [1, Hkv, T, D]: every token into its row's block, one scatter per pool."""
         pool = self.pools[layer_idx]
         bs = pool.block_size
-        bt, same = self._wave_bt(layer_idx)
-        if not same or self._wave_pos is None:
-            self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
+        if self._fused:
+            if self._wave_pos is None:                     # the same block ids in every layer: once a wave
+                self._ensure_blocks()
+                starts = [0]
+                for n in self._suffix[:-1]:
+                    starts.append(starts[-1] + n)
+                self._wave_pos = (None, *fused.packed_slots(self.prefix_lens, self.suffix_lens,
+                                                            to_device(starts, self.device, torch.int32), self._table(),
+                                                            bs, sum(self._suffix), max(self._suffix)))
+        else:
+            bt, same = self._wave_bt(layer_idx)
+            if not same or self._wave_pos is None:
+                self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
         k_t, v_t = k_new[0].transpose(0, 1), v_new[0].transpose(0, 1)                           # [T, Hkv, D]
         if fused._on(k_t, v_t) and pool.k.dtype in (torch.bfloat16, torch.float8_e4m3fn):    # cast in the kernel

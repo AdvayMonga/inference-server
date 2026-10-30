@@ -99,6 +99,18 @@ def kv_store_rows(pool_k: torch.Tensor, pool_v: torch.Tensor, bids: torch.Tensor
                                   BLOCK=K.triton.next_power_of_2(H * D))
 
 
+def packed_slots(prefix: torch.Tensor, suffix: torch.Tensor, starts: torch.Tensor, bt: torch.Tensor, bs: int,
+                 total: int, longest: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """A packed wave's per-token K/V (block id, slot), int64 [total], from the rows' prefix and suffix lengths, their
+    first token's index and block tables [rows, cols], in one launch."""
+    bids = torch.empty(total, dtype=torch.long, device=bt.device)
+    slots = torch.empty(total, dtype=torch.long, device=bt.device)
+    BLOCK = 1024
+    K._packed_slots_kernel[(prefix.numel(), K.triton.cdiv(max(longest, 1), BLOCK))](
+        prefix, suffix, starts, bt, bids, slots, bt.stride(0), BS=bs, BLOCK=BLOCK)
+    return bids, slots
+
+
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """Like models.qwen3_moe.route: (weights in logits' dtype, or fp32 as computed, expert ids int64), both [M, k]."""
     M, E = logits.shape

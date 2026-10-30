@@ -176,3 +176,15 @@ def test_kv_store_rows_matches_the_index_put_scatter(pool_dtype):
     rv[bids, :, slots, :] = v.to(pool_dtype)
     bits = lambda t: t.view(torch.uint8) if t.element_size() == 1 else t.view(torch.int16)
     assert torch.equal(bits(pk), bits(rk)) and torch.equal(bits(pv), bits(rv))
+
+
+def test_packed_slots_match_the_torch_indexing():
+    from inference_server.models import fused
+    prefix, suffix, bs = [6, 0, 11, 40], [5, 3, 1, 1500], 16
+    bt = torch.randint(0, 5000, (4, 200), device="cuda", dtype=torch.int32)
+    starts = [0, 5, 8, 9]
+    i32 = lambda v: torch.tensor(v, dtype=torch.int32, device="cuda")
+    bids, slots = fused.packed_slots(i32(prefix), i32(suffix), i32(starts), bt, bs, sum(suffix), max(suffix))
+    rows = torch.repeat_interleave(torch.arange(4, device="cuda"), i32(suffix).long())
+    pos = i32(prefix).long()[rows] + torch.arange(sum(suffix), device="cuda") - i32(starts).long()[rows]
+    assert torch.equal(bids, bt.long()[rows, pos // bs]) and torch.equal(slots, pos % bs)

@@ -227,3 +227,15 @@ def _kv_store_rows_kernel(KN, VN, PK, PV, BIDS, SLOTS, stride_kt, stride_kh, str
     dst = b * stride_pb + h * stride_ph + s * stride_ps + d
     tl.store(PK + dst, tl.load(KN + t * stride_kt + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
     tl.store(PV + dst, tl.load(VN + t * stride_vt + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
+
+
+@triton.jit
+def _packed_slots_kernel(PREFIX, SUFFIX, START, BT, BIDS, SLOTS, stride_bt, BS: tl.constexpr, BLOCK: tl.constexpr):
+    """Row r's chunk tokens of a packed wave: each token's K/V block (from the row's table) and slot."""
+    r = tl.program_id(0)
+    i = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    m = i < tl.load(SUFFIX + r)
+    p = tl.load(PREFIX + r) + i
+    t = tl.load(START + r) + i
+    tl.store(BIDS + t, tl.load(BT + r * stride_bt + p // BS, mask=m, other=0).to(tl.int64), mask=m)
+    tl.store(SLOTS + t, (p % BS).to(tl.int64), mask=m)
