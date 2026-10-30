@@ -327,11 +327,127 @@ def _splitk_combine_vec_kernel(
     tl.store(Out + seq * so_n + qh * so_h + d, out.to(Out.dtype.element_ty))
 
 
+CONFIG = {'TARGET_CTAS': 512, 'MAX_SPLITS': 16, 'BLOCK_N': 64, 'NUM_WARPS': 4, 'NUM_STAGES': 3}
+TUNABLES = {
+    "TARGET_CTAS": [256, 512, 1024, 2048],
+    "MAX_SPLITS": [8, 16, 32],
+    "BLOCK_N": [32, 64, 128],
+    "NUM_WARPS": [4, 8],
+    "NUM_STAGES": [1, 2, 3, 4],
+}
+
+
+@triton.jit
+def _gqa_decode_fused_kernel(
+    Q, Kp, Vp, BT, SL, PM, PL, PA, CNT, Out,
+    sq_n, sq_h,
+    sk_b, sk_h, sk_s,
+    pm_n, pm_h,
+    pa_n, pa_h, pa_s,
+    so_n, so_h,
+    bt_n, n_kv,
+    qk_scale,
+    GROUP: tl.constexpr, G_PAD: tl.constexpr, BLOCK_SIZE: tl.constexpr,
+    BLOCK_N: tl.constexpr, D: tl.constexpr, SPLITS: tl.constexpr,
+):
+    seq = tl.program_id(0)
+    kvh = tl.program_id(1)
+    sp = tl.program_id(2)
+
+    g = tl.arange(0, G_PAD)
+    gm = g < GROUP
+    heads = kvh * GROUP + g
+    d = tl.arange(0, D)
+    n = tl.arange(0, BLOCK_N)
+
+    L = tl.load(SL + seq)
+    n_tiles = (L + BLOCK_N - 1) // BLOCK_N
+    per = (n_tiles + SPLITS - 1) // SPLITS
+    t0 = sp * per
+    t1 = tl.minimum(t0 + per, n_tiles)
+
+    q = tl.load(Q + seq * sq_n + heads[:, None] * sq_h + d[None, :],
+                mask=gm[:, None], other=0.0)
+
+    m_i = tl.zeros([G_PAD], dtype=tl.float32) - 1e30
+    l_i = tl.zeros([G_PAD], dtype=tl.float32)
+    acc = tl.zeros([G_PAD, D], dtype=tl.float32)
+
+    for t in range(t0, t1):
+        offs = t * BLOCK_N + n
+        valid = offs < L
+        blk = tl.load(BT + seq * bt_n + offs // BLOCK_SIZE, mask=valid, other=0)
+        base = blk * sk_b + kvh * sk_h + (offs % BLOCK_SIZE) * sk_s
+        k = tl.load(Kp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0).to(q.dtype)
+        v = tl.load(Vp + base[:, None] + d[None, :], mask=valid[:, None], other=0.0).to(q.dtype)
+        s = tl.dot(q, tl.trans(k)) * qk_scale
+        s = tl.where(valid[None, :], s, -float("inf"))
+        m_new = tl.maximum(m_i, tl.max(s, axis=1))
+        alpha = tl.math.exp2(m_i - m_new)
+        p = tl.math.exp2(s - m_new[:, None])
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
+        m_i = m_new
+
+    if SPLITS == 1:
+        res = acc / tl.where(l_i == 0.0, 1.0, l_i)[:, None]
+        tl.store(Out + seq * so_n + heads[:, None] * so_h + d[None, :],
+                 res.to(Out.dtype.element_ty), mask=gm[:, None])
+    else:
+        tl.store(PM + seq * pm_n + heads * pm_h + sp, m_i, mask=gm)
+        tl.store(PL + seq * pm_n + heads * pm_h + sp, l_i, mask=gm)
+        tl.store(PA + seq * pa_n + heads[:, None] * pa_h + sp * pa_s + d[None, :], acc,
+                 mask=gm[:, None])
+
+        tl.debug_barrier()
+        cnt_ptr = CNT + seq * n_kv + kvh
+        old = tl.atomic_add(cnt_ptr, 1)
+        if old == SPLITS - 1:
+            mmax = tl.zeros([G_PAD], dtype=tl.float32) - float("inf")
+            for s2 in range(0, SPLITS):
+                ms = tl.load(PM + seq * pm_n + heads * pm_h + s2, mask=gm, other=0.0,
+                             cache_modifier=".cg")
+                mmax = tl.maximum(mmax, ms)
+            l_tot = tl.zeros([G_PAD], dtype=tl.float32)
+            o = tl.zeros([G_PAD, D], dtype=tl.float32)
+            for s2 in range(0, SPLITS):
+                ms = tl.load(PM + seq * pm_n + heads * pm_h + s2, mask=gm, other=0.0,
+                             cache_modifier=".cg")
+                ls = tl.load(PL + seq * pm_n + heads * pm_h + s2, mask=gm, other=0.0,
+                             cache_modifier=".cg")
+                w = tl.math.exp2(ms - mmax)
+                l_tot += ls * w
+                a = tl.load(PA + seq * pa_n + heads[:, None] * pa_h + s2 * pa_s + d[None, :],
+                            mask=gm[:, None], other=0.0, cache_modifier=".cg")
+                o += a * w[:, None]
+            res = o / tl.where(l_tot == 0.0, 1.0, l_tot)[:, None]
+            tl.store(Out + seq * so_n + heads[:, None] * so_h + d[None, :],
+                     res.to(Out.dtype.element_ty), mask=gm[:, None])
+            tl.store(cnt_ptr, 0)
+
+
+# Self-resetting arrival counters: zeroed once, every call leaves them at 0 again. Old buffers are
+# kept alive (never freed) so a previously captured CUDA graph never points at reused memory.
+_CNT_BUFS = {}
+_CNT_KEEP = []
+
+
+def _counter(n: int, device) -> torch.Tensor:
+    key = (device.type, device.index)
+    buf = _CNT_BUFS.get(key)
+    if buf is None or buf.numel() < n:
+        buf = torch.zeros(max(n, 16384), dtype=torch.int32, device=device)
+        _CNT_KEEP.append(buf)
+        _CNT_BUFS[key] = buf
+    return buf
+
+
 def _gqa_splits(n_seqs: int, n_kv: int) -> int:
     base = max(1, n_seqs * n_kv)
-    s = (256 + base - 1) // base
-    s = 1 << (s - 1).bit_length()
-    return max(2, min(16, s))
+    target = int(CONFIG["TARGET_CTAS"])
+    s = (target + base - 1) // base
+    s = 1 << (max(1, s) - 1).bit_length()
+    return max(1, min(int(CONFIG["MAX_SPLITS"]), s))
 
 
 def paged_decode_attention(
@@ -355,30 +471,26 @@ def paged_decode_attention(
     if (D & (D - 1)) == 0 and 16 <= D <= 128 and (bs & (bs - 1)) == 0 and k_pool.dtype in (
             torch.float16, torch.bfloat16, torch.float8_e4m3fn) and q.dtype in (torch.float16, torch.bfloat16):
         g_pad = max(16, 1 << (group - 1).bit_length())
-        block_n = 64 if D <= 128 else (32 if D <= 256 else 16)
+        block_n = int(CONFIG["BLOCK_N"]) if D <= 128 else (32 if D <= 256 else 16)
         block_n = max(block_n, bs) if bs <= 64 else block_n
         splits = _gqa_splits(N, num_kv_heads)
-        pm = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
-        pl = torch.empty(N, Hq, splits, dtype=torch.float32, device=q.device)
-        pa = torch.empty(N, Hq, splits, D, dtype=torch.float32, device=q.device)
-        _gqa_decode_splitk_kernel[(N, num_kv_heads, splits)](
-            q, k_pool, v_pool, block_tables, seq_lens, pm, pl, pa,
+        ps = splits if splits > 1 else 1
+        pm = torch.empty(N, Hq, ps, dtype=torch.float32, device=q.device)
+        pl = torch.empty(N, Hq, ps, dtype=torch.float32, device=q.device)
+        pa = torch.empty(N, Hq, ps, D, dtype=torch.float32, device=q.device)
+        cnt = _counter(N * num_kv_heads, q.device)
+        out = torch.empty(N, Hq, D, dtype=q.dtype, device=q.device)
+        _gqa_decode_fused_kernel[(N, num_kv_heads, splits)](
+            q, k_pool, v_pool, block_tables, seq_lens, pm, pl, pa, cnt, out,
             q.stride(0), q.stride(1),
             k_pool.stride(0), k_pool.stride(1), k_pool.stride(2),
             pm.stride(0), pm.stride(1),
             pa.stride(0), pa.stride(1), pa.stride(2),
-            block_tables.stride(0),
-            scale,
-            GROUP=group, G_PAD=g_pad, BLOCK_SIZE=bs, BLOCK_N=block_n, D=D, SPLITS=splits,
-            num_warps=4,
-        )
-        out = torch.empty(N, Hq, D, dtype=q.dtype, device=q.device)
-        _splitk_combine_vec_kernel[(N, Hq)](
-            pm, pl, pa, out,
-            pm.stride(0), pm.stride(1),
-            pa.stride(0), pa.stride(1), pa.stride(2),
             out.stride(0), out.stride(1),
-            D=D, SPLITS=splits, num_warps=4,
+            block_tables.stride(0), num_kv_heads,
+            float(scale) * 1.4426950408889634,
+            GROUP=group, G_PAD=g_pad, BLOCK_SIZE=bs, BLOCK_N=block_n, D=D, SPLITS=splits,
+            num_warps=int(CONFIG["NUM_WARPS"]), num_stages=int(CONFIG["NUM_STAGES"]),
         )
         return out
 
@@ -614,3 +726,16 @@ def paged_prefill_attention(
         **kw,
     )
     return out.to(q.dtype)
+
+
+_CONFIG_BY_SIZE = [(5, {'TARGET_CTAS': 2048, 'MAX_SPLITS': 16, 'BLOCK_N': 128, 'NUM_WARPS': 4, 'NUM_STAGES': 4}), (42, {'TARGET_CTAS': 2048, 'MAX_SPLITS': 8, 'BLOCK_N': 128, 'NUM_WARPS': 4, 'NUM_STAGES': 2}), (64, {'TARGET_CTAS': 512, 'MAX_SPLITS': 16, 'BLOCK_N': 64, 'NUM_WARPS': 4, 'NUM_STAGES': 3}), (None, {'TARGET_CTAS': 2048, 'MAX_SPLITS': 8, 'BLOCK_N': 128, 'NUM_WARPS': 4, 'NUM_STAGES': 2})]
+_dispatch_impl = paged_decode_attention
+
+
+def _dispatched(*args, **kwargs):
+    global CONFIG
+    n = args[0].shape[0]
+    CONFIG = next(c for ub, c in _CONFIG_BY_SIZE if ub is None or n <= ub)
+    return _dispatch_impl(*args, **kwargs)
+
+paged_decode_attention = _dispatched
