@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 @triton.jit
 def _rms(x, w, D: tl.constexpr, eps):
@@ -128,3 +129,85 @@ def _kv_store_kernel(KN, VN, PK, PV, BT, LB, SLOT, stride_kr, stride_kh, stride_
     tl.store(PK + dst, tl.load(KN + r * stride_kr + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
     tl.store(PV + dst, tl.load(VN + r * stride_vr + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
 
+
+
+@triton.jit
+def _embed_rope_kernel(IDS, POS, WEMB, INV, HOUT, COS, SIN, H: tl.constexpr, BLOCK_H: tl.constexpr,
+                       HALF: tl.constexpr):
+    """Per token: its embedding row, and its rotary cos/sin (fp32 angle = position * inv_freq, accurate cos/sin, bf16;
+    HF's layout, the halves repeat)."""
+    row = tl.program_id(0)
+    tok = tl.load(IDS + row).to(tl.int64)
+    cols = tl.arange(0, BLOCK_H)
+    for c in range(0, H, BLOCK_H):
+        m = (c + cols) < H
+        tl.store(HOUT + row.to(tl.int64) * H + c + cols, tl.load(WEMB + tok * H + c + cols, mask=m), mask=m)
+    i = tl.arange(0, HALF)
+    f = tl.load(POS + row).to(tl.float32) * tl.load(INV + i)
+    c16, s16 = libdevice.cos(f).to(tl.bfloat16), libdevice.sin(f).to(tl.bfloat16)
+    base = row * (2 * HALF)
+    tl.store(COS + base + i, c16)
+    tl.store(COS + base + HALF + i, c16)
+    tl.store(SIN + base + i, s16)
+    tl.store(SIN + base + HALF + i, s16)
+
+
+@triton.jit
+def _step_inputs_kernel(SEQ, KV_BLOCK, KV_SLOT, ATTN_SL, N, BS: tl.constexpr, BLOCK: tl.constexpr):
+    """A decode step's per-row K/V block and slot and the attention lengths, from the rows' lengths."""
+    r = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = r < N
+    s = tl.load(SEQ + r, mask=m, other=0)
+    tl.store(KV_BLOCK + r, s // BS, mask=m)
+    tl.store(KV_SLOT + r, s % BS, mask=m)
+    tl.store(ATTN_SL + r, (s + 1).to(tl.int32), mask=m)
+
+
+@triton.jit
+def _stage_decode_kernel(CUR, POS, SEQ, BT, NEW_BLK, NEW_LB, G_TOK, G_POS, G_SEQ, G_BT, SEQ_NEXT, n, bt_cols,
+                         stride_cur, stride_pos, stride_bt, g_cols, scratch, HAS_NEW: tl.constexpr,
+                         ADVANCE: tl.constexpr, BLOCK_C: tl.constexpr):
+    """A captured decode graph's inputs for bucket row r (live when r < n): its token, position and length (dummies
+    0, 0, 1), its int32 block table (clamped at 0; dummies and stale columns the scratch block), a block allocated this
+    step written into both tables, and the rows' lengths after the step."""
+    r = tl.program_id(0)
+    live = r < n
+    c = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
+    cm = c < g_cols
+    v = tl.load(BT + r * stride_bt + c, mask=cm & (c < bt_cols) & live, other=scratch)
+    v = tl.maximum(v, 0)
+    if HAS_NEW:
+        nb = tl.load(NEW_BLK + r, mask=live, other=-1)
+        hit = (c == tl.load(NEW_LB + r, mask=live, other=-1)) & (nb >= 0) & cm & (c < bt_cols)
+        v = tl.where(hit, nb, v)
+        tl.store(BT + r * stride_bt + c, nb + tl.zeros_like(v), mask=hit)
+    tl.store(G_BT + r * g_cols + c, v.to(tl.int32), mask=cm)
+    if tl.program_id(1) == 0:
+        s = tl.load(SEQ + r, mask=live, other=1)
+        tl.store(G_TOK + r, tl.load(CUR + r * stride_cur, mask=live, other=0))
+        tl.store(G_POS + r, tl.load(POS + r * stride_pos, mask=live, other=0))
+        tl.store(G_SEQ + r, s)
+        if ADVANCE:
+            tl.store(SEQ_NEXT + r, s + 1, mask=live)
+
+
+@triton.jit
+def _argmax_partial_kernel(X, PV, PI, V, stride_x, n_chunks, CHUNK: tl.constexpr):
+    """Row r, chunk ch of the vocab: its largest logit and that logit's index (the first, on ties)."""
+    r = tl.program_id(0)
+    ch = tl.program_id(1)
+    cols = ch * CHUNK + tl.arange(0, CHUNK)
+    x = tl.load(X + r.to(tl.int64) * stride_x + cols, mask=cols < V, other=float("-inf")).to(tl.float32)
+    i = tl.argmax(x, 0, tie_break_left=True)
+    tl.store(PV + r * n_chunks + ch, tl.max(x, 0))
+    tl.store(PI + r * n_chunks + ch, ch * CHUNK + i)
+
+
+@triton.jit
+def _argmax_final_kernel(PV, PI, OUT, n_chunks, BLOCK: tl.constexpr):
+    """Row r: the index of the largest chunk maximum (the first chunk, on ties)."""
+    r = tl.program_id(0)
+    i = tl.arange(0, BLOCK)
+    v = tl.load(PV + r * n_chunks + i, mask=i < n_chunks, other=float("-inf"))
+    best = tl.argmax(v, 0, tie_break_left=True)
+    tl.store(OUT + r, tl.load(PI + r * n_chunks + best).to(tl.int64))

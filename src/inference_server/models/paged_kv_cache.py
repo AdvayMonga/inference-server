@@ -20,6 +20,7 @@ Storage layout per pool: `[num_blocks, num_kv_heads, block_size, head_dim]`
 
 from __future__ import annotations
 
+import functools
 import heapq
 from collections import OrderedDict
 
@@ -76,13 +77,26 @@ def to_device(values, device: torch.device, dtype=torch.long) -> torch.Tensor:
 
 def step_inputs(bt: torch.Tensor, seq_lens: torch.Tensor, bs: int) -> dict:
     """What every layer's K/V write and decode attention share in a step, built once per step (as per-layer ops they
-    were ~10 launches a layer): the stations' step inputs (models/stations.py)."""
+    were ~10 launches a layer): the stations' step inputs (models/stations.py). An int32 `bt` is taken as already
+    clamped (a captured graph's, `fused.stage_decode`)."""
+    if fused.ENABLED and seq_lens.is_cuda:
+        kv_block, kv_slot, attn_sl = fused.step_inputs(seq_lens, bs)
+        return {"block_tables": bt, "kv_rows": _rows(seq_lens.shape[0], seq_lens.device), "kv_block": kv_block,
+                "kv_slot": kv_slot,
+                "attn_block_tables": bt if bt.dtype == torch.int32 else bt.to(torch.int32).clamp_min_(0),
+                "attn_seq_lens": attn_sl}
     return {"block_tables": bt,
             "kv_rows": torch.arange(seq_lens.shape[0], device=seq_lens.device),
             "kv_block": seq_lens // bs,
             "kv_slot": seq_lens % bs,
             "attn_block_tables": bt.to(torch.int32).clamp_min_(0),
             "attn_seq_lens": (seq_lens + 1).to(torch.int32)}
+
+
+@functools.lru_cache(maxsize=None)
+def _rows(n: int, device: torch.device) -> torch.Tensor:
+    """arange(n) on `device`, made once per row count (a captured graph's warmup makes it before the capture)."""
+    return torch.arange(n, device=device)
 
 
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
@@ -692,6 +706,21 @@ class BatchedPagedKVCache:
         return bt, sl
 
 
+class _Deferred:
+    """prepare_step(defer=True)'s table writes: per row its new block (-1 for none) and column on the device, for a
+    staging launch; `apply()` makes them here instead."""
+
+    def __init__(self, state, ids, rows, cols):
+        self._state, self._host = state, (ids, rows, cols)
+        blk, col = [-1] * state.n_rows, [-1] * state.n_rows
+        for r, c, bid in zip(rows, cols, ids):
+            blk[r], col[r] = bid, c
+        self.blk, self.col = to_device(blk, state.device), to_device(col, state.device)
+
+    def apply(self) -> None:
+        self._state._write(*self._host)
+
+
 class BatchedDecodeState:
     """Persistent batched-decode state — the de-Pythoned replacement for rebuilding
     `BatchedPagedKVCache` every step. Block tables and seq_lens live as GPU tensors, updated
@@ -711,7 +740,6 @@ class BatchedDecodeState:
         self.bs = next(p.block_size for p in pools if p is not None)
         self.alloc = _allocator(pools)
         self.seq_lens = torch.zeros(0, dtype=torch.long, device=device)   # [R] logical len (pre-step)
-        self.n_alloc = torch.zeros(0, dtype=torch.long, device=device)    # [R] logical blocks alloc'd
         # One table [R, cols] for every layer that owns K/V: a block id is the same in every layer's pool. (A table
         # per layer cost a launch or a sync per layer on every join, leave and allocation; stacked [layers, R, cols]
         # they were one op each but 48x the bytes to build, grow, compact and copy into the graphs' buffers.)
@@ -749,7 +777,6 @@ class BatchedDecodeState:
         self.seq_lens = torch.cat([self.seq_lens, to_device([pkv.seq_len], self.device)])
         blocks = list(pkv.blocks)
         n0 = len(blocks)
-        self.n_alloc = torch.cat([self.n_alloc, to_device([n0], self.device)])
         self._host_len.append(pkv.seq_len)
         self._host_alloc.append(n0)
         self._host_blocks.append(blocks)
@@ -770,30 +797,36 @@ class BatchedDecodeState:
             self._host_len.pop(idx)
             self._host_alloc.pop(idx)
         if not keep:
-            self.bt, self.seq_lens, self.n_alloc = None, self.seq_lens[:0], self.n_alloc[:0]
+            self.bt, self.seq_lens = None, self.seq_lens[:0]
             return
         keep_t = to_device(keep, self.device)
         self.bt = self.bt[keep_t]
         self.seq_lens = self.seq_lens[keep_t]
-        self.n_alloc = self.n_alloc[keep_t]
 
-    def prepare_step(self) -> None:
-        """Alloc a block for every boundary-crossing row in every layer (once per step)."""
+    def prepare_step(self, defer: bool = False):
+        """Alloc a block for every boundary-crossing row in every layer (once per step). `defer`: the device table's
+        writes are returned instead (`_Deferred`), for a captured graph's staging launch to make
+        (`fused.stage_decode`); None when no row crosses."""
         if self.n_rows == 0:
-            return
+            return None
         bs = self.bs                                   # from the host mirrors: no sync before the step
         crossing = [r for r in range(self.n_rows) if self._host_len[r] // bs >= self._host_alloc[r]]
         if not crossing:
-            return
+            return None
         lbs = [self._host_len[r] // bs for r in crossing]
         self.bt = self._grow_cols(self.bt, max(lbs) + 1)
         ids = self.alloc.alloc_many(len(crossing))                # all or nothing (KVCacheExhausted leaves no block taken)
         for r, bid in zip(crossing, ids):
             self._host_blocks[r].append(bid)
             self._host_alloc[r] += 1
-        new, rows_t, lbs_t = (to_device(v, self.device) for v in (ids, crossing, lbs))
-        self.bt[rows_t, lbs_t] = new
-        self.n_alloc[rows_t] += 1
+        if defer:
+            return _Deferred(self, ids, crossing, lbs)
+        self._write(ids, crossing, lbs)
+        return None
+
+    def _write(self, ids: list[int], rows: list[int], cols: list[int]) -> None:
+        new, rows_t, cols_t = (to_device(v, self.device) for v in (ids, rows, cols))
+        self.bt[rows_t, cols_t] = new
 
     def append(self, layer_idx: int, k_new: torch.Tensor, v_new: torch.Tensor) -> None:
         """Scatter the new token (k_new,v_new [R,H,1,D]) into each row's block. Pure GPU —
@@ -829,16 +862,16 @@ class BatchedDecodeState:
         self._host_alloc[r] += add
         self.bt = self._grow_cols(self.bt, need)
         self.bt[r, lb0:lb0 + add] = to_device(ids, self.device)
-        self.n_alloc[r] += add
 
     def advance_row(self, r: int, n: int) -> None:
         """Row r's length moves on by `n` accepted tokens (GPU tensor and host mirror; no sync)."""
         self.seq_lens[r] += n
         self._host_len[r] += n
 
-    def advance(self) -> None:
-        """Bump seq_lens by the new token (GPU tensor and host mirror; no sync)."""
-        self.seq_lens = self.seq_lens + 1
+    def advance(self, seq_next: torch.Tensor | None = None) -> None:
+        """Bump seq_lens by the new token (GPU tensor and host mirror; no sync). `seq_next`: the bumped lengths, made
+        by a staging launch already."""
+        self.seq_lens = self.seq_lens + 1 if seq_next is None else seq_next
         for r in range(len(self._host_len)):
             self._host_len[r] += 1
 

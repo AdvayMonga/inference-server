@@ -53,14 +53,15 @@ def add_rmsnorm(h: torch.Tensor, a: torch.Tensor, weight: torch.Tensor, eps: flo
 def rmsnorm_rope(x: torch.Tensor, weight: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, eps: float) -> torch.Tensor:
     """x [B, S, H, D] -> head-wise RMSNorm then rotary (cos/sin [B, S, D], HF layout: halves repeat)."""
     B, S, H, D = x.shape
-    if x.stride(3) != 1 or x.stride(2) != D or (B > 1 and x.stride(0) != S * x.stride(1)):
+    if x.stride(3) != 1 or x.stride(2) != D or (B > 1 and S > 1 and x.stride(0) != S * x.stride(1)):
         x = x.contiguous()                      # any layout but "rows of H*D-contiguous heads" (never the qkv slice)
+    row_stride = x.stride(0) if S == 1 else x.stride(1)       # one token per row: a size-1 dim's stride is arbitrary
     y = torch.empty(B, S, H, D, dtype=x.dtype, device=x.device)
     cos2, sin2 = cos.reshape(B * S, -1), sin.reshape(B * S, -1)
     if not cos2.is_contiguous():
         cos2, sin2 = cos2.contiguous(), sin2.contiguous()
     HB = min(8, K.triton.next_power_of_2(H))
-    K._rmsnorm_rope_kernel[(B * S, K.triton.cdiv(H, HB))](x, weight, cos2, sin2, y, x.stride(1), x.stride(2),
+    K._rmsnorm_rope_kernel[(B * S, K.triton.cdiv(H, HB))](x, weight, cos2, sin2, y, row_stride, x.stride(2),
                                                          cos2.stride(0), eps, H=H, HB=HB, D=D, HALF=D // 2)
     return y
 
@@ -106,3 +107,55 @@ def add_cast(h: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     out = torch.empty_like(h2)
     K._add_cast_kernel[(h2.shape[0],)](h2, y2, out, D, D=D, BLOCK=K.triton.next_power_of_2(D))
     return out.view(h.shape)
+
+
+def embed_rope(ids: torch.Tensor, weight: torch.Tensor, inv_freq: torch.Tensor,
+               pos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """ids, pos [B, S] -> (embedding rows [B, S, H], cos, sin [B, S, D]) in one launch; RotaryEmbedding's tables in
+    the weight's dtype."""
+    B, S = ids.shape
+    H, half = weight.shape[1], inv_freq.numel()
+    ids, pos = ids.reshape(-1).contiguous(), pos.reshape(-1).contiguous()
+    h = torch.empty(B, S, H, dtype=weight.dtype, device=ids.device)
+    cos = torch.empty(B, S, 2 * half, dtype=weight.dtype, device=ids.device)
+    sin = torch.empty_like(cos)
+    K._embed_rope_kernel[(B * S,)](ids, pos, weight, inv_freq, h, cos, sin, H=H,
+                                   BLOCK_H=min(4096, K.triton.next_power_of_2(H)), HALF=half)
+    return h, cos, sin
+
+
+def step_inputs(seq_lens: torch.Tensor, bs: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(kv_block = len // bs, kv_slot = len % bs, attention lengths len + 1 as int32) per row, one launch."""
+    n = seq_lens.numel()
+    kv_block, kv_slot = torch.empty_like(seq_lens), torch.empty_like(seq_lens)
+    attn_sl = torch.empty(n, dtype=torch.int32, device=seq_lens.device)
+    K._step_inputs_kernel[(K.triton.cdiv(max(n, 1), 256),)](seq_lens, kv_block, kv_slot, attn_sl, n, BS=bs, BLOCK=256)
+    return kv_block, kv_slot, attn_sl
+
+
+def stage_decode(g: dict, cur: torch.Tensor, pos: torch.Tensor, seq: torch.Tensor, bt: torch.Tensor, n: int,
+                 scratch: int, new: tuple[torch.Tensor, torch.Tensor] | None = None,
+                 seq_next: torch.Tensor | None = None) -> None:
+    """A captured graph's static inputs from the live rows (cur, pos [n, 1]; seq [n]; bt [n, cols], any int dtype) in
+    one launch: g["tokens"], g["pos"], g["seqlens"], g["bt"] (int32). `new`: per row a block allocated this step
+    (-1 for none) and its column, written into bt too. `seq_next`: the lengths after the step."""
+    gb = g["bt"]
+    bucket, g_cols = gb.shape
+    BLOCK_C = 1024
+    K._stage_decode_kernel[(bucket, K.triton.cdiv(g_cols, BLOCK_C))](
+        cur, pos, seq, bt, new[0] if new else seq, new[1] if new else seq, g["tokens"], g["pos"], g["seqlens"], gb,
+        seq_next if seq_next is not None else seq, n, bt.shape[1], cur.stride(0), pos.stride(0), bt.stride(0), g_cols,
+        scratch, HAS_NEW=new is not None, ADVANCE=seq_next is not None, BLOCK_C=BLOCK_C)
+
+
+def argmax(x: torch.Tensor) -> torch.Tensor:
+    """x [N, V] (unit stride along V) -> [N] int64, the first index of each row's maximum, as torch.argmax."""
+    N, V = x.shape
+    CHUNK = 8192
+    n_chunks = K.triton.cdiv(V, CHUNK)
+    pv = torch.empty(N, n_chunks, dtype=torch.float32, device=x.device)
+    pi = torch.empty(N, n_chunks, dtype=torch.int32, device=x.device)
+    out = torch.empty(N, dtype=torch.int64, device=x.device)
+    K._argmax_partial_kernel[(N, n_chunks)](x, pv, pi, V, x.stride(0), n_chunks, CHUNK=CHUNK, num_warps=8)
+    K._argmax_final_kernel[(N,)](pv, pi, out, n_chunks, BLOCK=K.triton.next_power_of_2(n_chunks))
+    return out

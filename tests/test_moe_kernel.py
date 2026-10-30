@@ -68,7 +68,10 @@ def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     torch.manual_seed(T + 7)
     logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
     rw, rids = route(logits, top_k, renorm)
-    sorted_ids, expert_ids, tok, pair_w = getattr(moe_kernel, router)(logits, E, top_k, renorm, 16)
+    K_, N = 256, 384
+    out = torch.full((T, N), float("nan"), device="cuda")              # the router zeroes the down GEMM's accumulator
+    sorted_ids, expert_ids, tok, pair_w = getattr(moe_kernel, router)(logits, E, top_k, renorm, 16, out=out)
+    assert torch.equal(out, torch.zeros_like(out))
     M = T * top_k
     assert sorted_ids.numel() == expert_ids.numel() * 16 and (sorted_ids < M).sum() == M
     real = sorted_ids[sorted_ids < M]
@@ -88,10 +91,8 @@ def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     for t in range(T):
         assert set(pair_e[t * top_k:(t + 1) * top_k].tolist()) == set(rids[t].tolist())
     torch.testing.assert_close(pair_w, ref_w[tok.long(), pair_e.long()], atol=2e-3, rtol=2e-2)
-    K_, N = 256, 384
     act = torch.randn(M, K_, dtype=torch.bfloat16, device="cuda")
     w = torch.randn(E, N, K_, dtype=torch.bfloat16, device="cuda") * 0.05
-    out = torch.zeros(T, N, device="cuda")
     moe_kernel.moe_gemm_scatter(act, w, sorted_ids, expert_ids, M, tok, pair_w, out)
     ref = torch.zeros(T, N, device="cuda")
     for i in range(M):

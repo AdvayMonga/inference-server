@@ -1054,20 +1054,26 @@ class CustomTorchBackend(InferenceBackend):
             n = state.n_rows
             if position_ids is None:                   # the state knows every row's position; no host round trip
                 position_ids = state.seq_lens.unsqueeze(1)
-            state.prepare_step()  # alloc any boundary-crossing block (once per step)
+            new = state.prepare_step(defer=True)  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
+            seq_next = None
             if self._mega_on and self._use_megakernel(state):
+                if new is not None:
+                    new.apply()
                 logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
             elif self._graph_on and fits:
+                seq_next = torch.empty_like(state.seq_lens)            # staged by the same launch as the inputs
                 logits = self._replay_decode(current_tokens, position_ids, state,
-                                             self._decode_bucket(n))
+                                             self._decode_bucket(n), new=new, seq_next=seq_next)
             else:
+                if new is not None:
+                    new.apply()
                 logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
-            state.advance()       # bump seq_lens
+            state.advance(seq_next)       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
             greedy_tokens = None
@@ -1182,8 +1188,8 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
-        # One table for every layer (a block id is the same in each layer's pool); replay refreshes it in two copies.
-        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.long, device=dev)
+        # One int32 table for every layer (a block id is the same in each layer's pool), refreshed by the staging launch.
+        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.int32, device=dev)
         ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
@@ -1260,18 +1266,16 @@ class CustomTorchBackend(InferenceBackend):
         except Exception as e:
             print(f"[graph-breaks] explain failed (diagnostic only): {e}", flush=True)
 
-    def _replay_decode(self, current_tokens, position_ids, state, bucket):
-        """Copy this step's inputs into `bucket`'s static buffers (real rows + scratch dummies),
+    def _replay_decode(self, current_tokens, position_ids, state, bucket, new=None, seq_next=None):
+        """Stage this step's inputs into `bucket`'s static buffers (real rows + scratch dummies) in one launch,
         replay that bucket's graph, return logits[:n_rows]. The graph reads the static buffers,
-        so its scatter/kernel run on the fresh values — no per-op dispatch."""
+        so its scatter/kernel run on the fresh values — no per-op dispatch. `new`, `seq_next`: as
+        fused.stage_decode's (a block allocated this step; the lengths after it)."""
+        from inference_server.models import fused
         n = state.n_rows
         g = self._graphs[bucket]
-        g["tokens"][:n].copy_(current_tokens)
-        g["pos"][:n].copy_(position_ids)
-        g["seqlens"][:n].copy_(state.seq_lens)
-        g["seqlens"][n:] = 1
-        g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
-        g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
+        fused.stage_decode(g, current_tokens, position_ids, state.seq_lens, state.bt, n, self._scratch,
+                           new=(new.blk, new.col) if new is not None else None, seq_next=seq_next)
         g["graph"].replay()
         return g["out"][:n]
 

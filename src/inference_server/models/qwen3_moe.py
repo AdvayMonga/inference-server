@@ -291,7 +291,8 @@ class Qwen3SparseMoE(nn.Module):
             dn, dn_s = self.experts.weights("down_proj")
             router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
             bm = moe_block_m(M)
-            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm)
+            out = torch.empty(flat.shape, dtype=torch.float32, device=flat.device)      # zeroed by the router
+            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm, out=out)
             a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
             a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
             h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
@@ -300,7 +301,6 @@ class Qwen3SparseMoE(nn.Module):
                 act, sact = moe_kernel.quant_rows(act)
             else:
                 sact = None
-            out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
             moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
                                         a_scale=sact)
             return out
@@ -367,11 +367,15 @@ class Qwen3MoeModel(nn.Module):
         self.norm = Qwen3RMSNorm(hidden_size, eps=eps, dtype=dtype)
 
     def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None):
-        h = self.embed_tokens(input_ids)
-        if position_ids is None:
-            start = kv_cache.seq_len if kv_cache is not None else 0
-            position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-        cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
+        w = self.embed_tokens.weight
+        if position_ids is not None and fused._on(w):          # embedding rows and rotary tables in one launch
+            h, cos, sin = fused.embed_rope(input_ids, w, self.rope.inv_freq, position_ids.expand(input_ids.shape))
+        else:
+            h = self.embed_tokens(input_ids)
+            if position_ids is None:
+                start = kv_cache.seq_len if kv_cache is not None else 0
+                position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+            cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
         if paged_ctx is not None:
             from inference_server.models import stations
             if stations.applies(self, h, paged_ctx):     # a CUDA decode step: the named stations (models/stations.py)

@@ -93,3 +93,67 @@ def test_topk_softmax_keeps_ids_in_range_on_nan_rows():
     logits[1] = float("nan")
     w, ids = fused.topk_softmax(logits, 8, True)
     assert ids.min() >= 0 and ids.max() < 128
+
+
+def test_embed_rope_matches_embedding_and_rotary():
+    from inference_server.models import fused
+    from inference_server.models.common import RotaryEmbedding
+    torch.manual_seed(0)
+    w = torch.randn(1000, 2048, dtype=torch.bfloat16, device="cuda")
+    rope = RotaryEmbedding(128, 1_000_000.0).cuda()
+    ids = torch.randint(0, 1000, (5, 3), device="cuda")
+    pos = torch.tensor([[0, 1, 2], [7, 8, 9], [4095, 4096, 4097], [30000, 30001, 30002], [17, 18, 19]], device="cuda")
+    h, cos, sin = fused.embed_rope(ids, w, rope.inv_freq, pos)
+    rc, rs = (t.to(torch.bfloat16) for t in rope(pos))
+    assert torch.equal(h, F.embedding(ids, w))
+    torch.testing.assert_close(cos, rc, atol=8e-3, rtol=0)
+    torch.testing.assert_close(sin, rs, atol=8e-3, rtol=0)
+    assert (cos != rc).float().mean() < 0.01 and (sin != rs).float().mean() < 0.01      # one bf16 ulp at most, rarely
+
+
+def test_step_inputs_match_the_torch_ones():
+    from inference_server.models import fused
+    seq = torch.tensor([0, 15, 16, 17, 4095, 31], device="cuda")
+    kb, ks, sl = fused.step_inputs(seq, 16)
+    assert torch.equal(kb, seq // 16) and torch.equal(ks, seq % 16) and torch.equal(sl, (seq + 1).int())
+
+
+@pytest.mark.parametrize("new", [False, True])
+def test_stage_decode_matches_the_copies_it_replaces(new):
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    bucket, cols, n, scratch = 8, 2048, 5, 3
+    g = {"tokens": torch.full((bucket, 1), 9, dtype=torch.long, device="cuda"),
+         "pos": torch.full((bucket, 1), 9, dtype=torch.long, device="cuda"),
+         "seqlens": torch.full((bucket,), 9, dtype=torch.long, device="cuda"),
+         "bt": torch.full((bucket, cols), 7, dtype=torch.int32, device="cuda")}
+    cur = torch.randint(0, 100, (n, 1), device="cuda")
+    seq = torch.randint(0, 500, (n,), device="cuda")
+    bt = torch.randint(0, 900, (n, 40), device="cuda")
+    bt[1, 39] = -1
+    ref_bt = bt.clone()
+    blk = torch.tensor([-1, 77, -1, 88, -1], device="cuda")
+    col = torch.tensor([-1, 12, -1, 39, -1], device="cuda")
+    if new:
+        ref_bt[1, 12], ref_bt[3, 39] = 77, 88
+    nxt = torch.empty_like(seq)
+    fused.stage_decode(g, cur, seq.unsqueeze(1), seq, bt, n, scratch, new=(blk, col) if new else None, seq_next=nxt)
+    want = torch.full((bucket, cols), scratch, dtype=torch.int32, device="cuda")
+    want[:n, :40] = ref_bt.clamp_min(0).int()
+    assert torch.equal(g["bt"], want) and torch.equal(bt, ref_bt)
+    assert torch.equal(g["tokens"][:n], cur) and torch.equal(g["tokens"][n:], torch.zeros_like(g["tokens"][n:]))
+    assert torch.equal(g["pos"][:n, 0], seq) and torch.equal(g["seqlens"][:n], seq)
+    assert torch.equal(g["seqlens"][n:], torch.ones_like(g["seqlens"][n:])) and torch.equal(nxt, seq + 1)
+
+
+@pytest.mark.parametrize("N", [1, 7, 256])
+def test_argmax_matches_torch_ties_included(N):
+    from inference_server.models import fused
+    torch.manual_seed(N)
+    x = torch.randn(N, 151936, dtype=torch.bfloat16, device="cuda")
+    x[0, 5000] = x[0, 140000] = 50.0                    # a tie across chunks: the first index, as torch
+    if N > 1:
+        x[1, 8191] = x[1, 8192] = 60.0                   # a tie across a chunk edge
+    assert torch.equal(fused.argmax(x), x.argmax(-1))
+    view = torch.randn(N, 2, 151936, dtype=torch.bfloat16, device="cuda")[:, -1, :]      # a strided row view
+    assert torch.equal(fused.argmax(view), view.argmax(-1))
