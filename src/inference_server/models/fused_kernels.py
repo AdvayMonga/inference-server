@@ -272,3 +272,16 @@ def _assemble_tokens_kernel(PREV, DEVT, SPEC, OUT, n, BLOCK: tl.constexpr):
     v = tl.where(src_dev >= 0, tl.load(DEVT + src_dev, mask=m & (src_dev >= 0), other=0).to(tl.int64), v)
     v = tl.where(src >= 0, tl.load(PREV + src, mask=m & (src >= 0), other=0).to(tl.int64), v)
     tl.store(OUT + r, v, mask=m)
+
+
+@triton.jit(do_not_specialize=["S"])
+def _rmsnorm_rows_kernel(X, IDX, W, Y, stride_x, S, eps, PACKED: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Output row i: RMSNorm of X's row IDX[i] (PACKED, one sequence) or i * S + IDX[i] (row i's position IDX[i])."""
+    i = tl.program_id(0)
+    j = tl.load(IDX + i).to(tl.int64)
+    src = j if PACKED else i.to(tl.int64) * S + j
+    cols = tl.arange(0, BLOCK)
+    m = cols < D
+    x = tl.load(X + src * stride_x + cols, mask=m, other=0.0).to(tl.float32)
+    w = tl.load(W + cols, mask=m, other=0.0).to(tl.float32)
+    tl.store(Y + i * D + cols, _rms(x, w, D, eps).to(tl.bfloat16), mask=m)

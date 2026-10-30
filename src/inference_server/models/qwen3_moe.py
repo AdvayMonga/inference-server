@@ -378,7 +378,8 @@ class Qwen3MoeModel(nn.Module):
         ) for _ in range(num_layers))
         self.norm = Qwen3RMSNorm(hidden_size, eps=eps, dtype=dtype)
 
-    def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None):
+    def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None, norm=True):
+        """The residual stream through every layer, then the final norm (`norm=False`: without it)."""
         w = self.embed_tokens.weight
         if position_ids is not None and fused._on(w):          # embedding rows and rotary tables in one launch
             h, cos, sin = fused.embed_rope(input_ids, w, self.rope.inv_freq, position_ids.expand(input_ids.shape))
@@ -391,7 +392,8 @@ class Qwen3MoeModel(nn.Module):
         if paged_ctx is not None:
             from inference_server.models import stations
             if stations.applies(self, h, paged_ctx):     # a CUDA decode step: the named stations (models/stations.py)
-                return self.norm(stations.forward(self, h, cos, sin, paged_ctx))
+                h = stations.forward(self, h, cos, sin, paged_ctx)
+                return self.norm(h) if norm else h
         for i, layer in enumerate(self.layers):
             if paged_ctx is not None:
                 h, _ = layer(h, cos, sin, paged_ctx=paged_ctx, kv_layer_idx=i)
@@ -400,7 +402,7 @@ class Qwen3MoeModel(nn.Module):
             h, kv_new = layer(h, cos, sin, past_kv=past, attn_mask=attn_mask)
             if kv_cache is not None:
                 kv_cache.append(i, kv_new[0], kv_new[1])
-        return self.norm(h)
+        return self.norm(h) if norm else h
 
 
 class Qwen3MoeForCausalLM(nn.Module):
@@ -415,6 +417,11 @@ class Qwen3MoeForCausalLM(nn.Module):
     def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None,
                 paged_ctx=None, logits_index=None):
         """`logits_index` [B]: lm_head on that one position per row → [B, 1, V]."""
+        norm = self.model.norm
+        if logits_index is not None and fused._on(norm.weight):    # only the lm head's rows normed, gathered by it
+            h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx,
+                           norm=False)
+            return self.lm_head(fused.rmsnorm_rows(h, logits_index, norm.weight, norm.eps))
         h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
         if logits_index is not None:
             if h.shape[0] == 1 and logits_index.numel() > 1:       # a packed wave: several rows' last tokens in one row

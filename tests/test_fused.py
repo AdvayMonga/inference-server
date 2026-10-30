@@ -203,3 +203,16 @@ def test_compose_rows_matches_the_torch_fallback():
     ok_bt[0, :64], ok_bt[2, :64], ok_bt[3, :64] = old_bt[4], old_bt[0], old_bt[2]
     ok_bt[1, :128], ok_bt[4, :128] = new_bt[1], new_bt[0]
     assert torch.equal(bt, ok_bt) and seq.tolist() == [old_seq[4].item(), 8, old_seq[0].item(), old_seq[2].item(), 7]
+
+
+def test_rmsnorm_rows_is_the_final_norm_then_the_gather():
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    w = (torch.rand(2048, device="cuda") + 0.5).to(torch.bfloat16)
+    h = torch.randn(1, 300, 2048, dtype=torch.bfloat16, device="cuda")
+    idx = torch.tensor([4, 99, 299], device="cuda")
+    assert torch.equal(fused.rmsnorm_rows(h, idx, w, 1e-6), fused.rmsnorm(h, w, 1e-6)[:, idx])
+    hb = torch.randn(3, 50, 2048, dtype=torch.bfloat16, device="cuda")
+    ib = torch.tensor([49, 0, 17], device="cuda")
+    want = fused.rmsnorm(hb, w, 1e-6).gather(1, ib.view(-1, 1, 1).expand(-1, 1, 2048))
+    assert torch.equal(fused.rmsnorm_rows(hb, ib, w, 1e-6), want)

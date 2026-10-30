@@ -140,6 +140,21 @@ def assemble_tokens(prev: torch.Tensor | None, devt: torch.Tensor | None, spec: 
     return out
 
 
+def rmsnorm_rows(h: torch.Tensor, idx: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """The lm head's rows of the final norm in one launch: h [B, S, D] -> [B, n, D] normed rows, where a packed wave
+    (B = 1, n = idx.numel()) takes positions idx and a batch (n = 1) takes row b's position idx[b]."""
+    B, S, D = h.shape
+    packed = B == 1 and idx.numel() > 1
+    n = idx.numel()
+    x = h.reshape(B * S, D)
+    if x.stride(1) != 1:
+        x = x.contiguous()
+    y = torch.empty(n, D, dtype=h.dtype, device=h.device)
+    K._rmsnorm_rows_kernel[(n,)](x, idx, weight, y, x.stride(0), S, eps, PACKED=packed, D=D,
+                                 BLOCK=K.triton.next_power_of_2(D))
+    return y.view(1, n, D) if packed else y.view(n, 1, D)
+
+
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """Like models.qwen3_moe.route: (weights in logits' dtype, or fp32 as computed, expert ids int64), both [M, k]."""
     M, E = logits.shape
