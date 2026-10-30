@@ -24,6 +24,7 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
+from inference_server.models import fused
 from inference_server.models.paged_kv_cache import step_inputs, to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
@@ -169,8 +170,9 @@ class _PrefillCtx:
         self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
         self._scratch = scratch                    # the padding block id (padding writes land here), every pool
-        self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
-        self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
+        if not self.packed:                        # the padded wave's grid (a packed wave has none)
+            self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
+            self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
         # Built on the host from the lengths: nonzero() on the device waits for every kernel queued before it.
@@ -264,6 +266,9 @@ class _PackedCtx(_PrefillCtx):
     def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         super().__init__(caches, pools, prefix_lens, suffix_lens, device, scratch)
         self.tokens = None                                  # nothing is padded: the MoE sees every token
+        self._fused = fused.ENABLED and torch.device(device).type == "cuda"
+        if self._fused:                                     # token -> (block, slot) in one launch at the first append
+            return
         lens = self.suffix_lens.long()
         total = sum(suffix_lens)
         rows = torch.repeat_interleave(torch.arange(len(suffix_lens), device=device), lens, output_size=total)
@@ -275,12 +280,26 @@ class _PackedCtx(_PrefillCtx):
         """k/v_new [1, Hkv, T, D]: every token into its row's block, one scatter per pool."""
         pool = self.pools[layer_idx]
         bs = pool.block_size
-        bt, same = self._wave_bt(layer_idx)
-        if not same or self._wave_pos is None:
-            self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
+        if self._fused:
+            if self._wave_pos is None:                     # the same block ids in every layer: once a wave
+                self._ensure_blocks()
+                starts = [0]
+                for n in self._suffix[:-1]:
+                    starts.append(starts[-1] + n)
+                self._wave_pos = (None, *fused.packed_slots(self.prefix_lens, self.suffix_lens,
+                                                            to_device(starts, self.device, torch.int32), self._table(),
+                                                            bs, sum(self._suffix), max(self._suffix)))
+        else:
+            bt, same = self._wave_bt(layer_idx)
+            if not same or self._wave_pos is None:
+                self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)                 # [T, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
+        k_t, v_t = k_new[0].transpose(0, 1), v_new[0].transpose(0, 1)                           # [T, Hkv, D]
+        if fused._on(k_t, v_t) and pool.k.dtype in (torch.bfloat16, torch.float8_e4m3fn):    # cast in the kernel
+            fused.kv_store_rows(pool.k, pool.v, bids, slots, k_t, v_t)
+        else:
+            pool.k[bids, :, slots, :] = k_t.to(pool.k.dtype)
+            pool.v[bids, :, slots, :] = v_t.to(pool.v.dtype)
         for b, cache in enumerate(self.caches):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
@@ -1060,21 +1079,27 @@ class CustomTorchBackend(InferenceBackend):
             n = state.n_rows
             if position_ids is None:                   # the state knows every row's position; no host round trip
                 position_ids = state.seq_lens.unsqueeze(1)
-            state.prepare_step()  # alloc any boundary-crossing block (once per step)
+            new = state.prepare_step(defer=True)  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
+            seq_next = None
             path = self._mega_path(state) if self._mega_on else "kernels"
             if path != "kernels":
+                if new is not None:
+                    new.apply()
                 logits, greedy_tokens = self._decode_megakernel(current_tokens, state, path)
             elif self._graph_on and fits:
+                seq_next = torch.empty_like(state.seq_lens)            # staged by the same launch as the inputs
                 logits = self._replay_decode(current_tokens, position_ids, state,
-                                             self._decode_bucket(n))
+                                             self._decode_bucket(n), new=new, seq_next=seq_next)
             else:
+                if new is not None:
+                    new.apply()
                 logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
-            state.advance()       # bump seq_lens
+            state.advance(seq_next)       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
             greedy_tokens = None
@@ -1195,8 +1220,8 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
-        # One table for every layer (a block id is the same in each layer's pool); replay refreshes it in two copies.
-        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.long, device=dev)
+        # One int32 table for every layer (a block id is the same in each layer's pool), refreshed by the staging launch.
+        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.int32, device=dev)
         ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
@@ -1273,18 +1298,15 @@ class CustomTorchBackend(InferenceBackend):
         except Exception as e:
             print(f"[graph-breaks] explain failed (diagnostic only): {e}", flush=True)
 
-    def _replay_decode(self, current_tokens, position_ids, state, bucket):
-        """Copy this step's inputs into `bucket`'s static buffers (real rows + scratch dummies),
+    def _replay_decode(self, current_tokens, position_ids, state, bucket, new=None, seq_next=None):
+        """Stage this step's inputs into `bucket`'s static buffers (real rows + scratch dummies) in one launch,
         replay that bucket's graph, return logits[:n_rows]. The graph reads the static buffers,
-        so its scatter/kernel run on the fresh values — no per-op dispatch."""
+        so its scatter/kernel run on the fresh values — no per-op dispatch. `new`, `seq_next`: as
+        fused.stage_decode's (a block allocated this step; the lengths after it)."""
         n = state.n_rows
         g = self._graphs[bucket]
-        g["tokens"][:n].copy_(current_tokens)
-        g["pos"][:n].copy_(position_ids)
-        g["seqlens"][:n].copy_(state.seq_lens)
-        g["seqlens"][n:] = 1
-        g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
-        g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
+        fused.stage_decode(g, current_tokens, position_ids, state.seq_lens, state.bt, n, self._scratch,
+                           new=(new.blk, new.col) if new is not None else None, seq_next=seq_next)
         g["graph"].replay()
         return g["out"][:n]
 

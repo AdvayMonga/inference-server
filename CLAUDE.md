@@ -91,5 +91,10 @@
   graph capture). Prefill, CPU and the torch MoE path keep the layer forward. `CAPTURE_REGION=first:last` (+
   `CAPTURE_REGION_DIR`, optional `CAPTURE_REGION_LAYERS`) records a stretch's real reads and writes per layer call
   (`models/region_capture.py`, BlameGraph's `lab/capture.py` layout; graphs and the megakernel off, `CUSTOM_BACKEND_CUDA_GRAPH=0 MEGAKERNEL=0`, to see every call).
+- No PyTorch built-in kernels on the CUDA hot paths (2026-10-30): every launch of the graphed decode step and the
+  packed prefill forward is ours (Triton/CUDA) or a library's (cuBLAS, CUTLASS, FlashInfer). Graph inputs are staged
+  by one launch (`fused.stage_decode`, `prepare_step(defer=True)`), embedding + rotary is one (`fused.embed_rope`),
+  greedy sampling is `fused.argmax`, the routers zero the down GEMM's accumulator, and the CUTLASS MoE path routes
+  with `moe_kernel.route_dense` (no torch.sort). A new op on these paths is a custom kernel or folded into a neighbour.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.
