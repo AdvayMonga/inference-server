@@ -96,7 +96,9 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
         w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
-    o = w.run(qp[tokens] if tokens is not None else qp, (pool.k, pool.v))           # [total real tokens, Hq, D]
+    qr = qp[tokens] if tokens is not None else qp
+    o = w.run(qr, (pool.k, pool.v), out=torch.empty_like(qr))       # [total real tokens, Hq, D]; every row is written,
+                                                                     # so not FlashInfer's default zero-filled buffer
     if tokens is None:
         return o.view(B, S, Hq, D)
     return torch.zeros(B * S, Hq, D, dtype=o.dtype, device=o.device).index_copy_(0, tokens, o).view(B, S, Hq, D)

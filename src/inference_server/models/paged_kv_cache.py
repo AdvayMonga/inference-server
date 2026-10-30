@@ -706,6 +706,9 @@ class BatchedPagedKVCache:
         return bt, sl
 
 
+_BT_COLS = 64          # a decode state's block table is this many columns wider at a time
+
+
 class _Deferred:
     """prepare_step(defer=True)'s table writes: per row its new block (-1 for none) and column on the device, for a
     staging launch; `apply()` makes them here instead."""
@@ -739,13 +742,16 @@ class BatchedDecodeState:
         self.device = device
         self.bs = next(p.block_size for p in pools if p is not None)
         self.alloc = _allocator(pools)
-        self.seq_lens = torch.zeros(0, dtype=torch.long, device=device)   # [R] logical len (pre-step)
+        self._seq = torch.zeros(0, dtype=torch.long, device=device)       # [R] logical len (pre-step)
         # One table [R, cols] for every layer that owns K/V: a block id is the same in every layer's pool. (A table
         # per layer cost a launch or a sync per layer on every join, leave and allocation; stacked [layers, R, cols]
         # they were one op each but 48x the bytes to build, grow, compact and copy into the graphs' buffers.)
         self._live = [L for L, p in enumerate(pools) if p is not None]
         self._li = {L: i for i, L in enumerate(self._live)}
-        self.bt: torch.Tensor | None = None
+        self._bt: torch.Tensor | None = None
+        # Joins and leaves since the device tensors were last built: per row, its old row index or (blocks, length)
+        # for a joining row; None when there are none. Applied by one launch when bt or seq_lens is next read.
+        self._src: list | None = None
         # Host mirrors of what join, leave and allocation need, so none of them waits on the GPU (an async decode
         # step overlaps host work with the running forward; a .item() here would serialize them again).
         self._host_len: list[int] = []                   # per row: logical length (pre-step)
@@ -759,7 +765,51 @@ class BatchedDecodeState:
 
     @property
     def n_rows(self) -> int:
-        return self.seq_lens.shape[0]
+        return len(self._host_len)
+
+    @property
+    def bt(self) -> torch.Tensor | None:
+        self._flush()
+        return self._bt
+
+    @bt.setter
+    def bt(self, t: torch.Tensor | None) -> None:
+        self._flush()
+        self._bt = t
+
+    @property
+    def seq_lens(self) -> torch.Tensor:
+        self._flush()
+        return self._seq
+
+    @seq_lens.setter
+    def seq_lens(self, t: torch.Tensor) -> None:
+        self._flush()
+        self._seq = t
+
+    def _flush(self) -> None:
+        """Build bt and seq_lens for the rows as they are now, from the old ones and the joining rows' host lists, in
+        one launch (fused.compose_rows): every join and leave since the last read at once."""
+        src, self._src = self._src, None
+        if src is None:
+            return
+        if not src:
+            self._bt, self._seq = None, self._seq[:0]
+            return
+        new = [x for x in src if not isinstance(x, int)]
+        cols = max([len(b) for b, _ in new] + [self._bt.shape[1] if self._bt is not None else 0])
+        cols = -(-cols // _BT_COLS) * _BT_COLS               # headroom: a row crossing into a new column rarely regrows
+        old_idx, new_j, j = [], [], 0
+        for x in src:
+            old_idx.append(x if isinstance(x, int) else -1)
+            new_j.append(-1 if isinstance(x, int) else j)
+            j += not isinstance(x, int)
+        new_bt = to_device([b + [0] * (cols - len(b)) for b, _ in new] or [[0] * cols], self.device)
+        new_seq = to_device([n for _, n in new] or [0], self.device)
+        old_bt = self._bt if self._bt is not None else new_bt
+        self._bt, self._seq = fused.compose_rows(old_bt, self._seq if self._bt is not None else new_seq,
+                                                 to_device(old_idx, self.device), to_device(new_j, self.device),
+                                                 new_bt, new_seq, cols)
 
     def max_len(self) -> int:
         """The longest row's length before this step, from the host mirror (no sync)."""
@@ -769,20 +819,19 @@ class BatchedDecodeState:
     def _grow_cols(t: torch.Tensor, cols: int) -> torch.Tensor:
         if t.shape[-1] >= cols:
             return t
+        cols = -(-cols // _BT_COLS) * _BT_COLS
         pad = torch.zeros(*t.shape[:-1], cols - t.shape[-1], dtype=t.dtype, device=t.device)
         return torch.cat([t, pad], dim=-1)
 
     def add_row(self, pkv: "PagedKVCache") -> None:
-        """Adopt a prefilled PagedKVCache's blocks as a new batch row (no per-step cost)."""
-        self.seq_lens = torch.cat([self.seq_lens, to_device([pkv.seq_len], self.device)])
+        """Adopt a prefilled PagedKVCache's blocks as a new batch row (host only; built on the next read)."""
         blocks = list(pkv.blocks)
-        n0 = len(blocks)
+        if self._src is None:
+            self._src = list(range(len(self._host_len)))
+        self._src.append((blocks, pkv.seq_len))
         self._host_len.append(pkv.seq_len)
-        self._host_alloc.append(n0)
+        self._host_alloc.append(len(blocks))
         self._host_blocks.append(blocks)
-        cols = max(n0, self.bt.shape[1] if self.bt is not None else 0)
-        row = to_device([blocks + [0] * (cols - n0)], self.device)                   # [1, cols]
-        self.bt = row if self.bt is None else torch.cat([self._grow_cols(self.bt, cols), row], dim=0)
 
     def remove_row(self, idx: int) -> None:
         """Free row `idx`'s blocks and drop it from the batch."""
@@ -791,17 +840,13 @@ class BatchedDecodeState:
     def remove_rows(self, idxs) -> None:
         """Free these rows' blocks and drop them from the batch: one compaction for all of them, no stream sync."""
         drop = set(idxs)
-        keep = [i for i in range(self.n_rows) if i not in drop]
+        if self._src is None:
+            self._src = list(range(len(self._host_len)))
+        self._src = [x for i, x in enumerate(self._src) if i not in drop]     # host only; built on the next read
         for idx in sorted(drop, reverse=True):
             self.alloc.release_all(self._host_blocks.pop(idx))          # host mirror: no D2H
             self._host_len.pop(idx)
             self._host_alloc.pop(idx)
-        if not keep:
-            self.bt, self.seq_lens = None, self.seq_lens[:0]
-            return
-        keep_t = to_device(keep, self.device)
-        self.bt = self.bt[keep_t]
-        self.seq_lens = self.seq_lens[keep_t]
 
     def prepare_step(self, defer: bool = False):
         """Alloc a block for every boundary-crossing row in every layer (once per step). `defer`: the device table's

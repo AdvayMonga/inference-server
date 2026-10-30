@@ -188,3 +188,18 @@ def test_packed_slots_match_the_torch_indexing():
     rows = torch.repeat_interleave(torch.arange(4, device="cuda"), i32(suffix).long())
     pos = i32(prefix).long()[rows] + torch.arange(sum(suffix), device="cuda") - i32(starts).long()[rows]
     assert torch.equal(bids, bt.long()[rows, pos // bs]) and torch.equal(slots, pos % bs)
+
+
+def test_compose_rows_matches_the_torch_fallback():
+    from inference_server.models import fused
+    old_bt = torch.randint(0, 99, (5, 64), device="cuda")
+    old_seq = torch.randint(0, 999, (5,), device="cuda")
+    new_bt = torch.randint(0, 99, (2, 128), device="cuda")
+    new_seq = torch.tensor([7, 8], device="cuda")
+    o = torch.tensor([4, -1, 0, 2, -1], device="cuda")
+    j = torch.tensor([-1, 1, -1, -1, 0], device="cuda")
+    bt, seq = fused.compose_rows(old_bt, old_seq, o, j, new_bt, new_seq, 192)
+    ok_bt = torch.zeros(5, 192, dtype=torch.long, device="cuda")
+    ok_bt[0, :64], ok_bt[2, :64], ok_bt[3, :64] = old_bt[4], old_bt[0], old_bt[2]
+    ok_bt[1, :128], ok_bt[4, :128] = new_bt[1], new_bt[0]
+    assert torch.equal(bt, ok_bt) and seq.tolist() == [old_seq[4].item(), 8, old_seq[0].item(), old_seq[2].item(), 7]

@@ -25,7 +25,7 @@ def _arange(n: int, device: torch.device, scale: int = 1) -> torch.Tensor:
     return ar * scale if scale != 1 else ar
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _moe_gemm_kernel(A, TOK, W, SCALE, A_SCALE, C, SORTED, EXPERT_IDS, M, N, K,
                      stride_am, stride_wn, stride_wk, stride_cm,
                      E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -156,7 +156,7 @@ def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torc
     return sorted_ids, expert_ids, tok, pair_w
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
                              stride_am, stride_wn, stride_wk, stride_om,
                              E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
@@ -342,7 +342,7 @@ def _zero_rows(OUT, t, tm, N, BLOCK_T: tl.constexpr, BLOCK_Z: tl.constexpr):
                  mask=tm[:, None] & ((c + z) < N)[None, :])
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T", "n_blocks", "max_blocks"])
 def _route_kernel(LOGITS, SORTED_IDS, EXPERT_IDS, TOK, PAIR_W, SCRATCH, OUT, stride_l, T, n_blocks, max_blocks, N_OUT,
                   E: tl.constexpr, E_PAD: tl.constexpr, K: tl.constexpr, RENORM: tl.constexpr,
                   BLOCK_T: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK: tl.constexpr, BLOCK_Z: tl.constexpr):
@@ -426,7 +426,7 @@ def route_fused(logits: torch.Tensor, num_experts: int, top_k: int, renorm: bool
     return sorted_ids, expert_ids, tok, pair_w
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["T", "M", "n_blocks"])
 def _route_topk_kernel(LOGITS, E_IDS, TOK, PAIR_W, SORTED_IDS, EXPERT_IDS, OUT, stride_l, T, M, n_blocks, N_OUT,
                        E: tl.constexpr, E_PAD: tl.constexpr, K: tl.constexpr, RENORM: tl.constexpr,
                        BLOCK_T: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_F: tl.constexpr, BLOCK_Z: tl.constexpr):
@@ -462,7 +462,7 @@ def _route_topk_kernel(LOGITS, E_IDS, TOK, PAIR_W, SORTED_IDS, EXPERT_IDS, OUT, 
             tl.store(PAIR_W + t * K + j, w / total, mask=tm)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M", "max_blocks"])
 def _route_offsets_kernel(E_IDS, PSTART, CURSOR, EXPERT_IDS, M, max_blocks, E: tl.constexpr, E_PAD: tl.constexpr,
                           BLOCK_M: tl.constexpr, BLOCK: tl.constexpr, DENSE: tl.constexpr = False):
     """route_multi, step 2 (one program): the pairs per expert (a histogram, so no buffer needs zeroing first), each
@@ -487,7 +487,7 @@ def _route_offsets_kernel(E_IDS, PSTART, CURSOR, EXPERT_IDS, M, max_blocks, E: t
             tl.store(EXPERT_IDS + first + j, bins, mask=(j < nb) & (bins < E))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _route_place_kernel(E_IDS, PSTART, CURSOR, SORTED_IDS, POS, M, BLOCK: tl.constexpr, HAS_POS: tl.constexpr = False):
     """route_multi, step 3 (a program per BLOCK pairs): each pair takes the next row of its expert's run (and, with
     HAS_POS, records that row as its position)."""
@@ -564,7 +564,7 @@ def route_dense(logits: torch.Tensor, num_experts: int, top_k: int,
     return sorted_ids, offs, pos, pair_w
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["M"])
 def _scatter_add_weighted_kernel(Y, TOK, PAIR_W, OUT, M, N, stride_y, stride_o,
                                  BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
     """out[tok[i]] += pair_w[i] * y[i] for a tile of rows: the MoE epilogue of the CUTLASS path in one pass."""

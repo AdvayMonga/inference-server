@@ -152,7 +152,7 @@ def _embed_rope_kernel(IDS, POS, WEMB, INV, HOUT, COS, SIN, H: tl.constexpr, BLO
     tl.store(SIN + base + HALF + i, s16)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _step_inputs_kernel(SEQ, KV_BLOCK, KV_SLOT, ATTN_SL, N, BS: tl.constexpr, BLOCK: tl.constexpr):
     """A decode step's per-row K/V block and slot and the attention lengths, from the rows' lengths."""
     r = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
@@ -163,7 +163,7 @@ def _step_inputs_kernel(SEQ, KV_BLOCK, KV_SLOT, ATTN_SL, N, BS: tl.constexpr, BL
     tl.store(ATTN_SL + r, (s + 1).to(tl.int32), mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n", "bt_cols", "stride_bt", "scratch"])
 def _stage_decode_kernel(CUR, POS, SEQ, BT, NEW_BLK, NEW_LB, G_TOK, G_POS, G_SEQ, G_BT, SEQ_NEXT, n, bt_cols,
                          stride_cur, stride_pos, stride_bt, g_cols, scratch, HAS_NEW: tl.constexpr,
                          ADVANCE: tl.constexpr, BLOCK_C: tl.constexpr):
@@ -229,7 +229,7 @@ def _kv_store_rows_kernel(KN, VN, PK, PV, BIDS, SLOTS, stride_kt, stride_kh, str
     tl.store(PV + dst, tl.load(VN + t * stride_vt + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["stride_bt"])
 def _packed_slots_kernel(PREFIX, SUFFIX, START, BT, BIDS, SLOTS, stride_bt, BS: tl.constexpr, BLOCK: tl.constexpr):
     """Row r's chunk tokens of a packed wave: each token's K/V block (from the row's table) and slot."""
     r = tl.program_id(0)
@@ -239,3 +239,36 @@ def _packed_slots_kernel(PREFIX, SUFFIX, START, BT, BIDS, SLOTS, stride_bt, BS: 
     t = tl.load(START + r) + i
     tl.store(BIDS + t, tl.load(BT + r * stride_bt + p // BS, mask=m, other=0).to(tl.int64), mask=m)
     tl.store(SLOTS + t, (p % BS).to(tl.int64), mask=m)
+
+
+@triton.jit(do_not_specialize=["old_cols", "stride_old", "new_cols", "stride_new", "cols"])
+def _compose_rows_kernel(OLD_BT, OLD_SEQ, OLD_IDX, NEW_J, NEW_BT, NEW_SEQ, BT, SEQ, old_cols, stride_old, new_cols,
+                         stride_new, cols, BLOCK: tl.constexpr):
+    """Row r of a decode state's table and lengths: old row OLD_IDX[r], or joining row NEW_J[r]; 0 past its table."""
+    r = tl.program_id(0)
+    c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    o = tl.load(OLD_IDX + r)
+    j = tl.load(NEW_J + r)
+    if o >= 0:
+        v = tl.load(OLD_BT + o * stride_old + c, mask=c < old_cols, other=0)
+    else:
+        v = tl.load(NEW_BT + j * stride_new + c, mask=c < new_cols, other=0)
+    tl.store(BT + r * cols + c, v.to(tl.int64), mask=c < cols)
+    if tl.program_id(1) == 0:
+        if o >= 0:
+            tl.store(SEQ + r, tl.load(OLD_SEQ + o))
+        else:
+            tl.store(SEQ + r, tl.load(NEW_SEQ + j))
+
+
+@triton.jit(do_not_specialize=["n"])
+def _assemble_tokens_kernel(PREV, DEVT, SPEC, OUT, n, BLOCK: tl.constexpr):
+    """Row r's input token: PREV[src], else DEVT[src_dev], else the host's (SPEC = [src, src_dev, host], each [n])."""
+    r = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = r < n
+    src = tl.load(SPEC + r, mask=m, other=-1)
+    src_dev = tl.load(SPEC + n + r, mask=m, other=-1)
+    v = tl.load(SPEC + 2 * n + r, mask=m, other=0)
+    v = tl.where(src_dev >= 0, tl.load(DEVT + src_dev, mask=m & (src_dev >= 0), other=0).to(tl.int64), v)
+    v = tl.where(src >= 0, tl.load(PREV + src, mask=m & (src >= 0), other=0).to(tl.int64), v)
+    tl.store(OUT + r, v, mask=m)

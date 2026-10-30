@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend
+from inference_server.models import fused
 from inference_server.models.paged_kv_cache import KVCacheExhausted, to_device
 from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams
@@ -161,6 +162,7 @@ class _ActiveRow:
     current_token: int | DeviceToken   # token to feed next forward pass (a DeviceToken until its host copy lands)
     real_kv_len: int         # actual KV cache length for this row
     fresh: bool = True       # current_token not yet appended/streamed/checked for EOS by _evict_finished
+    backlog: list = field(default_factory=list)   # earlier tokens still to stream ahead of current_token
 
 
 @dataclass
@@ -569,16 +571,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     continue                  # its host copy has not landed: streamed on a later pass
                 tok = row.current_token = tok.value()
             row.fresh = False
-
-            if self.backend.is_eos(tok) and not row.request.ignore_eos:
-                to_evict.append((i, "ok"))
-                continue
-
-            row.request.generated.append(tok)
-            self._stream_token(row.request, tok)
-
-            if len(row.request.generated) >= row.request.max_tokens:
-                to_evict.append((i, "ok"))
+            tokens, row.backlog = row.backlog + [tok], []
+            for tok in tokens:
+                if self.backend.is_eos(tok) and not row.request.ignore_eos:
+                    to_evict.append((i, "ok"))
+                    break
+                row.request.generated.append(tok)
+                self._stream_token(row.request, tok)
+                if len(row.request.generated) >= row.request.max_tokens:
+                    to_evict.append((i, "ok"))
+                    break
 
         if to_evict:
             for i, _ in to_evict:
@@ -1118,6 +1120,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
             dev = out_prev.device
         if not where and not any(isinstance(r.current_token, DeviceToken) for r in batch):
             return to_device([r.current_token for r in batch], dev)
+        groups = {id(r.current_token.tokens) for r in batch if id(r) not in where and isinstance(r.current_token, DeviceToken)}
+        if dev.type == "cuda" and fused.ENABLED and len(groups) <= 1:      # one launch: rows from the last step's
+            prev = out_prev if where else None                           # output, a prefill's tokens, or the host
+            devt = next((r.current_token.tokens for r in batch if id(r) not in where
+                         and isinstance(r.current_token, DeviceToken)), None)
+            src = [where.get(id(r), -1) for r in batch]
+            src_dev = [r.current_token.index if src[i] < 0 and isinstance(r.current_token, DeviceToken) else -1
+                       for i, r in enumerate(batch)]
+            host = [0 if src[i] >= 0 or src_dev[i] >= 0 else r.current_token for i, r in enumerate(batch)]
+            return fused.assemble_tokens(prev, devt, to_device(src + src_dev + host, dev), n)
         current = torch.empty(n, dtype=torch.long, device=dev)
         dst = [i for i, r in enumerate(batch) if id(r) in where]
         if dst:
@@ -1146,9 +1158,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._pending is not None:
             self._finish_pending()                 # the previous step's tokens, while this step runs
         self._pending = (next_tokens, batch, host, event)
-        for row in batch:                          # first tokens read now: this step is already queued behind them
-            if isinstance(row.current_token, DeviceToken):
-                row.current_token = row.current_token.value()
+        for row in batch:                          # first tokens whose copy has landed; the rest are read without
+            tok = row.current_token                # waiting by _evict_finished or the next _finish_pending
+            if isinstance(tok, DeviceToken) and tok.ready():
+                row.current_token = tok.value()
 
     def _pinned_out(self, n: int, dtype) -> torch.Tensor:
         """A pinned host buffer for this step's tokens, from a ring of four (pinning a fresh one each step is a
@@ -1172,6 +1185,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row, tok in zip(snap, host.tolist()):
             if id(row) not in alive:
                 continue                           # finished or cancelled since: its extra token is dropped
+            if row.fresh:                          # a prefill's first token not streamed yet (its copy landed
+                first = row.current_token          # behind this step's): streamed ahead of this one
+                row.backlog.append(first.value() if isinstance(first, DeviceToken) else first)
             row.current_token = tok
             row.real_kv_len += 1
             row.fresh = True

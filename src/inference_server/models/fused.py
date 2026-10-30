@@ -111,6 +111,35 @@ def packed_slots(prefix: torch.Tensor, suffix: torch.Tensor, starts: torch.Tenso
     return bids, slots
 
 
+def compose_rows(old_bt: torch.Tensor, old_seq: torch.Tensor, old_idx: torch.Tensor, new_j: torch.Tensor,
+                 new_bt: torch.Tensor, new_seq: torch.Tensor, cols: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """A decode state's (block table [R, cols], lengths [R]) after joins and leaves, in one launch: row r is old row
+    old_idx[r], or (old_idx[r] = -1) joining row new_j[r]; columns past a row's table are 0. Off CUDA, in torch."""
+    R = old_idx.numel()
+    if not (ENABLED and old_bt.is_cuda):
+        o, j = old_idx.long(), new_j.long()
+        pad = lambda t: torch.nn.functional.pad(t, (0, cols - t.shape[1]))
+        take_old = (o >= 0)[:, None]
+        bt = torch.where(take_old, pad(old_bt)[o.clamp_min(0)], pad(new_bt)[j.clamp_min(0)])
+        return bt, torch.where(o >= 0, old_seq[o.clamp_min(0)], new_seq[j.clamp_min(0)])
+    bt = torch.empty(R, cols, dtype=torch.long, device=old_bt.device)
+    seq = torch.empty(R, dtype=torch.long, device=old_bt.device)
+    BLOCK = 256
+    K._compose_rows_kernel[(R, K.triton.cdiv(cols, BLOCK))](old_bt, old_seq, old_idx, new_j, new_bt, new_seq, bt, seq,
+                                                             old_bt.shape[1], old_bt.stride(0), new_bt.shape[1],
+                                                             new_bt.stride(0), cols, BLOCK=BLOCK)
+    return bt, seq
+
+
+def assemble_tokens(prev: torch.Tensor | None, devt: torch.Tensor | None, spec: torch.Tensor, n: int) -> torch.Tensor:
+    """A decode step's [n] input tokens in one launch. spec = [src, src_dev, host] ([3n] long): row r takes prev[src[r]]
+    if src[r] >= 0, else devt[src_dev[r]] if src_dev[r] >= 0, else host[r]."""
+    out = torch.empty(n, dtype=torch.long, device=spec.device)
+    K._assemble_tokens_kernel[(K.triton.cdiv(max(n, 1), 256),)](
+        prev if prev is not None else spec, devt if devt is not None else spec, spec, out, n, BLOCK=256)
+    return out
+
+
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """Like models.qwen3_moe.route: (weights in logits' dtype, or fp32 as computed, expert ids int64), both [M, k]."""
     M, E = logits.shape
