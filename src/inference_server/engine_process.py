@@ -110,8 +110,9 @@ def _engine_main(conn, factory: str | None) -> None:
     def push_stats():
         while not stop.wait(STATS_EVERY_S):
             info = prefix_cache.stats() if prefix_cache is not None else None
+            stats = sched.stats()               # outside the pipe lock: the scheduler holds its own lock while it sends
             with lock:
-                conn.send(("stats", sched.stats(), info))
+                conn.send(("stats", stats, info))
 
     threading.Thread(target=push_stats, name="engine-stats", daemon=True).start()
 
