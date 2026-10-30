@@ -3,14 +3,20 @@
 `available()` is False without CUDA or nvcc. MEGAKERNEL=1 makes the backend use it for decode steps of up to
 MEGAKERNEL_MAX_ROWS rows (default 2); MEGAKERNEL_FP8=1 streams the expert weights as fp8 e4m3 with one fp32 scale
 per output channel (weight-only: activations stay bf16/fp32), copies made at load (~29 GB) when the engine's experts
-are bf16; the Triton/torch path stays for prefill, wider batches and everything else."""
+are bf16; the Triton/torch path stays for prefill, wider batches and everything else. A module of the region overrides
+package (`models/regions/`) may define `STEP(tokens, pos, bt, k_pools, v_pools, weights) -> (logits, next)`, a whole
+step (the kernel layer's `region:embed:argmax` winner, K/V written in place, `weights` named as `Model.weights`):
+`decode_step` then runs it in place of the extension."""
 
 from __future__ import annotations
 
 import functools
+import importlib
 import logging
 import os
+import pkgutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 
@@ -31,6 +37,25 @@ RING_KB = int(os.environ.get("MEGAKERNEL_RING_KB", "96"))      # the weight ring
 NOMATH = os.environ.get("MEGAKERNEL_NOMATH", "0") == "1"       # timing only: the ring phases skip their dot products
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
+ROW = ("w.input_norm", "w.qkv", "w.q_norm", "w.k_norm", "w.o_proj", "w.post_norm", "w.router", "w.gate_up",
+       "w.gate_up_scale", "w.down", "w.down_scale")      # the kernel's Layer, then the pools; stations' "w.*" names
+
+
+def source(name: str = "decode_step.cu") -> str:
+    """A kernel's source with common.cuh inlined: one self-contained file (load_inline, the kernel layer's start)."""
+    d = Path(__file__).parent
+    return (d / name).read_text().replace('#include "common.cuh"', (d / "common.cuh").read_text().replace("#pragma once", ""), 1)
+
+
+@functools.lru_cache(maxsize=None)
+def step_override(package: str = "inference_server.models.regions"):
+    """The one `STEP` defined by a module of `package` (stations.overrides' package), or None."""
+    pkg = importlib.import_module(package)
+    found = [(m.name, getattr(mod, "STEP")) for m in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m.name)
+             if hasattr(mod := importlib.import_module(f"{package}.{m.name}"), "STEP")]
+    if len(found) > 1:
+        raise ValueError(f"STEP defined by more than one module of {package}: {[n for n, _ in found]}")
+    return found[0][1] if found else None
 
 
 def _build(src: str, tag: str, kv8: bool, tma: bool, bps: int, include: list[str] = ()):
@@ -87,6 +112,7 @@ class Model:
         self.n_layers = len(m.layers)
         self._keep: list[torch.Tensor] = []                  # tensors the table points to that the model does not own
         self._rows: list[list[int]] = []
+        self.weights: dict = {}                              # what a STEP override gets, BlameGraph kernels/step.py's names
         for layer in m.layers:
             attn, mlp, ex = layer.self_attn, layer.mlp, layer.mlp.experts
             assert hasattr(attn, "qkv_weight"), "fuse_qkv() first"
@@ -111,6 +137,7 @@ class Model:
                   _check(attn.o_proj.weight, "wo", (H, NQ * D)), _check(layer.post_attention_layernorm.weight, "post_norm", (H,)),
                   _check(mlp.gate.weight, "wr", (E, H)), gu, gus, dn, dns]
             self._rows.append([t.data_ptr() if t is not None else 0 for t in ts] + [0, 0])
+            self.weights.update({f"{len(self._rows) - 1}.{n}": t for n, t in zip(ROW, ts)})
             self.scale = attn.scale
         if self._keep:
             torch.cuda.empty_cache()
@@ -120,10 +147,29 @@ class Model:
         for name, t in (("embed", self.embed), ("lm_head", self.lm_head)):
             assert t.is_cuda and t.dtype == torch.bfloat16 and t.shape[1] == H and t.is_contiguous(), name
         self.inv_freq = m.rope.inv_freq.to(torch.float32).contiguous()
+        from inference_server.models import stations
+        self.weights.update(embed=self.embed, final_norm=self.final_norm, lm_head=self.lm_head, inv_freq=self.inv_freq,
+                            cfg=stations.layer_config(model), n_layers=self.n_layers)
+        self._scratch()
+
+    @classmethod
+    def from_weights(cls, w: dict, k_pools, v_pools) -> "Model":
+        """A Model over a STEP's `weights` and pools, as `Model.weights` names them (no checks, no copies)."""
+        self = cls.__new__(cls)
+        self.weights, self.n_layers, self.device = w, w["n_layers"], w["embed"].device
+        self.fp8, self.scale = w["0.w.gate_up_scale"] is not None, w["cfg"].scale
+        self.embed, self.final_norm, self.lm_head, self.inv_freq = w["embed"], w["final_norm"], w["lm_head"], w["inv_freq"]
+        self._rows = [[w[f"{i}.{n}"].data_ptr() if w[f"{i}.{n}"] is not None else 0 for n in ROW] + [0, 0]
+                      for i in range(self.n_layers)]
+        self._scratch()
+        self.bind_pools([SimpleNamespace(k=k, v=v) for k, v in zip(k_pools, v_pools)])
+        return self
+
+    def _scratch(self) -> None:
         e = _ext(os.environ.get("KV_CACHE_DTYPE", "").lower() == "fp8", TMA)     # scratch sizes: any build; this one is the server's
-        self.f32 = torch.empty(e.scratch_f32_elems(), dtype=torch.float32, device=device)
-        self.bf16 = torch.empty(e.scratch_bf16_elems(), dtype=torch.bfloat16, device=device)
-        self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=device)
+        self.f32 = torch.empty(e.scratch_f32_elems(), dtype=torch.float32, device=self.device)
+        self.bf16 = torch.empty(e.scratch_bf16_elems(), dtype=torch.bfloat16, device=self.device)
+        self.i32 = torch.empty(e.scratch_i32_elems(), dtype=torch.int32, device=self.device)
         self.table: torch.Tensor | None = None
 
     def bind_pools(self, pools) -> None:
@@ -134,6 +180,7 @@ class Model:
             assert p.k.dtype in (torch.bfloat16, torch.float8_e4m3fn) and p.k.dtype == pools[0].k.dtype
             assert tuple(p.k.shape[1:]) == (NKV, 16, D) and p.k.is_contiguous() and p.v.is_contiguous()
             row[11], row[12] = p.k.data_ptr(), p.v.data_ptr()
+        self.k_pools, self.v_pools = [p.k for p in pools], [p.v for p in pools]
         self.table = torch.tensor(self._rows, dtype=torch.int64, device=self.device)
 
 
@@ -146,8 +193,13 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
     block table (one for every layer), as the batched state keeps it. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
     `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug; given
-    [blocks, 16] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew."""
+    [blocks, 16] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew. A STEP
+    override (models/regions/) runs in place of the extension for a Model without stamps; a caller passing its own
+    namespace (the kernel layer's baseline) gets the extension."""
     assert mdl.table is not None, "bind_pools() first"
+    step = step_override()
+    if step is not None and times is None and isinstance(mdl, Model):
+        return step(tokens, pos, bt, mdl.k_pools, mdl.v_pools, mdl.weights)
     global _NO_TIMES
     if times is None:
         if _NO_TIMES is None:

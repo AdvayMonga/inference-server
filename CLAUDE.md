@@ -81,6 +81,10 @@
   every block) writing the experts into the block's GATEUP/DOWN instructions on the GPU. A search passes its own
   program to `Framework`. Taken only where the routing table names the path `"framework"`; not yet compiled or
   measured on a GPU (`tests/test_megakernel_framework.py`, MEGAKERNEL_TEST=1; schedules: `test_megakernel_schedule.py`).
+- Whole-step override (the kernel layer's `region:embed:argmax` winner): a module of `models/regions/` may define
+  `STEP(tokens, pos, bt, k_pools, v_pools, weights) -> (logits, next)` (K/V in place; `weights` = `megakernel.Model.weights`,
+  BlameGraph kernels/step.py's names); `megakernel.decode_step` runs it in place of the extension. A framework program
+  ships this way: `STEP = framework.step(program)`. `megakernel.source()` is decode_step.cu with common.cuh inlined.
 - Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
   layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
   define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before

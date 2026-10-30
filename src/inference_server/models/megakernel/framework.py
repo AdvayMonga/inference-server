@@ -5,7 +5,8 @@ instructions, ordered by dependency counters instead of grid-wide barriers. Same
 A program is a schedule plus its instructions' device code: a module with `schedule(B, blocks, n_layers, vocab, fp8)
 -> Schedule` (Python, run at load for every batch size) and `OPS`, the header interp.cu includes (it defines
 `run_op` and `program_smem`). `program/` is the default, today's megakernel phases as instructions; a search passes
-its own module to `Framework`. Weights are the `megakernel.Model`'s device tensors: nothing is loaded here."""
+its own module to `Framework`. Weights are the `megakernel.Model`'s device tensors: nothing is loaded here. A program
+ships as the engine's whole-step override: a module of `models/regions/` with `STEP = framework.step(program)`."""
 
 from __future__ import annotations
 
@@ -106,3 +107,16 @@ def decode_step(fw: Framework, tokens: torch.Tensor, pos: torch.Tensor, bt: torc
     return ext.decode_step(tokens.contiguous(), pos.contiguous(), bt.contiguous(), mdl.table, mdl.embed, mdl.final_norm,
                            mdl.lm_head, mdl.inv_freq, fw.f32, fw.bf16, fw.i32, float(mdl.scale), mdl.fp8,
                            s.instrs, s.offsets, fw.counters)
+
+
+def step(program=None):
+    """`program` as a STEP override (megakernel.step_override's signature): its Framework built at the first call over
+    the weights and pools it is given (fixed for the engine's lifetime), then run like `decode_step`."""
+    fws = {}
+
+    def run(tokens, pos, bt, k_pools, v_pools, weights):
+        from inference_server.models import megakernel as mk
+        if "fw" not in fws:
+            fws["fw"] = Framework(mk.Model.from_weights(weights, k_pools, v_pools), program)
+        return decode_step(fws["fw"], tokens, pos, bt)
+    return run

@@ -4,7 +4,8 @@ One layer: what the attention half writes (h, qkv, attn, o, h1, the new K/V) and
 experts and weights, act) bit for bit; out2 to fp32 rounding (both kernels add it up with atomics in any order). The
 whole step: logits, tokens and every layer's new K/V bit for bit whenever today's kernel reproduces itself on that step
 (those atomics may make it not). Greedy tokens over 300 steps of real prompts; a copy of the default program built and
-run in its place changes nothing; the step no slower at batch 1 and 2."""
+run in its place changes nothing, and so does shipping it as the engine's STEP override; the step no slower at batch 1
+and 2."""
 
 import copy
 import importlib.util
@@ -47,6 +48,7 @@ def models(backend):
     for which, m in (("bf16", backend._mega), ("fp8", fp8)):
         m1 = copy.copy(m)
         m1.table, m1.n_layers = m.table[:1].contiguous(), 1
+        m1.weights, m1.k_pools, m1.v_pools = {**m.weights, "n_layers": 1}, m.k_pools[:1], m.v_pools[:1]
         out[which] = (m, Framework(m), m1, Framework(m1))
     return out
 
@@ -214,6 +216,21 @@ def test_a_copy_of_the_default_program_changes_nothing(backend, models, which, t
             t_def, t_copy = _time(framework.decode_step, fw, st, tokens), _time(framework.decode_step, cfw, st, tokens)
             print(f"{which} B={B}: default {t_def:.3f} ms, copy {t_copy:.3f} ms")
             assert t_copy < 1.03 * t_def
+        _free(st)
+
+
+@pytest.mark.parametrize("which", ["bf16", "fp8"])
+def test_the_framework_shipped_as_a_step_override(backend, models, which, monkeypatch):
+    """megakernel.decode_step with a STEP override built by framework.step(): the framework's own outputs."""
+    from inference_server.models import megakernel as mk
+    from inference_server.models.megakernel import framework
+    _, _, m1, fw1 = models[which]
+    monkeypatch.setattr(mk, "step_override", lambda s=framework.step(): s)
+    for B in (1, 2, 8):
+        st, _ = _state(backend, _prompts(B, 1000, seed=400 + B))
+        tokens = torch.randint(1000, 30000, (B,), device="cuda")
+        ref, got = _step(backend, framework.decode_step, fw1, st, tokens), _step(backend, mk.decode_step, m1, st, tokens)
+        assert all(torch.equal(x, y) for x, y in zip(got[1:], ref[1:]))
         _free(st)
 
 
