@@ -24,6 +24,7 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
+from inference_server.models import fused
 from inference_server.models.paged_kv_cache import step_inputs, to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
@@ -279,8 +280,12 @@ class _PackedCtx(_PrefillCtx):
         if not same or self._wave_pos is None:
             self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)                 # [T, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
+        k_t, v_t = k_new[0].transpose(0, 1), v_new[0].transpose(0, 1)                           # [T, Hkv, D]
+        if fused._on(k_t, v_t) and pool.k.dtype in (torch.bfloat16, torch.float8_e4m3fn):    # cast in the kernel
+            fused.kv_store_rows(pool.k, pool.v, bids, slots, k_t, v_t)
+        else:
+            pool.k[bids, :, slots, :] = k_t.to(pool.k.dtype)
+            pool.v[bids, :, slots, :] = v_t.to(pool.v.dtype)
         for b, cache in enumerate(self.caches):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
@@ -1271,7 +1276,6 @@ class CustomTorchBackend(InferenceBackend):
         replay that bucket's graph, return logits[:n_rows]. The graph reads the static buffers,
         so its scatter/kernel run on the fresh values — no per-op dispatch. `new`, `seq_next`: as
         fused.stage_decode's (a block allocated this step; the lengths after it)."""
-        from inference_server.models import fused
         n = state.n_rows
         g = self._graphs[bucket]
         fused.stage_decode(g, current_tokens, position_ids, state.seq_lens, state.bt, n, self._scratch,

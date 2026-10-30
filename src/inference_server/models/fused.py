@@ -89,6 +89,16 @@ def kv_store(pool_k: torch.Tensor, pool_v: torch.Tensor, bt: torch.Tensor, lb: t
                              pool_k.stride(2), H=H, D=D, BLOCK=K.triton.next_power_of_2(H * D))
 
 
+def kv_store_rows(pool_k: torch.Tensor, pool_v: torch.Tensor, bids: torch.Tensor, slots: torch.Tensor,
+                  k: torch.Tensor, v: torch.Tensor) -> None:
+    """pool[bids[t], :, slots[t], :] = new[t] for K and V in one launch (k/v [T, H, D], unit stride along D)."""
+    T, H, D = k.shape
+    assert k.stride(2) == 1 and v.stride(2) == 1
+    K._kv_store_rows_kernel[(T,)](k, v, pool_k, pool_v, bids, slots, k.stride(0), k.stride(1), v.stride(0),
+                                  v.stride(1), pool_k.stride(0), pool_k.stride(1), pool_k.stride(2), H=H, D=D,
+                                  BLOCK=K.triton.next_power_of_2(H * D))
+
+
 def topk_softmax(logits: torch.Tensor, k: int, renorm: bool, fp32: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
     """Like models.qwen3_moe.route: (weights in logits' dtype, or fp32 as computed, expert ids int64), both [M, k]."""
     M, E = logits.shape

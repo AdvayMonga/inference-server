@@ -157,3 +157,22 @@ def test_argmax_matches_torch_ties_included(N):
     assert torch.equal(fused.argmax(x), x.argmax(-1))
     view = torch.randn(N, 2, 151936, dtype=torch.bfloat16, device="cuda")[:, -1, :]      # a strided row view
     assert torch.equal(fused.argmax(view), view.argmax(-1))
+
+
+@pytest.mark.parametrize("pool_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_kv_store_rows_matches_the_index_put_scatter(pool_dtype):
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    T, H, bs, D = 37, 4, 16, 128
+    pk = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda").to(pool_dtype)
+    pv = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda").to(pool_dtype)
+    rk, rv = pk.clone(), pv.clone()
+    flat = torch.randperm(64 * bs, device="cuda")[:T]
+    bids, slots = flat // bs, flat % bs
+    k = torch.randn(1, T, H, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2)[0].transpose(0, 1)    # [T, H, D]
+    v = torch.randn(1, T, 3 * H * D, dtype=torch.bfloat16, device="cuda")[..., 2 * H * D:].view(T, H, D)
+    fused.kv_store_rows(pk, pv, bids, slots, k, v)
+    rk[bids, :, slots, :] = k.to(pool_dtype)
+    rv[bids, :, slots, :] = v.to(pool_dtype)
+    bits = lambda t: t.view(torch.uint8) if t.element_size() == 1 else t.view(torch.int16)
+    assert torch.equal(bits(pk), bits(rk)) and torch.equal(bits(pv), bits(rv))

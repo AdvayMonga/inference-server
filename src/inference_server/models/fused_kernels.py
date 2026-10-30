@@ -211,3 +211,19 @@ def _argmax_final_kernel(PV, PI, OUT, n_chunks, BLOCK: tl.constexpr):
     v = tl.load(PV + r * n_chunks + i, mask=i < n_chunks, other=float("-inf"))
     best = tl.argmax(v, 0, tie_break_left=True)
     tl.store(OUT + r, tl.load(PI + r * n_chunks + best).to(tl.int64))
+
+
+@triton.jit
+def _kv_store_rows_kernel(KN, VN, PK, PV, BIDS, SLOTS, stride_kt, stride_kh, stride_vt, stride_vh, stride_pb,
+                          stride_ph, stride_ps, H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Token t's new K and V ([H, D] each, their own strides) into pool[bids[t], :, slots[t], :], cast to the pools'
+    dtype, both pools in one launch: a packed prefill's K/V write."""
+    t = tl.program_id(0)
+    b = tl.load(BIDS + t).to(tl.int64)
+    s = tl.load(SLOTS + t).to(tl.int64)
+    offs = tl.arange(0, BLOCK)
+    m = offs < H * D
+    h, d = offs // D, offs % D
+    dst = b * stride_pb + h * stride_ph + s * stride_ps + d
+    tl.store(PK + dst, tl.load(KN + t * stride_kt + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
+    tl.store(PV + dst, tl.load(VN + t * stride_vt + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
