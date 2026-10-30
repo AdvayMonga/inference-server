@@ -98,13 +98,15 @@ def _router(c):
 
 
 def _route(c):
+    """The routing, and the down GEMM's fp32 accumulator "y" zeroed by the same launch."""
     from inference_server.models import moe_kernel
     cfg, logits = c["cfg"], c["logits"]
     T = logits.shape[0]
+    y = torch.empty(T, c["n"].shape[-1], dtype=torch.float32, device=logits.device)
     router = moe_kernel.route_fused if T <= qwen3_moe.ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
     sorted_ids, expert_ids, tok, pair_w = router(logits, cfg.num_experts, cfg.top_k, cfg.norm_topk_prob,
-                                                 qwen3_moe.moe_block_m(T * cfg.top_k))
-    return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w}
+                                                 qwen3_moe.moe_block_m(T * cfg.top_k), out=y)
+    return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w, "y": y}
 
 
 def _a8(w_scale, pairs: int) -> bool:
@@ -126,11 +128,10 @@ def _silu_mul(c):
 
 
 def _down(c):
-    """The down GEMM scattering each pair's weighted row into its token's fp32 output row."""
+    """The down GEMM scattering each pair's weighted row into its token's fp32 output row ("y", zeroed by route)."""
     from inference_server.models import moe_kernel
-    act, M = c["act"], c["tok"].numel()
+    act, M, out = c["act"], c["tok"].numel(), c["y"]
     act, sact = moe_kernel.quant_rows(act) if _a8(c["w.down_scale"], M) else (act, None)
-    out = torch.zeros(M // c["cfg"].top_k, c["w.down"].shape[1], dtype=torch.float32, device=act.device)
     moe_kernel.moe_gemm_scatter(act, c["w.down"], c["sorted_ids"], c["expert_ids"], M, c["tok"], c["pair_w"], out,
                                 block_m=qwen3_moe.moe_block_m(M), w_scale=c["w.down_scale"], a_scale=sact)
     return {"y": out}
@@ -151,12 +152,12 @@ DECODE: tuple[Station, ...] = (
     Station("o_proj", ("attn", "w.o_proj"), ("a",), _o_proj),
     Station("add_norm", ("h", "a", "w.post_norm", "cfg"), ("h", "n"), _add_norm),
     Station("router", ("n", "w.router"), ("logits",), _router),
-    Station("route", ("logits", "cfg"), ("sorted_ids", "expert_ids", "tok", "pair_w"), _route),
+    Station("route", ("logits", "n", "cfg"), ("sorted_ids", "expert_ids", "tok", "pair_w", "y"), _route),
     Station("gate_up", ("n", "tok", "sorted_ids", "expert_ids", "w.gate_up", "w.gate_up_scale", "cfg"), ("hgu",),
             _gate_up),
     Station("silu_mul", ("hgu",), ("act",), _silu_mul),
-    Station("down", ("act", "sorted_ids", "expert_ids", "tok", "pair_w", "w.down", "w.down_scale", "cfg"), ("y",),
-            _down),
+    Station("down", ("act", "sorted_ids", "expert_ids", "tok", "pair_w", "y", "w.down", "w.down_scale", "cfg"),
+            ("y",), _down),
     Station("residual", ("h", "y"), ("h",), _residual),
 )
 
@@ -334,9 +335,12 @@ def _ref_paged_decode_attention(q, k_pool, v_pool, block_tables, seq_lens, scale
     return torch.stack(out)
 
 
-def _ref_route(logits, num_experts, top_k, renorm, block_m):
+def _ref_route(logits, num_experts, top_k, renorm, block_m, out=None):
     """moe_kernel.route_fused's outputs and layout: (sorted_ids: pair ids grouped by expert, each expert's run padded
-    to `block_m` with M; expert_ids: each block's expert, num_experts past the end; tok, pair_w by pair id)."""
+    to `block_m` with M; expert_ids: each block's expert, num_experts past the end; tok, pair_w by pair id); `out`
+    zeroed."""
+    if out is not None:
+        out.zero_()
     w, e = torch.topk(F.softmax(logits, dim=-1, dtype=torch.float), top_k, dim=-1)
     if renorm:
         w = w / w.sum(dim=-1, keepdim=True)
@@ -412,7 +416,9 @@ def _r_route(c):
     cfg, logits = c["cfg"], c["logits"]
     sorted_ids, expert_ids, tok, pair_w = _ref_route(logits, cfg.num_experts, cfg.top_k, cfg.norm_topk_prob,
                                                      qwen3_moe.moe_block_m(logits.shape[0] * cfg.top_k))
-    return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w}
+    y = torch.zeros(logits.shape[0], c["n"].shape[-1], dtype=torch.promote_types(c["n"].dtype, torch.float32),
+                    device=logits.device)
+    return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w, "y": y}
 
 
 def _r_gate_up(c):
@@ -427,8 +433,7 @@ def _r_silu_mul(c):
 
 def _r_down(c):
     act, M = c["act"], c["tok"].numel()
-    out = torch.zeros(M // c["cfg"].top_k, c["w.down"].shape[1], dtype=torch.promote_types(act.dtype, torch.float32),
-                      device=act.device)
+    out = c["y"].clone()
     _ref_moe_gemm_scatter(act, c["w.down"], c["sorted_ids"], c["expert_ids"], M, c["tok"], c["pair_w"], out,
                           w_scale=c["w.down_scale"])
     return {"y": out}

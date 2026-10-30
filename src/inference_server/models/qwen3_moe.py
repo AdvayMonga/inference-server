@@ -228,6 +228,17 @@ class Qwen3Experts(nn.Module):
     def gate_up(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
         return self._mm(a, "gate_up_proj", offs)
 
+    def gate_up_sorted(self, x: torch.Tensor, sorted_ids: torch.Tensor, top_k: int, offs: torch.Tensor) -> torch.Tensor:
+        """gate_up of the expert-sorted pairs' token rows, x[sorted_ids // top_k], gathered by the same launch that
+        quantizes them (CUDA)."""
+        from inference_server.models import moe_kernel
+        if not self.fp8:
+            return torch._grouped_mm(moe_kernel.gather_rows(x, sorted_ids, top_k),
+                                     self.gate_up_proj.transpose(-2, -1), offs=offs)
+        a8, sa = moe_kernel.quant_rows_gather(x, sorted_ids, top_k)
+        return torch._scaled_grouped_mm(a8, self.gate_up_proj_fp8.transpose(-2, -1), sa, self.gate_up_proj_scale,
+                                        offs=offs, out_dtype=x.dtype)
+
     def down(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
         return self._mm(a, "down_proj", offs)
 
@@ -265,18 +276,22 @@ class Qwen3SparseMoE(nn.Module):
         self.gate = nn.Linear(hidden_size, num_experts, bias=False, dtype=dtype)
         self.experts = Qwen3Experts(num_experts, hidden_size, moe_intermediate, dtype=dtype)
 
-    def forward(self, x: torch.Tensor, tokens: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, tokens: torch.Tensor | None = None,
+                residual: torch.Tensor | None = None) -> torch.Tensor:
         """`tokens`: flat indices of the real tokens of a right-padded wave; only those are routed and run, the
-        padding positions come back as zeros (their outputs are never read)."""
+        padding positions come back as zeros (their outputs are never read). `residual` (bf16, x's shape): returns
+        residual + the experts' output instead, the add made by the last launch."""
         B, S, H = x.shape
         flat = x.reshape(-1, H)
         if tokens is None:
-            return self._run(flat).view(B, S, H)
+            return self._run(flat, residual).view(B, S, H)
         y = self._run(flat[tokens])
-        return torch.zeros(flat.shape, dtype=y.dtype, device=y.device).index_copy_(0, tokens, y).view(B, S, H)
+        y = torch.zeros(flat.shape, dtype=y.dtype, device=y.device).index_copy_(0, tokens, y).view(B, S, H)
+        return y if residual is None else residual + y.to(residual.dtype)
 
-    def _run(self, flat: torch.Tensor) -> torch.Tensor:
-        """The experts' output per row: bf16, or fp32 from the Triton path (its caller adds it to the residual)."""
+    def _run(self, flat: torch.Tensor, residual: torch.Tensor | None = None) -> torch.Tensor:
+        """The experts' output per row: bf16, or fp32 from the Triton path (its caller adds it to the residual); with
+        `residual`, residual + that output in bf16, added by each path's last launch."""
         logits = self.gate(flat)
         on = flat.is_cuda and fused._on(flat)
         E = self.experts.num_experts
@@ -291,7 +306,8 @@ class Qwen3SparseMoE(nn.Module):
             dn, dn_s = self.experts.weights("down_proj")
             router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
             bm = moe_block_m(M)
-            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm)
+            out = torch.empty(flat.shape, dtype=torch.float32, device=flat.device)      # zeroed by the router
+            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm, out=out)
             a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
             a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
             h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
@@ -300,29 +316,26 @@ class Qwen3SparseMoE(nn.Module):
                 act, sact = moe_kernel.quant_rows(act)
             else:
                 sact = None
-            out = torch.zeros(flat.shape, dtype=torch.float32, device=flat.device)
             moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
                                         a_scale=sact)
-            return out
-        weights, experts = (fused.topk_softmax(logits, self.top_k, self.norm_topk_prob, fp32=True) if on
-                            else route(logits, self.top_k, self.norm_topk_prob))
+            return out if residual is None else fused.add_cast(residual.reshape(out.shape), out)
+        if on:          # routing, gather and epilogue as custom launches: no sort, searchsorted, gather or scatter
+            from inference_server.models import moe_kernel
+            sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, E, self.top_k, self.norm_topk_prob)
+            act = fused.silu_mul(self.experts.gate_up_sorted(flat, sorted_ids, self.top_k, offs))
+            y = self.experts.down(act, offs)
+            return moe_kernel.gather_weighted(y, pos.view(T, self.top_k), pair_w.view(T, self.top_k), residual)
+        weights, experts = route(logits, self.top_k, self.norm_topk_prob)
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
         # Group ends, on device (bincount would sync to size its output).
         offs = torch.searchsorted(sorted_e, _experts_arange(E, flat.device), right=True).to(torch.int32)
         h = self.experts.gate_up(flat[tok], offs)
-        if on:
-            act = fused.silu_mul(h)
-        else:
-            gate, up = h.chunk(2, dim=-1)
-            act = F.silu(gate) * up
-        y = self.experts.down(act, offs)
-        if on:                                      # one pass per token: its K rows gathered, weighted, summed (bf16)
-            from inference_server.models import moe_kernel
-            pos = torch.empty_like(order).scatter_(0, order, _experts_arange(order.numel(), flat.device))
-            return moe_kernel.gather_weighted(y, pos.view(T, self.top_k), weights.contiguous())
+        gate, up = h.chunk(2, dim=-1)
+        y = self.experts.down(F.silu(gate) * up, offs)
         y = y * weights.view(-1)[order, None]
-        return torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype))
+        out = torch.zeros_like(flat).index_add_(0, tok, y.to(flat.dtype))
+        return out if residual is None else residual.reshape(out.shape) + out
 
 
 class Qwen3DecoderLayer(nn.Module):
@@ -342,8 +355,7 @@ class Qwen3DecoderLayer(nn.Module):
         tokens = getattr(paged_ctx, "tokens", None)      # a padded prefill wave: the experts see real tokens only
         if h.is_cuda and fused._on(h):          # residual add + post-attention norm in one launch
             h, n = fused.add_rmsnorm(h, a, self.post_attention_layernorm.weight, self.post_attention_layernorm.eps)
-            y = self.mlp(n, tokens)
-            return (fused.add_cast(h, y) if y.dtype == torch.float32 else h + y), kv_new
+            return self.mlp(n, tokens, residual=h), kv_new
         h = h + a
         return h + self.mlp(self.post_attention_layernorm(h), tokens), kv_new
 
@@ -366,16 +378,22 @@ class Qwen3MoeModel(nn.Module):
         ) for _ in range(num_layers))
         self.norm = Qwen3RMSNorm(hidden_size, eps=eps, dtype=dtype)
 
-    def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None):
-        h = self.embed_tokens(input_ids)
-        if position_ids is None:
-            start = kv_cache.seq_len if kv_cache is not None else 0
-            position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
-        cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
+    def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None, paged_ctx=None, norm=True):
+        """The residual stream through every layer, then the final norm (`norm=False`: without it)."""
+        w = self.embed_tokens.weight
+        if position_ids is not None and fused._on(w):          # embedding rows and rotary tables in one launch
+            h, cos, sin = fused.embed_rope(input_ids, w, self.rope.inv_freq, position_ids.expand(input_ids.shape))
+        else:
+            h = self.embed_tokens(input_ids)
+            if position_ids is None:
+                start = kv_cache.seq_len if kv_cache is not None else 0
+                position_ids = torch.arange(start, start + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
+            cos, sin = (t.to(h.dtype) for t in self.rope(position_ids))
         if paged_ctx is not None:
             from inference_server.models import stations
             if stations.applies(self, h, paged_ctx):     # a CUDA decode step: the named stations (models/stations.py)
-                return self.norm(stations.forward(self, h, cos, sin, paged_ctx))
+                h = stations.forward(self, h, cos, sin, paged_ctx)
+                return self.norm(h) if norm else h
         for i, layer in enumerate(self.layers):
             if paged_ctx is not None:
                 h, _ = layer(h, cos, sin, paged_ctx=paged_ctx, kv_layer_idx=i)
@@ -384,7 +402,7 @@ class Qwen3MoeModel(nn.Module):
             h, kv_new = layer(h, cos, sin, past_kv=past, attn_mask=attn_mask)
             if kv_cache is not None:
                 kv_cache.append(i, kv_new[0], kv_new[1])
-        return self.norm(h)
+        return self.norm(h) if norm else h
 
 
 class Qwen3MoeForCausalLM(nn.Module):
@@ -399,6 +417,11 @@ class Qwen3MoeForCausalLM(nn.Module):
     def forward(self, input_ids, position_ids=None, kv_cache=None, attn_mask=None,
                 paged_ctx=None, logits_index=None):
         """`logits_index` [B]: lm_head on that one position per row → [B, 1, V]."""
+        norm = self.model.norm
+        if logits_index is not None and fused._on(norm.weight):    # only the lm head's rows normed, gathered by it
+            h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx,
+                           norm=False)
+            return self.lm_head(fused.rmsnorm_rows(h, logits_index, norm.weight, norm.eps))
         h = self.model(input_ids, position_ids, kv_cache=kv_cache, attn_mask=attn_mask, paged_ctx=paged_ctx)
         if logits_index is not None:
             if h.shape[0] == 1 and logits_index.numel() > 1:       # a packed wave: several rows' last tokens in one row

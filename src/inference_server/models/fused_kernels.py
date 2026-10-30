@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 @triton.jit
 def _rms(x, w, D: tl.constexpr, eps):
@@ -128,3 +129,159 @@ def _kv_store_kernel(KN, VN, PK, PV, BT, LB, SLOT, stride_kr, stride_kh, stride_
     tl.store(PK + dst, tl.load(KN + r * stride_kr + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
     tl.store(PV + dst, tl.load(VN + r * stride_vr + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
 
+
+
+@triton.jit
+def _embed_rope_kernel(IDS, POS, WEMB, INV, HOUT, COS, SIN, H: tl.constexpr, BLOCK_H: tl.constexpr,
+                       HALF: tl.constexpr):
+    """Per token: its embedding row, and its rotary cos/sin (fp32 angle = position * inv_freq, accurate cos/sin, bf16;
+    HF's layout, the halves repeat)."""
+    row = tl.program_id(0)
+    tok = tl.load(IDS + row).to(tl.int64)
+    cols = tl.arange(0, BLOCK_H)
+    for c in range(0, H, BLOCK_H):
+        m = (c + cols) < H
+        tl.store(HOUT + row.to(tl.int64) * H + c + cols, tl.load(WEMB + tok * H + c + cols, mask=m), mask=m)
+    i = tl.arange(0, HALF)
+    f = tl.load(POS + row).to(tl.float32) * tl.load(INV + i)
+    c16, s16 = libdevice.cos(f).to(tl.bfloat16), libdevice.sin(f).to(tl.bfloat16)
+    base = row * (2 * HALF)
+    tl.store(COS + base + i, c16)
+    tl.store(COS + base + HALF + i, c16)
+    tl.store(SIN + base + i, s16)
+    tl.store(SIN + base + HALF + i, s16)
+
+
+@triton.jit(do_not_specialize=["N"])
+def _step_inputs_kernel(SEQ, KV_BLOCK, KV_SLOT, ATTN_SL, N, BS: tl.constexpr, BLOCK: tl.constexpr):
+    """A decode step's per-row K/V block and slot and the attention lengths, from the rows' lengths."""
+    r = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = r < N
+    s = tl.load(SEQ + r, mask=m, other=0)
+    tl.store(KV_BLOCK + r, s // BS, mask=m)
+    tl.store(KV_SLOT + r, s % BS, mask=m)
+    tl.store(ATTN_SL + r, (s + 1).to(tl.int32), mask=m)
+
+
+@triton.jit(do_not_specialize=["n", "bt_cols", "stride_bt", "scratch"])
+def _stage_decode_kernel(CUR, POS, SEQ, BT, NEW_BLK, NEW_LB, G_TOK, G_POS, G_SEQ, G_BT, SEQ_NEXT, n, bt_cols,
+                         stride_cur, stride_pos, stride_bt, g_cols, scratch, HAS_NEW: tl.constexpr,
+                         ADVANCE: tl.constexpr, BLOCK_C: tl.constexpr):
+    """A captured decode graph's inputs for bucket row r (live when r < n): its token, position and length (dummies
+    0, 0, 1), its int32 block table (clamped at 0; dummies and stale columns the scratch block), a block allocated this
+    step written into both tables, and the rows' lengths after the step."""
+    r = tl.program_id(0)
+    live = r < n
+    c = tl.program_id(1) * BLOCK_C + tl.arange(0, BLOCK_C)
+    cm = c < g_cols
+    v = tl.load(BT + r * stride_bt + c, mask=cm & (c < bt_cols) & live, other=scratch)
+    v = tl.maximum(v, 0)
+    if HAS_NEW:
+        nb = tl.load(NEW_BLK + r, mask=live, other=-1)
+        hit = (c == tl.load(NEW_LB + r, mask=live, other=-1)) & (nb >= 0) & cm & (c < bt_cols)
+        v = tl.where(hit, nb, v)
+        tl.store(BT + r * stride_bt + c, nb + tl.zeros_like(v), mask=hit)
+    tl.store(G_BT + r * g_cols + c, v.to(tl.int32), mask=cm)
+    if tl.program_id(1) == 0:
+        s = tl.load(SEQ + r, mask=live, other=1)
+        tl.store(G_TOK + r, tl.load(CUR + r * stride_cur, mask=live, other=0))
+        tl.store(G_POS + r, tl.load(POS + r * stride_pos, mask=live, other=0))
+        tl.store(G_SEQ + r, s)
+        if ADVANCE:
+            tl.store(SEQ_NEXT + r, s + 1, mask=live)
+
+
+@triton.jit
+def _argmax_partial_kernel(X, PV, PI, V, stride_x, n_chunks, CHUNK: tl.constexpr):
+    """Row r, chunk ch of the vocab: its largest logit and that logit's index (the first, on ties)."""
+    r = tl.program_id(0)
+    ch = tl.program_id(1)
+    cols = ch * CHUNK + tl.arange(0, CHUNK)
+    x = tl.load(X + r.to(tl.int64) * stride_x + cols, mask=cols < V, other=float("-inf")).to(tl.float32)
+    i = tl.argmax(x, 0, tie_break_left=True)
+    tl.store(PV + r * n_chunks + ch, tl.max(x, 0))
+    tl.store(PI + r * n_chunks + ch, ch * CHUNK + i)
+
+
+@triton.jit
+def _argmax_final_kernel(PV, PI, OUT, n_chunks, BLOCK: tl.constexpr):
+    """Row r: the index of the largest chunk maximum (the first chunk, on ties)."""
+    r = tl.program_id(0)
+    i = tl.arange(0, BLOCK)
+    v = tl.load(PV + r * n_chunks + i, mask=i < n_chunks, other=float("-inf"))
+    best = tl.argmax(v, 0, tie_break_left=True)
+    tl.store(OUT + r, tl.load(PI + r * n_chunks + best).to(tl.int64))
+
+
+@triton.jit
+def _kv_store_rows_kernel(KN, VN, PK, PV, BIDS, SLOTS, stride_kt, stride_kh, stride_vt, stride_vh, stride_pb,
+                          stride_ph, stride_ps, H: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Token t's new K and V ([H, D] each, their own strides) into pool[bids[t], :, slots[t], :], cast to the pools'
+    dtype, both pools in one launch: a packed prefill's K/V write."""
+    t = tl.program_id(0)
+    b = tl.load(BIDS + t).to(tl.int64)
+    s = tl.load(SLOTS + t).to(tl.int64)
+    offs = tl.arange(0, BLOCK)
+    m = offs < H * D
+    h, d = offs // D, offs % D
+    dst = b * stride_pb + h * stride_ph + s * stride_ps + d
+    tl.store(PK + dst, tl.load(KN + t * stride_kt + h * stride_kh + d, mask=m, other=0.0).to(PK.dtype.element_ty), mask=m)
+    tl.store(PV + dst, tl.load(VN + t * stride_vt + h * stride_vh + d, mask=m, other=0.0).to(PV.dtype.element_ty), mask=m)
+
+
+@triton.jit(do_not_specialize=["stride_bt"])
+def _packed_slots_kernel(PREFIX, SUFFIX, START, BT, BIDS, SLOTS, stride_bt, BS: tl.constexpr, BLOCK: tl.constexpr):
+    """Row r's chunk tokens of a packed wave: each token's K/V block (from the row's table) and slot."""
+    r = tl.program_id(0)
+    i = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    m = i < tl.load(SUFFIX + r)
+    p = tl.load(PREFIX + r) + i
+    t = tl.load(START + r) + i
+    tl.store(BIDS + t, tl.load(BT + r * stride_bt + p // BS, mask=m, other=0).to(tl.int64), mask=m)
+    tl.store(SLOTS + t, (p % BS).to(tl.int64), mask=m)
+
+
+@triton.jit(do_not_specialize=["old_cols", "stride_old", "new_cols", "stride_new", "cols"])
+def _compose_rows_kernel(OLD_BT, OLD_SEQ, OLD_IDX, NEW_J, NEW_BT, NEW_SEQ, BT, SEQ, old_cols, stride_old, new_cols,
+                         stride_new, cols, BLOCK: tl.constexpr):
+    """Row r of a decode state's table and lengths: old row OLD_IDX[r], or joining row NEW_J[r]; 0 past its table."""
+    r = tl.program_id(0)
+    c = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    o = tl.load(OLD_IDX + r)
+    j = tl.load(NEW_J + r)
+    if o >= 0:
+        v = tl.load(OLD_BT + o * stride_old + c, mask=c < old_cols, other=0)
+    else:
+        v = tl.load(NEW_BT + j * stride_new + c, mask=c < new_cols, other=0)
+    tl.store(BT + r * cols + c, v.to(tl.int64), mask=c < cols)
+    if tl.program_id(1) == 0:
+        if o >= 0:
+            tl.store(SEQ + r, tl.load(OLD_SEQ + o))
+        else:
+            tl.store(SEQ + r, tl.load(NEW_SEQ + j))
+
+
+@triton.jit(do_not_specialize=["n"])
+def _assemble_tokens_kernel(PREV, DEVT, SPEC, OUT, n, BLOCK: tl.constexpr):
+    """Row r's input token: PREV[src], else DEVT[src_dev], else the host's (SPEC = [src, src_dev, host], each [n])."""
+    r = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = r < n
+    src = tl.load(SPEC + r, mask=m, other=-1)
+    src_dev = tl.load(SPEC + n + r, mask=m, other=-1)
+    v = tl.load(SPEC + 2 * n + r, mask=m, other=0)
+    v = tl.where(src_dev >= 0, tl.load(DEVT + src_dev, mask=m & (src_dev >= 0), other=0).to(tl.int64), v)
+    v = tl.where(src >= 0, tl.load(PREV + src, mask=m & (src >= 0), other=0).to(tl.int64), v)
+    tl.store(OUT + r, v, mask=m)
+
+
+@triton.jit(do_not_specialize=["S"])
+def _rmsnorm_rows_kernel(X, IDX, W, Y, stride_x, S, eps, PACKED: tl.constexpr, D: tl.constexpr, BLOCK: tl.constexpr):
+    """Output row i: RMSNorm of X's row IDX[i] (PACKED, one sequence) or i * S + IDX[i] (row i's position IDX[i])."""
+    i = tl.program_id(0)
+    j = tl.load(IDX + i).to(tl.int64)
+    src = j if PACKED else i.to(tl.int64) * S + j
+    cols = tl.arange(0, BLOCK)
+    m = cols < D
+    x = tl.load(X + src * stride_x + cols, mask=m, other=0.0).to(tl.float32)
+    w = tl.load(W + cols, mask=m, other=0.0).to(tl.float32)
+    tl.store(Y + i * D + cols, _rms(x, w, D, eps).to(tl.bfloat16), mask=m)
