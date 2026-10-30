@@ -82,6 +82,12 @@ def _prefill_bucket(s: int) -> int | None:
     return None
 
 
+def real_tokens(suffix_lens: list[int]) -> list[int]:
+    """Flat indices of the real tokens in a right-padded [rows, longest] grid."""
+    s = max(suffix_lens)
+    return [b * s + i for b, n in enumerate(suffix_lens) for i in range(n)]
+
+
 class _PrefillGraphCtx:
     """Static-buffer paged ctx for K=1 CUDA-graph prefill at a fixed suffix bucket S, with or
     without a prefix-cache hit. Mirrors _GraphCtx: append scatters the S bucket tokens' K/V using
@@ -152,6 +158,7 @@ class _PrefillCtx:
     Suffix is right-padded (real tokens at [0, suffix_len)); padding queries are skipped in-kernel."""
 
     is_prefill = True
+    packed = False
 
     def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         self.caches = caches                       # list[PagedKVCache], one per row
@@ -166,8 +173,9 @@ class _PrefillCtx:
         self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
-        padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
-        self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
+        # Built on the host from the lengths: nonzero() on the device waits for every kernel queued before it.
+        padded = not self.packed and suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
+        self.tokens = to_device(real_tokens(suffix_lens), device) if padded else None
         self._bt_cache = {}                        # layer -> the wave's [K, maxb] table, built once
         self._wave_table = None                    # the one block table (a block id is the same in every layer)
         self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens

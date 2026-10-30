@@ -55,6 +55,7 @@ def test_packed_context_writes_the_same_kv_as_the_padded_wave():
         assert torch.equal(pools_b[L].k[scratch_b], torch.zeros(H, BS, D))   # packed never touches the scratch block
         assert [c.seq_lens[L] for c in ca] == [c.seq_lens[L] for c in cb] == [11, 3, 12]
     assert packed.tokens is None and packed._pos.tolist() == [6, 7, 8, 9, 10, 0, 1, 2, 11]
+    assert padded.tokens.tolist() == padded._valid.reshape(-1).nonzero().squeeze(1).tolist() == [0, 1, 2, 3, 4, 5, 6, 7, 10]
 
 
 def test_packed_attention_matches_the_padded_reference():

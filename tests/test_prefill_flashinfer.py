@@ -14,9 +14,9 @@ def test_plan_inputs_and_kv_indices():
     assert qo.tolist() == [0, 300, 307, 308] and nb == [19, 3, 3]
     assert kv.tolist() == [0, 19, 22, 25] and last.tolist() == [12, 15, 2]
     assert qo.dtype == kv.dtype == last.dtype == torch.int32 and qo.device.type == "cpu"
-    bt = torch.tensor([[5, 6, 7, 0], [8, 9, 0, 0], [1, 2, 3, 4]])
-    assert fi.kv_indices(bt, [3, 2, 4]).tolist() == [5, 6, 7, 8, 9, 1, 2, 3, 4]
-    assert fi.kv_indices(bt, [3, 2, 4]).dtype == torch.int32
+    blocks = [[5, 6, 7], [8, 9, 4], [1, 2, 3, 4]]
+    idx = fi.kv_indices(blocks, [3, 2, 4], torch.device("cpu"))
+    assert idx.tolist() == [5, 6, 7, 8, 9, 1, 2, 3, 4] and idx.dtype == torch.int32
 
 
 def test_unavailable_package_is_reported_not_raised(monkeypatch):
