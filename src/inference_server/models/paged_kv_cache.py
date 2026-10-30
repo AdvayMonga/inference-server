@@ -88,7 +88,7 @@ def step_inputs(bt: torch.Tensor, seq_lens: torch.Tensor, bs: int) -> dict:
 def write_token(pool, bt: torch.Tensor, rows: torch.Tensor, lb: torch.Tensor, slot: torch.Tensor,
                 k_new: torch.Tensor, v_new: torch.Tensor) -> None:
     """One decode token per row into the pool: pool.k[bt[r, lb[r]], :, slot[r], :] = k_new[r, :, 0, :] (and V)."""
-    if fused._on(k_new, v_new, pool.k):
+    if fused._on(k_new, v_new) and pool.k.dtype in (torch.bfloat16, torch.float8_e4m3fn):   # cast in the kernel
         fused.kv_store(pool.k, pool.v, bt, lb, slot, k_new, v_new)
         return
     bid = bt[rows, lb]

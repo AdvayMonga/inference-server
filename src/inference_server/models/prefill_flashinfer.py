@@ -60,11 +60,11 @@ def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):
     return torch.tensor(qo, dtype=i32), torch.tensor(kv, dtype=i32), torch.tensor(last, dtype=i32), nb
 
 
-def kv_indices(block_table: torch.Tensor, nb: list[int]) -> torch.Tensor:
-    """Each row's first nb[r] block ids of a [rows, max_blocks] table, concatenated (int32, on the table's device)."""
-    cols = torch.arange(block_table.shape[1], device=block_table.device)
-    keep = cols[None, :] < torch.tensor(nb, device=block_table.device)[:, None]
-    return block_table[keep].to(torch.int32)
+def kv_indices(blocks: list[list[int]], nb: list[int], device) -> torch.Tensor:
+    """Each row's first nb[r] block ids, concatenated (int32 on `device`). From the host's block lists: a boolean
+    mask over the device table waits for every kernel queued before it."""
+    from inference_server.models.paged_kv_cache import to_device
+    return to_device([b for row, n in zip(blocks, nb) for b in row[:n]], device, torch.int32)
 
 
 def _same_blocks(ctx, layer_idx: int, other: int) -> bool:
@@ -92,7 +92,8 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     if layer_idx != planned and not _same_blocks(ctx, layer_idx, planned):
         planned = layer_idx                          # a layer with its own block ids: its own plan
     if planned == layer_idx:
-        w.plan(qo_indptr, kv_indptr, kv_indices(ctx.block_table_tensor(layer_idx), nb), last, Hq, Hkv, D, bs,
+        ctx.block_table_tensor(layer_idx)            # every row's blocks allocated
+        w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
     o = w.run(qp[tokens] if tokens is not None else qp, (pool.k, pool.v))           # [total real tokens, Hq, D]

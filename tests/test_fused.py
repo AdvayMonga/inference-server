@@ -65,12 +65,13 @@ def test_add_cast_and_fp32_topk_weights():
     assert w32.dtype == torch.float32 and torch.equal(ids32, ids16) and torch.equal(w32.to(w16.dtype), w16)
 
 
-def test_kv_store_matches_the_index_put_scatter():
+@pytest.mark.parametrize("pool_dtype", [torch.bfloat16, torch.float8_e4m3fn])
+def test_kv_store_matches_the_index_put_scatter(pool_dtype):
     from inference_server.models import fused
     torch.manual_seed(0)
     R, H, bs, D = 5, 4, 16, 128
-    pk = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda")
-    pv = torch.randn_like(pk)
+    pk = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda").to(pool_dtype)
+    pv = torch.randn(64, H, bs, D, dtype=torch.bfloat16, device="cuda").to(pool_dtype)
     rk, rv = pk.clone(), pv.clone()
     bid = torch.tensor([3, 17, 0, 63, 17], device="cuda")
     lb = torch.tensor([0, 2, 1, 3, 0], device="cuda")
@@ -80,9 +81,10 @@ def test_kv_store_matches_the_index_put_scatter():
     k = torch.randn(R, 1, H, D, dtype=torch.bfloat16, device="cuda").transpose(1, 2)        # rope's layout
     v = torch.randn(R, 1, 3 * H * D, dtype=torch.bfloat16, device="cuda")[..., 2 * H * D:].view(R, 1, H, D).transpose(1, 2)
     fused.kv_store(pk, pv, bt, lb, slot, k, v)
-    rk[bid, :, slot, :] = k[:, :, 0, :]
-    rv[bid, :, slot, :] = v[:, :, 0, :]
-    assert torch.equal(pk, rk) and torch.equal(pv, rv)
+    rk[bid, :, slot, :] = k[:, :, 0, :].to(pool_dtype)
+    rv[bid, :, slot, :] = v[:, :, 0, :].to(pool_dtype)
+    bits = lambda t: t.view(torch.uint8) if t.element_size() == 1 else t.view(torch.int16)
+    assert torch.equal(bits(pk), bits(rk)) and torch.equal(bits(pv), bits(rv))
 
 
 def test_topk_softmax_keeps_ids_in_range_on_nan_rows():

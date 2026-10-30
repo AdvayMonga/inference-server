@@ -59,7 +59,8 @@ def test_align_fused_matches_align_and_the_scatter_gemm_matches_index_add(T, top
 @pytest.mark.parametrize("router,T,top_k,E,renorm", [("route_fused",) + c for c in [(1, 8, 128, True), (7, 8, 128, True), (32, 8, 128, False), (5, 2, 8, True),
                                                (3, 1, 4, True)]]
                          + [("route_multi", 1, 8, 128, True), ("route_multi", 33, 8, 128, False),
-                            ("route_multi", 200, 8, 128, True), ("route_multi", 5, 2, 8, True)])
+                            ("route_multi", 200, 8, 128, True), ("route_multi", 5, 2, 8, True),
+                            ("route_multi", 256, 8, 128, True), ("route_multi", 4096, 8, 128, True)])
 def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     """Same grouping (every pair once, each block one expert), same weights, same scattered output."""
     from inference_server.models import moe_kernel
