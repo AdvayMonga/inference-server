@@ -39,7 +39,8 @@ def _wave(rows):
     suf = torch.tensor([s for _, s in rows], dtype=torch.int32, device="cuda")
     ctx = SimpleNamespace(pools=[SimpleNamespace(k=pool_k, v=pool_v)], _prefix=[p for p, _ in rows],
                           _suffix=[s for _, s in rows], prefix_lens=pre, suffix_lens=suf,
-                          block_table_tensor=lambda layer: bt)
+                          block_table_tensor=lambda layer: bt,
+                          caches=[SimpleNamespace(blocks=t[:n].tolist()) for t, n in zip(bt, nbs)])
     ref = paged_prefill_attention(q.transpose(1, 2), pool_k, pool_v, bt, pre, suf, scale=D ** -0.5)
     return q, k_suf, v_suf, ctx, ref
 
