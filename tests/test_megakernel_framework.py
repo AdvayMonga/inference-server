@@ -66,7 +66,7 @@ def _state(b, prompts):
 
 def _prompts(B, ctx, seed):
     g = torch.Generator().manual_seed(seed)
-    return [torch.randint(1000, 30000, (ctx - 7 * i,), generator=g).tolist() for i in range(B)]
+    return [torch.randint(1000, 30000, (max(ctx - 7 * i, 8),), generator=g).tolist() for i in range(B)]   # 37 - 7 * 15 < 0
 
 
 def _new_kv(backend, st, n_layers):
