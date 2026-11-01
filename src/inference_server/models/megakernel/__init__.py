@@ -50,6 +50,7 @@ def source(name: str = "decode_step.cu") -> str:
 @functools.lru_cache(maxsize=None)
 def step_override(package: str = "inference_server.models.regions"):
     """The one `STEP` defined by a module of `package` (stations.overrides' package), or None."""
+    importlib.invalidate_caches()                   # a module just written into the package (a shipped winner)
     pkg = importlib.import_module(package)
     found = [(m.name, getattr(mod, "STEP")) for m in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m.name)
              if hasattr(mod := importlib.import_module(f"{package}.{m.name}"), "STEP")]

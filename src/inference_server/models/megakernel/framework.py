@@ -86,6 +86,7 @@ class Framework:
         from inference_server.models import megakernel as mk
         from inference_server.models.megakernel import program as default
         self.mdl, self.program = mdl, program or default
+        self.n_layers = mdl.n_layers                             # as the megakernel's Model: callers read it
         blocks = torch.cuda.get_device_properties(mdl.device).multi_processor_count
         vocab = mdl.lm_head.shape[0]
         self.schedules = {B: self.program.schedule(B, blocks, mdl.n_layers, vocab, mdl.fp8).to(mdl.device)
