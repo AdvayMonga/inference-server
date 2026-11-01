@@ -4,8 +4,9 @@
      "rows": {"1": ["megakernel", "megakernel", "kernels"],  # per row count: a path per bucket
               "2": ["megakernel", "kernels", "kernels"]}}
 
-"megakernel" is the one-launch decode step, "kernels" the separate kernels (graphs or eager). A step whose row count or
-context the table does not cover takes the MEGAKERNEL_MAX_ROWS rule. No file: the rule everywhere."""
+"megakernel" is the one-launch decode step, "framework" the same step through the instruction interpreter
+(framework.py, built only when the table names it), "kernels" the separate kernels (graphs or eager). A step whose row
+count or context the table does not cover takes the MEGAKERNEL_MAX_ROWS rule. No file: the rule everywhere."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-PATHS = ("megakernel", "kernels")
+PATHS = ("megakernel", "framework", "kernels")
 DEFAULT = Path(__file__).with_name("routing.json")
 
 
@@ -28,6 +29,9 @@ class Routing:
         paths = self.rows.get(n_rows)
         i = bisect.bisect_left(self.context_buckets, context)
         return paths[i] if paths is not None and i < len(paths) else None
+
+    def uses(self, path: str) -> bool:
+        return any(path in paths for paths in self.rows.values())
 
 
 def load(path: str | Path, max_rows: int) -> Routing | None:
@@ -44,6 +48,6 @@ def load(path: str | Path, max_rows: int) -> Routing | None:
     for n, paths in rows.items():
         if len(paths) != len(buckets) or not set(paths) <= set(PATHS):
             raise ValueError(f"{path}: rows[{n}] must give one of {PATHS} per bucket: {paths}")
-        if "megakernel" in paths and not 1 <= n <= max_rows:
+        if {"megakernel", "framework"} & set(paths) and not 1 <= n <= max_rows:
             raise ValueError(f"{path}: the megakernel handles 1-{max_rows} rows, not {n}")
     return Routing(buckets, rows)
