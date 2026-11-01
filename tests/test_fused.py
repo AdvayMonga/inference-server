@@ -216,3 +216,13 @@ def test_rmsnorm_rows_is_the_final_norm_then_the_gather():
     ib = torch.tensor([49, 0, 17], device="cuda")
     want = fused.rmsnorm(hb, w, 1e-6).gather(1, ib.view(-1, 1, 1).expand(-1, 1, 2048))
     assert torch.equal(fused.rmsnorm_rows(hb, ib, w, 1e-6), want)
+
+
+def test_cast_fp8_rounds_like_the_pools_and_saturates():
+    from inference_server.models import fused
+    torch.manual_seed(0)
+    x = torch.randn(5, 32, 128, dtype=torch.bfloat16, device="cuda") * 100
+    x[0, 0, 0], x[1, 2, 3] = 1000.0, -1000.0
+    got = fused.cast_fp8(x)
+    want = x.float().clamp(-448, 448).to(torch.float8_e4m3fn)
+    assert got.dtype == torch.float8_e4m3fn and torch.equal(got.float(), want.float())

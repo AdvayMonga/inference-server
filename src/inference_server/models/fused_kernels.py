@@ -285,3 +285,12 @@ def _rmsnorm_rows_kernel(X, IDX, W, Y, stride_x, S, eps, PACKED: tl.constexpr, D
     x = tl.load(X + src * stride_x + cols, mask=m, other=0.0).to(tl.float32)
     w = tl.load(W + cols, mask=m, other=0.0).to(tl.float32)
     tl.store(Y + i * D + cols, _rms(x, w, D, eps).to(tl.bfloat16), mask=m)
+
+
+@triton.jit
+def _cast_fp8_kernel(X, Y, n, BLOCK: tl.constexpr):
+    """y = fp8 e4m3 of x at unit scale, saturated at +-448 (the K/V pools' rounding)."""
+    i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    m = i < n
+    x = tl.load(X + i, mask=m, other=0.0).to(tl.float32)
+    tl.store(Y + i, tl.minimum(tl.maximum(x, -448.0), 448.0).to(tl.float8e4nv), mask=m)
