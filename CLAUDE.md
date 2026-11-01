@@ -54,7 +54,8 @@
   backend and scheduler in a child process (`ENGINE_PROCESS`, `engine_process.py`), 1,024 rows (`MAX_BATCH_SIZE`),
   mixed prefill (`PREFILL_MODE`, 2048-token steps; chunks of <= 128 tokens run as decode rows through the decode
   graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
-  (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
+  (`CUSTOM_BACKEND_PREFILL_ATTN`; over fp8 K/V, q goes in as fp8 too and FA3's fp8 kernel runs,
+  `CUSTOM_BACKEND_PREFILL_FP8_Q`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
   batch <= 2 (or as `models/megakernel/routing.json` says, when present) with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
   stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position (build-time flags of
   the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB`; `MEGAKERNEL_NOMATH` is a timing-only build), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles

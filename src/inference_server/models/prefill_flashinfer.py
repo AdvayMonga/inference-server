@@ -32,13 +32,21 @@ def available() -> bool:
     return True
 
 
+# Over fp8 K/V pools, q goes in as fp8 too (unit scale, like the pools) and the whole attention runs on FA3's fp8
+# kernel: FlashInfer 0.7.2's fa3 backend does not build for bf16 q over fp8 K/V, and its auto backend then runs FA2,
+# 3x slower per call on the H200 (2026-11-01: a 2,048-token causal chunk 208 -> 71 us, 2,048 over 6,144 965 -> 326).
+FP8_Q = os.environ.get("CUSTOM_BACKEND_PREFILL_FP8_Q", "1") == "1"
+FP8 = torch.float8_e4m3fn
+
+
 @functools.lru_cache(maxsize=None)
-def _wrapper(device: torch.device):
+def _wrapper(device: torch.device, backend: str | None = None):
     import flashinfer
     workspace = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=device)
     # auto | fa2 | fa3 | cutlass | trtllm-gen. fa3 measured long_prompt 14.2 req/s once and 6.25 once against auto's
-    # 12.0-12.5 (H200 2026-10-18; one-off ~2 s stalls on tiny steps in both fa3 runs, unexplained), so it stays opt-in.
-    backend = os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")
+    # 12.0-12.5 (H200 2026-10-18; one-off ~2 s stalls on tiny steps in both fa3 runs, unexplained), so it stays opt-in
+    # for bf16 q; fp8 q needs it (`backend`).
+    backend = backend or os.environ.get("CUSTOM_BACKEND_FLASHINFER_BACKEND", "auto")
     try:
         return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend=backend)
     except Exception as e:  # noqa: BLE001
@@ -81,7 +89,8 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     pool = ctx.pools[layer_idx]
     Hkv, bs = pool.k.shape[1], pool.k.shape[2]
     st = getattr(ctx, "_fi", None)
-    w = _wrapper(q.device)
+    fp8_q = FP8_Q and pool.k.dtype == FP8
+    w = _wrapper(q.device, "fa3" if fp8_q else None)
     if st is None:                                   # once per wave: the row structure, and the plan for this layer
         tokens = getattr(ctx, "tokens", None)        # the real positions of a ragged wave (None when none is padded)
         if tokens is None and sum(ctx._suffix) != B * S:
@@ -94,11 +103,15 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     if planned == layer_idx:
         getattr(ctx, "_ensure_blocks", lambda: ctx.block_table_tensor(layer_idx))()     # every row's blocks allocated
         w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
-               causal=True, sm_scale=scale, q_data_type=q.dtype, kv_data_type=pool.k.dtype)
+               causal=True, sm_scale=scale, q_data_type=FP8 if fp8_q else q.dtype, kv_data_type=pool.k.dtype,
+               o_data_type=q.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
     qr = qp[tokens] if tokens is not None else qp
-    o = w.run(qr, (pool.k, pool.v), out=torch.empty_like(qr))       # [total real tokens, Hq, D]; every row is written,
-                                                                     # so not FlashInfer's default zero-filled buffer
+    if fp8_q:
+        from inference_server.models import fused
+        qr = fused.cast_fp8(qr)
+    o = torch.empty(qr.shape, dtype=q.dtype, device=q.device)       # [total real tokens, Hq, D]; every row is written,
+    w.run(qr, (pool.k, pool.v), out=o)                              # so not FlashInfer's default zero-filled buffer
     if tokens is None:
         return o.view(B, S, Hq, D)
     return torch.zeros(B * S, Hq, D, dtype=o.dtype, device=o.device).index_copy_(0, tokens, o).view(B, S, Hq, D)

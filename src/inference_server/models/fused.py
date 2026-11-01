@@ -225,3 +225,12 @@ def argmax(x: torch.Tensor) -> torch.Tensor:
     K._argmax_partial_kernel[(N, n_chunks)](x, pv, pi, V, x.stride(0), n_chunks, CHUNK=CHUNK, num_warps=8)
     K._argmax_final_kernel[(N,)](pv, pi, out, n_chunks, BLOCK=K.triton.next_power_of_2(n_chunks))
     return out
+
+
+def cast_fp8(x: torch.Tensor) -> torch.Tensor:
+    """x as fp8 e4m3 at unit scale, saturated at +-448: the K/V pools' rounding, for a q that meets fp8 K."""
+    x = x.contiguous()
+    y = torch.empty(x.shape, dtype=torch.float8_e4m3fn, device=x.device)
+    BLOCK = 4096
+    K._cast_fp8_kernel[(K.triton.cdiv(x.numel(), BLOCK),)](x, y, x.numel(), BLOCK=BLOCK)
+    return y
