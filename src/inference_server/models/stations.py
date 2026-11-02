@@ -1,6 +1,8 @@
 """One layer's decode step as named stations: the code the CUDA decode forward runs (fused kernels on, Triton MoE
 path), each station declaring the context entries it reads and writes, so a stretch of them can be captured, searched
-and swapped as one region (`models/regions/`). Prefill, the CPU path and the torch MoE path do not run through here.
+and swapped as one region (`models/regions/`). `PREFILL` (names starting "p_") is the same for a CUDA prefill wave
+(FlashInfer attention, the experts as `qwen3_moe.moe_cuda`); a prefill wave runs through it only while a prefill
+stretch is overridden or captured, the module path (the same code) otherwise. The CPU path does not run through here.
 
 Context entries: activations ("h", "x", "q", ...), step inputs (`STEP`: rotary tables and the per-step K/V indices,
 `paged_kv_cache.step_inputs`), the layer's K/V pool ("k_cache", "v_cache", written in place), the layer's weights
@@ -162,6 +164,69 @@ DECODE: tuple[Station, ...] = (
 )
 
 
+# --- prefill: a CUDA prefill wave (padded or packed) as stations ---
+
+FI = ("fi_qo_indptr", "fi_kv_indptr", "fi_kv_indices", "fi_last_page_len", "fi_tokens")   # prefill_flashinfer.wave
+
+
+def _p_kv_store(c):
+    """The wave's K/V appended to the pool through the backend's context (in place), and the wave's attention inputs
+    (made once per wave)."""
+    from inference_server.models import prefill_flashinfer
+    cfg, v = c["cfg"], c["v"]
+    B, S = v.shape[:2]
+    ctx = c["paged_ctx"]
+    ctx.append(c["layer"], c["k"], v.view(B, S, cfg.num_kv_heads, cfg.head_dim).transpose(1, 2))
+    return {"k_cache": c["k_cache"], "v_cache": c["v_cache"], **prefill_flashinfer.wave(ctx, c["q"])}
+
+
+def _p_attention(c):
+    from inference_server.models import prefill_flashinfer
+    return {"attn": prefill_flashinfer.attend(c["q"], c["k_cache"], c["v_cache"], *(c[n] for n in FI[:4]),
+                                              c["fi_tokens"], c["cfg"].scale)}
+
+
+def _p_o_proj(c):
+    attn = c["attn"]
+    return {"a": F.linear(attn.reshape(attn.shape[0], attn.shape[1], -1), c["w.o_proj"])}
+
+
+def _p_moe(c):
+    """Router, experts and the residual add (Qwen3SparseMoE.forward with `residual`); only the real tokens of a padded
+    wave are routed."""
+    cfg, n, h, tokens = c["cfg"], c["n"], c["h"], c["tokens"]
+    B, S, H = n.shape
+    flat = n.reshape(-1, H)
+
+    def run(x, residual=None):
+        return qwen3_moe.moe_cuda(x, F.linear(x, c["w.router"]), c["w.gate_up"], c["w.gate_up_scale"], c["w.down"],
+                                  c["w.down_scale"], cfg.num_experts, cfg.top_k, cfg.norm_topk_prob, residual)
+    if tokens is None:
+        return {"h": run(flat, h).view(B, S, H)}
+    y = run(flat[tokens])
+    y = torch.zeros(flat.shape, dtype=y.dtype, device=y.device).index_copy_(0, tokens, y).view(B, S, H)
+    return {"h": h + y.to(h.dtype)}
+
+
+PREFILL: tuple[Station, ...] = (
+    Station("p_input_norm", ("h", "w.input_norm", "cfg"), ("x",), _input_norm),
+    Station("p_qkv", ("x", "w.qkv", "cfg"), ("q", "k", "v"), _qkv),
+    Station("p_qk_norm_rope", ("q", "k", "cos", "sin", "w.q_norm", "w.k_norm", "cfg"), ("q", "k"), _qk_norm_rope),
+    Station("p_kv_store", ("q", "k", "v", "k_cache", "v_cache", "paged_ctx", "layer", "cfg"),
+            ("k_cache", "v_cache", *FI), _p_kv_store),
+    Station("p_attention", ("q", "k_cache", "v_cache", *FI, "cfg"), ("attn",), _p_attention),
+    Station("p_o_proj", ("attn", "w.o_proj"), ("a",), _p_o_proj),
+    Station("p_add_norm", ("h", "a", "w.post_norm", "cfg"), ("h", "n"), _add_norm),
+    Station("p_moe", ("n", "h", "tokens", "w.router", "w.gate_up", "w.gate_up_scale", "w.down", "w.down_scale", "cfg"),
+            ("h",), _p_moe),
+)
+
+
+def stations_of(name: str) -> tuple[Station, ...]:
+    """The station set a station name belongs to: PREFILL for "p_" names, DECODE otherwise."""
+    return PREFILL if name.startswith("p_") else DECODE
+
+
 def _weights(layer) -> dict:
     attn, mlp = layer.self_attn, layer.mlp
     gu, gu_s = mlp.experts.weights("gate_up_proj")
@@ -205,7 +270,33 @@ def forward(model, h: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, paged_
     for i, layer in enumerate(model.layers):
         pool = paged_ctx.pools[i]
         c = {**step, **_weights(layer), "h": h, "k_cache": pool.k, "v_cache": pool.v}
-        for _, _, run in (cap.steps(steps, i) if cap is not None and cap.wants(i) else steps):
+        for _, _, run in (cap.steps(steps, i) if cap is not None and not cap.prefill and cap.wants(i) else steps):
+            c.update(run(c))
+        h = c["h"]
+    return h
+
+
+def prefill_applies(model, h: torch.Tensor, paged_ctx) -> bool:
+    """Whether this forward is a CUDA prefill wave the prefill stations run: eager (not a graph capture), FlashInfer
+    attention, the fused kernels on and QKV fused, and a prefill stretch overridden or being captured."""
+    layer = model.layers[0]
+    if not (getattr(paged_ctx, "is_prefill", False) and hasattr(paged_ctx, "caches") and h.is_cuda and fused._on(h)
+            and qwen3_moe.PREFILL_ATTN == "flashinfer" and hasattr(layer.self_attn, "qkv_weight")):
+        return False
+    cap = region_capture.active()
+    return bool(_overrides_of(PREFILL)) or (cap is not None and cap.prefill)
+
+
+def forward_prefill(model, h: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, paged_ctx) -> torch.Tensor:
+    """Every layer of `model` through the resolved prefill plan; the residual stream out (before the final norm)."""
+    step = {"cos": cos, "sin": sin, "cfg": layer_config(model), "tokens": getattr(paged_ctx, "tokens", None),
+            "paged_ctx": paged_ctx}
+    steps = plan_prefill()
+    cap = region_capture.active()
+    for i, layer in enumerate(model.layers):
+        pool = paged_ctx.pools[i]
+        c = {**step, **_weights(layer), "h": h, "k_cache": pool.k, "v_cache": pool.v, "layer": i}
+        for _, _, run in (cap.steps(steps, i) if cap is not None and cap.prefill and cap.wants(i) else steps):
             c.update(run(c))
         h = c["h"]
     return h
@@ -276,11 +367,23 @@ def overrides(package: str = "inference_server.models.regions") -> dict:
     return found
 
 
+def _overrides_of(stations: tuple[Station, ...]) -> dict:
+    """The overrides of models/regions/ whose stretch is in `stations`."""
+    names = {s.name for s in stations}
+    return {k: fn for k, fn in overrides().items() if k[0] in names}
+
+
 @functools.lru_cache(maxsize=None)
 def plan() -> tuple[tuple[str, str, Callable[[dict], dict]], ...]:
     """DECODE with the overrides of models/regions/, resolved at the first decode forward (the warmup before CUDA
     graphs are captured, so graphs bake it in) and never again."""
-    return resolve(DECODE, overrides())
+    return resolve(DECODE, _overrides_of(DECODE))
+
+
+@functools.lru_cache(maxsize=None)
+def plan_prefill() -> tuple[tuple[str, str, Callable[[dict], dict]], ...]:
+    """PREFILL with the overrides of models/regions/ that name prefill stations."""
+    return resolve(PREFILL, _overrides_of(PREFILL))
 
 
 def functional(stations: tuple[Station, ...] = DECODE) -> tuple[Station, ...]:
@@ -443,13 +546,95 @@ def _r_residual(c):
     return {"h": _ref_add_cast(c["h"], c["y"])}
 
 
+def _ref_prefill_attention(q, k_pool, v_pool, qo_indptr, kv_indptr, kv_indices, last, tokens, scale):
+    """prefill_flashinfer.attend in torch: each row's suffix queries over its prefix and suffix keys, causal with the
+    queries at the end; [B, S, Hq, D], padding rows zero."""
+    B, Hq, S, D = q.shape
+    bs = k_pool.shape[2]
+    qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
+    qr = qp[tokens] if tokens is not None else qp
+    out = torch.zeros_like(qr)
+    qo, kvp, lst, idx = qo_indptr.tolist(), kv_indptr.tolist(), last.tolist(), kv_indices.long()
+    for r in range(len(qo) - 1):
+        n, L = qo[r + 1] - qo[r], (kvp[r + 1] - kvp[r] - 1) * bs + lst[r]
+        if n == 0:
+            continue
+        blocks = idx[kvp[r]:kvp[r + 1]]
+        k = k_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L].to(q.dtype)         # [Hkv, L, D]
+        v = v_pool[blocks].permute(1, 0, 2, 3).flatten(1, 2)[:, :L].to(q.dtype)
+        rep = Hq // k.shape[0]
+        mask = torch.arange(L, device=q.device)[None, :] <= (L - n + torch.arange(n, device=q.device))[:, None]
+        o = F.scaled_dot_product_attention(qr[qo[r]:qo[r + 1]].transpose(0, 1), k.repeat_interleave(rep, 0),
+                                           v.repeat_interleave(rep, 0), attn_mask=mask, scale=scale)
+        out[qo[r]:qo[r + 1]] = o.transpose(0, 1)
+    if tokens is None:
+        return out.view(B, S, Hq, D)
+    return torch.zeros(B * S, Hq, D, dtype=out.dtype, device=out.device).index_copy_(0, tokens, out).view(B, S, Hq, D)
+
+
+def _picks(x, w_router, cfg) -> torch.Tensor:
+    """[T, top_k] the experts the engine's routing picks for rows `x`: bf16 logits through its own routing kernel at
+    this size (an fp32 reference could break a near tie the other way)."""
+    from inference_server.models import moe_kernel
+    logits = F.linear(x.to(torch.bfloat16), w_router.to(torch.bfloat16))
+    T, k, E = x.shape[0], cfg.top_k, cfg.num_experts
+    M = T * k
+    e = torch.empty(M, dtype=torch.long, device=x.device)
+    if M <= qwen3_moe.MOE_KERNEL_MAX_ROWS or (qwen3_moe.MOE_KERNEL_LARGE_PAIRS and M >= qwen3_moe.MOE_KERNEL_LARGE_PAIRS):
+        router = moe_kernel.route_fused if T <= qwen3_moe.ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
+        bm = qwen3_moe.moe_block_m(M)
+        out = torch.empty(T, x.shape[1], dtype=torch.float32, device=x.device)
+        sorted_ids, expert_ids, _, _ = router(logits, E, k, cfg.norm_topk_prob, bm, out=out)
+        be, pid = expert_ids.long().repeat_interleave(bm), sorted_ids.long()
+        keep = (pid < M) & (be < E)
+        e[pid[keep]] = be[keep]
+    else:
+        sorted_ids, offs, _, _ = moe_kernel.route_dense(logits, E, k, cfg.norm_topk_prob)
+        e[sorted_ids.long()] = torch.searchsorted(offs.long(), torch.arange(M, device=x.device), right=True)
+    return e.view(T, k)
+
+
+def _r_p_moe(c):
+    """The experts in the inputs' dtype (fp32 in the lab's reference) at the experts the engine picks, each pair's
+    weight the softmax of the full-precision logits there; fp8 weights dequantized by their scales."""
+    cfg, n, h, tokens = c["cfg"], c["n"], c["h"], c["tokens"]
+    B, S, H = n.shape
+    flat = n.reshape(-1, H)
+    x = flat[tokens] if tokens is not None else flat
+    dt = torch.promote_types(x.dtype, torch.float32)
+    e = _picks(x, c["w.router"], cfg)
+    p = torch.softmax(F.linear(x.to(dt), c["w.router"].to(dt)), -1).gather(1, e)
+    if cfg.norm_topk_prob:
+        p = p / p.sum(-1, keepdim=True)
+    y = torch.zeros(x.shape, dtype=dt, device=x.device)
+    for ex in e.unique().tolist():
+        r, slot = (e == ex).nonzero(as_tuple=True)
+        wgu, wdn = c["w.gate_up"][ex].to(dt), c["w.down"][ex].to(dt)
+        if c["w.gate_up_scale"] is not None:
+            wgu = wgu * c["w.gate_up_scale"][ex].to(dt)[:, None]
+            wdn = wdn * c["w.down_scale"][ex].to(dt)[:, None]
+        gate, up = (x[r].to(dt) @ wgu.T).chunk(2, dim=-1)
+        y.index_add_(0, r, ((F.silu(gate) * up) @ wdn.T) * p[r, slot][:, None])
+    if tokens is not None:
+        y = torch.zeros(flat.shape, dtype=dt, device=x.device).index_copy_(0, tokens, y)
+    return {"h": h.to(dt) + y.view(B, S, H)}
+
+
+def _r_p_attention(c):
+    return {"attn": _ref_prefill_attention(c["q"], c["k_cache"], c["v_cache"], *(c[n] for n in FI[:4]),
+                                           c["fi_tokens"], c["cfg"].scale)}
+
+
 _REFERENCE = {"input_norm": _r_input_norm, "qk_norm_rope": _r_qk_norm_rope, "attention": _r_attention,
               "add_norm": _r_add_norm, "route": _r_route, "gate_up": _r_gate_up, "silu_mul": _r_silu_mul,
-              "down": _r_down, "residual": _r_residual}
+              "down": _r_down, "residual": _r_residual, "p_input_norm": _r_input_norm,
+              "p_qk_norm_rope": _r_qk_norm_rope, "p_attention": _r_p_attention, "p_add_norm": _r_add_norm,
+              "p_moe": _r_p_moe}
 
 
-def reference() -> tuple[Station, ...]:
-    """DECODE in torch, for the lab's reference run: the same names, reads and writes, no fused or Triton kernel, in
-    the inputs' dtype (fp32 when the lab upcasts them), pure (the pool copied before its write). fp8 weights are
-    dequantized by their scales; activations are never quantized."""
-    return functional(tuple(replace(s, fn=_REFERENCE.get(s.name, s.fn)) for s in DECODE))
+def reference(stations: tuple[Station, ...] = DECODE) -> tuple[Station, ...]:
+    """`stations` (DECODE or PREFILL) in torch, for the lab's reference run: the same names, reads and writes, no fused
+    or Triton kernel (the prefill experts' choice excepted, `_picks`), in the inputs' dtype (fp32 when the lab upcasts
+    them), pure (the pool copied before its write). fp8 weights are dequantized by their scales; activations are never
+    quantized."""
+    return functional(tuple(replace(s, fn=_REFERENCE.get(s.name, s.fn)) for s in stations))

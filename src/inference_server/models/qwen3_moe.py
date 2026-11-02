@@ -201,6 +201,34 @@ def _fake_quantize(x: torch.Tensor) -> torch.Tensor:
     return (q.to(torch.float32) * s[..., None]).to(x.dtype)
 
 
+def grouped_mm(a: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, offs: torch.Tensor) -> torch.Tensor:
+    """Grouped GEMM of the expert-sorted rows `a` against the weight stack `w` (fp8 with per-channel scales `s`, or
+    bf16 with `s` None), groups ending at `offs`."""
+    if s is None:
+        return torch._grouped_mm(a, w.transpose(-2, -1), offs=offs)
+    if a.is_cuda:
+        if fused._on(a):
+            from inference_server.models import moe_kernel
+            a8, sa = moe_kernel.quant_rows(a.contiguous())
+        else:
+            a8, sa = quantize_rowwise(a)
+        return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
+    # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
+    deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
+    return torch._grouped_mm(_fake_quantize(a), deq.transpose(-2, -1), offs=offs)
+
+
+def grouped_mm_sorted(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, sorted_ids: torch.Tensor, top_k: int,
+                      offs: torch.Tensor) -> torch.Tensor:
+    """grouped_mm of the expert-sorted pairs' token rows, x[sorted_ids // top_k], gathered by the same launch that
+    quantizes them (CUDA)."""
+    from inference_server.models import moe_kernel
+    if s is None:
+        return torch._grouped_mm(moe_kernel.gather_rows(x, sorted_ids, top_k), w.transpose(-2, -1), offs=offs)
+    a8, sa = moe_kernel.quant_rows_gather(x, sorted_ids, top_k)
+    return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=x.dtype)
+
+
 class Qwen3Experts(nn.Module):
     """All experts' SwiGLU weights as 3D tensors (HF's layout): gate_up [E, 2I, H], down [E, H, I]. `quantize_fp8`
     swaps them for fp8 e4m3 with one fp32 scale per expert and output channel; activations are then quantized per
@@ -229,15 +257,7 @@ class Qwen3Experts(nn.Module):
         return self._mm(a, "gate_up_proj", offs)
 
     def gate_up_sorted(self, x: torch.Tensor, sorted_ids: torch.Tensor, top_k: int, offs: torch.Tensor) -> torch.Tensor:
-        """gate_up of the expert-sorted pairs' token rows, x[sorted_ids // top_k], gathered by the same launch that
-        quantizes them (CUDA)."""
-        from inference_server.models import moe_kernel
-        if not self.fp8:
-            return torch._grouped_mm(moe_kernel.gather_rows(x, sorted_ids, top_k),
-                                     self.gate_up_proj.transpose(-2, -1), offs=offs)
-        a8, sa = moe_kernel.quant_rows_gather(x, sorted_ids, top_k)
-        return torch._scaled_grouped_mm(a8, self.gate_up_proj_fp8.transpose(-2, -1), sa, self.gate_up_proj_scale,
-                                        offs=offs, out_dtype=x.dtype)
+        return grouped_mm_sorted(x, *self.weights("gate_up_proj"), sorted_ids, top_k, offs)
 
     def down(self, a: torch.Tensor, offs: torch.Tensor) -> torch.Tensor:
         return self._mm(a, "down_proj", offs)
@@ -250,19 +270,42 @@ class Qwen3Experts(nn.Module):
 
     def _mm(self, a: torch.Tensor, name: str, offs: torch.Tensor) -> torch.Tensor:
         """Grouped GEMM of the expert-sorted rows `a` against weight stack `name`, groups ending at `offs`."""
-        if not self.fp8:
-            return torch._grouped_mm(a, getattr(self, name).transpose(-2, -1), offs=offs)
-        w, s = getattr(self, f"{name}_fp8"), getattr(self, f"{name}_scale")
-        if a.is_cuda:
-            if fused._on(a):
-                from inference_server.models import moe_kernel
-                a8, sa = moe_kernel.quant_rows(a.contiguous())
-            else:
-                a8, sa = quantize_rowwise(a)
-            return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
-        # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
-        deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
-        return torch._grouped_mm(_fake_quantize(a), deq.transpose(-2, -1), offs=offs)
+        return grouped_mm(a, *self.weights(name), offs)
+
+
+def moe_cuda(flat: torch.Tensor, logits: torch.Tensor, gu: torch.Tensor, gu_s: torch.Tensor | None, dn: torch.Tensor,
+             dn_s: torch.Tensor | None, num_experts: int, top_k: int, renorm: bool,
+             residual: torch.Tensor | None = None) -> torch.Tensor:
+    """The experts on CUDA with the fused kernels, from the router's `logits`: their output per row of `flat` (fp32 from
+    the Triton path, bf16 from the torch one), or with `residual` residual + that output in bf16, added by each path's
+    last launch. Qwen3SparseMoE and the prefill stations (models/stations.py) both run it."""
+    from inference_server.models import moe_kernel
+    T = flat.shape[0]
+    M = T * top_k
+    if M <= MOE_KERNEL_MAX_ROWS or (MOE_KERNEL_LARGE_PAIRS and M >= MOE_KERNEL_LARGE_PAIRS):
+        # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py), bf16 or
+        # fp8 with a per-channel scale; the routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the
+        # down GEMM scatters weighted rows into an fp32 output.
+        router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
+        bm = moe_block_m(M)
+        out = torch.empty(flat.shape, dtype=torch.float32, device=flat.device)      # zeroed by the router
+        sorted_ids, expert_ids, tok, pair_w = router(logits, num_experts, top_k, renorm, bm, out=out)
+        a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
+        a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
+        h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
+        act = fused.silu_mul(h)
+        if a8:
+            act, sact = moe_kernel.quant_rows(act)
+        else:
+            sact = None
+        moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
+                                    a_scale=sact)
+        return out if residual is None else fused.add_cast(residual.reshape(out.shape), out)
+    # routing, gather and epilogue as custom launches: no sort, searchsorted, gather or scatter
+    sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, num_experts, top_k, renorm)
+    act = fused.silu_mul(grouped_mm_sorted(flat, gu, gu_s, sorted_ids, top_k, offs))
+    y = grouped_mm(act, dn, dn_s, offs)
+    return moe_kernel.gather_weighted(y, pos.view(T, top_k), pair_w.view(T, top_k), residual)
 
 
 class Qwen3SparseMoE(nn.Module):
@@ -293,38 +336,10 @@ class Qwen3SparseMoE(nn.Module):
         """The experts' output per row: bf16, or fp32 from the Triton path (its caller adds it to the residual); with
         `residual`, residual + that output in bf16, added by each path's last launch."""
         logits = self.gate(flat)
-        on = flat.is_cuda and fused._on(flat)
         E = self.experts.num_experts
-        T = flat.shape[0]
-        M = T * self.top_k
-        if on and (M <= MOE_KERNEL_MAX_ROWS or (MOE_KERNEL_LARGE_PAIRS and M >= MOE_KERNEL_LARGE_PAIRS)):
-            # Decode-sized M: the Triton grouped GEMMs read only the active experts' weights (moe_kernel.py), bf16 or
-            # fp8 with a per-channel scale; the routing is one launch (or four above ROUTE_FUSED_MAX_TOKENS) and the
-            # down GEMM scatters weighted rows into an fp32 output.
-            from inference_server.models import moe_kernel
-            gu, gu_s = self.experts.weights("gate_up_proj")
-            dn, dn_s = self.experts.weights("down_proj")
-            router = moe_kernel.route_fused if T <= ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
-            bm = moe_block_m(M)
-            out = torch.empty(flat.shape, dtype=torch.float32, device=flat.device)      # zeroed by the router
-            sorted_ids, expert_ids, tok, pair_w = router(logits, E, self.top_k, self.norm_topk_prob, bm, out=out)
-            a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
-            a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
-            h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
-            act = fused.silu_mul(h)
-            if a8:
-                act, sact = moe_kernel.quant_rows(act)
-            else:
-                sact = None
-            moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
-                                        a_scale=sact)
-            return out if residual is None else fused.add_cast(residual.reshape(out.shape), out)
-        if on:          # routing, gather and epilogue as custom launches: no sort, searchsorted, gather or scatter
-            from inference_server.models import moe_kernel
-            sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, E, self.top_k, self.norm_topk_prob)
-            act = fused.silu_mul(self.experts.gate_up_sorted(flat, sorted_ids, self.top_k, offs))
-            y = self.experts.down(act, offs)
-            return moe_kernel.gather_weighted(y, pos.view(T, self.top_k), pair_w.view(T, self.top_k), residual)
+        if flat.is_cuda and fused._on(flat):
+            return moe_cuda(flat, logits, *self.experts.weights("gate_up_proj"), *self.experts.weights("down_proj"),
+                            E, self.top_k, self.norm_topk_prob, residual)
         weights, experts = route(logits, self.top_k, self.norm_topk_prob)
         sorted_e, order = torch.sort(experts.view(-1), stable=True)   # (token, slot) pairs grouped by expert
         tok = order // self.top_k
@@ -393,6 +408,9 @@ class Qwen3MoeModel(nn.Module):
             from inference_server.models import stations
             if stations.applies(self, h, paged_ctx):     # a CUDA decode step: the named stations (models/stations.py)
                 h = stations.forward(self, h, cos, sin, paged_ctx)
+                return self.norm(h) if norm else h
+            if stations.prefill_applies(self, h, paged_ctx):    # a prefill wave with a prefill stretch overridden
+                h = stations.forward_prefill(self, h, cos, sin, paged_ctx)
                 return self.norm(h) if norm else h
         for i, layer in enumerate(self.layers):
             if paged_ctx is not None:

@@ -1,4 +1,4 @@
-"""CAPTURE_REGION=first:last records, during decode steps, what that stretch of the decode stations (models/stations.py)
+"""CAPTURE_REGION=first:last records, during decode steps (prefill waves for a "p_" stretch), what that stretch of the stations (models/stations.py)
 reads and writes, in the layout of BlameGraph's lab/capture.py: one JSON line per layer call in
 <CAPTURE_REGION_DIR>/calls.jsonl, and the first call per (layer, shape signature) whole in samples/<n>.pt as
 {"reads": {name: tensor}, "writes": {name: tensor}} on the CPU. Weights are named and described, never saved. A
@@ -20,7 +20,7 @@ import torch
 SMALL_INT = 4096                 # 1-D integer tensors up to this many elements are logged by value
 SAMPLE_BYTES = 256 * 2**20       # a call whose reads and writes are larger is logged, not sampled
 KV = ("k_cache", "v_cache")
-TABLES = ("block_tables", "attn_block_tables")
+TABLES = ("block_tables", "attn_block_tables", "fi_kv_indices")
 
 
 def _describe(x) -> dict:
@@ -53,7 +53,8 @@ class Capture:
     def __init__(self, first: str, last: str, layers: set[int] | None, out: Path):
         from inference_server.models import stations
         self.first, self.last, self.layers, self.out = first, last, layers, out
-        self.inputs, _, self.outputs = stations.interface(stations.DECODE, first, last)
+        self.prefill = first.startswith("p_")       # a prefill stretch (stations.PREFILL), captured in prefill waves
+        self.inputs, _, self.outputs = stations.interface(stations.stations_of(first), first, last)
         (out / "samples").mkdir(parents=True, exist_ok=True)
         self._log = open(out / "calls.jsonl", "a", buffering=1)
         self._seen: set[str] = set()
@@ -125,7 +126,10 @@ class Capture:
 
 
 def _touched(c: dict) -> torch.Tensor:
-    """The pool blocks this step's rows hold (the new token's included), sorted."""
+    """The pool blocks this step's rows hold (the new token's included), sorted; a prefill wave's from its attention
+    inputs."""
+    if "fi_kv_indices" in c:
+        return c["fi_kv_indices"].long().unique()
     bt, sl, bs = c["attn_block_tables"], c["attn_seq_lens"], c["k_cache"].shape[2]
     used = torch.arange(bt.shape[1], device=bt.device)[None, :] < ((sl + bs - 1) // bs)[:, None]
     return bt[used].long().unique()

@@ -102,6 +102,7 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
         planned = layer_idx                          # a layer with its own block ids: its own plan
     if planned == layer_idx:
         getattr(ctx, "_ensure_blocks", lambda: ctx.block_table_tensor(layer_idx))()     # every row's blocks allocated
+        _PLANNED.pop(id(w), None)                    # `attend`'s plan is this wrapper's no longer
         w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=FP8 if fp8_q else q.dtype, kv_data_type=pool.k.dtype,
                o_data_type=q.dtype)
@@ -112,6 +113,55 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
         qr = fused.cast_fp8(qr)
     o = torch.empty(qr.shape, dtype=q.dtype, device=q.device)       # [total real tokens, Hq, D]; every row is written,
     w.run(qr, (pool.k, pool.v), out=o)                              # so not FlashInfer's default zero-filled buffer
+    if tokens is None:
+        return o.view(B, S, Hq, D)
+    return torch.zeros(B * S, Hq, D, dtype=o.dtype, device=o.device).index_copy_(0, tokens, o).view(B, S, Hq, D)
+
+
+# --- the same attention from tensors, for the prefill stations (models/stations.py) ---
+
+_PLANNED: dict = {}             # wrapper id -> (the kv_indices tensor it was planned for, the rest of the plan's key)
+
+
+def wave(ctx, q: torch.Tensor) -> dict:
+    """The wave's FlashInfer inputs as tensors, made once per wave (every layer shares one block layout) after the
+    first layer's K/V append: what the prefill stations' attention reads."""
+    st = getattr(ctx, "_fi_wave", None)
+    if st is None:
+        B, Hq, S, D = q.shape
+        tokens = getattr(ctx, "tokens", None)
+        if tokens is None and sum(ctx._suffix) != B * S:
+            valid = torch.arange(S, device=q.device)[None, :] < torch.tensor(ctx._suffix, device=q.device)[:, None]
+            tokens = valid.reshape(-1).nonzero().squeeze(1)
+        qo, kv, last, nb = plan_inputs(ctx._prefix, ctx._suffix, ctx.pools[0].k.shape[2])
+        getattr(ctx, "_ensure_blocks", lambda: ctx.block_table_tensor(0))()
+        st = ctx._fi_wave = {"fi_qo_indptr": qo, "fi_kv_indptr": kv, "fi_last_page_len": last, "fi_tokens": tokens,
+                             "fi_kv_indices": kv_indices([c.blocks for c in ctx.caches], nb, q.device)}
+    return st
+
+
+def attend(q: torch.Tensor, k_pool: torch.Tensor, v_pool: torch.Tensor, qo_indptr: torch.Tensor,
+           kv_indptr: torch.Tensor, kv_indices_: torch.Tensor, last: torch.Tensor, tokens: torch.Tensor | None,
+           scale: float) -> torch.Tensor:
+    """`flashinfer_prefill` from the wave's tensors (`wave`): q [B, Hq, S, D] -> [B, S, Hq, D] in q's dtype, padding
+    rows zero. Plans only when the wave (its kv_indices tensor) or the shapes change."""
+    B, Hq, S, D = q.shape
+    Hkv, bs = k_pool.shape[1], k_pool.shape[2]
+    fp8_q = FP8_Q and k_pool.dtype == FP8
+    w = _wrapper(q.device, "fa3" if fp8_q else None)
+    key = (Hq, Hkv, D, bs, scale, q.dtype, k_pool.dtype)
+    done = _PLANNED.get(id(w))
+    if done is None or done[0] is not kv_indices_ or done[1] != key:
+        w.plan(qo_indptr, kv_indptr, kv_indices_, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
+               q_data_type=FP8 if fp8_q else q.dtype, kv_data_type=k_pool.dtype, o_data_type=q.dtype)
+        _PLANNED[id(w)] = (kv_indices_, key)     # holding the tensor keeps its memory from being reused by another
+    qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
+    qr = qp[tokens] if tokens is not None else qp
+    if fp8_q:
+        from inference_server.models import fused
+        qr = fused.cast_fp8(qr)
+    o = torch.empty(qr.shape, dtype=q.dtype, device=q.device)
+    w.run(qr, (k_pool, v_pool), out=o)
     if tokens is None:
         return o.view(B, S, Hq, D)
     return torch.zeros(B * S, Hq, D, dtype=o.dtype, device=o.device).index_copy_(0, tokens, o).view(B, S, Hq, D)
