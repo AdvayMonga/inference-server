@@ -96,6 +96,7 @@ def _wave(b, prompts):
 def test_a_wave_through_the_stations_is_bit_identical(backend, lengths, monkeypatch):
     g = torch.Generator().manual_seed(len(lengths))
     prompts = [torch.randint(1000, 30000, (n,), generator=g).tolist() for n in lengths]
+    _wave(backend, prompts)                  # the process's first wave of a shape differs from later ones, stations or not
     want = _wave(backend, prompts)
     monkeypatch.setattr(stations, "prefill_applies", lambda *a: True)
     got = _wave(backend, prompts)
