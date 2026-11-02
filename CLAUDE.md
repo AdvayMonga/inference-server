@@ -89,7 +89,11 @@
 - Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
   layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
   define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before
-  graph capture). Prefill, CPU and the torch MoE path keep the layer forward. `CAPTURE_REGION=first:last` (+
+  graph capture). A CUDA prefill wave (FlashInfer attention, fused kernels) is the 8 stations of `PREFILL` (names
+  "p_": norms, qkv, rope, `p_kv_store` (in place, through the context), `p_attention` (`prefill_flashinfer.attend`
+  from the wave's tensors), o_proj, `p_moe` = `qwen3_moe.moe_cuda`, the same function the module calls); a wave runs
+  through them only while a "p_" stretch is overridden or captured (`prefill_applies`), the module path otherwise.
+  CPU keeps the layer forward. `CAPTURE_REGION=first:last` (+
   `CAPTURE_REGION_DIR`, optional `CAPTURE_REGION_LAYERS`) records a stretch's real reads and writes per layer call
   (`models/region_capture.py`, BlameGraph's `lab/capture.py` layout; graphs and the megakernel off, `CUSTOM_BACKEND_CUDA_GRAPH=0 MEGAKERNEL=0`, to see every call).
 - No PyTorch built-in kernels on the CUDA hot paths (2026-10-30): every launch of the graphed decode step and the
