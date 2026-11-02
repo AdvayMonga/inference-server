@@ -1027,7 +1027,10 @@ class CustomTorchBackend(InferenceBackend):
             bt = tab_t[own_t]                                                                 # [n, cols]
             nd = state.n_rows if state is not None else 0
             if nd:
-                cols = max(bt.shape[1], state.bt.shape[1])
+                # Both tables grown to the same multiple of the table stride: _grow_cols rounds its target up only when
+                # it pads, so growing one and not the other left 128 against 84 columns (saturated, 2026-11-02).
+                from inference_server.models.paged_kv_cache import _BT_COLS
+                cols = -(-max(bt.shape[1], state.bt.shape[1]) // _BT_COLS) * _BT_COLS
                 bt = torch.cat([state._grow_cols(state.bt, cols), state._grow_cols(bt, cols)], dim=0)
                 tok_t = torch.cat([current.view(-1), tok_t])
                 pos_t = torch.cat([state.seq_lens, pos_t])
