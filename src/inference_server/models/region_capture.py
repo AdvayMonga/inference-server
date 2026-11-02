@@ -5,7 +5,10 @@ reads and writes, in the layout of BlameGraph's lab/capture.py: one JSON line pe
 sample's K/V pool is only the blocks the step touches, renumbered in the order of its `kv_blocks` (their ids in the
 real pool), its block tables renumbered to match. CAPTURE_REGION_LAYERS=0,23,47 limits the layers. Reads tensors
 back, so it is for a capture run; graph replays and megakernel steps run no stations, so a capture needs
-CUSTOM_BACKEND_CUDA_GRAPH=0 and MEGAKERNEL=0 to see every call."""
+CUSTOM_BACKEND_CUDA_GRAPH=0 and MEGAKERNEL=0 to see every call. Samples are kept to `SAMPLES_BYTES` in all, and a
+large one (over `SPREAD_BYTES`, e.g. a K/V pool of 256 rows, ~0.5 GB) only every `SPREAD_CALLS` calls, so they spread
+over the run: a region reading the pool has a new shape at almost every decode step (2026-11-02: 2,500 samples, 286 GB,
+filled the disk); a call over the budget is logged with `sample_skipped_bytes`."""
 
 from __future__ import annotations
 
@@ -19,6 +22,9 @@ import torch
 
 SMALL_INT = 4096                 # 1-D integer tensors up to this many elements are logged by value
 SAMPLE_BYTES = 256 * 2**20       # a call whose reads and writes are larger is logged, not sampled
+SAMPLES_BYTES = 16 * 2**30       # all of a capture's samples together
+SPREAD_BYTES = 32 * 2**20        # a sample this large is kept only every SPREAD_CALLS calls
+SPREAD_CALLS = 32
 KV = ("k_cache", "v_cache")
 TABLES = ("block_tables", "attn_block_tables", "fi_kv_indices")
 
@@ -59,6 +65,7 @@ class Capture:
         self._log = open(out / "calls.jsonl", "a", buffering=1)
         self._seen: set[str] = set()
         self._layer, self._call, self._sample, self._blocks = 0, None, None, None
+        self._bytes, self._calls, self._last_big, self._saved = 0, 0, -SPREAD_CALLS, 0
 
     def wants(self, layer: int) -> bool:
         return self.layers is None or layer in self.layers
@@ -82,6 +89,7 @@ class Capture:
                 "reads": {n: _describe(v) for n, v in reads.items()}}
         sig = json.dumps([self._layer] + [[n, d.get("shape"), d.get("dtype"), d.get("value")]
                                           for n, d in call["reads"].items()])
+        self._sig = sig
         if sig not in self._seen:
             self._seen.add(sig)
             self._blocks = _touched(c) if any(k in reads for k in KV) else None
@@ -96,16 +104,23 @@ class Capture:
             return {}
         writes = {n: c[n] for n in self.outputs}
         self._call["writes"] = {n: _describe(v) for n, v in writes.items()}
+        self._calls += 1
         if self._sample is not None:
             self._sample["writes"] = self._cpu(writes)
             size = sum(t.numel() * t.element_size() for part in self._sample.values() for t in part.values()
                        if isinstance(t, torch.Tensor))
-            if size <= SAMPLE_BYTES:
-                name = f"{len(self._seen)}.pt"
+            big = size > SPREAD_BYTES
+            if size <= SAMPLE_BYTES and self._bytes + size <= SAMPLES_BYTES and \
+                    (not big or self._calls - self._last_big >= SPREAD_CALLS):
+                self._saved += 1
+                name = f"{self._saved}.pt"
                 torch.save(self._sample, self.out / "samples" / name)
                 self._call["sample"] = name
+                self._bytes += size
+                self._last_big = self._calls if big else self._last_big
             else:
                 self._call["sample_skipped_bytes"] = size
+                self._seen.discard(self._sig)        # its shape may be sampled at a later call
         self._log.write(json.dumps(self._call) + "\n")
         self._call = self._sample = None
         return {}

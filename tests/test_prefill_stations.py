@@ -3,6 +3,7 @@ of their own station set, the capture of a "p_" stretch reads PREFILL, and the r
 at the end of each row's keys; on a GPU with the real model (PREFILL_STATIONS_TEST=1), a prefill wave through the
 stations is bit-identical to the module path (K/V written and the next token), padded and packed."""
 
+import json
 import os
 
 import pytest
@@ -117,3 +118,17 @@ def test_the_reference_moe_is_close_to_the_station(backend):
                                          if isinstance(v, torch.Tensor) and k in ("n", "h")}})["h"]
         err = (got - ref).abs().max().item()
         assert err < 0.25 * ref.abs().max().item(), (T, err)
+
+
+def test_a_capture_keeps_its_samples_to_a_budget_and_spreads_large_ones(tmp_path, monkeypatch):
+    monkeypatch.setattr(region_capture, "SPREAD_BYTES", 1000)
+    monkeypatch.setattr(region_capture, "SPREAD_CALLS", 3)
+    monkeypatch.setattr(region_capture, "SAMPLES_BYTES", 4 * 4096 * 4)
+    cap = region_capture.Capture("router", "router", None, tmp_path)
+    for i in range(10):                              # a new shape every call, each sample 4096 floats
+        c = {"n": torch.zeros(4, 1, 1024 + i), "w.router": torch.zeros(1, 1)}     # a new signature, ~16 KB each
+        cap._before(c)
+        cap._after({**c, "logits": torch.zeros(4, 1)})
+    calls = [json.loads(x) for x in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    kept = [i for i, x in enumerate(calls) if x.get("sample")]
+    assert kept == [0, 3, 6] and len(set(x["sample"] for x in calls if x.get("sample"))) == 3   # spread, then budget
