@@ -489,6 +489,7 @@ class CustomTorchBackend(InferenceBackend):
         self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz, kv_dtype=self.kv_dtype)
         self._alloc = next(p for p in self.pools if p is not None).allocator      # one id space for every layer
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
+        self._shared_refs: dict[int, int] = {}  # prefix-cache blocks admitted requests matched -> how many hold each
         if self._mega is not None:
             self._mega.bind_pools(self.pools)
 
@@ -1475,21 +1476,36 @@ class CustomTorchBackend(InferenceBackend):
         return [0 if pool is None else (tokens + pool.block_size - 1) // pool.block_size
                 for pool in self.pools]
 
-    def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
-        """Admit only if this request's per-pool footprint fits in EVERY pool's free blocks.
-        Commits the reservation on success. Single-threaded (scheduler worker) → no lock."""
+    def kv_reserve(self, prompt_len: int, max_tokens: int, shared=()) -> bool:
+        """Admit only if this request's blocks fit in EVERY pool: its own (prompt + max_tokens, less the `shared`
+        blocks its prefix-cache match already holds) on top of every admitted request's own, plus each distinct
+        matched block once, however many requests share it. Commits the reservation on success. Single-threaded
+        (scheduler worker) → no lock."""
         fps = self._kv_footprints(prompt_len, max_tokens)
+        m = len(shared)
+        distinct = len(self._shared_refs) + sum(1 for b in shared if b not in self._shared_refs)
         for i, pool in enumerate(self.pools):
-            if pool is not None and self._reserved[i] + fps[i] > pool.num_blocks:
+            if pool is not None and self._reserved[i] + fps[i] - m + distinct > pool.num_blocks:
                 return False
-        for i in range(len(self.pools)):
-            self._reserved[i] += fps[i]
+        for i, pool in enumerate(self.pools):
+            if pool is not None:
+                self._reserved[i] += fps[i] - m
+        for b in shared:
+            self._shared_refs[b] = self._shared_refs.get(b, 0) + 1
         return True
 
-    def kv_release(self, prompt_len: int, max_tokens: int) -> None:
+    def kv_release(self, prompt_len: int, max_tokens: int, shared=()) -> None:
         fps = self._kv_footprints(prompt_len, max_tokens)
-        for i in range(len(self.pools)):
-            self._reserved[i] -= fps[i]
+        m = len(shared)
+        for i, pool in enumerate(self.pools):
+            if pool is not None:
+                self._reserved[i] -= fps[i] - m
+        for b in shared:
+            n = self._shared_refs[b] - 1
+            if n:
+                self._shared_refs[b] = n
+            else:
+                del self._shared_refs[b]
 
     def kv_capacity_error(self, prompt_len: int, max_tokens: int) -> str | None:
         for fp, pool in zip(self._kv_footprints(prompt_len, max_tokens), self.pools):
