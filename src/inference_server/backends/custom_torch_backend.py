@@ -323,6 +323,7 @@ class _StateRow:
 # prompts are 98.7% prefix-cache hits, spent half its time in such steps (H200, 2026-10-19). Measured long_prompt:
 # 20 req/s off, 33.3 at 64 tokens, 36.7 at 128 and at 256. 0 = off.
 PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_TOKENS", "128"))
+BUCKET_WARM = 2048                     # a token count that makes `_piecewise` capture every bucket at load
 
 
 def decode_rows(caches, chunks, pools):
@@ -558,6 +559,9 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graphs: dict = {}
         if self._graph_on:
             self._capture_all_graphs()       # at load: on the first decode it was a 3.5 s step for the first requests
+        self._pw = None                      # piecewise prefill graphs (prefill_graphs.py), captured at load too
+        if self._piecewise_ok(None):
+            self._piecewise(BUCKET_WARM, None)
 
     # ---- Required interface ----
 
@@ -965,7 +969,11 @@ class CustomTorchBackend(InferenceBackend):
             if cuda:
                 ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 ev0.record()
-            logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
+            pw = self._piecewise(n_tok, decode)
+            if pw is not None:
+                logits = pw[0].forward(pw[1], ctx, input_ids, position_ids, last_idx)
+            else:
+                logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
             if cuda:
                 ev1.record()
         except BaseException:
@@ -990,6 +998,31 @@ class CustomTorchBackend(InferenceBackend):
                                     "gpu_forward_s": (round(ev0.elapsed_time(ev1) / 1e3, 4)
                                                       if cuda and ev1.query() else None)}   # a step with no final row has not synced
         return (out, next_tokens) if decode is not None else out
+
+    def _piecewise_ok(self, decode) -> bool:
+        """Whether a packed prefill forward can replay the piecewise graphs (the eager path's kernels, graphed)."""
+        from inference_server.backends import prefill_graphs
+        from inference_server.models import qwen3_moe, region_capture, stations
+        if not (prefill_graphs.ENABLED and self.device.type == "cuda" and self.packed_prefill and decode is None
+                and fused.ENABLED and qwen3_moe.PREFILL_ATTN == "flashinfer"
+                and hasattr(self.model.model.layers[0].self_attn, "qkv_weight")):
+            return False
+        cap = region_capture.active()
+        return not stations._overrides_of(stations.PREFILL) and not (cap is not None and cap.prefill)
+
+    def _piecewise(self, n_tok: int, decode):
+        """(graphs, the bucket's set) for a packed prefill of `n_tok` tokens, or None (the eager forward)."""
+        from inference_server.backends import prefill_graphs
+        if n_tok <= PREFILL_AS_DECODE_TOKENS or not self._piecewise_ok(decode):
+            return None
+        N = prefill_graphs.PrefillGraphs.bucket(n_tok)
+        if N is None:
+            return None
+        if self._pw is None:
+            self._ensure_scratch()
+            self._pw = prefill_graphs.PrefillGraphs(self.model, self.pools, self.device, self._scratch)
+        st = self._pw.get(N)
+        return (self._pw, st) if st is not None else None
 
     def joint_fits(self, n_rows: int, n_tokens: int, decode=None) -> bool:
         """Whether a step's prefill tokens (and `n_rows` running decode rows) fit one decode-graph replay."""
