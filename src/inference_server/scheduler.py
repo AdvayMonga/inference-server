@@ -131,6 +131,7 @@ class ScheduledRequest:
     cancelled: bool = False     # set by the HTTP side when the client goes away
     drafter: object | None = None   # NgramDrafter once speculative decoding has run for this request
     kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
+    kv_shared: tuple = ()              # the prefix-cache blocks its reservation counted as already held
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
     admit_seq: int = 0          # admission order (the latest admitted is preempted first)
     requeue_ts: float = 0.0     # when it was last requeued; its queue deadline counts from here (enqueue_ts stays)
@@ -738,9 +739,19 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._timeline.event("admit_blocked", reason="active_kv", trace_id=peeked.trace_id)
                     break
 
+                # Chunked/mixed: the prefix-cache lookup comes first, so the reservation counts the blocks the match
+                # already holds once for every request sharing them (one system prompt under 769 rows was reserved
+                # 769 times: shared prefix admission blocked at a pool far from full, 2026-11-02).
+                lookup = hit = None
+                if self.prefill_mode in ("chunked", "mixed"):
+                    lookup = self.backend.prefill_lookup(peeked.prefill_ids, peeked.session_id)
+                    hit = self.backend.last_cache_hit_tokens
+                shared = tuple(getattr(lookup[0], "blocks", None) or ()) if lookup is not None else ()
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
-                if not self.backend.kv_reserve(prompt_n, out_res):
+                if not self.backend.kv_reserve(prompt_n, out_res, shared):
+                    if lookup is not None and hasattr(lookup[0], "free_all"):
+                        lookup[0].free_all()
                     self._kv_admit_blocked += 1
                     self._timeline.event("admit_blocked", reason="backend_pools", trace_id=peeked.trace_id)
                     break
@@ -754,6 +765,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
                 req.kv_res = (prompt_n, out_res)
+                req.kv_shared = shared
             self._timeline.event("admit", trace_id=req.trace_id, mode=self.prefill_mode,
                                  reservation=reservation, queue_wait_s=req.admit_ts - req.enqueue_ts)
             if self.prefill_mode == "batched":
@@ -763,8 +775,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             try:
                 if self.prefill_mode in ("chunked", "mixed"):
                     # Lookup only; the forward happens in _advance_prefill_chunk / _advance_prefill_mixed
-                    partial_kv, matched = self.backend.prefill_lookup(req.prefill_ids, req.session_id)
-                    req.cache_hit_tokens = self.backend.last_cache_hit_tokens
+                    partial_kv, matched = lookup
+                    req.cache_hit_tokens = hit
                     self._prefilling.append(_PrefillingRow(
                         request=req, matched=matched,
                         tokens_fed=matched, partial_kv=partial_kv,
@@ -1349,8 +1361,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         p, o = request.kv_res
         if p or o:
             self._active_kv_reserved -= p + o
-            self.backend.kv_release(p, o)
-            request.kv_res = (0, 0)
+            self.backend.kv_release(p, o, request.kv_shared)
+            request.kv_res, request.kv_shared = (0, 0), ()
 
     def _fail_inflight(self, exc: BaseException, state: str | None = None) -> None:
         """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.
