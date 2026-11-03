@@ -141,7 +141,7 @@ class PrefillGraphs:
         w = fi._wrapper(self.dev, "fa3" if self.fp8_q else None)
         qo, kv, last, nb = fi.plan_inputs(ctx._prefix, ctx._suffix, bs)
         fi._PLANNED.pop(id(w), None)                        # `attend`'s plan is this wrapper's no longer
-        w.plan(qo, kv, fi.kv_indices([c.blocks for c in ctx.caches], nb, self.dev), last, self.hq, self.hkv, self.d,
+        fi.plan(w, qo, kv, fi.kv_indices([c.blocks for c in ctx.caches], nb, self.dev), last, self.hq, self.hkv, self.d,
                bs, causal=True, sm_scale=self.scale, q_data_type=st["q"].dtype, kv_data_type=self.pools[0].k.dtype,
                o_data_type=torch.bfloat16)
         q, o = st["q"][:T], st["o"][:T]

@@ -54,6 +54,21 @@ def _wrapper(device: torch.device, backend: str | None = None):
         return flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace, kv_layout="HND", backend="auto")
 
 
+_PLAN_DONE: dict = {}           # wrapper id -> event recorded after its last plan's host -> device copies
+
+
+def plan(w, *args, **kwargs) -> None:
+    """`w.plan`, once the GPU has read the previous plan: FlashInfer stages each plan in one pinned host buffer and copies
+    it asynchronously, so a host running ahead of the GPU (prefill graphs) overwrote a plan not yet copied, and attention
+    read another step's block indices (illegal memory access under long prompts, H200 2026-11-03)."""
+    ev = _PLAN_DONE.get(id(w))
+    if ev is not None:
+        ev.synchronize()
+    w.plan(*args, **kwargs)
+    ev = _PLAN_DONE[id(w)] = torch.cuda.Event()
+    ev.record()
+
+
 def plan_inputs(prefix: list[int], suffix: list[int], block_size: int):
     """The wave's row structure for FlashInfer, on the host (plan reads indptrs there, so no device sync):
     (qo_indptr, kv_indptr, kv_last_page_len) int32, and each row's block count."""
@@ -103,7 +118,7 @@ def flashinfer_prefill(q: torch.Tensor, ctx, layer_idx: int, scale: float) -> to
     if planned == layer_idx:
         getattr(ctx, "_ensure_blocks", lambda: ctx.block_table_tensor(layer_idx))()     # every row's blocks allocated
         _PLANNED.pop(id(w), None)                    # `attend`'s plan is this wrapper's no longer
-        w.plan(qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
+        plan(w, qo_indptr, kv_indptr, kv_indices([c.blocks for c in ctx.caches], nb, q.device), last, Hq, Hkv, D, bs,
                causal=True, sm_scale=scale, q_data_type=FP8 if fp8_q else q.dtype, kv_data_type=pool.k.dtype,
                o_data_type=q.dtype)
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
@@ -152,7 +167,7 @@ def attend(q: torch.Tensor, k_pool: torch.Tensor, v_pool: torch.Tensor, qo_indpt
     key = (Hq, Hkv, D, bs, scale, q.dtype, k_pool.dtype)
     done = _PLANNED.get(id(w))
     if done is None or done[0] is not kv_indices_ or done[1] != key:
-        w.plan(qo_indptr, kv_indptr, kv_indices_, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
+        plan(w, qo_indptr, kv_indptr, kv_indices_, last, Hq, Hkv, D, bs, causal=True, sm_scale=scale,
                q_data_type=FP8 if fp8_q else q.dtype, kv_data_type=k_pool.dtype, o_data_type=q.dtype)
         _PLANNED[id(w)] = (kv_indices_, key)     # holding the tensor keeps its memory from being reused by another
     qp = q.permute(0, 2, 1, 3).reshape(B * S, Hq, D)
