@@ -164,7 +164,9 @@ if PREFILL_ATTN == "flashinfer":
 # 0.38 / 0.34 / 0.29, 512 rows 0.39 / 0.44 / 0.30, 1,024 rows 0.47 / 0.70 / 0.50, 2,048 rows 0.61 / 1.17 / 0.83, 8,192
 # rows 2.95 / 4.00 / 2.86: the Triton paths win up to ~1,024 rows (8,192 pairs), W8A8 from 256 rows; beyond, torch's.
 # All three sit at 10-13% of fp8 peak at prefill sizes.
-MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "8192"))
+# 8192 -> 4096 (2026-11-03, H200, served decode step with XQA attention): 1,024 rows x 1,800 tokens 50.8 -> 44.6 ms with
+# the CUTLASS grouped GEMMs (MoE 21.8 -> 14.6 ms); 512 rows stays Triton (28.9 vs 30.9 ms), 256 rows even.
+MOE_KERNEL_MAX_ROWS = int(os.environ.get("CUSTOM_BACKEND_MOE_KERNEL_ROWS", "4096"))
 # ...and again from this many pairs: the 2026-10-24 tile sweep (W8A8, 64x64x128 tiles, the best of 47 configs at every
 # size) measured 4,096 tokens 1.19 ms vs torch 1.66 and 8,192 tokens 2.31 vs 2.82, while 2,048 tokens stays torch's
 # (0.65 vs 0.46). Both paths sit at 13-17% of fp8 peak: a proper fp8 grouped GEMM is kernel-loop work.
