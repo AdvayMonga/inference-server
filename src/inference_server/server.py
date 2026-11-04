@@ -8,7 +8,7 @@ import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -314,23 +314,37 @@ async def metrics():
     return Response(content=body, media_type=content_type)
 
 
-@app.middleware("http")
-async def timing_middleware(request: Request, call_next):
-    """Time every HTTP request → per-endpoint histogram + structured log line. Uses the matched
-    route template (not the raw path) as the label to keep cardinality low."""
-    start = time.perf_counter()
-    response = await call_next(request)
-    duration = time.perf_counter() - start
-    route = request.scope.get("route")
-    endpoint = getattr(route, "path", request.url.path)
-    if endpoint != "/metrics":  # don't let scrapes pollute their own histogram
-        prometheus_metrics.HTTP_DURATION.labels(
-            method=request.method, endpoint=endpoint, status=response.status_code,
-        ).observe(duration)
-        logger.info("http_request", extra={
-            "method": request.method, "endpoint": endpoint,
-            "status": response.status_code, "duration_ms": round(duration * 1000, 2),
-        })
-    return response
+class _TimingMiddleware:
+    """Time every HTTP request to its response's start -> per-endpoint histogram + structured log line, labelled by
+    the matched route template (not the raw path) to keep cardinality low. Plain ASGI: as `@app.middleware("http")` it
+    re-piped every streamed chunk through an anyio memory stream, ~30% of the HTTP process under overload, whose event
+    loop was the bottleneck (py-spy, H200 2026-11-03)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        start = time.perf_counter()
+
+        async def timed(message):
+            if message["type"] == "http.response.start":
+                duration = time.perf_counter() - start
+                endpoint = getattr(scope.get("route"), "path", scope["path"])
+                if endpoint != "/metrics":  # don't let scrapes pollute their own histogram
+                    prometheus_metrics.HTTP_DURATION.labels(
+                        method=scope["method"], endpoint=endpoint, status=message["status"],
+                    ).observe(duration)
+                    logger.info("http_request", extra={
+                        "method": scope["method"], "endpoint": endpoint,
+                        "status": message["status"], "duration_ms": round(duration * 1000, 2),
+                    })
+            await send(message)
+
+        await self.app(scope, receive, timed)
+
+
+app.add_middleware(_TimingMiddleware)
 
 
