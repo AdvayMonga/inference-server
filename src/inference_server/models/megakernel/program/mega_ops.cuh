@@ -478,7 +478,7 @@ __device__ __forceinline__ void op_topk(Ctx& c, const Instr& in, W& wait) {
         for (int j = 0; j < K; ++j) {
             float bv = fmaxf(fmaxf(pr[0], pr[1]), fmaxf(pr[2], pr[3]));
             bv = warp_max(bv);
-            int idx = E;
+            int idx = E - 1;                                           // not E: a row whose logits are all NaN matches no lane and must still name an expert that exists
 #pragma unroll
             for (int u = 3; u >= 0; --u) if (pr[u] == bv) idx = lane + 32 * u;
             for (int o = 16; o > 0; o >>= 1) idx = min(idx, __shfl_xor_sync(0xffffffff, idx, o));
