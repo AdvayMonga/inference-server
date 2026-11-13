@@ -63,7 +63,7 @@ _gc_t0 = [0.0]
 
 
 def _gc_watch(phase: str, info: dict) -> None:
-    """Log any collection that stalls the process (the scheduler freezes the heap to keep them short)."""
+    """Log any collection that stalls the process (the heap is frozen at startup to keep them short)."""
     if phase == "start":
         _gc_t0[0] = time.perf_counter()
         return
@@ -155,6 +155,8 @@ async def lifespan(app):
     app.state.tokenizer = tokenizer
     app.state.model_name = settings.model_name
     app.state.scheduler = scheduler
+    gc.collect()
+    gc.freeze()          # this process's startup heap (tokenizer, app) is never walked again: gen-2 stalls of 120-225 ms mid-stream
     app.state.ready = True
 
     yield
