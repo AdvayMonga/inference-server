@@ -580,7 +580,7 @@ def _picks(x, w_router, cfg) -> torch.Tensor:
     T, k, E = x.shape[0], cfg.top_k, cfg.num_experts
     M = T * k
     e = torch.empty(M, dtype=torch.long, device=x.device)
-    if M <= qwen3_moe.MOE_KERNEL_MAX_ROWS or (qwen3_moe.MOE_KERNEL_LARGE_PAIRS and M >= qwen3_moe.MOE_KERNEL_LARGE_PAIRS):
+    if M <= qwen3_moe.MOE_KERNEL_MAX_ROWS:
         router = moe_kernel.route_fused if T <= qwen3_moe.ROUTE_FUSED_MAX_TOKENS else moe_kernel.route_multi
         bm = qwen3_moe.moe_block_m(M)
         out = torch.empty(T, x.shape[1], dtype=torch.float32, device=x.device)
