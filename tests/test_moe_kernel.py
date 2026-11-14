@@ -174,6 +174,17 @@ def test_quant_rows_matches_quantize_rowwise(M, K):
     assert (q.float() != q_ref.float()).float().mean() < 1e-3          # a rounding-boundary element or two at most
 
 
+@pytest.mark.parametrize("M,dtype", [(1, torch.bfloat16), (300, torch.bfloat16), (300, torch.float32)])
+def test_silu_mul_quant_matches_silu_mul_then_quant_rows(M, dtype):
+    from inference_server.models import fused, moe_kernel
+    torch.manual_seed(M)
+    x = torch.randn(M, 2 * 768, dtype=dtype, device="cuda") * 3
+    q, s = moe_kernel.silu_mul_quant(x)
+    q_ref, s_ref = moe_kernel.quant_rows(fused.silu_mul(x))
+    torch.testing.assert_close(s, s_ref, rtol=0, atol=0)
+    assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8))
+
+
 @pytest.mark.parametrize("T,top_k,E", [(400, 8, 128), (1024, 8, 128), (2048, 8, 128)])
 def test_tall_tiles_match_the_torch_grouped_gemms(T, top_k, E):
     """Past 2048 pairs the GEMMs run 32- and 64-row tiles (qwen3_moe.moe_block_m): the gate_up GEMM over the routed
