@@ -44,7 +44,11 @@ class PrefillGraphs:
 
     def _attn_in(self, L: int, x: torch.Tensor, cos, sin, st: dict) -> None:
         at, N = self.m.layers[L].self_attn, x.shape[1]
-        q, k, v = at._qkv(x)
+        if hasattr(at, "qkv_w8"):
+            qd, kd = self.hq * self.d, self.hkv * self.d
+            q, k, v = at.linear_fp8(x, "qkv").split([qd, kd, kd], dim=-1)
+        else:
+            q, k, v = at._qkv(x)
         q = fused.rmsnorm_rope(q.view(1, N, self.hq, self.d), at.q_norm.weight, cos, sin, at.q_norm.eps)
         k = fused.rmsnorm_rope(k.view(1, N, self.hkv, self.d), at.k_norm.weight, cos, sin, at.k_norm.eps)
         v = v.view(1, N, self.hkv, self.d)
@@ -54,7 +58,8 @@ class PrefillGraphs:
 
     def _attn_out(self, L: int, h: torch.Tensor, st: dict) -> torch.Tensor:
         layer, N = self.m.layers[L], h.shape[1]
-        a = layer.self_attn.o_proj(st["o"].view(1, N, -1))
+        at, o = layer.self_attn, st["o"].view(1, N, -1)
+        a = at.linear_fp8(o, "o") if hasattr(at, "o_w8") else at.o_proj(o)
         pn = layer.post_attention_layernorm
         h, n = fused.add_rmsnorm(h, a, pn.weight, pn.eps)
         return layer.mlp(n, None, residual=h)

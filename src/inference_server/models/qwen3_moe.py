@@ -66,6 +66,23 @@ class Qwen3Attention(nn.Module):
         del self.q_proj, self.k_proj, self.v_proj
         self.register_buffer("qkv_weight", w.contiguous())
 
+    @torch.no_grad()
+    def dense_fp8(self) -> None:
+        """fp8 copies (per output channel) of the fused qkv and o_proj weights, for the prefill graphs' GEMMs; decode
+        keeps reading the bf16 ones."""
+        for name, w in (("qkv", self.qkv_weight), ("o", self.o_proj.weight)):
+            q, s = quantize_rowwise(w)
+            self.register_buffer(f"{name}_w8", q.contiguous())
+            self.register_buffer(f"{name}_s", s.float().contiguous())
+
+    def linear_fp8(self, x: torch.Tensor, name: str) -> torch.Tensor:
+        """x @ w.T in fp8 (x quantized per token, one launch), bf16 out: `name` is "qkv" or "o"."""
+        from inference_server.models import moe_kernel
+        a8, sa = moe_kernel.quant_rows(x.reshape(-1, x.shape[-1]))
+        y = torch._scaled_mm(a8, getattr(self, f"{name}_w8").t(), scale_a=sa[:, None],
+                             scale_b=getattr(self, f"{name}_s")[None, :], out_dtype=x.dtype)
+        return y.view(*x.shape[:-1], -1)
+
     def _qkv(self, x):
         qd, kd = self.num_q_heads * self.head_dim, self.num_kv_heads * self.head_dim
         if hasattr(self, "qkv_weight"):
