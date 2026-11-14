@@ -393,6 +393,33 @@ def quant_rows_gather(x: torch.Tensor, idx: torch.Tensor, div: int) -> tuple[tor
 
 
 @triton.jit
+def _silu_mul_quant_kernel(X, Q, S, stride_x, stride_q, I: tl.constexpr, FP8_MAX: tl.constexpr, BLOCK: tl.constexpr):
+    """One row: fused.silu_mul's bf16 values, then quant_rows on them."""
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, BLOCK)
+    m = cols < I
+    g = tl.load(X + row * stride_x + cols, mask=m, other=0.0).to(tl.float32)
+    u = tl.load(X + row * stride_x + I + cols, mask=m, other=0.0).to(tl.float32)
+    a = (g * tl.sigmoid(g) * u).to(tl.bfloat16).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(a), axis=0), 1e-12) / FP8_MAX
+    q = tl.minimum(tl.maximum(a / scale, -FP8_MAX), FP8_MAX)
+    tl.store(Q + row * stride_q + cols, q.to(tl.float8e4nv), mask=m)
+    tl.store(S + row, scale)
+
+
+def silu_mul_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """quant_rows(fused.silu_mul(x)) in one launch for x [M, 2I] (bf16 or fp32): the bf16 activation is never
+    written."""
+    x = x.contiguous()
+    M, I = x.shape[0], x.shape[1] // 2
+    q = torch.empty(M, I, dtype=torch.float8_e4m3fn, device=x.device)
+    s = torch.empty(M, dtype=torch.float32, device=x.device)
+    _silu_mul_quant_kernel[(M,)](x, q, s, x.stride(0), q.stride(0), I=I, FP8_MAX=448.0,
+                                 BLOCK=triton.next_power_of_2(I), num_warps=4)
+    return q, s
+
+
+@triton.jit
 def _gather_rows_kernel(X, Y, IDX, K, stride_x, DIV, BLOCK_K: tl.constexpr):
     row = tl.program_id(0)
     src = (tl.load(IDX + row) // DIV).to(tl.int64)

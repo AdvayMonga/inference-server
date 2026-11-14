@@ -296,18 +296,18 @@ def moe_cuda(flat: torch.Tensor, logits: torch.Tensor, gu: torch.Tensor, gu_s: t
         a8 = gu_s is not None and M >= MOE_A8_MIN_PAIRS
         a, sa = moe_kernel.quant_rows(flat) if a8 else (flat, None)
         h = moe_kernel.moe_gemm(a, tok, gu, sorted_ids, expert_ids, M, block_m=bm, w_scale=gu_s, a_scale=sa)
-        act = fused.silu_mul(h)
-        if a8:
-            act, sact = moe_kernel.quant_rows(act)
-        else:
-            sact = None
+        act, sact = moe_kernel.silu_mul_quant(h) if a8 else (fused.silu_mul(h), None)
         moe_kernel.moe_gemm_scatter(act, dn, sorted_ids, expert_ids, M, tok, pair_w, out, block_m=bm, w_scale=dn_s,
                                     a_scale=sact)
         return out if residual is None else fused.add_cast(residual.reshape(out.shape), out)
     # routing, gather and epilogue as custom launches: no sort, searchsorted, gather or scatter
     sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, num_experts, top_k, renorm)
-    act = fused.silu_mul(grouped_mm_sorted(flat, gu, gu_s, sorted_ids, top_k, offs))
-    y = grouped_mm(act, dn, dn_s, offs)
+    h = grouped_mm_sorted(flat, gu, gu_s, sorted_ids, top_k, offs)
+    if dn_s is None:
+        y = grouped_mm(fused.silu_mul(h), dn, None, offs)
+    else:                                       # the activation quantized by the launch that makes it
+        a8, sa = moe_kernel.silu_mul_quant(h)
+        y = torch._scaled_grouped_mm(a8, dn.transpose(-2, -1), sa, dn_s, offs=offs, out_dtype=h.dtype)
     return moe_kernel.gather_weighted(y, pos.view(T, top_k), pair_w.view(T, top_k), residual)
 
 
