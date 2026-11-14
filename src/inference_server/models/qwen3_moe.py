@@ -184,8 +184,9 @@ def moe_block_m(pairs: int) -> int:
     tiles once each expert has tens of rows, so its weights are read once per tile of 64 rows, not of 16."""
     return 16 if pairs <= 2048 else 32 if pairs <= 4096 else 64
 # Up to this many tokens the whole router (softmax, top-k, grouping, padding) is one launch (moe_kernel.route_fused);
-# above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router.
-ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "32"))
+# above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router: route_multi is faster
+# at every size, graphed (H200 2026-11-14: 10.7 vs 11.9 us at 1 token, 13.4 vs 26.8 at 32).
+ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "0"))
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
