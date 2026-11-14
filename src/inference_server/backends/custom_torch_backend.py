@@ -421,6 +421,8 @@ class CustomTorchBackend(InferenceBackend):
         if quant == "fp8" and self.device.type == "cuda":
             for layer in self.model.model.layers:
                 layer.mlp.experts.quantize_fp8()
+                if hasattr(layer.self_attn, "qkv_weight"):
+                    layer.self_attn.dense_fp8()        # the prefill graphs' qkv and o_proj GEMMs
             torch.cuda.empty_cache()
             logger.info("MoE experts quantized to fp8 e4m3 (per output channel; activations per token)")
         elif quant == "fp8":
