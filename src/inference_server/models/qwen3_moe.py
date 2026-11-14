@@ -204,6 +204,9 @@ def moe_block_m(pairs: int) -> int:
 # above it, the same in three (route_multi, a counting sort). 0 = never the one-launch router: route_multi is faster
 # at every size, graphed (H200 2026-11-14: 10.7 vs 11.9 us at 1 token, 13.4 vs 26.8 at 32).
 ROUTE_FUSED_MAX_TOKENS = int(os.environ.get("CUSTOM_BACKEND_ROUTE_FUSED_TOKENS", "0"))
+# torch._scaled_grouped_mm picks a 3x slower config above ~16.5k rows (H200, torch 2.14, gate_up: 2,048 tokens x 8
+# = 16,384 rows 232 us, 2,100 tokens 680 us, 4,096 tokens 937 us): bigger GEMMs run as chunks of this many rows.
+GMM_CHUNK_ROWS = 16384
 
 FP8 = torch.float8_e4m3fn
 FP8_MAX = 448.0
@@ -221,6 +224,21 @@ def _fake_quantize(x: torch.Tensor) -> torch.Tensor:
     return (q.to(torch.float32) * s[..., None]).to(x.dtype)
 
 
+def scaled_grouped_mm(a8: torch.Tensor, w: torch.Tensor, sa: torch.Tensor, s: torch.Tensor, offs: torch.Tensor,
+                      out_dtype: torch.dtype) -> torch.Tensor:
+    """torch._scaled_grouped_mm in row chunks of at most GMM_CHUNK_ROWS, each chunk's groups `offs` clamped to it on the
+    device (no sync)."""
+    R, wt = a8.shape[0], w.transpose(-2, -1)
+    if R <= GMM_CHUNK_ROWS:
+        return torch._scaled_grouped_mm(a8, wt, sa, s, offs=offs, out_dtype=out_dtype)
+    out = torch.empty(R, w.shape[1], dtype=out_dtype, device=a8.device)
+    for r0 in range(0, R, GMM_CHUNK_ROWS):
+        r1 = min(r0 + GMM_CHUNK_ROWS, R)
+        o = (offs - r0).clamp_(0, r1 - r0)
+        out[r0:r1] = torch._scaled_grouped_mm(a8[r0:r1], wt, sa[r0:r1], s, offs=o, out_dtype=out_dtype)
+    return out
+
+
 def grouped_mm(a: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, offs: torch.Tensor) -> torch.Tensor:
     """Grouped GEMM of the expert-sorted rows `a` against the weight stack `w` (fp8 with per-channel scales `s`, or
     bf16 with `s` None), groups ending at `offs`."""
@@ -232,7 +250,7 @@ def grouped_mm(a: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, offs: t
             a8, sa = moe_kernel.quant_rows(a.contiguous())
         else:
             a8, sa = quantize_rowwise(a)
-        return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=a.dtype)
+        return scaled_grouped_mm(a8, w, sa, s, offs, a.dtype)
     # Reference path (no fp8 GEMM here): the same roundings on both operands, then a bf16 grouped GEMM.
     deq = (w.to(torch.float32) * s[..., None]).to(a.dtype)
     return torch._grouped_mm(_fake_quantize(a), deq.transpose(-2, -1), offs=offs)
@@ -246,7 +264,7 @@ def grouped_mm_sorted(x: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, 
     if s is None:
         return torch._grouped_mm(moe_kernel.gather_rows(x, sorted_ids, top_k), w.transpose(-2, -1), offs=offs)
     a8, sa = moe_kernel.quant_rows_gather(x, sorted_ids, top_k)
-    return torch._scaled_grouped_mm(a8, w.transpose(-2, -1), sa, s, offs=offs, out_dtype=x.dtype)
+    return scaled_grouped_mm(a8, w, sa, s, offs, x.dtype)
 
 
 class Qwen3Experts(nn.Module):
@@ -324,7 +342,7 @@ def moe_cuda(flat: torch.Tensor, logits: torch.Tensor, gu: torch.Tensor, gu_s: t
         y = grouped_mm(fused.silu_mul(h), dn, None, offs)
     else:                                       # the activation quantized by the launch that makes it
         a8, sa = moe_kernel.silu_mul_quant(h)
-        y = torch._scaled_grouped_mm(a8, dn.transpose(-2, -1), sa, dn_s, offs=offs, out_dtype=h.dtype)
+        y = scaled_grouped_mm(a8, dn, sa, dn_s, offs, h.dtype)
     return moe_kernel.gather_weighted(y, pos.view(T, top_k), pair_w.view(T, top_k), residual)
 
 
