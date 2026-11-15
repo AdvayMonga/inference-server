@@ -47,8 +47,8 @@
 - Both routes take vLLM's benchmark fields `ignore_eos` (the row runs past its stop token to `max_tokens`,
   `ScheduledRequest.ignore_eos`) and `skip_special_tokens` (False keeps special tokens in the text), so a load
   client can fix each answer's length and still re-count its tokens from the text.
-- Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-2026102[45]-*` lab
-  A/Bs): single_stream TPOT p99 3.68 ms, saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
+- Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-2026102[456]-*` lab
+  A/Bs): single_stream TPOT p99 3.63 ms, p50 3.36 (2026-10-26), saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
   at 2,048 rows), bursty 256x at TPOT p99 19.8 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at
   22 ms. Defaults: the
   backend and scheduler in a child process (`ENGINE_PROCESS`, `engine_process.py`), 1,024 rows (`MAX_BATCH_SIZE`),
@@ -57,8 +57,10 @@
   (`CUSTOM_BACKEND_PREFILL_ATTN`; over fp8 K/V, q goes in as fp8 too and FA3's fp8 kernel runs,
   `CUSTOM_BACKEND_PREFILL_FP8_Q`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
   batch <= 2 (or as `models/megakernel/routing.json` says, when present) with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
-  stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position (build-time flags of
-  the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB`; `MEGAKERNEL_NOMATH` is a timing-only build), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
+  stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position, fp8 gate_up stages
+  on the tensor cores (`MEGAKERNEL_GUMMA`), down's act row in registers and its scales in shared memory (build-time
+  flags of the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB/GUMMA`; `MEGAKERNEL_NOMATH` is a timing-only
+  build, `MEGAKERNEL_STAMPS=1` the build that writes the debug `times` stamps, which cost ~0.1 ms a step compiled in), Triton MoE GEMMs up to 8,192 pairs with 16/32/64-row tiles
   and fp8 activations from 2,048 pairs (`models/moe_kernel.py`, table in `qwen3_moe.py`), CUTLASS grouped GEMMs
   above. One block table per request, shared by every layer (`paged_kv_cache.BlockAllocator`); KV admission reserves
   the p90 of recent output lengths and preempts/requeues a row that outgrows it; `KV_CACHE_DTYPE=fp8` pools are

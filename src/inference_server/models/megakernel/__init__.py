@@ -35,6 +35,8 @@ PRIME = os.environ.get("MEGAKERNEL_PRIME", "1") == "1"  # a phase's first ring s
 THREADS = int(os.environ.get("MEGAKERNEL_THREADS", "512"))   # 256 or 512 threads a block (8 or 16 warps)
 RING_KB = int(os.environ.get("MEGAKERNEL_RING_KB", "96"))      # the weight ring's size (up to 192 at batch <= 2)
 NOMATH = os.environ.get("MEGAKERNEL_NOMATH", "0") == "1"       # timing only: the ring phases skip their dot products
+GUMMA = os.environ.get("MEGAKERNEL_GUMMA", "1") == "1"         # fp8 gate_up stages dotted on the tensor cores
+STAMPS = os.environ.get("MEGAKERNEL_STAMPS", "0") == "1"       # debug: the build that writes `times` (off: none compiled in)
 BMAX = 16
 H, NQ, NKV, D, I, E, K = 2048, 32, 4, 128, 768, 128, 8   # the kernel's compile-time shape (Qwen3-30B-A3B)
 ROW = ("w.input_norm", "w.qkv", "w.q_norm", "w.k_norm", "w.o_proj", "w.post_norm", "w.router", "w.gate_up",
@@ -64,14 +66,15 @@ def _build(src: str, tag: str, kv8: bool, tma: bool, bps: int, include: list[str
     import sys
     from torch.utils.cpp_extension import load
     os.environ["PATH"] = str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", "")   # ninja lives there
-    return load(name=f"{tag}_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}_r{RING_KB}_nm{int(NOMATH)}",
+    return load(name=f"{tag}_kv8{int(kv8)}_tma{int(tma)}_bps{bps}_nst{NST}_c{CHUNK}_p{int(PRIME)}_t{THREADS}_r{RING_KB}_nm{int(NOMATH)}_g{int(GUMMA)}_s{int(STAMPS)}",
                 sources=[str(Path(__file__).with_name(src))], extra_include_paths=list(include),
                 # no --use_fast_math: the rope's cosf/sinf must be the precise ones (torch's are), the arguments
                 # reach position x inv_freq ~ 3e4 rad; fast exp is spelled __expf where it is wanted
                 extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "-lineinfo",
                                    f"-DMEGA_KV8={int(kv8)}", f"-DMEGA_TMA={int(tma)}", f"-DMEGA_BPS={bps}",
                                    f"-DMEGA_NST={NST}", f"-DMEGA_CHUNK={CHUNK}", f"-DMEGA_PRIME={int(PRIME)}",
-                                   f"-DMEGA_THREADS={THREADS}", f"-DMEGA_RING_KB={RING_KB}", f"-DMEGA_NOMATH={int(NOMATH)}"],
+                                   f"-DMEGA_THREADS={THREADS}", f"-DMEGA_RING_KB={RING_KB}", f"-DMEGA_NOMATH={int(NOMATH)}",
+                                   f"-DMEGA_GUMMA={int(GUMMA)}", f"-DMEGA_STAMPS={int(STAMPS)}"],
                 verbose=False)
 
 
@@ -193,8 +196,9 @@ def decode_step(mdl: Model, tokens: torch.Tensor, pos: torch.Tensor, bt: torch.T
     """tokens [B] int64, pos [B] int64 (each row's length so far = the new token's position), bt [B, cols] int64
     block table (one for every layer), as the batched state keeps it. Writes every layer's K/V for the new token into the pools and
     returns (logits [B, V] bf16, greedy next token [B] int64: the argmax, lowest index on ties, like torch's).
-    `times` [16] int64: globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug; given
-    [blocks, 16] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew. A STEP
+    `times` [16] int64 (the MEGAKERNEL_STAMPS=1 build): globaltimer stamps (layer `stamp_layer`'s phases, after the layers, the end), debug; given
+    [blocks, 128] (blocks = the grid, torch.cuda SM count), every block stamps its own row: the phases' skew and the
+    expert phases' ring stages (slots in decode_step.cu). A STEP
     override (models/regions/) runs in place of the extension for a Model without stamps; a caller passing its own
     namespace (the kernel layer's baseline) gets the extension."""
     assert mdl.table is not None, "bind_pools() first"

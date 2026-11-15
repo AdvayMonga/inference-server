@@ -234,6 +234,16 @@ __device__ __forceinline__ void load_down(const void* down, const int* ids, int 
 #ifndef MEGA_NOMATH
 #define MEGA_NOMATH 0
 #endif
+// MEGA_GUMMA: the fp8 gate_up stage (16 rows) dotted on the tensor cores: one m16n8k16 tile per 16 columns, the
+// weights converted exactly to f16, x as f16, f32 sums; the warps split the columns, partials summed in shared memory.
+#ifndef MEGA_GUMMA
+#define MEGA_GUMMA 1
+#endif
+// MEGA_STAMPS: the debug globaltimer stamps (`times`) are compiled in; off, the kernel carries none (the ring stages'
+// stamp checks alone cost ~0.1 ms a step at batch 1, 2026-10-26).
+#ifndef MEGA_STAMPS
+#define MEGA_STAMPS 0
+#endif
 constexpr int NST = MEGA_NST, STAGE = MEGA_RING_KB * 1024 / NST, RING_OFF = 32768;
 // Attention layout: SPLIT threads per position, each a QW-wide slice of the head dimension (q slices padded by 4 floats,
 // V rows by 8 elements, so the slices a quarter-warp reads start in different banks); PVS threads per (head, 8-wide d
@@ -265,8 +275,13 @@ __device__ __forceinline__ void mbar_wait(unsigned long long* b, uint32_t parity
 // nst stages through the ring: issue(s, dst, bar) (thread 0) arms `bar` with the stage's byte count and starts its
 // bulk copies into `dst`; consume(s, src) runs on the whole block once they have landed. `ph` holds each slot's phase
 // parity and persists across calls (every thread runs every call, so all agree).
+__device__ __forceinline__ unsigned long long gtimer() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
+
 template <typename Issue>
-__device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue) {
+__device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, unsigned char* ring, Issue issue,
+                                           unsigned long long* ts = nullptr) {
+    if (MEGA_STAMPS && ts && threadIdx.x == 0)
+        for (int s = 0; s < min(nst, min(NST, 8)); ++s) ts[3 * s] = gtimer();   // debug: the stages' issue times
     if (threadIdx.x == 0) {
         // the ring's bytes were last written by ordinary stores (the attention phase stages V there): order those
         // before the async proxy's copies
@@ -277,15 +292,22 @@ __device__ __forceinline__ void ring_prime(int nst, unsigned long long* bars, un
 
 template <typename Issue, typename Consume>
 __device__ __forceinline__ void ring_run(int nst, unsigned long long* bars, unsigned char* ring, uint32_t& ph,
-                                         Issue issue, Consume consume, bool primed = false) {
-    if (!primed) ring_prime(nst, bars, ring, issue);
+                                         Issue issue, Consume consume, bool primed = false,
+                                         unsigned long long* ts = nullptr) {
+    if (!primed) ring_prime(nst, bars, ring, issue, ts);
     for (int s = 0; s < nst; ++s) {
         const int k = s % NST;
         mbar_wait(bars + k, (ph >> k) & 1u);
         ph ^= 1u << k;
+        if (MEGA_STAMPS && ts && threadIdx.x == 0 && s < 8) ts[3 * s + 1] = gtimer();   // debug: landed
+        if (MEGA_STAMPS && ts && s == 1 && (threadIdx.x & 31) == 0) ts[48 + threadIdx.x / 32] = gtimer();   // each warp's
         consume(s, ring + k * STAGE);
         __syncthreads();                                          // the slot is free again
-        if (threadIdx.x == 0 && s + NST < nst) issue(s + NST, ring + k * STAGE, bars + k);
+        if (MEGA_STAMPS && ts && threadIdx.x == 0 && s < 8) ts[3 * s + 2] = gtimer();   // debug: consumed
+        if (threadIdx.x == 0 && s + NST < nst) {
+            if (MEGA_STAMPS && ts && s + NST < 8) ts[3 * (s + NST)] = gtimer();
+            issue(s + NST, ring + k * STAGE, bars + k);
+        }
     }
 }
 
@@ -359,6 +381,31 @@ __device__ __forceinline__ float smem_dot_fp8_8(const unsigned char* __restrict_
         for (int j = 0; j < 8; ++j) acc += wf[j] * xf[j];
     }
     return warp_sum(acc);
+}
+
+__device__ __forceinline__ void mma_f16(float* d, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
+    asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]) : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ uint32_t e4m3x2_f16x2(uint32_t v) {     // the low 2 bytes of v: e4m3 -> f16, exact
+    const __half2_raw r = __nv_cvt_fp8x2_to_halfraw2((unsigned short)v, __NV_E4M3);
+    return (uint32_t)r.x | ((uint32_t)r.y << 16);
+}
+__device__ __forceinline__ uint32_t f16x2_of(const bf16 a, const bf16 b) {
+    const __half2 h = __floats2half2_rn(bf2f(a), bf2f(b));
+    return *reinterpret_cast<const uint32_t*>(&h);
+}
+
+// One lane's share: 8 e4m3 weights dotted with 8 bf16 values held in registers.
+__device__ __forceinline__ float dot8_fp8(const uint2& w, const uint4& x) {
+    if constexpr (MEGA_NOMATH) return (float)(w.x & 0xff) + (float)(x.x & 0xff);
+    float wf[8], xf[8];
+    fp8_to_f32<8>(&w, wf);
+    bf16_to_f32<8>(&x, xf);
+    float a0 = 0.f, a1 = 0.f;
+#pragma unroll
+    for (int j = 0; j < 8; j += 2) { a0 += wf[j] * xf[j]; a1 += wf[j + 1] * xf[j + 1]; }
+    return a0 + a1;
 }
 
 // Stage starts over [lo, hi) in steps of at most `c`, never crossing a multiple of `seg` (a pair's rows end there):
