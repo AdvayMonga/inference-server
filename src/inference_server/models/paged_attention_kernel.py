@@ -349,14 +349,24 @@ def _xqa_applies(q, k_pool, block_tables, seq_lens) -> bool:
             and block_tables.dtype == torch.int32 and seq_lens.dtype == torch.int32)
 
 
+# XQA splits each row into round(SMs * 3 / (rows * kv heads) / 4) pieces, whatever the rows' lengths, so at 16-32 rows
+# one long row sets the step (H200 2026-11-15, 16 rows of lp8's lengths with one 11,883-token row: 66 us a layer
+# against 30 for 16 equal rows of the same mean). Telling it 8x the SMs gives 8x the pieces: 32 us; 64 and 256
+# rows unchanged.
+XQA_SM_MULT = 8
+
+
 def _xqa(q, k_pool, v_pool, block_tables, seq_lens, scale):
-    import flashinfer.decode as fd
+    from flashinfer.xqa import xqa
     ws = _XQA_WS.get(q.device)
     if ws is None:                                   # zeroed once, kept: the kernel's semaphores live in it
         ws = _XQA_WS[q.device] = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=q.device)
-    max_len = block_tables.shape[1] * k_pool.shape[2]   # fixed per captured graph (the table's width)
-    return fd.xqa_batch_decode_with_kv_cache(q.contiguous(), (k_pool, v_pool), ws, block_tables, seq_lens.view(torch.uint32),
-                                             max_len, bmm1_scale=scale, bmm2_scale=1.0, kv_layout="HND")
+    out = torch.empty_like(q)
+    xqa(q.contiguous().unsqueeze(1), k_pool, v_pool, block_tables, seq_lens.view(torch.uint32).unsqueeze(1),
+        out.unsqueeze(1), ws[8 << 20:], ws[:8 << 20], k_pool.shape[1], k_pool.shape[2],
+        q_scale=scale * q.shape[-1] ** 0.5, kv_scale=1.0, kv_layout="HND",
+        sm_count=torch.cuda.get_device_properties(q.device).multi_processor_count * XQA_SM_MULT)
+    return out
 
 
 def paged_decode_attention(
