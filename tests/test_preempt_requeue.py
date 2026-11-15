@@ -42,14 +42,14 @@ class ContinuingBackend(FakeMixedBackend):
             raise KVCacheExhausted("pool empty")
         return super().decode_step_batched(current_tokens, batched_kv, attention_mask, position_ids, sampling_per_row)
 
-    def kv_reserve(self, prompt_len, max_tokens):
+    def kv_reserve(self, prompt_len, max_tokens, shared=()):
         if self.capacity is not None and self.reserved + prompt_len + max_tokens > self.capacity:
             return False
         self.reserved += prompt_len + max_tokens
         self.reservations.append(max_tokens)
         return True
 
-    def kv_release(self, prompt_len, max_tokens):
+    def kv_release(self, prompt_len, max_tokens, shared=()):
         self.reserved -= prompt_len + max_tokens
 
 

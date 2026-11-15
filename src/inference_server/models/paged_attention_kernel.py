@@ -334,6 +334,31 @@ def _gqa_splits(n_seqs: int, n_kv: int) -> int:
     return max(2, min(16, s))
 
 
+# Over fp8 K/V pools on Hopper, decode attention runs in TensorRT-LLM's XQA kernel (shipped in FlashInfer): it reads
+# the pools' layout ([blocks, Hkv, block_size, D], "HND") and the block tables as they are, needs no host plan, so it
+# replays inside the decode graphs. H200 2026-11-03, per layer, fp8 K/V, 32 q / 4 kv heads: 1,024 rows x 1,800 tokens
+# 817 -> 462 us (~4.1 TB/s, the HBM floor), 256 x 2,048 243 -> 139, 8 x 2,048 54 -> 38. CUSTOM_BACKEND_DECODE_ATTN=triton
+# keeps the kernels below.
+DECODE_ATTN = os.environ.get("CUSTOM_BACKEND_DECODE_ATTN", "xqa")
+_XQA_WS: dict = {}
+
+
+def _xqa_applies(q, k_pool, block_tables, seq_lens) -> bool:
+    return (DECODE_ATTN == "xqa" and q.is_cuda and k_pool.dtype == torch.float8_e4m3fn and q.dtype == torch.bfloat16
+            and k_pool.shape[2] == 16 and q.shape[-1] == 128 and torch.cuda.get_device_capability(q.device)[0] == 9
+            and block_tables.dtype == torch.int32 and seq_lens.dtype == torch.int32)
+
+
+def _xqa(q, k_pool, v_pool, block_tables, seq_lens, scale):
+    import flashinfer.decode as fd
+    ws = _XQA_WS.get(q.device)
+    if ws is None:                                   # zeroed once, kept: the kernel's semaphores live in it
+        ws = _XQA_WS[q.device] = torch.zeros(256 * 1024 * 1024, dtype=torch.uint8, device=q.device)
+    max_len = block_tables.shape[1] * k_pool.shape[2]   # fixed per captured graph (the table's width)
+    return fd.xqa_batch_decode_with_kv_cache(q.contiguous(), (k_pool, v_pool), ws, block_tables, seq_lens.view(torch.uint32),
+                                             max_len, bmm1_scale=scale, bmm2_scale=1.0, kv_layout="HND")
+
+
 def paged_decode_attention(
     q: torch.Tensor,          # [N, Hq, D] — one decode token per sequence
     k_pool: torch.Tensor,     # [num_blocks, num_kv_heads, block_size, D]
@@ -345,6 +370,8 @@ def paged_decode_attention(
     """Decode attention reading K/V via block tables. Returns [N, Hq, D] (q's dtype)."""
     N, Hq, D = q.shape
     num_kv_heads = k_pool.shape[1]
+    if _xqa_applies(q, k_pool, block_tables, seq_lens):
+        return _xqa(q, k_pool, v_pool, block_tables, seq_lens, scale)
     q = q.contiguous()
     group = Hq // num_kv_heads
     bs = k_pool.shape[2]

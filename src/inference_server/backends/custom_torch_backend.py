@@ -24,7 +24,8 @@ from typing import Generator
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend, stop_token_ids
-from inference_server.models.paged_kv_cache import to_device, write_token
+from inference_server.models import fused
+from inference_server.models.paged_kv_cache import step_inputs, to_device, write_token
 from inference_server.sampling import GREEDY, SamplingParams, sample, sample_batched
 
 logger = logging.getLogger(__name__)
@@ -82,6 +83,12 @@ def _prefill_bucket(s: int) -> int | None:
     return None
 
 
+def real_tokens(suffix_lens: list[int]) -> list[int]:
+    """Flat indices of the real tokens in a right-padded [rows, longest] grid."""
+    s = max(suffix_lens)
+    return [b * s + i for b, n in enumerate(suffix_lens) for i in range(n)]
+
+
 class _PrefillGraphCtx:
     """Static-buffer paged ctx for K=1 CUDA-graph prefill at a fixed suffix bucket S, with or
     without a prefix-cache hit. Mirrors _GraphCtx: append scatters the S bucket tokens' K/V using
@@ -133,15 +140,16 @@ class _GraphCtx:
 
     def append(self, layer_idx, k_new, v_new):
         if layer_idx == self._live[0]:   # per-step values once per forward, not per layer (captured as such)
-            self._rows = torch.arange(self.seq_lens.shape[0], device=self.seq_lens.device)
-            self._lb = self.seq_lens // self.bs
-            self._slot = self.seq_lens % self.bs
-            self._sl32 = (self.seq_lens + 1).to(torch.int32)
-            self._bt32 = self.bt.to(torch.int32).clamp_min_(0)
+            s = self.step_inputs()
+            self._rows, self._lb, self._slot = s["kv_rows"], s["kv_block"], s["kv_slot"]
+            self._bt32, self._sl32 = s["attn_block_tables"], s["attn_seq_lens"]
         write_token(self.pools[layer_idx], self.bt, self._rows, self._lb, self._slot, k_new, v_new)
 
     def block_table_tensor(self, layer_idx):
         return self._bt32, self._sl32
+
+    def step_inputs(self) -> dict:
+        return step_inputs(self.bt, self.seq_lens, self.bs)
 
 
 class _PrefillCtx:
@@ -151,6 +159,7 @@ class _PrefillCtx:
     Suffix is right-padded (real tokens at [0, suffix_len)); padding queries are skipped in-kernel."""
 
     is_prefill = True
+    packed = False
 
     def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         self.caches = caches                       # list[PagedKVCache], one per row
@@ -161,12 +170,14 @@ class _PrefillCtx:
         self.suffix_lens = to_device(list(suffix_lens), device, torch.int32)
         self.device = device
         self._scratch = scratch                    # the padding block id (padding writes land here), every pool
-        self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
-        self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
+        if not self.packed:                        # the padded wave's grid (a packed wave has none)
+            self._ar = torch.arange(max(suffix_lens) if suffix_lens else 1, device=device)
+            self._valid = self._ar.unsqueeze(0) < self.suffix_lens.long().unsqueeze(1)   # [K, Smax]
         # Flat indices of the real tokens in the [K, Smax] grid when there is padding: the MoE runs only those
         # (a 54-row mixed step padded to 2048 once sent 110k tokens through the experts and OOMed on 3.4 GiB).
-        padded = suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
-        self.tokens = self._valid.reshape(-1).nonzero().squeeze(1) if padded else None
+        # Built on the host from the lengths: nonzero() on the device waits for every kernel queued before it.
+        padded = not self.packed and suffix_lens and sum(suffix_lens) < len(suffix_lens) * max(suffix_lens)
+        self.tokens = to_device(real_tokens(suffix_lens), device) if padded else None
         self._bt_cache = {}                        # layer -> the wave's [K, maxb] table, built once
         self._wave_table = None                    # the one block table (a block id is the same in every layer)
         self._wave_pos = None                      # (scratch id, block ids [K, S], slots [K, S]) of the suffix tokens
@@ -255,6 +266,9 @@ class _PackedCtx(_PrefillCtx):
     def __init__(self, caches, pools, prefix_lens, suffix_lens, device, scratch=None):
         super().__init__(caches, pools, prefix_lens, suffix_lens, device, scratch)
         self.tokens = None                                  # nothing is padded: the MoE sees every token
+        self._fused = fused.ENABLED and torch.device(device).type == "cuda"
+        if self._fused:                                     # token -> (block, slot) in one launch at the first append
+            return
         lens = self.suffix_lens.long()
         total = sum(suffix_lens)
         rows = torch.repeat_interleave(torch.arange(len(suffix_lens), device=device), lens, output_size=total)
@@ -266,12 +280,26 @@ class _PackedCtx(_PrefillCtx):
         """k/v_new [1, Hkv, T, D]: every token into its row's block, one scatter per pool."""
         pool = self.pools[layer_idx]
         bs = pool.block_size
-        bt, same = self._wave_bt(layer_idx)
-        if not same or self._wave_pos is None:
-            self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
+        if self._fused:
+            if self._wave_pos is None:                     # the same block ids in every layer: once a wave
+                self._ensure_blocks()
+                starts = [0]
+                for n in self._suffix[:-1]:
+                    starts.append(starts[-1] + n)
+                self._wave_pos = (None, *fused.packed_slots(self.prefix_lens, self.suffix_lens,
+                                                            to_device(starts, self.device, torch.int32), self._table(),
+                                                            bs, sum(self._suffix), max(self._suffix)))
+        else:
+            bt, same = self._wave_bt(layer_idx)
+            if not same or self._wave_pos is None:
+                self._wave_pos = (None, bt[self._rows, self._pos // bs], self._pos % bs)
         _, bids, slots = self._wave_pos
-        pool.k[bids, :, slots, :] = k_new[0].transpose(0, 1).to(pool.k.dtype)                 # [T, Hkv, D]
-        pool.v[bids, :, slots, :] = v_new[0].transpose(0, 1).to(pool.v.dtype)
+        k_t, v_t = k_new[0].transpose(0, 1), v_new[0].transpose(0, 1)                           # [T, Hkv, D]
+        if fused._on(k_t, v_t) and pool.k.dtype in (torch.bfloat16, torch.float8_e4m3fn):    # cast in the kernel
+            fused.kv_store_rows(pool.k, pool.v, bids, slots, k_t, v_t)
+        else:
+            pool.k[bids, :, slots, :] = k_t.to(pool.k.dtype)
+            pool.v[bids, :, slots, :] = v_t.to(pool.v.dtype)
         for b, cache in enumerate(self.caches):
             cache.seq_lens[layer_idx] += self._suffix[b]
 
@@ -295,6 +323,7 @@ class _StateRow:
 # prompts are 98.7% prefix-cache hits, spent half its time in such steps (H200, 2026-10-19). Measured long_prompt:
 # 20 req/s off, 33.3 at 64 tokens, 36.7 at 128 and at 256. 0 = off.
 PREFILL_AS_DECODE_TOKENS = int(os.environ.get("CUSTOM_BACKEND_PREFILL_AS_DECODE_TOKENS", "128"))
+BUCKET_WARM = 2048                     # a token count that makes `_piecewise` capture every bucket at load
 
 
 def decode_rows(caches, chunks, pools):
@@ -392,6 +421,8 @@ class CustomTorchBackend(InferenceBackend):
         if quant == "fp8" and self.device.type == "cuda":
             for layer in self.model.model.layers:
                 layer.mlp.experts.quantize_fp8()
+                if hasattr(layer.self_attn, "qkv_weight"):
+                    layer.self_attn.dense_fp8()        # the prefill graphs' qkv and o_proj GEMMs
             torch.cuda.empty_cache()
             logger.info("MoE experts quantized to fp8 e4m3 (per output channel; activations per token)")
         elif quant == "fp8":
@@ -406,9 +437,20 @@ class CustomTorchBackend(InferenceBackend):
         from inference_server.models import megakernel as mk
         self._mega_on = self.device.type == "cuda" and mk.ENABLED and mk.available()
         self._mega_max_rows = int(os.environ.get("MEGAKERNEL_MAX_ROWS", "2"))
+        # A measured table of which path wins per row count and context (models/megakernel/routing.py); the rule above
+        # where it has no entry.
+        from inference_server.models.megakernel import routing
+        self._mega_routing = (routing.load(os.environ.get("MEGAKERNEL_ROUTING", routing.DEFAULT), mk.BMAX)
+                              if self._mega_on else None)
         self._mega = mk.Model(self.model, self.device) if self._mega_on else None
         if self._mega is not None:
             logger.info("decode-step megakernel on: batch <= %d, experts %s", self._mega_max_rows, "fp8" if self._mega.fp8 else "bf16")
+        # The same step through the instruction interpreter (megakernel/framework.py), only where the table names it.
+        self._mega_fw = None
+        if self._mega_routing is not None and self._mega_routing.uses("framework"):
+            from inference_server.models.megakernel import framework
+            self._mega_fw = framework.Framework(self._mega)
+            logger.info("decode-step instruction interpreter on where the routing table names it")
 
         # A draft model for speculative decoding (SPEC_DRAFT_MODEL, drafter.py), loaded before the pools are sized: its
         # weights and its static cache (max_len = the context window) come out of the KV budget.
@@ -450,6 +492,7 @@ class CustomTorchBackend(InferenceBackend):
         self.pools = make_pools(self.model, num_blocks_per_pool=n_blocks, block_size=bsz, kv_dtype=self.kv_dtype)
         self._alloc = next(p for p in self.pools if p is not None).allocator      # one id space for every layer
         self._reserved = [0] * len(self.pools)  # per-pool blocks reserved by admitted requests
+        self._shared_refs: dict[int, int] = {}  # prefix-cache blocks admitted requests matched -> how many hold each
         if self._mega is not None:
             self._mega.bind_pools(self.pools)
 
@@ -518,6 +561,9 @@ class CustomTorchBackend(InferenceBackend):
         self._prefill_graphs: dict = {}
         if self._graph_on:
             self._capture_all_graphs()       # at load: on the first decode it was a 3.5 s step for the first requests
+        self._pw = None                      # piecewise prefill graphs (prefill_graphs.py), captured at load too
+        if self._piecewise_ok(None):
+            self._piecewise(BUCKET_WARM, None)
 
     # ---- Required interface ----
 
@@ -925,7 +971,11 @@ class CustomTorchBackend(InferenceBackend):
             if cuda:
                 ev0, ev1 = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
                 ev0.record()
-            logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
+            pw = self._piecewise(n_tok, decode)
+            if pw is not None:
+                logits = pw[0].forward(pw[1], ctx, input_ids, position_ids, last_idx)
+            else:
+                logits = self.model(input_ids, position_ids=position_ids, paged_ctx=ctx, logits_index=last_idx)
             if cuda:
                 ev1.record()
         except BaseException:
@@ -950,6 +1000,31 @@ class CustomTorchBackend(InferenceBackend):
                                     "gpu_forward_s": (round(ev0.elapsed_time(ev1) / 1e3, 4)
                                                       if cuda and ev1.query() else None)}   # a step with no final row has not synced
         return (out, next_tokens) if decode is not None else out
+
+    def _piecewise_ok(self, decode) -> bool:
+        """Whether a packed prefill forward can replay the piecewise graphs (the eager path's kernels, graphed)."""
+        from inference_server.backends import prefill_graphs
+        from inference_server.models import qwen3_moe, region_capture, stations
+        if not (prefill_graphs.ENABLED and self.device.type == "cuda" and self.packed_prefill and decode is None
+                and fused.ENABLED and qwen3_moe.PREFILL_ATTN == "flashinfer"
+                and hasattr(self.model.model.layers[0].self_attn, "qkv_weight")):
+            return False
+        cap = region_capture.active()
+        return not stations._overrides_of(stations.PREFILL) and not (cap is not None and cap.prefill)
+
+    def _piecewise(self, n_tok: int, decode):
+        """(graphs, the bucket's set) for a packed prefill of `n_tok` tokens, or None (the eager forward)."""
+        from inference_server.backends import prefill_graphs
+        if n_tok <= PREFILL_AS_DECODE_TOKENS or not self._piecewise_ok(decode):
+            return None
+        N = prefill_graphs.PrefillGraphs.bucket(n_tok)
+        if N is None:
+            return None
+        if self._pw is None:
+            self._ensure_scratch()
+            self._pw = prefill_graphs.PrefillGraphs(self.model, self.pools, self.device, self._scratch)
+        st = self._pw.get(N)
+        return (self._pw, st) if st is not None else None
 
     def joint_fits(self, n_rows: int, n_tokens: int, decode=None) -> bool:
         """Whether a step's prefill tokens (and `n_rows` running decode rows) fit one decode-graph replay."""
@@ -988,7 +1063,10 @@ class CustomTorchBackend(InferenceBackend):
             bt = tab_t[own_t]                                                                 # [n, cols]
             nd = state.n_rows if state is not None else 0
             if nd:
-                cols = max(bt.shape[1], state.bt.shape[1])
+                # Both tables grown to the same multiple of the table stride: _grow_cols rounds its target up only when
+                # it pads, so growing one and not the other left 128 against 84 columns (saturated, 2026-11-02).
+                from inference_server.models.paged_kv_cache import _BT_COLS
+                cols = -(-max(bt.shape[1], state.bt.shape[1]) // _BT_COLS) * _BT_COLS
                 bt = torch.cat([state._grow_cols(state.bt, cols), state._grow_cols(bt, cols)], dim=0)
                 tok_t = torch.cat([current.view(-1), tok_t])
                 pos_t = torch.cat([state.seq_lens, pos_t])
@@ -1040,20 +1118,27 @@ class CustomTorchBackend(InferenceBackend):
             n = state.n_rows
             if position_ids is None:                   # the state knows every row's position; no host round trip
                 position_ids = state.seq_lens.unsqueeze(1)
-            state.prepare_step()  # alloc any boundary-crossing block (once per step)
+            new = state.prepare_step(defer=True)  # alloc any boundary-crossing block (once per step)
             if self._graph_on and not self._graphs:
                 self._capture_all_graphs()   # all buckets up-front, largest first (shared pool)
             # Rows past context_window outgrow the static block tables; run that step eagerly.
             fits = state.bt.shape[1] <= self._graph_max_cols
             greedy_tokens = None
-            if self._mega_on and n <= self._mega_max_rows:
-                logits, greedy_tokens = self._decode_megakernel(current_tokens, state)
+            seq_next = None
+            path = self._mega_path(state) if self._mega_on else "kernels"
+            if path != "kernels":
+                if new is not None:
+                    new.apply()
+                logits, greedy_tokens = self._decode_megakernel(current_tokens, state, path)
             elif self._graph_on and fits:
+                seq_next = torch.empty_like(state.seq_lens)            # staged by the same launch as the inputs
                 logits = self._replay_decode(current_tokens, position_ids, state,
-                                             self._decode_bucket(n))
+                                             self._decode_bucket(n), new=new, seq_next=seq_next)
             else:
+                if new is not None:
+                    new.apply()
                 logits = self._decode_fwd(current_tokens, position_ids=position_ids, paged_ctx=state)
-            state.advance()       # bump seq_lens
+            state.advance(seq_next)       # bump seq_lens
         else:
             from inference_server.models.paged_kv_cache import BatchedPagedKVCache
             greedy_tokens = None
@@ -1131,12 +1216,24 @@ class CustomTorchBackend(InferenceBackend):
 
     # --- the decode-step megakernel (MEGAKERNEL=1, batch <= 16): one cooperative kernel for the whole step ---
 
-    def _decode_megakernel(self, current_tokens, state):
+    def _mega_path(self, state) -> str:
+        """The routing table's path for this step's rows and longest context, else the megakernel for
+        n <= MEGAKERNEL_MAX_ROWS and the kernels above."""
+        n, table = state.n_rows, self._mega_routing
+        path = table.path(n, state.max_len()) if table is not None and n in table.rows else None
+        return path if path is not None else "megakernel" if n <= self._mega_max_rows else "kernels"
+
+    def _decode_megakernel(self, current_tokens, state, path="megakernel"):
         """One launch: embedding, every layer (each writes its K/V for the new token), final norm, lm_head, greedy
-        argmax -> (logits [B, 1, V], tokens [B]). Nothing else is launched around it: a cooperative kernel overlaps no
-        other kernel, so each small launch beside it cost ~70 us of idle GPU (measured 2026-10-18)."""
+        argmax -> (logits [B, 1, V], tokens [B]); `path` "framework" runs it through the instruction interpreter.
+        Nothing else is launched around it: a cooperative kernel overlaps no other kernel, so each small launch beside
+        it cost ~70 us of idle GPU (measured 2026-10-18)."""
         from inference_server.models import megakernel as mk
-        logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
+        if path == "framework":
+            from inference_server.models.megakernel import framework
+            logits, tokens = framework.decode_step(self._mega_fw, current_tokens.view(-1), state.seq_lens, state.bt)
+        else:
+            logits, tokens = mk.decode_step(self._mega, current_tokens.view(-1), state.seq_lens, state.bt)
         return logits.unsqueeze(1), tokens
 
     # --- CUDA-graph decode capture/replay (one graph per row bucket; see DECISIONS) ---
@@ -1162,8 +1259,8 @@ class CustomTorchBackend(InferenceBackend):
         g_tokens = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_pos = torch.zeros(bucket, 1, dtype=torch.long, device=dev)
         g_seqlens = torch.ones(bucket, dtype=torch.long, device=dev)
-        # One table for every layer (a block id is the same in each layer's pool); replay refreshes it in two copies.
-        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.long, device=dev)
+        # One int32 table for every layer (a block id is the same in each layer's pool), refreshed by the staging launch.
+        g_bt = torch.full((bucket, cols), self._scratch, dtype=torch.int32, device=dev)
         ctx = _GraphCtx(self.pools, g_seqlens, g_bt, self._block_size)
         if os.environ.get("CUSTOM_BACKEND_EXPLAIN", "0") == "1":
             self._log_graph_breaks(ctx, g_tokens, g_pos)
@@ -1240,18 +1337,15 @@ class CustomTorchBackend(InferenceBackend):
         except Exception as e:
             print(f"[graph-breaks] explain failed (diagnostic only): {e}", flush=True)
 
-    def _replay_decode(self, current_tokens, position_ids, state, bucket):
-        """Copy this step's inputs into `bucket`'s static buffers (real rows + scratch dummies),
+    def _replay_decode(self, current_tokens, position_ids, state, bucket, new=None, seq_next=None):
+        """Stage this step's inputs into `bucket`'s static buffers (real rows + scratch dummies) in one launch,
         replay that bucket's graph, return logits[:n_rows]. The graph reads the static buffers,
-        so its scatter/kernel run on the fresh values — no per-op dispatch."""
+        so its scatter/kernel run on the fresh values — no per-op dispatch. `new`, `seq_next`: as
+        fused.stage_decode's (a block allocated this step; the lengths after it)."""
         n = state.n_rows
         g = self._graphs[bucket]
-        g["tokens"][:n].copy_(current_tokens)
-        g["pos"][:n].copy_(position_ids)
-        g["seqlens"][:n].copy_(state.seq_lens)
-        g["seqlens"][n:] = 1
-        g["bt"].fill_(self._scratch)                                  # reset dummies + stale columns to scratch
-        g["bt"][:n, :state.bt.shape[1]].copy_(state.bt.clamp_min(0))  # one table for every layer
+        fused.stage_decode(g, current_tokens, position_ids, state.seq_lens, state.bt, n, self._scratch,
+                           new=(new.blk, new.col) if new is not None else None, seq_next=seq_next)
         g["graph"].replay()
         return g["out"][:n]
 
@@ -1417,21 +1511,36 @@ class CustomTorchBackend(InferenceBackend):
         return [0 if pool is None else (tokens + pool.block_size - 1) // pool.block_size
                 for pool in self.pools]
 
-    def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
-        """Admit only if this request's per-pool footprint fits in EVERY pool's free blocks.
-        Commits the reservation on success. Single-threaded (scheduler worker) → no lock."""
+    def kv_reserve(self, prompt_len: int, max_tokens: int, shared=()) -> bool:
+        """Admit only if this request's blocks fit in EVERY pool: its own (prompt + max_tokens, less the `shared`
+        blocks its prefix-cache match already holds) on top of every admitted request's own, plus each distinct
+        matched block once, however many requests share it. Commits the reservation on success. Single-threaded
+        (scheduler worker) → no lock."""
         fps = self._kv_footprints(prompt_len, max_tokens)
+        m = len(shared)
+        distinct = len(self._shared_refs) + sum(1 for b in shared if b not in self._shared_refs)
         for i, pool in enumerate(self.pools):
-            if pool is not None and self._reserved[i] + fps[i] > pool.num_blocks:
+            if pool is not None and self._reserved[i] + fps[i] - m + distinct > pool.num_blocks:
                 return False
-        for i in range(len(self.pools)):
-            self._reserved[i] += fps[i]
+        for i, pool in enumerate(self.pools):
+            if pool is not None:
+                self._reserved[i] += fps[i] - m
+        for b in shared:
+            self._shared_refs[b] = self._shared_refs.get(b, 0) + 1
         return True
 
-    def kv_release(self, prompt_len: int, max_tokens: int) -> None:
+    def kv_release(self, prompt_len: int, max_tokens: int, shared=()) -> None:
         fps = self._kv_footprints(prompt_len, max_tokens)
-        for i in range(len(self.pools)):
-            self._reserved[i] -= fps[i]
+        m = len(shared)
+        for i, pool in enumerate(self.pools):
+            if pool is not None:
+                self._reserved[i] -= fps[i] - m
+        for b in shared:
+            n = self._shared_refs[b] - 1
+            if n:
+                self._shared_refs[b] = n
+            else:
+                del self._shared_refs[b]
 
     def kv_capacity_error(self, prompt_len: int, max_tokens: int) -> str | None:
         for fp, pool in zip(self._kv_footprints(prompt_len, max_tokens), self.pools):

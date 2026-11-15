@@ -44,15 +44,19 @@
   repo via `LAB_ENGINE_REPO` (default `../inference-server`) and runs its code with `.venv/bin/python`.
 - `/v1/completions` accepts token-id prompts and vLLM's `prompt_logprobs: k` (teacher-forced scoring via
   `CustomTorchBackend.score_logprobs`), the output-equivalence surface the environment uses.
-- Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-202610(24|25|26)-*`
-  lab A/Bs): single_stream TPOT p99 3.63 ms, p50 3.36 (2026-10-26), saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
+- Both routes take vLLM's benchmark fields `ignore_eos` (the row runs past its stop token to `max_tokens`,
+  `ScheduledRequest.ignore_eos`) and `skip_special_tokens` (False keeps special tokens in the text), so a load
+  client can fix each answer's length and still re-count its tokens from the text.
+- Serving on the H200 (short tier, BlameGraph ledger runs `manual-20261020/21/24` and the `researcher-2026102[456]-*` lab
+  A/Bs): single_stream TPOT p99 3.63 ms, p50 3.36 (2026-10-26), saturated 9-10.4 req/s, long_prompt 80, short_prompt_long_output 22.5 (24.1
   at 2,048 rows), bursty 256x at TPOT p99 19.8 ms; vLLM 0.32 on the same corpus 4.10 / 5.47 / 80 / 22.5 / 256x at
   22 ms. Defaults: the
   backend and scheduler in a child process (`ENGINE_PROCESS`, `engine_process.py`), 1,024 rows (`MAX_BATCH_SIZE`),
   mixed prefill (`PREFILL_MODE`, 2048-token steps; chunks of <= 128 tokens run as decode rows through the decode
   graphs), async decode with first tokens read asynchronously, FlashInfer paged prefill attention
-  (`CUSTOM_BACKEND_PREFILL_ATTN`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
-  batch <= 2 with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
+  (`CUSTOM_BACKEND_PREFILL_ATTN`; over fp8 K/V, q goes in as fp8 too and FA3's fp8 kernel runs,
+  `CUSTOM_BACKEND_PREFILL_FP8_Q`), decode CUDA graphs per row bucket captured at load, the decode-step megakernel at
+  batch <= 2 (or as `models/megakernel/routing.json` says, when present) with its weights streamed through a TMA shared-memory ring (`MEGAKERNEL_TMA`), 16 warps a block, ring
   stages pre-issued before their barriers, 128-position attention chunks with 4 lanes per position, fp8 gate_up stages
   on the tensor cores (`MEGAKERNEL_GUMMA`), down's act row in registers and its scales in shared memory (build-time
   flags of the extension: `MEGAKERNEL_THREADS/PRIME/CHUNK/NST/RING_KB/GUMMA`; `MEGAKERNEL_NOMATH` is a timing-only
@@ -72,5 +76,32 @@
   BlameGraph's regimes; `profiles.py` writes `[general]` and the table named by `ENGINE_PROFILE` into the env before
   `config.py` loads settings, so a profile overrides the launch env. BlameGraph serves a regime with its own table in
   its own launch and gates that config with its own equiv. Ships empty: one config for everything.
+- The decode megakernel as an instruction interpreter (`models/megakernel/framework.py` + `interp.cu`): one persistent
+  kernel whose blocks each run a queue of instructions ordered by dependency counters (no grid barriers inside the
+  step), same inputs and outputs as `megakernel.decode_step`. A program = a schedule (Python, built at load for batch
+  1..16) + its instructions' device code (a header interp.cu includes); `models/megakernel/program/` is the default,
+  today's phases with the same arithmetic (`common.cuh` holds the helpers both kernels share), its router (TOPK, in
+  every block) writing the experts into the block's GATEUP/DOWN instructions on the GPU. A search passes its own
+  program to `Framework`. Taken only where the routing table names the path `"framework"`; not yet compiled or
+  measured on a GPU (`tests/test_megakernel_framework.py`, MEGAKERNEL_TEST=1; schedules: `test_megakernel_schedule.py`).
+- Whole-step override (the kernel layer's `region:embed:argmax` winner): a module of `models/regions/` may define
+  `STEP(tokens, pos, bt, k_pools, v_pools, weights) -> (logits, next)` (K/V in place; `weights` = `megakernel.Model.weights`,
+  BlameGraph kernels/step.py's names); `megakernel.decode_step` runs it in place of the extension. A framework program
+  ships this way: `STEP = framework.step(program)`. `megakernel.source()` is decode_step.cu with common.cuh inlined.
+- Decode stations (`models/stations.py`): a CUDA decode step (fused kernels, Triton MoE path, QKV fused) runs each
+  layer as 13 named stations (`DECODE`, each with the context entries it reads and writes); `models/regions/` may
+  define `OVERRIDES = {(first, last): fn}` that replace a stretch, resolved once at the first decode forward (before
+  graph capture). A CUDA prefill wave (FlashInfer attention, fused kernels) is the 8 stations of `PREFILL` (names
+  "p_": norms, qkv, rope, `p_kv_store` (in place, through the context), `p_attention` (`prefill_flashinfer.attend`
+  from the wave's tensors), o_proj, `p_moe` = `qwen3_moe.moe_cuda`, the same function the module calls); a wave runs
+  through them only while a "p_" stretch is overridden or captured (`prefill_applies`), the module path otherwise.
+  CPU keeps the layer forward. `CAPTURE_REGION=first:last` (+
+  `CAPTURE_REGION_DIR`, optional `CAPTURE_REGION_LAYERS`) records a stretch's real reads and writes per layer call
+  (`models/region_capture.py`, BlameGraph's `lab/capture.py` layout; graphs and the megakernel off, `CUSTOM_BACKEND_CUDA_GRAPH=0 MEGAKERNEL=0`, to see every call).
+- No PyTorch built-in kernels on the CUDA hot paths (2026-10-30): every launch of the graphed decode step and the
+  packed prefill forward is ours (Triton/CUDA) or a library's (cuBLAS, CUTLASS, FlashInfer). Graph inputs are staged
+  by one launch (`fused.stage_decode`, `prepare_step(defer=True)`), embedding + rotary is one (`fused.embed_rope`),
+  greedy sampling is `fused.argmax`, the routers zero the down GEMM's accumulator, and the CUTLASS MoE path routes
+  with `moe_kernel.route_dense` (no torch.sort). A new op on these paths is a custom kernel or folded into a neighbour.
 - `TIMELINE_DIR` turns on the engine event timeline (`timeline.py`): one JSONL event per scheduler
   decision and a profiler range per phase, both keyed by step id. Off by default, no-op when off.

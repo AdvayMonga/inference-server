@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 import torch
 
+from inference_server.models import fused
+
 
 @dataclass(frozen=True)
 class SamplingParams:
@@ -28,6 +30,8 @@ def sample(logits: torch.Tensor, params: SamplingParams = GREEDY) -> torch.Tenso
     logits: [..., vocab_size] — last dim is vocab. Returns shape with last dim dropped.
     """
     if params.temperature <= 0.0:
+        if logits.is_cuda and fused.ENABLED and logits.stride(-1) == 1:     # one custom launch pair, not torch's reduce
+            return fused.argmax(logits.reshape(-1, logits.shape[-1])).view(logits.shape[:-1])
         return logits.argmax(dim=-1)
 
     scaled = logits.float() / params.temperature

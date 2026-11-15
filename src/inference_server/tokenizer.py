@@ -86,13 +86,13 @@ class Tokenizer:
 
         return token_ids
 
-    def decode(self, token_ids: list[int]) -> str:
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
         """Convert token IDs back to text."""
-        return self._tokenizer.decode(token_ids, skip_special_tokens=True)
+        return self._tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
-    def incremental(self) -> "IncrementalDetokenizer":
+    def incremental(self, skip_special_tokens: bool = True) -> "IncrementalDetokenizer":
         """A detokenizer for one streamed answer."""
-        return IncrementalDetokenizer(self.decode)
+        return IncrementalDetokenizer(lambda ids: self.decode(ids, skip_special_tokens))
 
     def decode_token(self, token_id: int) -> str:
         """Decode a single token ID — used for streaming one token at a time."""
@@ -129,7 +129,7 @@ class IncrementalDetokenizer:
     broke such characters (byte-level BPE splits an emoji over several tokens) and cost a decode call per token."""
 
     def __init__(self, decode):
-        self._text = decode       # token ids -> text, special tokens skipped
+        self._text = decode       # token ids -> text
         self._ids: list[int] = []
         self._prefix = 0          # start of the window whose text was already emitted up to `_read`
         self._read = 0

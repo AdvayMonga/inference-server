@@ -13,8 +13,11 @@ from inference_server.openai_shim import router
 from inference_server.scheduler import QueueFullError, RequestTooLargeError
 
 
+SPECIAL = ord("#")   # the fake tokenizer's one special token
+
+
 class FakeTokenizer:
-    """1 char = 1 token; decode_token echoes the char. Deterministic, no HF load."""
+    """1 char = 1 token, "#" special; decode_token echoes the char. Deterministic, no HF load."""
     def encode(self, text):
         if not text:
             raise ValueError("empty")
@@ -25,15 +28,15 @@ class FakeTokenizer:
             raise ValueError("No messages provided")
         return self.encode("".join(m["content"] for m in messages))
 
-    def decode(self, ids):
-        return "".join(chr(i) for i in ids)
+    def decode(self, ids, skip_special_tokens=True):
+        return "".join(chr(i) for i in ids if not (skip_special_tokens and i == SPECIAL))
 
     def decode_token(self, tid):
         return chr(tid)
 
-    def incremental(self):
+    def incremental(self, skip_special_tokens=True):
         from inference_server.tokenizer import IncrementalDetokenizer
-        return IncrementalDetokenizer(self.decode)
+        return IncrementalDetokenizer(lambda ids: self.decode(ids, skip_special_tokens))
 
 
 class FakeScheduler:
@@ -421,3 +424,25 @@ def test_incremental_detokenizer_holds_a_split_character_and_streams_the_rest():
     assert d.add(emoji[:2]) == ""                               # incomplete: held back
     assert d.add(emoji[2:] + list(b"!")) == "🙂!"
     assert d.add(emoji[:1]) == "" and d.flush() == "\ufffd"     # an answer cut mid-character still ends
+
+
+def test_ignore_eos_and_special_tokens_default_off_and_pass_through_on_both_routes():
+    """vLLM's benchmark fields: ignore_eos reaches the scheduler, skip_special_tokens=False keeps "#" in the text."""
+    sched = FakeScheduler()
+    sched.out = [ord("a"), SPECIAL, ord("b")]
+    client = TestClient(_app(sched))
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 3})
+    assert r.json()["choices"][0]["text"] == "ab" and sched.seen[-1].ignore_eos is False
+    bench = {"ignore_eos": True, "skip_special_tokens": False}
+    r = client.post("/v1/completions", json={"prompt": "hi", "max_tokens": 3, **bench})
+    assert r.json()["choices"][0]["text"] == "a#b" and sched.seen[-1].ignore_eos is True
+    r = client.post("/v1/chat/completions", json={**CHAT_BODY, **bench})
+    assert r.json()["choices"][0]["message"]["content"] == "a#b" and sched.seen[-1].ignore_eos is True
+    with client.stream("POST", "/v1/chat/completions", json={**CHAT_BODY, **bench, "stream": True}) as r:
+        chunks = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: {")]
+    text = "".join(c["choices"][0]["delta"].get("content", "") for c in chunks if c["choices"])
+    assert text == "a#b" and chunks[-1]["usage"]["completion_tokens"] == 3
+    with client.stream("POST", "/v1/completions", json={"prompt": "hi", "max_tokens": 3, **bench, "stream": True}) as r:
+        chunks = [json.loads(line[6:]) for line in r.iter_lines() if line.startswith("data: {")]
+    assert "".join(c["choices"][0]["text"] for c in chunks if c["choices"]) == "a#b"
+    assert chunks[-2]["choices"][0]["finish_reason"] == "length" and sched.seen[-1].ignore_eos is True

@@ -199,12 +199,13 @@ class InferenceBackend(ABC):
     # --- Per-pool KV admission (backends that bound admission by their own block pools) ---
     # Default no-op: backends relying on the scheduler's token gate / cache-pool gate pass.
 
-    def kv_reserve(self, prompt_len: int, max_tokens: int) -> bool:
-        """Reserve KV-block budget for a request about to be admitted. Returns True (and
-        commits the reservation) if it fits in every pool, else False (caller soft-holds)."""
+    def kv_reserve(self, prompt_len: int, max_tokens: int, shared=()) -> bool:
+        """Reserve KV-block budget for a request about to be admitted (`shared`: the block ids its prefix-cache
+        match already holds). Returns True (and commits the reservation) if it fits in every pool, else False
+        (caller soft-holds)."""
         return True
 
-    def kv_release(self, prompt_len: int, max_tokens: int) -> None:
+    def kv_release(self, prompt_len: int, max_tokens: int, shared=()) -> None:
         """Release a reservation taken by kv_reserve (request finished / rejected / failed)."""
         ...
 

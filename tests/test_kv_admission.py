@@ -19,6 +19,7 @@ def _backend():
     large = BlockPool(100, bs, 1, 8, torch.float32, torch.device("cpu"))
     b.pools = [small, large, None]   # None = a layer that owns no K/V
     b._reserved = [0, 0, 0]
+    b._shared_refs = {}
     return b
 
 
@@ -51,3 +52,22 @@ def test_capacity_error_only_when_a_pool_can_never_fit():
     assert b.kv_capacity_error(80, 20) is None
     assert b.kv_capacity_error(900, 100) == (
         "request needs 1000 KV tokens (prompt + max_tokens) but the cache holds 160")
+
+
+def test_shared_prefix_blocks_reserved_once():
+    """Requests whose prefix-cache match holds the same blocks reserve those blocks once between them, and their own
+    blocks (prompt + output beyond the match) each."""
+    b = _backend()
+    b.pools = [b.pools[0], None]               # one 10-block pool
+    b._reserved = [0, 0]
+    shared = (3, 4, 5)                          # a 48-token system prompt, 3 blocks, already in the cache
+    # 48 matched + 16 own prompt tokens + 16 output = 5 blocks each, 3 of them the shared ones.
+    assert b.kv_reserve(64, 16, shared) is True    # own 2 + shared 3 = 5
+    assert b.kv_reserve(64, 16, shared) is True    # own 2 more: 7
+    assert b.kv_reserve(64, 16, shared) is True    # 9
+    assert b._reserved == [6, 0] and b._shared_refs == {3: 3, 4: 3, 5: 3}
+    assert b.kv_reserve(64, 16, shared) is False   # 11 > 10; counted fully it would have stopped at 2 requests
+    assert b.kv_reserve(64, 16, (6, 7, 8)) is False   # other matched blocks count too: 6 + 6 + 2 > 10
+    for _ in range(3):
+        b.kv_release(64, 16, shared)
+    assert b._reserved == [0, 0] and b._shared_refs == {}

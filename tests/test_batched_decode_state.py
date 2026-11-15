@@ -53,7 +53,7 @@ def test_state_decode_bookkeeping():
     for r, P in enumerate(prefill_lens):
         final_len = P + STEPS
         for L, pool in enumerate(pools):
-            n_alloc = int(state.n_alloc[r].item())
+            n_alloc = state._host_alloc[r]
             for pos in range(final_len):
                 lb = pos // BS
                 if lb >= n_alloc:

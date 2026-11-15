@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 import torch
 
 from inference_server.backends.base import DeviceToken, InferenceBackend
+from inference_server.models import fused
 from inference_server.models.paged_kv_cache import KVCacheExhausted, to_device
 from inference_server.metrics import MetricsTracker
 from inference_server.sampling import SamplingParams
@@ -130,9 +131,11 @@ class ScheduledRequest:
     cancelled: bool = False     # set by the HTTP side when the client goes away
     drafter: object | None = None   # NgramDrafter once speculative decoding has run for this request
     kv_res: tuple[int, int] = (0, 0)   # (prompt, output) tokens reserved for it at admission, released on exit
+    kv_shared: tuple = ()              # the prefix-cache blocks its reservation counted as already held
     preemptions: int = 0        # times it was preempted under KV pressure and requeued
     admit_seq: int = 0          # admission order (the latest admitted is preempted first)
     requeue_ts: float = 0.0     # when it was last requeued; its queue deadline counts from here (enqueue_ts stays)
+    ignore_eos: bool = False    # benchmarking (vLLM's ignore_eos): stop tokens are kept and it runs to max_tokens
 
     @property
     def prefill_ids(self) -> list[int]:
@@ -160,6 +163,7 @@ class _ActiveRow:
     current_token: int | DeviceToken   # token to feed next forward pass (a DeviceToken until its host copy lands)
     real_kv_len: int         # actual KV cache length for this row
     fresh: bool = True       # current_token not yet appended/streamed/checked for EOS by _evict_finished
+    backlog: list = field(default_factory=list)   # earlier tokens still to stream ahead of current_token
 
 
 @dataclass
@@ -467,50 +471,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     if self._pending_count == 0:
                         continue   # idle tick: nothing to admit, nothing to step
 
-            self._timeline.begin_step()
-            step_t0 = time.perf_counter()
             try:
-                with self.backend._lock:  # serialize against legacy generate/stream
-                    # Order matters: admit (lookup-only when chunked) → advance one prefill
-                    # chunk (may promote a row to _active with a fresh first_token) → evict
-                    # processes those first_tokens this same iter → decode advances active.
-                    with self._timeline.phase("admit"):
-                        self._admit_pending(device)
-                    self._decoded_this_iter = False
-                    with self._timeline.phase("prefill_chunk"):
-                        if self.prefill_mode == "mixed":
-                            self._advance_prefill_mixed(device)
-                        else:
-                            self._advance_prefill_chunk(device)
-                    with self._timeline.phase("evict"):
-                        self._evict_finished()
-                    if not self._active:
-                        self._pending = None            # every row of the last step has gone
-                    if self._active and not self._decoded_this_iter:
-                        self._active_samples += 1
-                        self._active_sum += len(self._active)
-                        if len(self._active) > self._active_high_water:
-                            self._active_high_water = len(self._active)
-                        try:
-                            with self._timeline.phase("decode", batch=len(self._active)):
-                                if self._spec_ready():
-                                    self._decode_step_spec(device)
-                                elif self.async_decode:
-                                    self._decode_step_async(device)
-                                else:
-                                    self._decode_step(device)
-                        except Exception as e:
-                            # Under genuine KV pressure the NEWEST request should pay, not the
-                            # whole batch. Preempt one row (freeing its blocks) and let the next
-                            # iteration retry; only escalate if we are down to a single row.
-                            if len(self._active) > 1:
-                                self._preempt_newest(e)
-                            elif isinstance(e, KVCacheExhausted) and self._prefilling:
-                                self._requeue_prefilling()        # their blocks back; the one row goes on
-                            else:
-                                raise
+                self.step(device)
                 errors_in_a_row = 0
-                self._step_event(step_t0)
                 self._steps_since_freeze += 1
                 if self._steps_since_freeze % GC_YOUNG_STEPS == 0:
                     # A full collection walks every live object; the prefix cache's nodes and the rows' host mirrors
@@ -540,6 +503,53 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._fail_all(e)
                     break
 
+    def step(self, device: str | None = None) -> None:
+        """One scheduler iteration: admit → one prefill chunk → evict → decode, under the backend's lock. The loop
+        calls it; a simulator calls it directly, on its own clock, with its own backend."""
+        device = device or self.backend.device_str
+        self._timeline.begin_step()
+        step_t0 = time.perf_counter()
+        with self.backend._lock:  # serialize against legacy generate/stream
+            # Order matters: admit (lookup-only when chunked) → advance one prefill
+            # chunk (may promote a row to _active with a fresh first_token) → evict
+            # processes those first_tokens this same iter → decode advances active.
+            with self._timeline.phase("admit"):
+                self._admit_pending(device)
+            self._decoded_this_iter = False
+            with self._timeline.phase("prefill_chunk"):
+                if self.prefill_mode == "mixed":
+                    self._advance_prefill_mixed(device)
+                else:
+                    self._advance_prefill_chunk(device)
+            with self._timeline.phase("evict"):
+                self._evict_finished()
+            if not self._active:
+                self._pending = None            # every row of the last step has gone
+            if self._active and not self._decoded_this_iter:
+                self._active_samples += 1
+                self._active_sum += len(self._active)
+                if len(self._active) > self._active_high_water:
+                    self._active_high_water = len(self._active)
+                try:
+                    with self._timeline.phase("decode", batch=len(self._active)):
+                        if self._spec_ready():
+                            self._decode_step_spec(device)
+                        elif self.async_decode:
+                            self._decode_step_async(device)
+                        else:
+                            self._decode_step(device)
+                except Exception as e:
+                    # Under genuine KV pressure the NEWEST request should pay, not the
+                    # whole batch. Preempt one row (freeing its blocks) and let the next
+                    # iteration retry; only escalate if we are down to a single row.
+                    if len(self._active) > 1:
+                        self._preempt_newest(e)
+                    elif isinstance(e, KVCacheExhausted) and self._prefilling:
+                        self._requeue_prefilling()        # their blocks back; the one row goes on
+                    else:
+                        raise
+        self._step_event(step_t0)
+
     def _step_event(self, t0: float) -> None:
         if not self._timeline.enabled:
             return
@@ -568,16 +578,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     continue                  # its host copy has not landed: streamed on a later pass
                 tok = row.current_token = tok.value()
             row.fresh = False
-
-            if self.backend.is_eos(tok):
-                to_evict.append((i, "ok"))
-                continue
-
-            row.request.generated.append(tok)
-            self._stream_token(row.request, tok)
-
-            if len(row.request.generated) >= row.request.max_tokens:
-                to_evict.append((i, "ok"))
+            tokens, row.backlog = row.backlog + [tok], []
+            for tok in tokens:
+                if self.backend.is_eos(tok) and not row.request.ignore_eos:
+                    to_evict.append((i, "ok"))
+                    break
+                row.request.generated.append(tok)
+                self._stream_token(row.request, tok)
+                if len(row.request.generated) >= row.request.max_tokens:
+                    to_evict.append((i, "ok"))
+                    break
 
         if to_evict:
             for i, _ in to_evict:
@@ -735,9 +745,19 @@ class ContinuousBatchScheduler(SchedulerInterface):
                     self._timeline.event("admit_blocked", reason="active_kv", trace_id=peeked.trace_id)
                     break
 
+                # Chunked/mixed: the prefix-cache lookup comes first, so the reservation counts the blocks the match
+                # already holds once for every request sharing them (one system prompt under 769 rows was reserved
+                # 769 times: shared prefix admission blocked at a pool far from full, 2026-11-02).
+                lookup = hit = None
+                if self.prefill_mode in ("chunked", "mixed"):
+                    lookup = self.backend.prefill_lookup(peeked.prefill_ids, peeked.session_id)
+                    hit = self.backend.last_cache_hit_tokens
+                shared = tuple(getattr(lookup[0], "blocks", None) or ()) if lookup is not None else ()
                 # Per-pool window-aware KV gate (custom backend; no-op default). Soft-hold if
                 # this request's per-pool footprint doesn't fit every pool's free blocks.
-                if not self.backend.kv_reserve(prompt_n, out_res):
+                if not self.backend.kv_reserve(prompt_n, out_res, shared):
+                    if lookup is not None and hasattr(lookup[0], "free_all"):
+                        lookup[0].free_all()
                     self._kv_admit_blocked += 1
                     self._timeline.event("admit_blocked", reason="backend_pools", trace_id=peeked.trace_id)
                     break
@@ -751,6 +771,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                 self._pending_count -= 1
                 self._active_kv_reserved += reservation
                 req.kv_res = (prompt_n, out_res)
+                req.kv_shared = shared
             self._timeline.event("admit", trace_id=req.trace_id, mode=self.prefill_mode,
                                  reservation=reservation, queue_wait_s=req.admit_ts - req.enqueue_ts)
             if self.prefill_mode == "batched":
@@ -760,8 +781,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
             try:
                 if self.prefill_mode in ("chunked", "mixed"):
                     # Lookup only; the forward happens in _advance_prefill_chunk / _advance_prefill_mixed
-                    partial_kv, matched = self.backend.prefill_lookup(req.prefill_ids, req.session_id)
-                    req.cache_hit_tokens = self.backend.last_cache_hit_tokens
+                    partial_kv, matched = lookup
+                    req.cache_hit_tokens = hit
                     self._prefilling.append(_PrefillingRow(
                         request=req, matched=matched,
                         tokens_fed=matched, partial_kv=partial_kv,
@@ -1069,7 +1090,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
             for t in kept:
                 used += 1
                 row.real_kv_len += 1
-                if self.backend.is_eos(t):
+                if self.backend.is_eos(t) and not req.ignore_eos:
                     finished = "ok"
                     break
                 req.generated.append(t)
@@ -1117,6 +1138,16 @@ class ContinuousBatchScheduler(SchedulerInterface):
             dev = out_prev.device
         if not where and not any(isinstance(r.current_token, DeviceToken) for r in batch):
             return to_device([r.current_token for r in batch], dev)
+        groups = {id(r.current_token.tokens) for r in batch if id(r) not in where and isinstance(r.current_token, DeviceToken)}
+        if dev.type == "cuda" and fused.ENABLED and len(groups) <= 1:      # one launch: rows from the last step's
+            prev = out_prev if where else None                           # output, a prefill's tokens, or the host
+            devt = next((r.current_token.tokens for r in batch if id(r) not in where
+                         and isinstance(r.current_token, DeviceToken)), None)
+            src = [where.get(id(r), -1) for r in batch]
+            src_dev = [r.current_token.index if src[i] < 0 and isinstance(r.current_token, DeviceToken) else -1
+                       for i, r in enumerate(batch)]
+            host = [0 if src[i] >= 0 or src_dev[i] >= 0 else r.current_token for i, r in enumerate(batch)]
+            return fused.assemble_tokens(prev, devt, to_device(src + src_dev + host, dev), n)
         current = torch.empty(n, dtype=torch.long, device=dev)
         dst = [i for i, r in enumerate(batch) if id(r) in where]
         if dst:
@@ -1145,9 +1176,10 @@ class ContinuousBatchScheduler(SchedulerInterface):
         if self._pending is not None:
             self._finish_pending()                 # the previous step's tokens, while this step runs
         self._pending = (next_tokens, batch, host, event)
-        for row in batch:                          # first tokens read now: this step is already queued behind them
-            if isinstance(row.current_token, DeviceToken):
-                row.current_token = row.current_token.value()
+        for row in batch:                          # first tokens whose copy has landed; the rest are read without
+            tok = row.current_token                # waiting by _evict_finished or the next _finish_pending
+            if isinstance(tok, DeviceToken) and tok.ready():
+                row.current_token = tok.value()
 
     def _pinned_out(self, n: int, dtype) -> torch.Tensor:
         """A pinned host buffer for this step's tokens, from a ring of four (pinning a fresh one each step is a
@@ -1171,6 +1203,9 @@ class ContinuousBatchScheduler(SchedulerInterface):
         for row, tok in zip(snap, host.tolist()):
             if id(row) not in alive:
                 continue                           # finished or cancelled since: its extra token is dropped
+            if row.fresh:                          # a prefill's first token not streamed yet (its copy landed
+                first = row.current_token          # behind this step's): streamed ahead of this one
+                row.backlog.append(first.value() if isinstance(first, DeviceToken) else first)
             row.current_token = tok
             row.real_kv_len += 1
             row.fresh = True
@@ -1332,8 +1367,8 @@ class ContinuousBatchScheduler(SchedulerInterface):
         p, o = request.kv_res
         if p or o:
             self._active_kv_reserved -= p + o
-            self.backend.kv_release(p, o)
-            request.kv_res = (0, 0)
+            self.backend.kv_release(p, o, request.kv_shared)
+            request.kv_res, request.kv_shared = (0, 0), ()
 
     def _fail_inflight(self, exc: BaseException, state: str | None = None) -> None:
         """Drop everything in flight and RELEASE ITS KV, leaving the worker able to continue.

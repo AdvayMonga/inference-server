@@ -42,6 +42,8 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+    ignore_eos: bool = False           # vLLM's: run to max_tokens past the stop token (benchmarks)
+    skip_special_tokens: bool = True   # vLLM's: False keeps special tokens in the text
 
     @property
     def output_budget(self) -> int:
@@ -57,6 +59,8 @@ class CompletionRequest(BaseModel):
     temperature: float = 0.0
     top_p: float = 1.0
     top_k: int = 0
+    ignore_eos: bool = False           # vLLM's: run to max_tokens past the stop token (benchmarks)
+    skip_special_tokens: bool = True   # vLLM's: False keeps special tokens in the text
     prompt_logprobs: int | None = None
 
 
@@ -158,11 +162,12 @@ def _failed_midway(req: ScheduledRequest, n: int) -> bool:
 
 
 async def _stream(req: ScheduledRequest, first: int | None, tokenizer, cid: str, created: int,
-                  model: str, prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
+                  model: str, prompt_tokens: int, max_tokens: int,
+                  skip_special_tokens: bool = True) -> AsyncGenerator[str, None]:
     """Stream one OpenAI chunk per generated token, then finish_reason + usage + [DONE]."""
     n = 0
     ended = False
-    detok = tokenizer.incremental()
+    detok = tokenizer.incremental(skip_special_tokens)
     try:
         async for ids in _token_batches(req, first):
             text = detok.add(ids)
@@ -243,7 +248,7 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
-            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
+            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival, ignore_eos=body.ignore_eos,
         )
         try:
             scheduler.enqueue(req)
@@ -262,14 +267,15 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
             raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
-            _stream(req, first, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens),
+            _stream(req, first, tokenizer, cid, created, body.model, len(token_ids), body.max_tokens,
+                    body.skip_special_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=body.max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
-        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
+        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival, ignore_eos=body.ignore_eos,
     )
     try:
         generated_ids = await scheduler.submit(req)
@@ -279,7 +285,7 @@ async def completions(body: CompletionRequest, request: Request, response: Respo
     except RequestTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
-    text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
+    text = await loop.run_in_executor(None, tokenizer.decode, generated_ids, body.skip_special_tokens)
     n = len(generated_ids)
     response.headers["X-Trace-Id"] = req.trace_id
     return {
@@ -301,11 +307,12 @@ def _chat_chunk(cid: str, created: int, model: str, delta: dict, finish: str | N
 
 
 async def _chat_stream(req: ScheduledRequest, first: int | None, tokenizer, cid: str, created: int,
-                       model: str, prompt_tokens: int, max_tokens: int) -> AsyncGenerator[str, None]:
+                       model: str, prompt_tokens: int, max_tokens: int,
+                       skip_special_tokens: bool = True) -> AsyncGenerator[str, None]:
     """Role delta first (clients key off it), then one content delta per token, then usage."""
     n = 0
     ended = False
-    detok = tokenizer.incremental()
+    detok = tokenizer.incremental(skip_special_tokens)
     try:
         yield _chat_chunk(cid, created, model, {"role": "assistant", "content": ""}, None)
         async for ids in _token_batches(req, first):
@@ -360,7 +367,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
         req = ScheduledRequest(
             token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
             future=loop.create_future(), token_queue=asyncio.Queue(), sampling=sampling,
-            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
+            trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival, ignore_eos=body.ignore_eos,
         )
         try:
             scheduler.enqueue(req)
@@ -379,14 +386,15 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
             raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
         return StreamingResponse(
-            _chat_stream(req, first, tokenizer, cid, created, body.model, len(token_ids), max_tokens),
+            _chat_stream(req, first, tokenizer, cid, created, body.model, len(token_ids), max_tokens,
+                         body.skip_special_tokens),
             media_type="text/event-stream", headers={"X-Trace-Id": req.trace_id},
         )
 
     req = ScheduledRequest(
         token_ids=token_ids, max_tokens=max_tokens, session_id=session_id,
         future=loop.create_future(), sampling=sampling,
-        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival,
+        trace_id=trace_id, turn_index=turn_index, arrival_ts=arrival, ignore_eos=body.ignore_eos,
     )
     try:
         generated_ids = await scheduler.submit(req)
@@ -396,7 +404,7 @@ async def chat_completions(body: ChatCompletionRequest, request: Request, respon
     except RequestTooLargeError as e:
         raise HTTPException(status_code=400, detail=str(e),
                                 headers={"X-Trace-Id": req.trace_id})
-    text = await loop.run_in_executor(None, tokenizer.decode, generated_ids)
+    text = await loop.run_in_executor(None, tokenizer.decode, generated_ids, body.skip_special_tokens)
     n = len(generated_ids)
     response.headers["X-Trace-Id"] = req.trace_id
     return {

@@ -59,7 +59,8 @@ def test_align_fused_matches_align_and_the_scatter_gemm_matches_index_add(T, top
 @pytest.mark.parametrize("router,T,top_k,E,renorm", [("route_fused",) + c for c in [(1, 8, 128, True), (7, 8, 128, True), (32, 8, 128, False), (5, 2, 8, True),
                                                (3, 1, 4, True)]]
                          + [("route_multi", 1, 8, 128, True), ("route_multi", 33, 8, 128, False),
-                            ("route_multi", 200, 8, 128, True), ("route_multi", 5, 2, 8, True)])
+                            ("route_multi", 200, 8, 128, True), ("route_multi", 5, 2, 8, True),
+                            ("route_multi", 256, 8, 128, True), ("route_multi", 4096, 8, 128, True)])
 def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     """Same grouping (every pair once, each block one expert), same weights, same scattered output."""
     from inference_server.models import moe_kernel
@@ -67,7 +68,10 @@ def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     torch.manual_seed(T + 7)
     logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
     rw, rids = route(logits, top_k, renorm)
-    sorted_ids, expert_ids, tok, pair_w = getattr(moe_kernel, router)(logits, E, top_k, renorm, 16)
+    K_, N = 256, 384
+    out = torch.full((T, N), float("nan"), device="cuda")              # the router zeroes the down GEMM's accumulator
+    sorted_ids, expert_ids, tok, pair_w = getattr(moe_kernel, router)(logits, E, top_k, renorm, 16, out=out)
+    assert torch.equal(out, torch.zeros_like(out))
     M = T * top_k
     assert sorted_ids.numel() == expert_ids.numel() * 16 and (sorted_ids < M).sum() == M
     real = sorted_ids[sorted_ids < M]
@@ -87,10 +91,8 @@ def test_router_matches_the_four_launch_routing(router, T, top_k, E, renorm):
     for t in range(T):
         assert set(pair_e[t * top_k:(t + 1) * top_k].tolist()) == set(rids[t].tolist())
     torch.testing.assert_close(pair_w, ref_w[tok.long(), pair_e.long()], atol=2e-3, rtol=2e-2)
-    K_, N = 256, 384
     act = torch.randn(M, K_, dtype=torch.bfloat16, device="cuda")
     w = torch.randn(E, N, K_, dtype=torch.bfloat16, device="cuda") * 0.05
-    out = torch.zeros(T, N, device="cuda")
     moe_kernel.moe_gemm_scatter(act, w, sorted_ids, expert_ids, M, tok, pair_w, out)
     ref = torch.zeros(T, N, device="cuda")
     for i in range(M):
@@ -172,6 +174,17 @@ def test_quant_rows_matches_quantize_rowwise(M, K):
     assert (q.float() != q_ref.float()).float().mean() < 1e-3          # a rounding-boundary element or two at most
 
 
+@pytest.mark.parametrize("M,dtype", [(1, torch.bfloat16), (300, torch.bfloat16), (300, torch.float32)])
+def test_silu_mul_quant_matches_silu_mul_then_quant_rows(M, dtype):
+    from inference_server.models import fused, moe_kernel
+    torch.manual_seed(M)
+    x = torch.randn(M, 2 * 768, dtype=dtype, device="cuda") * 3
+    q, s = moe_kernel.silu_mul_quant(x)
+    q_ref, s_ref = moe_kernel.quant_rows(fused.silu_mul(x))
+    torch.testing.assert_close(s, s_ref, rtol=0, atol=0)
+    assert torch.equal(q.view(torch.uint8), q_ref.view(torch.uint8))
+
+
 @pytest.mark.parametrize("T,top_k,E", [(400, 8, 128), (1024, 8, 128), (2048, 8, 128)])
 def test_tall_tiles_match_the_torch_grouped_gemms(T, top_k, E):
     """Past 2048 pairs the GEMMs run 32- and 64-row tiles (qwen3_moe.moe_block_m): the gate_up GEMM over the routed
@@ -248,3 +261,78 @@ def test_fp8_activations_match_torch_scaled_grouped_mm(T, top_k, E, bm):
                                  out_dtype=torch.bfloat16).float() * pair_w[order, None]
     ref = torch.zeros(T, K, device="cuda").index_add_(0, rows, y)
     torch.testing.assert_close(out, ref, atol=5e-2, rtol=3e-2)
+
+
+@pytest.mark.parametrize("T", [33, 1500, 4096])
+def test_route_dense_groups_every_pair_with_group_ends_and_positions(T):
+    from inference_server.models import moe_kernel
+    from inference_server.models.qwen3_moe import route
+    torch.manual_seed(T)
+    E, top_k = 128, 8
+    logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda") * 2
+    sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, E, top_k, True)
+    M = T * top_k
+    assert torch.equal(sorted_ids.sort().values, torch.arange(M, device="cuda", dtype=torch.int32))
+    assert torch.equal(sorted_ids[pos.long()], torch.arange(M, device="cuda", dtype=torch.int32))     # pos inverts it
+    starts = torch.cat([offs.new_zeros(1), offs[:-1]]).long()
+    pair_e = torch.empty(M, dtype=torch.long, device="cuda")
+    for e in range(E):
+        pair_e[sorted_ids[starts[e]:offs[e]].long()] = e
+    assert int(offs[-1]) == M
+    rw, rids = route(logits, top_k, True)
+    for t in range(0, T, max(1, T // 50)):
+        assert set(pair_e[t * top_k:(t + 1) * top_k].tolist()) == set(rids[t].tolist())
+    ref_w = torch.zeros(T, E, device="cuda").scatter_(1, rids, rw.float())
+    tok = torch.arange(M, device="cuda") // top_k
+    torch.testing.assert_close(pair_w, ref_w[tok, pair_e], atol=2e-3, rtol=2e-2)
+
+
+def test_quant_and_gather_rows_take_the_sorted_pairs_tokens():
+    from inference_server.models import moe_kernel
+    torch.manual_seed(0)
+    x = torch.randn(300, 2048, dtype=torch.bfloat16, device="cuda")
+    idx = torch.randperm(300 * 8, device="cuda").int()
+    q, s = moe_kernel.quant_rows_gather(x, idx, 8)
+    rq, rs = moe_kernel.quant_rows(x[idx.long() // 8])
+    assert torch.equal(q.view(torch.uint8), rq.view(torch.uint8)) and torch.equal(s, rs)
+    assert torch.equal(moe_kernel.gather_rows(x, idx, 8), x[idx.long() // 8])
+
+
+def test_gather_weighted_adds_the_residual_as_the_layer_did():
+    from inference_server.models import moe_kernel
+    torch.manual_seed(0)
+    T, K, N = 70, 8, 2048
+    y = torch.randn(T * K, N, dtype=torch.bfloat16, device="cuda")
+    pos = torch.randperm(T * K, device="cuda").view(T, K).int()
+    w = torch.rand(T, K, device="cuda")
+    h = torch.randn(T, N, dtype=torch.bfloat16, device="cuda")
+    assert torch.equal(moe_kernel.gather_weighted(y, pos, w, residual=h), h + moe_kernel.gather_weighted(y, pos, w))
+
+
+@pytest.mark.parametrize("T", [1500, 3000])
+def test_grouped_gemm_path_matches_the_sort_path(T):
+    """The MoE's CUTLASS path (1,024 < T < 4,096 tokens) with the custom routing and epilogue, against torch routing
+    and the same grouped GEMMs."""
+    from inference_server.models import qwen3_moe as Q
+    torch.manual_seed(T)
+    moe = Q.Qwen3SparseMoE(2048, 768, 128, 8, True).cuda()
+    with torch.no_grad():
+        for p in moe.parameters():
+            p.normal_(0, 0.02)
+    moe.experts.quantize_fp8()
+    x = torch.randn(1, T, 2048, dtype=torch.bfloat16, device="cuda")
+    h = torch.randn_like(x)
+    with torch.no_grad():
+        got = moe(x, residual=h)
+        flat = x.reshape(-1, 2048)
+        logits = moe.gate(flat)
+        weights, experts = Q.route(logits.float(), 8, True)
+        weights = weights.float()
+        order = torch.sort(experts.view(-1), stable=True)[1]
+        ends = torch.searchsorted(experts.view(-1)[order].contiguous(), torch.arange(128, device="cuda"), right=True).int()
+        act = Q.fused.silu_mul(moe.experts.gate_up(flat[order // 8], ends))
+        yy = moe.experts.down(act, ends)
+        pos = torch.empty_like(order).scatter_(0, order, torch.arange(order.numel(), device="cuda"))
+        from inference_server.models import moe_kernel
+        ref = moe_kernel.gather_weighted(yy, pos.view(T, 8), weights.contiguous(), residual=h.reshape(T, 2048))
+    torch.testing.assert_close(got.reshape(T, 2048).float(), ref.float(), atol=2e-2, rtol=2e-2)
