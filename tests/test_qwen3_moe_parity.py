@@ -378,3 +378,22 @@ async def test_packed_joint_steps_match_hf_greedy_with_staggered_arrivals(backen
     finally:
         backend.packed_prefill = False
     assert outs == [_hf_greedy(hf, p, 10) for p in PROMPTS * 2]
+
+
+def test_scaled_grouped_mm_in_row_chunks_matches_one_call(monkeypatch):
+    """Chunked rows with their groups clamped give the one-call result (a reference grouped GEMM stands in on CPU)."""
+    def ref(a, wt, sa, s, offs, out_dtype):
+        out, start = torch.zeros(a.shape[0], wt.shape[-1]), 0
+        for e, end in enumerate(offs.tolist()):
+            out[start:end] = (a[start:end].float() * sa[start:end, None]) @ (wt[e].float() * s[e][None, :])
+            start = end
+        return out.to(out_dtype)
+    monkeypatch.setattr(torch, "_scaled_grouped_mm", ref)
+    torch.manual_seed(0)
+    E, R, K, N = 6, 50, 16, 8
+    a, sa = torch.randn(R, K), torch.rand(R) + 0.5
+    w, s = torch.randn(E, N, K), torch.rand(E, N) + 0.5
+    offs = torch.tensor([3, 3, 20, 31, 44, 50], dtype=torch.int32)
+    whole = qwen3_moe.scaled_grouped_mm(a, w, sa, s, offs, torch.float32)
+    monkeypatch.setattr(qwen3_moe, "GMM_CHUNK_ROWS", 16)
+    torch.testing.assert_close(qwen3_moe.scaled_grouped_mm(a, w, sa, s, offs, torch.float32), whole)
