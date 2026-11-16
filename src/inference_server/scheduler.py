@@ -223,7 +223,7 @@ class ContinuousBatchScheduler(SchedulerInterface):
                  max_active_kv_tokens: int = 0,
                  prefill_chunk_size: int = 0,
                  max_prefill_tokens: int = 0,
-                 prefill_step_tokens: int = 2048,
+                 prefill_step_tokens: int = 4096,
                  prefill_step_rows: int = 0,
                  prefill_joint: bool = False,
                  prefill_mode: str | None = None,
