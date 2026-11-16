@@ -157,16 +157,23 @@ def align_fused(sorted_experts: torch.Tensor, order: torch.Tensor, weights: torc
 
 
 @triton.jit(do_not_specialize=["M"])
-def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K,
+def _moe_gemm_scatter_raw(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK, PAIR_W, M, N, K: tl.constexpr,
                              stride_am, stride_wn, stride_wk, stride_om,
                              E: tl.constexpr, BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
                              SPLIT_K: tl.constexpr, W_FP8: tl.constexpr, A_FP8: tl.constexpr,
-                             EVEN_N: tl.constexpr = False):
+                             EVEN_N: tl.constexpr = False, N_MAJOR: tl.constexpr = False,
+                             EVEN_K: tl.constexpr = False, USE_GDC: tl.constexpr = False):
     """The down projection with its epilogue: each pair's row, times its routing weight, added into its token's
     fp32 output row (the multiply, the zero-fill-and-index_add and the cast were four launches). Split over K like
     moe_gemm: the atomics make the slices free."""
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
+    if N_MAJOR:
+        pid_n = tl.program_id(0)
+        pid_m = tl.program_id(1)
+    else:
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
     e = tl.load(EXPERT_IDS + pid_m)
     if e >= E:
         return
@@ -179,6 +186,10 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK,
     k_lo = tl.program_id(2) * (K // SPLIT_K)
     a_ptrs = A + rows[:, None] * stride_am + k_lo + offs_k[None, :]
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    if W_FP8:
+        sc = tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)
+    pw = tl.load(PAIR_W + rows, mask=valid, other=0.0)
+    t = tl.load(TOK + rows, mask=valid, other=0).to(tl.int64)
     if A_FP8:                                             # W8A8, as in _moe_gemm_kernel; the row scale is per pair
         w_ptrs = W + e.to(tl.int64) * N * stride_wn + (k_lo + offs_k[:, None]) * stride_wk + offs_n[None, :] * stride_wn
         for k0 in range(0, K // SPLIT_K, BLOCK_K):
@@ -193,23 +204,53 @@ def _moe_gemm_scatter_kernel(A, W, SCALE, A_SCALE, OUT, SORTED, EXPERT_IDS, TOK,
         w_ptrs = W + e.to(tl.int64) * N * stride_wn + offs_n[:, None] * stride_wn + (k_lo + offs_k[None, :]) * stride_wk
         for k0 in range(0, K // SPLIT_K, BLOCK_K):
             k_ok = (k0 + offs_k) < K // SPLIT_K
-            a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0)
-            w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0)
+            if EVEN_K:
+                if EVEN_N:
+                    w = tl.load(w_ptrs, eviction_policy="evict_first")
+                else:
+                    w = tl.load(w_ptrs, mask=n_ok[:, None], other=0.0, eviction_policy="evict_first")
+                a = tl.load(a_ptrs, mask=valid[:, None], other=0.0, eviction_policy="evict_last")
+            else:
+                a = tl.load(a_ptrs, mask=valid[:, None] & k_ok[None, :], other=0.0, eviction_policy="evict_last")
+                w = tl.load(w_ptrs, mask=n_ok[:, None] & k_ok[None, :], other=0.0, eviction_policy="evict_first")
             if W_FP8:
-                w = w.to(tl.bfloat16)
+                a = a.to(tl.float16)
+                w = w.to(tl.float16)
             acc += tl.dot(a, tl.trans(w))
             a_ptrs += BLOCK_K
             w_ptrs += BLOCK_K * stride_wk
     if W_FP8:
-        acc = acc * tl.load(SCALE + e.to(tl.int64) * N + offs_n, mask=n_ok, other=0.0)[None, :]
-    acc = acc * tl.load(PAIR_W + rows, mask=valid, other=0.0)[:, None]
-    t = tl.load(TOK + rows, mask=valid, other=0).to(tl.int64)
+        acc = acc * sc[None, :]
+    acc = acc * pw[:, None]
     offs_nv = tl.max_contiguous(tl.multiple_of(offs_n, 8), 8)
+    if USE_GDC:
+        tl.extra.cuda.gdc_wait()
     if EVEN_N:
         tl.atomic_add(OUT + t[:, None] * stride_om + offs_nv[None, :], acc, mask=valid[:, None], sem="relaxed")
     else:
         tl.atomic_add(OUT + t[:, None] * stride_om + offs_nv[None, :], acc, mask=valid[:, None] & n_ok[None, :],
                       sem="relaxed")
+
+
+_SC_BASE = [
+    (64, 128, 4, 4), (64, 256, 3, 4), (128, 128, 4, 4), (128, 256, 3, 8),
+    (128, 128, 3, 8), (256, 128, 3, 8), (64, 128, 5, 4), (128, 256, 2, 4),
+]
+_SC_DEEP = [(64, 64, 6, 4), (128, 64, 6, 4), (64, 32, 8, 4), (128, 32, 8, 4)]
+_SC_REG = [(64, 128, 4, 4), (128, 128, 4, 4), (64, 256, 3, 4), (128, 256, 3, 8)]
+_SC_CONFIGS = [triton.Config({"BLOCK_N": bn, "BLOCK_K": bk, "N_MAJOR": nm}, num_stages=st, num_warps=wp)
+               for (bn, bk, st, wp) in _SC_BASE + _SC_DEEP for nm in (False, True)]
+_SC_CONFIGS += [triton.Config({"BLOCK_N": bn, "BLOCK_K": bk, "N_MAJOR": nm}, num_stages=st, num_warps=wp,
+                              maxnreg=reg)
+                for (bn, bk, st, wp) in _SC_REG for reg in (64, 80) for nm in (False, True)]
+
+_moe_gemm_scatter_tuned = triton.autotune(configs=_SC_CONFIGS, key=["M", "N", "K", "BLOCK_M"],
+                                          restore_value=["OUT"])(
+    triton.heuristics({"EVEN_N": lambda args: args["N"] % args["BLOCK_N"] == 0,
+                       "EVEN_K": lambda args: args["K"] % args["BLOCK_K"] == 0})(_moe_gemm_scatter_raw))
+
+
+_PDL_OK = True
 
 
 def _a8(a: torch.Tensor, a_scale, fp8_w: bool) -> bool:
@@ -228,13 +269,31 @@ def moe_gemm_scatter(a: torch.Tensor, w: torch.Tensor, sorted_ids: torch.Tensor,
     fp8 = w.dtype == torch.float8_e4m3fn
     assert fp8 == (w_scale is not None), "fp8 weights come with their per-channel scale"
     a8 = _a8(a, a_scale, fp8)
-    bn, bk, stages, warps = _tile(block_m, tile)
-    grid = (expert_ids.numel(), triton.cdiv(N, bn))
-    _moe_gemm_scatter_kernel[(*grid, 1)](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
-                                         tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
-                                         E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
-                                         SPLIT_K=1, W_FP8=fp8, A_FP8=a8, EVEN_N=(N % bn == 0),
-                                         num_warps=warps, num_stages=stages)
+    nb = expert_ids.numel()
+    if tile is not None:
+        bn, bk, stages, warps = _tile(block_m, tile)
+        _moe_gemm_scatter_raw[(nb, triton.cdiv(N, bn), 1)](
+            a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
+            tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+            E=E, BLOCK_M=block_m, BLOCK_N=bn, BLOCK_K=bk,
+            SPLIT_K=1, W_FP8=fp8, A_FP8=a8, EVEN_N=(N % bn == 0), N_MAJOR=False,
+            num_warps=warps, num_stages=stages)
+        return
+    grid = lambda meta: ((triton.cdiv(N, meta["BLOCK_N"]), nb, 1) if meta["N_MAJOR"]
+                         else (nb, triton.cdiv(N, meta["BLOCK_N"]), 1))
+    global _PDL_OK
+    if _PDL_OK:
+        try:
+            _moe_gemm_scatter_tuned[grid](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids,
+                                          expert_ids, tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2),
+                                          out.stride(0), E=E, BLOCK_M=block_m, SPLIT_K=1, W_FP8=fp8, A_FP8=a8,
+                                          USE_GDC=True, launch_pdl=True)
+            return
+        except Exception:
+            _PDL_OK = False
+    _moe_gemm_scatter_tuned[grid](a, w, w_scale if fp8 else a, a_scale if a8 else a, out, sorted_ids, expert_ids,
+                                  tok, pair_w, M, N, K, a.stride(0), w.stride(1), w.stride(2), out.stride(0),
+                                  E=E, BLOCK_M=block_m, SPLIT_K=1, W_FP8=fp8, A_FP8=a8)
 
 
 # Tiles from a 48-config sweep on the H200 at the decode shapes (M = 8 and 64 pairs): BLOCK_N 64, BLOCK_K 128, 4 stages
