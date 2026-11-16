@@ -46,7 +46,7 @@ class LayerConfig:
 
 STEP = ("cos", "sin", "block_tables", "kv_rows", "kv_block", "kv_slot", "attn_block_tables", "attn_seq_lens")
 LIVE = ("h", "k_cache", "v_cache")      # what outlives a layer's stations: the residual stream and the K/V pool
-IN_PLACE = ("k_cache", "v_cache")       # written in place; an override must return these same tensors
+IN_PLACE = ("k_cache", "v_cache", "y")  # written in place by a station that reads them; an override returns the same tensors
 DISCRETE = ("sorted_ids", "expert_ids", "tok")   # a discrete choice: a reference station takes it from ctx["pinned"]
 OPAQUE = ("paged_ctx",)                 # neither a tensor nor a constant: a region cannot read it
 
@@ -329,7 +329,7 @@ def _guarded(key: tuple[str, str], fn: Callable, inputs, writes, outputs) -> Cal
             raise ValueError(f"override {key} returned {sorted(out)}; it must write {sorted(required)} and may write "
                              f"only {sorted(allowed)}")
         for k in IN_PLACE:
-            if k in out and out[k] is not c[k]:
+            if k in out and k in c and out[k] is not c[k]:
                 raise ValueError(f"override {key}: {k} must be written in place")
         return out
     return run
@@ -391,7 +391,7 @@ def plan_prefill() -> tuple[tuple[str, str, Callable[[dict], dict]], ...]:
 def functional(stations: tuple[Station, ...] = DECODE) -> tuple[Station, ...]:
     """The stations as pure functions, for the lab: one that writes an entry in place gets a copy of it to write."""
     def pure(s: Station) -> Station:
-        inplace = [n for n in s.writes if n in IN_PLACE]
+        inplace = [n for n in s.writes if n in IN_PLACE and n in s.reads]
         if not inplace:
             return s
         return replace(s, fn=lambda c: s.fn({**c, **{n: c[n].clone() for n in inplace}}))
