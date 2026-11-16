@@ -115,6 +115,35 @@ def test_gather_weighted_matches_index_add(T, top_k, N):
     torch.testing.assert_close(got.float(), ref, atol=2e-2, rtol=1e-2)
 
 
+@pytest.mark.parametrize("pieces", [2, 3, 4, 5])
+def test_gather_weighted_reads_y_in_pieces(pieces):
+    from inference_server.models import moe_kernel
+    torch.manual_seed(pieces)
+    T, top_k, N, chunk = 300, 8, 384, 512
+    M = (pieces - 1) * chunk + 100                                 # the last piece is short
+    y = torch.randn(M, N, dtype=torch.bfloat16, device="cuda")
+    pos = torch.randint(0, M, (T, top_k), device="cuda", dtype=torch.int32)
+    weights, res = torch.rand(T, top_k, device="cuda"), torch.randn(T, N, dtype=torch.bfloat16, device="cuda")
+    whole = moe_kernel.gather_weighted(y, pos, weights, res)
+    got = moe_kernel.gather_weighted(list(y.split(chunk)), pos, weights, res, chunk)
+    assert torch.equal(got, whole)
+
+
+def test_moe_cuda_fp8_in_gemm_chunks_matches_one_chunk(monkeypatch):
+    """The torch-path experts with their GEMMs in several row chunks (nothing copied into one tensor) against one."""
+    from inference_server.models import qwen3_moe
+    torch.manual_seed(0)
+    T, top_k, E, H, I = 1024, 8, 16, 256, 128                      # 8,192 pairs: above MOE_KERNEL_MAX_ROWS
+    flat = torch.randn(T, H, dtype=torch.bfloat16, device="cuda")
+    logits = torch.randn(T, E, dtype=torch.bfloat16, device="cuda")
+    gu, gu_s = qwen3_moe.quantize_rowwise(torch.randn(E, 2 * I, H, device="cuda") * 0.05)
+    dn, dn_s = qwen3_moe.quantize_rowwise(torch.randn(E, H, I, device="cuda") * 0.05)
+    run = lambda: qwen3_moe.moe_cuda(flat, logits, gu, gu_s, dn, dn_s, E, top_k, True, residual=flat)
+    whole = run()
+    monkeypatch.setattr(qwen3_moe, "GMM_CHUNK_ROWS", 3000)
+    torch.testing.assert_close(run().float(), whole.float(), atol=1e-2, rtol=1e-2)
+
+
 @pytest.mark.parametrize("T,top_k,N", [(1, 8, 2048), (300, 8, 2048), (1000, 8, 384)])
 def test_scatter_add_weighted_matches_index_add(T, top_k, N):
     from inference_server.models import moe_kernel

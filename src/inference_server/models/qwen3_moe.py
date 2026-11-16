@@ -220,19 +220,25 @@ def _fake_quantize(x: torch.Tensor) -> torch.Tensor:
     return (q.to(torch.float32) * s[..., None]).to(x.dtype)
 
 
-def scaled_grouped_mm(a8: torch.Tensor, w: torch.Tensor, sa: torch.Tensor, s: torch.Tensor, offs: torch.Tensor,
-                      out_dtype: torch.dtype) -> torch.Tensor:
-    """torch._scaled_grouped_mm in row chunks of at most GMM_CHUNK_ROWS, each chunk's groups `offs` clamped to it on the
-    device (no sync)."""
+def gmm_chunks(a8: torch.Tensor, w: torch.Tensor, sa: torch.Tensor, s: torch.Tensor, offs: torch.Tensor,
+               out_dtype: torch.dtype):
+    """(first row, torch._scaled_grouped_mm of the rows) per chunk of at most GMM_CHUNK_ROWS rows, each chunk's groups
+    `offs` clamped to it on the device (no sync)."""
     R, wt = a8.shape[0], w.transpose(-2, -1)
     if R <= GMM_CHUNK_ROWS:
-        return torch._scaled_grouped_mm(a8, wt, sa, s, offs=offs, out_dtype=out_dtype)
-    out = torch.empty(R, w.shape[1], dtype=out_dtype, device=a8.device)
+        yield 0, torch._scaled_grouped_mm(a8, wt, sa, s, offs=offs, out_dtype=out_dtype)
+        return
     for r0 in range(0, R, GMM_CHUNK_ROWS):
         r1 = min(r0 + GMM_CHUNK_ROWS, R)
         o = (offs - r0).clamp_(0, r1 - r0)
-        out[r0:r1] = torch._scaled_grouped_mm(a8[r0:r1], wt, sa[r0:r1], s, offs=o, out_dtype=out_dtype)
-    return out
+        yield r0, torch._scaled_grouped_mm(a8[r0:r1], wt, sa[r0:r1], s, offs=o, out_dtype=out_dtype)
+
+
+def scaled_grouped_mm(a8: torch.Tensor, w: torch.Tensor, sa: torch.Tensor, s: torch.Tensor, offs: torch.Tensor,
+                      out_dtype: torch.dtype) -> torch.Tensor:
+    """gmm_chunks as one tensor (a copy of every chunk when there are several)."""
+    chunks = [c for _, c in gmm_chunks(a8, w, sa, s, offs, out_dtype)]
+    return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
 
 
 def grouped_mm(a: torch.Tensor, w: torch.Tensor, s: torch.Tensor | None, offs: torch.Tensor) -> torch.Tensor:
@@ -333,13 +339,23 @@ def moe_cuda(flat: torch.Tensor, logits: torch.Tensor, gu: torch.Tensor, gu_s: t
         return out if residual is None else fused.add_cast(residual.reshape(out.shape), out)
     # routing, gather and epilogue as custom launches: no sort, searchsorted, gather or scatter
     sorted_ids, offs, pos, pair_w = moe_kernel.route_dense(logits, num_experts, top_k, renorm)
-    h = grouped_mm_sorted(flat, gu, gu_s, sorted_ids, top_k, offs)
-    if dn_s is None:
-        y = grouped_mm(fused.silu_mul(h), dn, None, offs)
-    else:                                       # the activation quantized by the launch that makes it
-        a8, sa = moe_kernel.silu_mul_quant(h)
-        y = scaled_grouped_mm(a8, dn, sa, dn_s, offs, h.dtype)
-    return moe_kernel.gather_weighted(y, pos.view(T, top_k), pair_w.view(T, top_k), residual)
+    if gu_s is None or dn_s is None:
+        h = grouped_mm_sorted(flat, gu, gu_s, sorted_ids, top_k, offs)
+        if dn_s is None:
+            y = grouped_mm(fused.silu_mul(h), dn, None, offs)
+        else:
+            a8, sa = moe_kernel.silu_mul_quant(h)
+            y = scaled_grouped_mm(a8, dn, sa, dn_s, offs, h.dtype)
+        return moe_kernel.gather_weighted(y, pos.view(T, top_k), pair_w.view(T, top_k), residual)
+    # fp8: each GEMM chunk goes straight to its consumer, never copied into one tensor (H200 2026-11-15, lp8 at
+    # 8,192-token steps: those copies were 1,000 GB and 0.41 s of every 10 s)
+    x8, sx = moe_kernel.quant_rows_gather(flat, sorted_ids, top_k)
+    a8 = torch.empty(x8.shape[0], dn.shape[2], dtype=FP8, device=flat.device)
+    sa = torch.empty(x8.shape[0], dtype=torch.float32, device=flat.device)
+    for r0, h in gmm_chunks(x8, gu, sx, gu_s, offs, flat.dtype):      # the activation quantized by the launch that makes it
+        moe_kernel.silu_mul_quant(h, a8[r0:r0 + h.shape[0]], sa[r0:r0 + h.shape[0]])
+    ys = [y for _, y in gmm_chunks(a8, dn, sa, dn_s, offs, flat.dtype)]
+    return moe_kernel.gather_weighted(ys, pos.view(T, top_k), pair_w.view(T, top_k), residual, GMM_CHUNK_ROWS)
 
 
 class Qwen3SparseMoE(nn.Module):

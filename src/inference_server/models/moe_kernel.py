@@ -407,13 +407,15 @@ def _silu_mul_quant_kernel(X, Q, S, stride_x, stride_q, I: tl.constexpr, FP8_MAX
     tl.store(S + row, scale)
 
 
-def silu_mul_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def silu_mul_quant(x: torch.Tensor, q: torch.Tensor | None = None,
+                   s: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """quant_rows(fused.silu_mul(x)) in one launch for x [M, 2I] (bf16 or fp32): the bf16 activation is never
-    written."""
+    written. Into `q` [M, I] fp8 and `s` [M] fp32 when given."""
     x = x.contiguous()
     M, I = x.shape[0], x.shape[1] // 2
-    q = torch.empty(M, I, dtype=torch.float8_e4m3fn, device=x.device)
-    s = torch.empty(M, dtype=torch.float32, device=x.device)
+    if q is None:
+        q = torch.empty(M, I, dtype=torch.float8_e4m3fn, device=x.device)
+        s = torch.empty(M, dtype=torch.float32, device=x.device)
     _silu_mul_quant_kernel[(M,)](x, q, s, x.stride(0), q.stride(0), I=I, FP8_MAX=448.0,
                                  BLOCK=triton.next_power_of_2(I), num_warps=4)
     return q, s
@@ -695,10 +697,11 @@ def scatter_add_weighted(y: torch.Tensor, tok: torch.Tensor, pair_w: torch.Tenso
 
 
 @triton.jit
-def _gather_weighted_kernel(Y, POS, W, OUT, RES, N, stride_y, stride_o, stride_r, K: tl.constexpr,
-                            BLOCK_N: tl.constexpr, HAS_RES: tl.constexpr = False):
+def _gather_weighted_kernel(Y, Y1, Y2, Y3, POS, W, OUT, RES, N, CHUNK, stride_y, stride_o, stride_r, K: tl.constexpr,
+                            BLOCK_N: tl.constexpr, HAS_RES: tl.constexpr = False, NCH: tl.constexpr = 1):
     """out[t] = sum_j w[t, j] * y[pos[t, j]]: one token's K expert rows gathered and summed, no atomics, bf16 out;
-    with HAS_RES, bf16(res[t] + that bf16 sum), the residual add the layer makes next."""
+    with HAS_RES, bf16(res[t] + that bf16 sum), the residual add the layer makes next. With NCH > 1, y is NCH
+    tensors of CHUNK rows each (the last may be shorter): row pos is row pos % CHUNK of tensor pos // CHUNK."""
     t = tl.program_id(0)
     cols = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
     cm = cols < N
@@ -706,24 +709,41 @@ def _gather_weighted_kernel(Y, POS, W, OUT, RES, N, stride_y, stride_o, stride_r
     for j in tl.static_range(K):
         pos = tl.load(POS + t * K + j).to(tl.int64)
         w = tl.load(W + t * K + j)
-        acc += w * tl.load(Y + pos * stride_y + cols, mask=cm, other=0.0).to(tl.float32)
+        if NCH == 1:
+            acc += w * tl.load(Y + pos * stride_y + cols, mask=cm, other=0.0).to(tl.float32)
+        else:
+            c = pos // CHUNK
+            off = (pos - c * CHUNK) * stride_y + cols
+            v = tl.load(Y + off, mask=cm & (c == 0), other=0.0).to(tl.float32)
+            v += tl.load(Y1 + off, mask=cm & (c == 1), other=0.0).to(tl.float32)
+            if NCH > 2:
+                v += tl.load(Y2 + off, mask=cm & (c == 2), other=0.0).to(tl.float32)
+            if NCH > 3:
+                v += tl.load(Y3 + off, mask=cm & (c == 3), other=0.0).to(tl.float32)
+            acc += w * v
     out = acc.to(tl.bfloat16)
     if HAS_RES:
         out = (tl.load(RES + t * stride_r + cols, mask=cm, other=0.0).to(tl.float32) + out.to(tl.float32)).to(tl.bfloat16)
     tl.store(OUT + t * stride_o + cols, out, mask=cm)
 
 
-def gather_weighted(y: torch.Tensor, pos: torch.Tensor, weights: torch.Tensor,
-                    residual: torch.Tensor | None = None) -> torch.Tensor:
+def gather_weighted(y: torch.Tensor | list[torch.Tensor], pos: torch.Tensor, weights: torch.Tensor,
+                    residual: torch.Tensor | None = None, chunk: int = 0) -> torch.Tensor:
     """[T, N] bf16: each token's routed rows of y [M, N] (at sorted positions pos [T, K]) times its weights [T, K],
     summed. The MoE epilogue of the CUTLASS path as one read of y and one write of the output: the atomic
-    scatter-add version ran at 456 us a layer for 8k tokens (8 fp32 atomics per output element)."""
+    scatter-add version ran at 456 us a layer for 8k tokens (8 fp32 atomics per output element). y may be its
+    consecutive pieces of `chunk` rows each, read in place up to four."""
+    ys = y if isinstance(y, list) else [y]
+    if len(ys) > 4:
+        ys = [torch.cat(ys)]
     T, K = pos.shape
-    N = y.shape[1]
-    out = torch.empty(T, N, dtype=torch.bfloat16, device=y.device)
+    N = ys[0].shape[1]
+    out = torch.empty(T, N, dtype=torch.bfloat16, device=ys[0].device)
     BLOCK_N = 256
     res = residual.reshape(T, N) if residual is not None else out
-    _gather_weighted_kernel[(T, triton.cdiv(N, BLOCK_N))](y, pos, weights, out, res, N, y.stride(0), out.stride(0),
-                                                           res.stride(0), K=K, BLOCK_N=BLOCK_N,
-                                                           HAS_RES=residual is not None, num_warps=4)
+    y1, y2, y3 = (ys + ys[:1] * 3)[1:4]
+    _gather_weighted_kernel[(T, triton.cdiv(N, BLOCK_N))](ys[0], y1, y2, y3, pos, weights, out, res, N, chunk,
+                                                           ys[0].stride(0), out.stride(0), res.stride(0), K=K,
+                                                           BLOCK_N=BLOCK_N, HAS_RES=residual is not None,
+                                                           NCH=len(ys), num_warps=4)
     return out
