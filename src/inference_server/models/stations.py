@@ -654,6 +654,11 @@ _REFERENCE = {"input_norm": _r_input_norm, "qk_norm_rope": _r_qk_norm_rope, "att
               "p_moe": _r_p_moe}
 
 
+def constants(model) -> dict:
+    """The context entries that are the model's constants, for the lab's hold process."""
+    return {"cfg": layer_config(model)}
+
+
 def load_model():
     """The model as a launch loads it, for the lab's hold process."""
     from inference_server.config import load_settings

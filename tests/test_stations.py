@@ -254,6 +254,10 @@ def _run(stretch, c):
     return c
 
 
+def test_constants_are_the_layer_config_under_its_entry_name(model):
+    assert stations.constants(model) == {"cfg": stations.layer_config(model)}
+
+
 def test_reference_has_the_stations_names_reads_and_writes():
     assert [(s.name, s.reads, s.writes) for s in stations.reference()] == \
         [(s.name, s.reads, s.writes) for s in stations.DECODE]
