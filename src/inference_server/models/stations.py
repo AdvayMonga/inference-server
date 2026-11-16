@@ -49,6 +49,8 @@ LIVE = ("h", "k_cache", "v_cache")      # what outlives a layer's stations: the 
 IN_PLACE = ("k_cache", "v_cache", "y")  # written in place by a station that reads them; an override returns the same tensors
 DISCRETE = ("sorted_ids", "expert_ids", "tok")   # a discrete choice: a reference station takes it from ctx["pinned"]
 OPAQUE = ("paged_ctx",)                 # neither a tensor nor a constant: a region cannot read it
+GATHERED = {"w.gate_up": "expert_ids", "w.gate_up_scale": "expert_ids", "w.down": "expert_ids",
+            "w.down_scale": "expert_ids"}   # a weight read only at the first-axis rows the named entry holds
 
 
 def _input_norm(c):
