@@ -47,6 +47,8 @@ class LayerConfig:
 STEP = ("cos", "sin", "block_tables", "kv_rows", "kv_block", "kv_slot", "attn_block_tables", "attn_seq_lens")
 LIVE = ("h", "k_cache", "v_cache")      # what outlives a layer's stations: the residual stream and the K/V pool
 IN_PLACE = ("k_cache", "v_cache")       # written in place; an override must return these same tensors
+DISCRETE = ("sorted_ids", "expert_ids", "tok")   # a discrete choice: a reference station takes it from ctx["pinned"]
+OPAQUE = ("paged_ctx",)                 # neither a tensor nor a constant: a region cannot read it
 
 
 def _input_norm(c):
@@ -515,10 +517,30 @@ def _r_add_norm(c):
     return {"h": h, "n": n}
 
 
+def _ref_pair_weights(logits, sorted_ids, expert_ids, tok, renorm: bool) -> torch.Tensor:
+    """Each pair's fp32 softmax weight at the expert the layout sends it to, renormalized over its token's pairs when
+    `renorm`."""
+    M = tok.numel()
+    block_m = sorted_ids.numel() // expert_ids.numel()
+    slots = torch.nonzero(sorted_ids < M).view(-1)
+    expert = torch.empty(M, dtype=torch.long, device=tok.device)
+    expert[sorted_ids[slots].long()] = expert_ids[slots // block_m].long()
+    t = tok.long()
+    w = torch.softmax(logits.float(), dim=-1)[t, expert]
+    if renorm:
+        w = w / torch.zeros(logits.shape[0], device=w.device).index_add_(0, t, w)[t]
+    return w
+
+
 def _r_route(c):
+    """The routing; with ctx["pinned"] (the `DISCRETE` entries), that choice and its weights."""
     cfg, logits = c["cfg"], c["logits"]
-    sorted_ids, expert_ids, tok, pair_w = _ref_route(logits, cfg.num_experts, cfg.top_k, cfg.norm_topk_prob,
-                                                     qwen3_moe.moe_block_m(logits.shape[0] * cfg.top_k))
+    if "pinned" in c:
+        sorted_ids, expert_ids, tok = (c["pinned"][k] for k in DISCRETE)
+        pair_w = _ref_pair_weights(logits, sorted_ids, expert_ids, tok, bool(cfg.norm_topk_prob))
+    else:
+        sorted_ids, expert_ids, tok, pair_w = _ref_route(logits, cfg.num_experts, cfg.top_k, cfg.norm_topk_prob,
+                                                         qwen3_moe.moe_block_m(logits.shape[0] * cfg.top_k))
     y = torch.zeros(logits.shape[0], c["n"].shape[-1], dtype=torch.promote_types(c["n"].dtype, torch.float32),
                     device=logits.device)
     return {"sorted_ids": sorted_ids, "expert_ids": expert_ids, "tok": tok, "pair_w": pair_w, "y": y}
@@ -630,6 +652,13 @@ _REFERENCE = {"input_norm": _r_input_norm, "qk_norm_rope": _r_qk_norm_rope, "att
               "down": _r_down, "residual": _r_residual, "p_input_norm": _r_input_norm,
               "p_qk_norm_rope": _r_qk_norm_rope, "p_attention": _r_p_attention, "p_add_norm": _r_add_norm,
               "p_moe": _r_p_moe}
+
+
+def load_model():
+    """The model as a launch loads it, for the lab's hold process."""
+    from inference_server.config import load_settings
+    from inference_server.server import build_backend
+    return build_backend(load_settings()).model
 
 
 def reference(stations: tuple[Station, ...] = DECODE) -> tuple[Station, ...]:

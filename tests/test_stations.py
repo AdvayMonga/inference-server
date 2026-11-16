@@ -291,6 +291,26 @@ def test_reference_route_layout():
     assert torch.equal(tok, (torch.arange(M) // k).int()) and torch.allclose(pair_w.view(T, k).sum(1), torch.ones(T))
 
 
+def test_reference_route_takes_a_pinned_choice_and_weighs_it_in_fp32():
+    """With ctx["pinned"], the reference route keeps that layout and gives each pair its fp32 softmax weight."""
+    logits = torch.tensor([[1.0, 2.0, 0.0], [0.0, 1.0, 3.0]])
+    # pairs 0,1 = token 0 (experts 1, 0), pairs 2,3 = token 1 (experts 2, 1); blocks of 2 by expert, padded with M=4
+    pinned = {"sorted_ids": torch.tensor([1, 4, 0, 3, 2, 4], dtype=torch.int32),
+              "expert_ids": torch.tensor([0, 1, 2], dtype=torch.int32), "tok": torch.tensor([0, 0, 1, 1], dtype=torch.int32)}
+    p = torch.softmax(logits, -1)
+    want = torch.stack([p[0, 1], p[0, 0], p[1, 2], p[1, 1]])
+    got = stations._ref_pair_weights(logits, *pinned.values(), True)
+    assert got.dtype == torch.float32 and torch.allclose(got, want / want.view(2, 2).sum(1).repeat_interleave(2))
+    assert torch.allclose(stations._ref_pair_weights(logits.bfloat16(), *pinned.values(), False),
+                          torch.softmax(logits.bfloat16().float(), -1)[[0, 0, 1, 1], [1, 0, 2, 1]])
+    cfg = types.SimpleNamespace(num_experts=3, top_k=2, norm_topk_prob=False)
+    out = stations._r_route({"cfg": cfg, "logits": logits, "n": torch.zeros(2, 4), "pinned": pinned})
+    assert all(out[k] is pinned[k] for k in stations.DISCRETE) and torch.allclose(out["pair_w"], want)
+    assert out["y"].shape == (2, 4) and not out["y"].any()
+    route = next(s for s in stations.DECODE if s.name == "route")
+    assert set(stations.DISCRETE) <= set(route.writes) and set(stations.OPAQUE) <= {r for s in stations.PREFILL for r in s.reads}
+
+
 def test_reference_gemm_takes_fp8_weights():
     """fp8 weights with their per-channel scales give the dequantized product."""
     torch.manual_seed(0)
